@@ -1,0 +1,48 @@
+# GitLab CI skeleton; shape follows ../kraken/docs/09-observability-and-testing.md.
+# Registry and GitLab host are placeholders until the kraken group exists.
+stages:
+  - build
+  - test
+  - publish
+  - docker
+
+variables:
+  GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.caching=true"
+  GRADLE_USER_HOME: "$CI_PROJECT_DIR/.gradle"
+  REGISTRY: "registry.gitlab.damoreira.ml/kraken"
+  # Testcontainers in CI (Docker-in-Docker service)
+  DOCKER_HOST: "tcp://docker:2375"
+  DOCKER_TLS_CERTDIR: ""
+  TESTCONTAINERS_RYUK_DISABLED: "true"
+
+default:
+  image: eclipse-temurin:25-jdk
+  cache:
+    key: "$CI_COMMIT_REF_SLUG"
+    paths:
+      - .gradle/wrapper
+      - .gradle/caches
+
+build:
+  stage: build
+  script:
+    - ./gradlew assemble --no-daemon
+
+test:
+  stage: test
+  services:
+    - docker:28-dind
+  script:
+    - ./gradlew test --no-daemon
+  artifacts:
+    when: always
+    reports:
+      junit: "**/build/test-results/test/TEST-*.xml"
+
+publish-api:
+  stage: publish
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^api\/v[0-9]+\.[0-9]+\.[0-9]+$/'
+  script:
+    - export KRAKEN_GITLAB_MAVEN_URL="$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/maven"
+    - ./gradlew :kraken-messaging-api:publish :kraken-messaging:publish :kraken-messaging-test:publish --no-daemon -Pversion="${CI_COMMIT_TAG#api/v}"
