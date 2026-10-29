@@ -1,0 +1,184 @@
+{
+  "groups": [
+    {
+      "name": "kraken.messaging",
+      "type": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties"
+    },
+    {
+      "name": "kraken.messaging.hub",
+      "type": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Hub",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties",
+      "sourceMethod": "getHub()"
+    },
+    {
+      "name": "kraken.messaging.hub.reconnect-backoff",
+      "type": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Backoff",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Hub",
+      "sourceMethod": "getReconnectBackoff()"
+    },
+    {
+      "name": "kraken.messaging.kafka",
+      "type": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Kafka",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties",
+      "sourceMethod": "getKafka()"
+    },
+    {
+      "name": "kraken.messaging.kafka.consumer",
+      "type": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Consumer",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Kafka",
+      "sourceMethod": "getConsumer()"
+    },
+    {
+      "name": "kraken.messaging.outbox",
+      "type": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Outbox",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties",
+      "sourceMethod": "getOutbox()"
+    },
+    {
+      "name": "kraken.messaging.idempotency",
+      "type": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Idempotency",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties",
+      "sourceMethod": "getIdempotency()"
+    },
+    {
+      "name": "kraken.messaging.security",
+      "type": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Security",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties",
+      "sourceMethod": "getSecurity()"
+    }
+  ],
+  "properties": [
+    {
+      "name": "kraken.messaging.service-name",
+      "type": "java.lang.String",
+      "description": "Logical service name: Kafka consumer group, event source and hub registration name. Required.",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties"
+    },
+    {
+      "name": "kraken.messaging.type-prefix",
+      "type": "java.lang.String",
+      "description": "Prefix of the wire type name of message classes without @MessageType. Required.",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties"
+    },
+    {
+      "name": "kraken.messaging.hub.enabled",
+      "type": "java.lang.Boolean",
+      "description": "Connect to the hub and expose the hub-backed CommandBus and QueryBus.",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Hub",
+      "defaultValue": true
+    },
+    {
+      "name": "kraken.messaging.hub.address",
+      "type": "java.lang.String",
+      "description": "gRPC target of the hub; an optional static:// prefix is stripped.",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Hub",
+      "defaultValue": "static://kraken-hub:7000"
+    },
+    {
+      "name": "kraken.messaging.hub.request-timeout",
+      "type": "java.time.Duration",
+      "description": "Default per-request timeout, sent as timeout_ms.",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Hub",
+      "defaultValue": "5s"
+    },
+    {
+      "name": "kraken.messaging.hub.heartbeat-interval",
+      "type": "java.time.Duration",
+      "description": "Heartbeat period on the hub stream.",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Hub",
+      "defaultValue": "10s"
+    },
+    {
+      "name": "kraken.messaging.hub.reconnect-backoff.min",
+      "type": "java.time.Duration",
+      "description": "Initial reconnect delay when the hub stream drops; doubles per failed attempt.",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Backoff",
+      "defaultValue": "500ms"
+    },
+    {
+      "name": "kraken.messaging.hub.reconnect-backoff.max",
+      "type": "java.time.Duration",
+      "description": "Maximum reconnect delay when the hub stream drops.",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Backoff",
+      "defaultValue": "30s"
+    },
+    {
+      "name": "kraken.messaging.kafka.bootstrap-servers",
+      "type": "java.lang.String",
+      "description": "Kafka bootstrap servers.",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Kafka",
+      "defaultValue": "broker:19092"
+    },
+    {
+      "name": "kraken.messaging.kafka.topic",
+      "type": "java.lang.String",
+      "description": "Events topic.",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Kafka",
+      "defaultValue": "kraken.events"
+    },
+    {
+      "name": "kraken.messaging.kafka.consumer.enabled",
+      "type": "java.lang.Boolean",
+      "description": "Consume the events topic; set false in tools that only publish.",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Consumer",
+      "defaultValue": true
+    },
+    {
+      "name": "kraken.messaging.kafka.consumer.max-attempts",
+      "type": "java.lang.Integer",
+      "description": "Handler invocations per record (first try included) before the record is logged and skipped.",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Consumer",
+      "defaultValue": 5
+    },
+    {
+      "name": "kraken.messaging.outbox.enabled",
+      "type": "java.lang.Boolean",
+      "description": "Run the outbox publisher that relays the outbox collection to Kafka.",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Outbox",
+      "defaultValue": true
+    },
+    {
+      "name": "kraken.messaging.outbox.poll-interval",
+      "type": "java.time.Duration",
+      "description": "Outbox publisher poll period.",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Outbox",
+      "defaultValue": "200ms"
+    },
+    {
+      "name": "kraken.messaging.outbox.batch-size",
+      "type": "java.lang.Integer",
+      "description": "Outbox documents per poll.",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Outbox",
+      "defaultValue": 100
+    },
+    {
+      "name": "kraken.messaging.outbox.retention",
+      "type": "java.time.Duration",
+      "description": "Sent outbox documents older than this are deleted.",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Outbox",
+      "defaultValue": "7d"
+    },
+    {
+      "name": "kraken.messaging.idempotency.retention",
+      "type": "java.time.Duration",
+      "description": "processed_events documents older than this are deleted.",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Idempotency",
+      "defaultValue": "30d"
+    },
+    {
+      "name": "kraken.messaging.security.forward-jwt",
+      "type": "java.lang.Boolean",
+      "description": "Put the current request's bearer token in the hub request's authorization header.",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Security",
+      "defaultValue": true
+    },
+    {
+      "name": "kraken.messaging.security.require-jwt",
+      "type": "java.lang.Boolean",
+      "description": "Reject forwarded requests without a valid JWT; requires a JwtDecoder bean.",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Security",
+      "defaultValue": true
+    }
+  ]
+}

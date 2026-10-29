@@ -1,1 +1,3 @@
 io.damoreira.kraken.messaging.config.KrakenMessagingAutoConfiguration
+io.damoreira.kraken.messaging.config.HubAutoConfiguration
+io.damoreira.kraken.messaging.config.KafkaEventsAutoConfiguration

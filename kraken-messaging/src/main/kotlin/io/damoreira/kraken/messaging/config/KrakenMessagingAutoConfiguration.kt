@@ -1,19 +1,27 @@
 package io.damoreira.kraken.messaging.config
 
-import io.damoreira.kraken.messaging.CommandBus
-import io.damoreira.kraken.messaging.EventBus
-import io.damoreira.kraken.messaging.QueryBus
-import io.damoreira.kraken.messaging.api.Command
-import io.damoreira.kraken.messaging.api.Event
-import io.damoreira.kraken.messaging.api.Query
+import io.damoreira.kraken.messaging.codec.JsonCodec
+import io.damoreira.kraken.messaging.codec.MessageTypeResolver
+import io.damoreira.kraken.messaging.handler.HandlerBeanPostProcessor
+import io.damoreira.kraken.messaging.handler.HandlerInvoker
+import io.damoreira.kraken.messaging.handler.HandlerRegistry
+import io.damoreira.kraken.messaging.security.ForwardedJwtAuthenticator
+import io.damoreira.kraken.messaging.tracing.TraceHeaders
+import io.micrometer.tracing.Tracer
+import io.micrometer.tracing.propagation.Propagator
+import org.springframework.beans.factory.ObjectProvider
 import org.springframework.boot.autoconfigure.AutoConfiguration
+import org.springframework.boot.autoconfigure.condition.ConditionalOnClass
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
 import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Bean
+import org.springframework.context.annotation.Configuration
+import org.springframework.security.oauth2.jwt.JwtDecoder
 
 /**
- * Skeleton auto-configuration. Every bean is a stub that fails fast; the Kafka and hub
- * transports are implemented in the next phase (see ../kraken/docs/02-messaging.md).
+ * Transport-independent beans: type names, JSON codec, handler discovery and invocation, trace header injection and
+ * forwarded-JWT validation. The hub and Kafka transports are wired by [HubAutoConfiguration] and
+ * [KafkaEventsAutoConfiguration].
  */
 @AutoConfiguration
 @EnableConfigurationProperties(KrakenMessagingProperties::class)
@@ -21,19 +29,51 @@ class KrakenMessagingAutoConfiguration {
 
     @Bean
     @ConditionalOnMissingBean
-    fun eventBus(): EventBus = object : EventBus {
-        override suspend fun publish(event: Event, key: String?) = throw NotImplementedError("skeleton")
-    }
+    fun messageTypeResolver(properties: KrakenMessagingProperties) = MessageTypeResolver(properties.typePrefix)
 
     @Bean
     @ConditionalOnMissingBean
-    fun commandBus(): CommandBus = object : CommandBus {
-        override suspend fun <R> send(command: Command<R>, routingKey: String?): R = throw NotImplementedError("skeleton")
-    }
+    fun jsonCodec() = JsonCodec()
 
     @Bean
     @ConditionalOnMissingBean
-    fun queryBus(): QueryBus = object : QueryBus {
-        override suspend fun <R> send(query: Query<R>): R = throw NotImplementedError("skeleton")
+    fun handlerRegistry(typeResolver: MessageTypeResolver) = HandlerRegistry(typeResolver)
+
+    @Bean
+    @ConditionalOnMissingBean
+    fun handlerInvoker(registry: HandlerRegistry, codec: JsonCodec) = HandlerInvoker(registry, codec)
+
+    @Bean
+    @ConditionalOnMissingBean
+    fun forwardedJwtAuthenticator(properties: KrakenMessagingProperties, decoder: ObjectProvider<JwtDecoder>): ForwardedJwtAuthenticator {
+        val jwtDecoder = decoder.ifAvailable
+        check(jwtDecoder != null || !properties.security.requireJwt) {
+            "kraken.messaging.security.require-jwt=true but no JwtDecoder bean is present; configure " +
+                "spring.security.oauth2.resourceserver.jwt.issuer-uri or set require-jwt=false"
+        }
+        return ForwardedJwtAuthenticator(jwtDecoder, properties.security.requireJwt)
+    }
+
+    /** Fallback when micrometer-tracing is absent: no trace headers. */
+    @Bean
+    @ConditionalOnMissingBean
+    fun noopTraceHeaders() = TraceHeaders(null, null)
+
+    /** Injects W3C trace headers when micrometer-tracing is on the classpath and its beans exist. */
+    @Configuration(proxyBeanMethods = false)
+    @ConditionalOnClass(name = ["io.micrometer.tracing.Tracer", "io.micrometer.tracing.propagation.Propagator"])
+    class MicrometerTraceHeadersConfiguration {
+        @Bean
+        @ConditionalOnMissingBean
+        fun traceHeaders(propagator: ObjectProvider<Propagator>, tracer: ObjectProvider<Tracer>) =
+            TraceHeaders(propagator.ifAvailable, tracer.ifAvailable)
+    }
+
+    companion object {
+        /** Static so it is registered before other beans without instantiating this configuration; registry is resolved lazily. */
+        @JvmStatic
+        @Bean
+        fun krakenHandlerBeanPostProcessor(registry: ObjectProvider<HandlerRegistry>) =
+            HandlerBeanPostProcessor { registry.getObject() }
     }
 }

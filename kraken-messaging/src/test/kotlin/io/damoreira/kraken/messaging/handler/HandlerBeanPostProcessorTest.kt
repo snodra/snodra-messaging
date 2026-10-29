@@ -15,6 +15,7 @@ import org.springframework.context.annotation.Configuration
 import org.springframework.core.NestedExceptionUtils
 import java.time.Instant
 import kotlin.test.assertEquals
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 open class ProxiedHandler {
@@ -70,5 +71,21 @@ class HandlerBeanPostProcessorTest {
     @Test fun `duplicate handlers across beans fail context startup`() {
         val ex = assertThrows<BeanCreationException> { AnnotationConfigApplicationContext(DuplicatingConfig::class.java) }
         assertTrue(NestedExceptionUtils.getMostSpecificCause(ex) is DuplicateHandlerException)
+    }
+
+    @Test fun `registry is resolved only for beans that declare handlers`() {
+        val processor = HandlerBeanPostProcessor { error("registry must not be resolved for a plain bean") }
+        val plain = Any()
+        assertSame(plain, processor.postProcessAfterInitialization(plain, "plain"))
+        assertSame(this, processor.postProcessAfterInitialization(this, "test"))
+    }
+
+    @Test fun `introspection failures skip the bean but validation errors propagate`() {
+        val handler = ProxiedHandler()
+        val skipping = HandlerBeanPostProcessor { throw UnsupportedOperationException("synthetic class") }
+        assertSame(handler, skipping.postProcessAfterInitialization(handler, "handler"))
+
+        val failing = HandlerBeanPostProcessor { throw IllegalStateException("Handler X.y must take (message)") }
+        assertThrows<IllegalStateException> { failing.postProcessAfterInitialization(handler, "handler") }
     }
 }

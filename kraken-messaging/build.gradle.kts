@@ -35,7 +35,6 @@ dependencies {
     implementation(libs.spring.security.oauth2.jose)
     compileOnly(libs.micrometer.tracing)
     compileOnly("jakarta.validation:jakarta.validation-api") // optional: violation messages go into HANDLER_ERROR details when present
-    annotationProcessor(libs.spring.boot.configuration.processor)
 
     testImplementation(libs.spring.boot.starter.test)
     testImplementation(libs.kotlin.test.junit5)
