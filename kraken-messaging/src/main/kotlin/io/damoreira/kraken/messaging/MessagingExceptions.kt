@@ -10,3 +10,5 @@ class ReplyTimeoutException(val type: String) : MessagingException("Timed out wa
 
 /** The handling instance disconnected mid-flight (hub error code HANDLER_DISCONNECTED). */
 class HandlerDisconnectedException(val type: String) : MessagingException("Handler for '$type' disconnected")
+
+class InvalidMessageException(message: String, cause: Throwable? = null) : MessagingException(message, cause)
