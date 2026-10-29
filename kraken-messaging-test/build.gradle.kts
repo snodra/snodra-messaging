@@ -10,6 +10,11 @@ dependencies {
     api(libs.testcontainers.kafka)
     api(libs.testcontainers.mongodb)
     api(libs.kotlinx.coroutines.core)
+
+    testImplementation(libs.kotlin.test.junit5)
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+    // The starter is a project dependency, so its BOM-managed (version-less) transitives need the BOM here too.
+    testRuntimeOnly(platform("org.springframework.boot:spring-boot-dependencies:${libs.versions.spring.boot.get()}"))
 }
 
 java {
