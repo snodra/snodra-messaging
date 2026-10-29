@@ -11,6 +11,7 @@ import io.damoreira.kraken.messaging.codec.JsonCodec
 import io.damoreira.kraken.messaging.codec.MessageTypeResolver
 import io.damoreira.kraken.messaging.codec.ResponseTypes
 import io.damoreira.kraken.messaging.handler.HandlerInvoker
+import io.damoreira.kraken.messaging.security.LocalIdentity
 import io.damoreira.kraken.messaging.handler.HandlerRegistry
 import io.damoreira.kraken.messaging.handler.InvocationResult
 import io.damoreira.kraken.messaging.hub.HubErrors
@@ -46,13 +47,13 @@ class InMemoryBuses(typePrefix: String = "test", private val userId: String? = "
     @Suppress("UNCHECKED_CAST")
     override suspend fun <R> send(command: Command<R>, routingKey: String?): R {
         val type = resolver.typeNameOf(command::class)
-        return unwrap(type, command::class, invoker.invokeCommand(type, codec.encode(command), context(type))) as R
+        return unwrap(type, command::class, invoker.invokeCommand(type, codec.encode(command), context(type), LocalIdentity.current())) as R
     }
 
     @Suppress("UNCHECKED_CAST")
     override suspend fun <R> send(query: Query<R>): R {
         val type = resolver.typeNameOf(query::class)
-        return unwrap(type, query::class, invoker.invokeQuery(type, codec.encode(query), context(type))) as R
+        return unwrap(type, query::class, invoker.invokeQuery(type, codec.encode(query), context(type), LocalIdentity.current())) as R
     }
 
     private fun unwrap(type: String, messageClass: kotlin.reflect.KClass<*>, result: InvocationResult): Any = when (result) {

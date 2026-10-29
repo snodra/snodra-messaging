@@ -17,6 +17,8 @@ class HandlerMethod(
     val messageClass: KClass<*>,
     val typeName: String,
     val wantsContext: Boolean,
+    /** Compiled `@RequiresAuthentication` expression, or null when any caller may invoke the handler. */
+    val authorization: CompiledAuthorization? = null,
 ) {
     init {
         function.isAccessible = true

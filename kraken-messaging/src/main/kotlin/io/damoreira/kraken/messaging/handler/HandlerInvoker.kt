@@ -1,10 +1,12 @@
 package io.damoreira.kraken.messaging.handler
 
 import io.damoreira.kraken.hub.v1.ErrorCode
+import io.damoreira.kraken.messaging.AccessDeniedException
 import io.damoreira.kraken.messaging.InvalidMessageException
 import io.damoreira.kraken.messaging.MessageContext
 import io.damoreira.kraken.messaging.UnauthenticatedException
 import io.damoreira.kraken.messaging.codec.JsonCodec
+import io.damoreira.kraken.messaging.security.Identity
 import jakarta.validation.ConstraintViolationException
 import kotlin.coroutines.cancellation.CancellationException
 
@@ -19,15 +21,18 @@ sealed interface InvocationResult {
  * `IllegalArgumentException` and `jakarta.validation.ConstraintViolationException` become `HANDLER_ERROR` with the plain
  * exception message and `details` = JSON array of violation messages (`"<propertyPath>: <message>"`, or just
  * `<message>` when the path is empty, sorted; `[]` when none). Other throwables become
- * `HANDLER_ERROR` with `"<SimpleName>: <message>"`. Stack traces are never included.
+ * `HANDLER_ERROR` with `"<SimpleName>: <message>"`. A handler's `@RequiresAuthentication` is checked before it runs
+ * (`UNAUTHENTICATED` / `PERMISSION_DENIED`); a thrown `AccessDeniedException` (ours or Spring's) is `PERMISSION_DENIED`.
+ * Stack traces are never included.
  */
 class HandlerInvoker(private val registry: HandlerRegistry, private val codec: JsonCodec) {
 
-    suspend fun invokeCommand(type: String, payload: ByteArray, ctx: MessageContext): InvocationResult =
-        invoke(type, registry.commandHandler(type), payload, ctx)
+    /** [identity] is the resolved caller (null = anonymous); it is checked against the handler's `@RequiresAuthentication`. */
+    suspend fun invokeCommand(type: String, payload: ByteArray, ctx: MessageContext, identity: Identity?): InvocationResult =
+        invoke(type, registry.commandHandler(type), payload, ctx, identity)
 
-    suspend fun invokeQuery(type: String, payload: ByteArray, ctx: MessageContext): InvocationResult =
-        invoke(type, registry.queryHandler(type), payload, ctx)
+    suspend fun invokeQuery(type: String, payload: ByteArray, ctx: MessageContext, identity: Identity?): InvocationResult =
+        invoke(type, registry.queryHandler(type), payload, ctx, identity)
 
     /** Calls every handler of [type] in order; a failing handler does not stop the others, the first failure is rethrown. */
     suspend fun invokeEvent(type: String, payload: ByteArray, ctx: MessageContext) {
@@ -44,12 +49,23 @@ class HandlerInvoker(private val registry: HandlerRegistry, private val codec: J
         first?.let { throw it }
     }
 
-    private suspend fun invoke(type: String, handler: HandlerMethod?, payload: ByteArray, ctx: MessageContext): InvocationResult {
+    private suspend fun invoke(
+        type: String,
+        handler: HandlerMethod?,
+        payload: ByteArray,
+        ctx: MessageContext,
+        identity: Identity?,
+    ): InvocationResult {
         if (handler == null) return InvocationResult.Failure(ErrorCode.NO_HANDLER, "no handler for type $type")
         val message = try {
             codec.decode(payload, handler.messageClass)
         } catch (e: InvalidMessageException) {
             return InvocationResult.Failure(ErrorCode.INVALID_REQUEST, e.message ?: "Cannot decode payload as $type")
+        }
+        when (val decision = handler.authorization?.check(identity, message, ctx, handler.label)) {
+            null, AuthorizationDecision.Granted -> Unit
+            is AuthorizationDecision.Unauthenticated -> return InvocationResult.Failure(ErrorCode.UNAUTHENTICATED, decision.message)
+            is AuthorizationDecision.Denied -> return InvocationResult.Failure(ErrorCode.PERMISSION_DENIED, decision.message)
         }
         return try {
             InvocationResult.Success(codec.encode(handler.invoke(message, ctx) ?: Unit))
@@ -57,6 +73,10 @@ class HandlerInvoker(private val registry: HandlerRegistry, private val codec: J
             throw e
         } catch (e: UnauthenticatedException) {
             InvocationResult.Failure(ErrorCode.UNAUTHENTICATED, e.message ?: "unauthenticated")
+        } catch (e: AccessDeniedException) {
+            InvocationResult.Failure(ErrorCode.PERMISSION_DENIED, e.message ?: "access denied")
+        } catch (e: org.springframework.security.access.AccessDeniedException) {
+            InvocationResult.Failure(ErrorCode.PERMISSION_DENIED, e.message ?: "access denied")
         } catch (e: Throwable) {
             when {
                 e is IllegalArgumentException || isConstraintViolation(e) ->

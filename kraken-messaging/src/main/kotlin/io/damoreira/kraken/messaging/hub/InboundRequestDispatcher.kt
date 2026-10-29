@@ -60,8 +60,8 @@ class InboundRequestDispatcher(
         val payload = req.payload.toByteArray()
         val result = withContext(SecurityContextElement(securityContext) + CorrelationContext(ctx.correlationId)) {
             when (req.kind) {
-                RequestKind.QUERY -> invoker.invokeQuery(req.type, payload, ctx)
-                RequestKind.COMMAND -> invoker.invokeCommand(req.type, payload, ctx)
+                RequestKind.QUERY -> invoker.invokeQuery(req.type, payload, ctx, identity)
+                RequestKind.COMMAND -> invoker.invokeCommand(req.type, payload, ctx, identity)
                 else -> InvocationResult.Failure(ErrorCode.INVALID_REQUEST, "unsupported request kind ${req.kind}")
             }
         }

@@ -2,7 +2,11 @@ package io.damoreira.kraken.messaging.handler
 
 import io.damoreira.kraken.hub.v1.ErrorCode
 import io.damoreira.kraken.messaging.MessageContext
+import io.damoreira.kraken.messaging.AccessDeniedException
 import io.damoreira.kraken.messaging.UnauthenticatedException
+import io.damoreira.kraken.messaging.security.Identity
+import io.damoreira.kraken.messaging.security.KrakenForwardedAuthentication
+import io.damoreira.kraken.messaging.security.MessagePrincipal
 import io.damoreira.kraken.messaging.codec.JsonCodec
 import io.damoreira.kraken.messaging.codec.MessageTypeResolver
 import io.damoreira.kraken.messaging.fixtures.Count
@@ -21,6 +25,7 @@ import jakarta.validation.ConstraintViolation
 import jakarta.validation.ConstraintViolationException
 import kotlin.test.assertFailsWith
 import kotlin.test.assertSame
+import kotlin.test.assertTrue
 
 class InvokerHandlers {
     val seen = mutableListOf<String>()
@@ -57,6 +62,18 @@ class FailingEventHandlers {
     @EventHandler fun b(event: Happened) { seen += "b" }
 }
 
+class AuthHandlers {
+    @CommandHandler @RequiresAuthentication("hasRole('kraken-admin')") fun handle(command: Ping): Pong = Pong(command.text, Instant.EPOCH)
+}
+
+class DenyingHandlers {
+    @CommandHandler fun handle(command: Ping): Pong = throw AccessDeniedException("nested send denied")
+}
+
+class SpringDenyingHandlers {
+    @CommandHandler fun handle(command: Ping): Pong = throw org.springframework.security.access.AccessDeniedException("spring denied")
+}
+
 class HandlerInvokerTest {
     private val codec = JsonCodec()
     private val registry = HandlerRegistry(MessageTypeResolver("test"))
@@ -65,13 +82,13 @@ class HandlerInvokerTest {
 
     @Test fun `command success returns encoded response`() = runBlocking {
         registry.register(InvokerHandlers())
-        val result = invoker.invokeCommand("test.Ping", codec.encode(Ping("x")), ctx("test.Ping"))
+        val result = invoker.invokeCommand("test.Ping", codec.encode(Ping("x")), ctx("test.Ping"), null)
         val success = assertIs<InvocationResult.Success>(result)
         assertEquals("x", codec.decode(success.payload, Pong::class).echoed)
     }
 
     @Test fun `query without handler is NO_HANDLER`() = runBlocking {
-        val result = invoker.invokeQuery("test.GetCount", codec.encode(GetCount("k")), ctx("test.GetCount"))
+        val result = invoker.invokeQuery("test.GetCount", codec.encode(GetCount("k")), ctx("test.GetCount"), null)
         val failure = assertIs<InvocationResult.Failure>(result)
         assertEquals(ErrorCode.NO_HANDLER, failure.code)
         assertEquals("no handler for type test.GetCount", failure.message)
@@ -79,7 +96,7 @@ class HandlerInvokerTest {
 
     @Test fun `bad payload is INVALID_REQUEST with type in message`() = runBlocking {
         registry.register(InvokerHandlers())
-        val result = invoker.invokeCommand("test.Ping", "[1,2]".toByteArray(), ctx("test.Ping"))
+        val result = invoker.invokeCommand("test.Ping", "[1,2]".toByteArray(), ctx("test.Ping"), null)
         val failure = assertIs<InvocationResult.Failure>(result)
         assertEquals(ErrorCode.INVALID_REQUEST, failure.code)
         assertEquals("Cannot decode payload as io.damoreira.kraken.messaging.fixtures.Ping", failure.message)
@@ -87,7 +104,7 @@ class HandlerInvokerTest {
 
     @Test fun `handler exception is HANDLER_ERROR without stack trace`() = runBlocking {
         registry.register(BoomHandlers())
-        val result = invoker.invokeCommand("test.Ping", codec.encode(Ping("x")), ctx("test.Ping"))
+        val result = invoker.invokeCommand("test.Ping", codec.encode(Ping("x")), ctx("test.Ping"), null)
         val failure = assertIs<InvocationResult.Failure>(result)
         assertEquals(ErrorCode.HANDLER_ERROR, failure.code)
         assertEquals("IllegalStateException: boom", failure.message)
@@ -95,7 +112,7 @@ class HandlerInvokerTest {
 
     @Test fun `unauthenticated exception maps to UNAUTHENTICATED`() = runBlocking {
         registry.register(UnauthHandlers())
-        val result = invoker.invokeCommand("test.Ping", codec.encode(Ping("x")), ctx("test.Ping"))
+        val result = invoker.invokeCommand("test.Ping", codec.encode(Ping("x")), ctx("test.Ping"), null)
         val failure = assertIs<InvocationResult.Failure>(result)
         assertEquals(ErrorCode.UNAUTHENTICATED, failure.code)
         assertEquals("token expired", failure.message)
@@ -120,7 +137,7 @@ class HandlerInvokerTest {
 
     @Test fun `illegal argument maps to HANDLER_ERROR with plain message and empty details`() = runBlocking {
         registry.register(IllegalArgHandlers())
-        val failure = assertIs<InvocationResult.Failure>(invoker.invokeCommand("test.Ping", codec.encode(Ping("x")), ctx("test.Ping")))
+        val failure = assertIs<InvocationResult.Failure>(invoker.invokeCommand("test.Ping", codec.encode(Ping("x")), ctx("test.Ping"), null))
         assertEquals(ErrorCode.HANDLER_ERROR, failure.code)
         assertEquals("bad input", failure.message)
         assertEquals("[]", String(failure.details))
@@ -128,9 +145,55 @@ class HandlerInvokerTest {
 
     @Test fun `constraint violations map to HANDLER_ERROR with details array`() = runBlocking {
         registry.register(ViolationHandlers())
-        val failure = assertIs<InvocationResult.Failure>(invoker.invokeCommand("test.Ping", codec.encode(Ping("x")), ctx("test.Ping")))
+        val failure = assertIs<InvocationResult.Failure>(invoker.invokeCommand("test.Ping", codec.encode(Ping("x")), ctx("test.Ping"), null))
         assertEquals(ErrorCode.HANDLER_ERROR, failure.code)
         assertEquals("invalid", failure.message)
         assertEquals(listOf("a: too short", "global problem", "text: must not be blank"), codec.mapper.readValue(failure.details, List::class.java))
+    }
+
+    private fun invokerFor(bean: Any): Pair<HandlerInvoker, JsonCodec> {
+        val codec = JsonCodec()
+        val registry = HandlerRegistry(MessageTypeResolver("test"))
+        registry.register(bean)
+        return HandlerInvoker(registry, codec) to codec
+    }
+
+    private fun identity(vararg roles: String): Identity {
+        val principal = MessagePrincipal("u-1", roles.toSet(), verified = true)
+        return Identity(principal, KrakenForwardedAuthentication("tok", principal))
+    }
+
+    @Test fun `annotated handler without identity is UNAUTHENTICATED`() = runBlocking {
+        val (invoker, codec) = invokerFor(AuthHandlers())
+        val result = invoker.invokeCommand("test.Ping", codec.encode(Ping("x")), ctx("test.Ping"), null)
+        val failure = assertIs<InvocationResult.Failure>(result)
+        assertEquals(ErrorCode.UNAUTHENTICATED, failure.code)
+        assertEquals("handler AuthHandlers.handle requires authentication", failure.message)
+    }
+
+    @Test fun `annotated handler with wrong role is PERMISSION_DENIED`() = runBlocking {
+        val (invoker, codec) = invokerFor(AuthHandlers())
+        val failure = assertIs<InvocationResult.Failure>(invoker.invokeCommand("test.Ping", codec.encode(Ping("x")), ctx("test.Ping"), identity("kraken-user")))
+        assertEquals(ErrorCode.PERMISSION_DENIED, failure.code)
+        assertEquals("handler AuthHandlers.handle: access denied", failure.message)
+    }
+
+    @Test fun `annotated handler with matching role runs`() = runBlocking {
+        val (invoker, codec) = invokerFor(AuthHandlers())
+        assertIs<InvocationResult.Success>(invoker.invokeCommand("test.Ping", codec.encode(Ping("x")), ctx("test.Ping"), identity("kraken-admin")))
+    }
+
+    @Test fun `unannotated handler accepts anonymous`() = runBlocking {
+        val (invoker, codec) = invokerFor(InvokerHandlers())
+        assertIs<InvocationResult.Success>(invoker.invokeCommand("test.Ping", codec.encode(Ping("x")), ctx("test.Ping"), null))
+    }
+
+    @Test fun `handler throwing AccessDeniedException maps to PERMISSION_DENIED`() = runBlocking {
+        for (bean in listOf(DenyingHandlers(), SpringDenyingHandlers())) {
+            val (invoker, codec) = invokerFor(bean)
+            val failure = assertIs<InvocationResult.Failure>(invoker.invokeCommand("test.Ping", codec.encode(Ping("x")), ctx("test.Ping"), identity("kraken-user")))
+            assertEquals(ErrorCode.PERMISSION_DENIED, failure.code, bean::class.simpleName)
+            assertTrue(failure.message.contains("denied"), failure.message)
+        }
     }
 }

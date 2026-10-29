@@ -46,6 +46,15 @@ class Throwing {
     @CommandHandler fun handle(command: Ping): Pong = throw IllegalStateException("boom")
 }
 
+class AuthOnEvent {
+    @EventHandler @RequiresAuthentication fun on(event: Happened) {}
+}
+
+class AuthOnCommand {
+    @CommandHandler @RequiresAuthentication("hasRole('kraken-admin')") fun handle(command: Ping): Pong = Pong("x", Instant.EPOCH)
+    @QueryHandler fun handle(query: GetCount): Count = Count(1)
+}
+
 class HandlerRegistryTest {
     private val registry = HandlerRegistry(MessageTypeResolver("test"))
     private val ctx = MessageContext("m1", "test.Ping", "c1", "alice", setOf("USER"), null, emptyMap())
@@ -109,5 +118,18 @@ class HandlerRegistryTest {
         assertEquals(1, fired)
         registry.register(Any())
         assertEquals(1, fired)
+    }
+
+    @Test fun `requires authentication on event handler fails registration`() {
+        val e = assertThrows<IllegalStateException> { HandlerRegistry(MessageTypeResolver("test")).register(AuthOnEvent()) }
+        assertTrue(e.message!!.contains("AuthOnEvent.on"), e.message)
+        assertTrue(e.message!!.contains("@RequiresAuthentication is not supported on @EventHandler"), e.message)
+    }
+
+    @Test fun `handler method carries compiled authorization`() {
+        val r = HandlerRegistry(MessageTypeResolver("test"))
+        r.register(AuthOnCommand())
+        assertEquals("hasRole('kraken-admin')", assertNotNull(r.commandHandler("test.Ping")).authorization?.source)
+        assertNull(assertNotNull(r.queryHandler("test.GetCount")).authorization)
     }
 }

@@ -80,7 +80,12 @@ class HandlerRegistry(private val typeResolver: MessageTypeResolver) {
         if (messageClass == null || !(params.size == 1 || wantsContext)) {
             throw IllegalStateException("Handler ${klass.simpleName}.${fn.name} must take (message) or (message, MessageContext)")
         }
-        return HandlerMethod(bean, fn, kind, messageClass, typeResolver.typeNameOf(messageClass), wantsContext)
+        val requires = fn.findAnnotation<RequiresAuthentication>()
+        if (requires != null && kind == HandlerKind.EVENT) {
+            throw IllegalStateException("Handler ${labelOf(klass, fn)}: @RequiresAuthentication is not supported on @EventHandler")
+        }
+        val authorization = requires?.let { HandlerAuthorizations.compile(it.expression, labelOf(klass, fn)) }
+        return HandlerMethod(bean, fn, kind, messageClass, typeResolver.typeNameOf(messageClass), wantsContext, authorization)
     }
 
     private fun add(handler: HandlerMethod) {

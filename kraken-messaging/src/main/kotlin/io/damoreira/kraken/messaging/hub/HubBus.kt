@@ -16,6 +16,7 @@ import io.damoreira.kraken.messaging.handler.HandlerInvoker
 import io.damoreira.kraken.messaging.handler.HandlerRegistry
 import io.damoreira.kraken.messaging.handler.InvocationResult
 import io.damoreira.kraken.messaging.security.CallerContext
+import io.damoreira.kraken.messaging.security.LocalIdentity
 import io.damoreira.kraken.messaging.tracing.TraceHeaders
 import io.damoreira.kraken.messaging.tracing.CorrelationContext
 import kotlinx.coroutines.currentCoroutineContext
@@ -100,8 +101,9 @@ class HubBus(
             headers = mapOf("correlationId" to correlationId),
         )
         // Same thread and coroutine as the caller (so a thread-bound transaction of the caller is joined).
+        val identity = LocalIdentity.current()
         val result = withContext(CorrelationContext(correlationId)) {
-            if (kind == RequestKind.COMMAND) invoker.invokeCommand(type, payload, ctx) else invoker.invokeQuery(type, payload, ctx)
+            if (kind == RequestKind.COMMAND) invoker.invokeCommand(type, payload, ctx, identity) else invoker.invokeQuery(type, payload, ctx, identity)
         }
         return when (result) {
             is InvocationResult.Success -> decodeReply(type, messageClass, result.payload)
