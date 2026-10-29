@@ -97,7 +97,8 @@ spring:
           issuer-uri: https://keycloak.example/realms/kraken
 ```
 
-For services or tools without JWTs set `kraken.messaging.security.require-jwt: false`.
+The `issuer-uri` is only needed when the service also serves HTTP or wants forwarded tokens verified (see
+[Security](#security)); Kafka-only tools and services behind the hub start without any security configuration.
 
 All keys (`kraken.messaging.*`; durations accept `200ms`, `5s`, `7d`; relaxed binding, e.g. `KRAKEN_MESSAGING_HUB_ADDRESS`):
 
@@ -123,7 +124,62 @@ All keys (`kraken.messaging.*`; durations accept `200ms`, `5s`, `7d`; relaxed bi
 | `outbox.max-attempts` | `10` | Send attempts per outbox document before it is marked failed (`failedAt`) and skipped. |
 | `idempotency.retention` | `30d` | `processed_events` documents older than this are deleted (TTL index). |
 | `security.forward-jwt` | `true` | Put the current request's bearer token in the hub request's `authorization` header. |
-| `security.require-jwt` | `true` | Reject forwarded requests without a valid JWT; requires a `JwtDecoder` bean. |
+
+### Security
+
+Cross-service commands and queries are service-to-service calls on a private network, so they are **trusted by
+default**: a request with no token is anonymous and is still handled. A handler that needs an authenticated user
+opts in:
+
+```kotlin
+@CommandHandler
+@RequiresAuthentication(expression = "hasRole('kraken-user')")
+suspend fun handle(cmd: LogWorkout, ctx: MessageContext): LogWorkoutResult = ...
+
+@QueryHandler
+@RequiresAuthentication   // isAuthenticated()
+fun handle(q: GetWorkout, ctx: MessageContext): GetWorkoutResult = ...
+
+@CommandHandler
+fun handle(cmd: RecomputeStats) { ... }   // no annotation: any caller, including event handlers and jobs
+```
+
+The expression is Spring Security SpEL evaluated by the **receiving** library before the handler runs:
+`isAuthenticated()`, `hasRole('x')`, `hasAnyRole(...)`, `hasAuthority('ROLE_x')`, `principal` (a `MessagePrincipal`
+with `userId`, `roles`, `verified`), plus `#message` (the decoded command or query) and `#ctx` (the `MessageContext`),
+e.g. `"hasRole('kraken-user') and #message.ownerId == #ctx.userId"`. Realm roles from the token's `realm_access.roles`
+become `ROLE_<role>` authorities. A syntax error fails startup naming the handler; `@RequiresAuthentication` is not
+allowed on `@EventHandler` (events carry no identity). Annotated handlers are listed at startup at `INFO`.
+
+Outcomes, on the hub path and the local short-circuit alike:
+
+| Caller | Result at the sender |
+|---|---|
+| no identity (no token, or an event handler / job) | `UnauthenticatedException` (wire code `UNAUTHENTICATED`) |
+| identity present, expression false or fails to evaluate | `AccessDeniedException` (wire code `PERMISSION_DENIED`) |
+| identity present, expression true | handler runs |
+
+A handler that throws `AccessDeniedException` (this library's or Spring's) also yields `PERMISSION_DENIED`, so a
+nested send denied deeper in a chain reaches the original caller as `AccessDeniedException`.
+
+How the receiver resolves the forwarded identity (`ForwardedIdentityResolver`):
+
+| Forwarded `authorization` header | `JwtDecoder` bean | Result |
+|---|---|---|
+| absent | any | anonymous; `MessageContext.userId = null`, request proceeds |
+| `Bearer <jwt>`, valid | present | identity `{sub, realm roles}`, `verified = true` |
+| `Bearer <jwt>`, invalid or expired | present | `UNAUTHENTICATED` (a forged or stale token is a bug or an attack) |
+| `Bearer <jwt>` | absent | claims read **without verification**, `verified = false`; warned once per process |
+| malformed | any | `UNAUTHENTICATED` |
+
+Builder call: an unverified identity counts as authenticated. The peer that forwarded it validated it at its own
+ingress and is trusted by the network model; verification is for catching forged or expired tokens where the
+service can, not for distrusting the peer. On the local short-circuit the current Spring `Authentication` is used
+as is (`JwtAuthenticationToken`, `BearerTokenAuthentication`, or any other authenticated token).
+
+The resolved identity is installed in the `SecurityContext` while the handler runs, so `CallerContext` works inside
+handlers and nested sends re-forward the same token. `kraken.messaging.security.require-jwt` was removed; setting it
+fails startup with a hint.
 
 ### Handlers
 
@@ -182,9 +238,9 @@ eventBus.publish(WorkoutLogged(id, owner, at), key = id)         // inside the c
   event reuse the incoming id (carried in the coroutine context and mirrored into the SLF4J MDC key `correlationId`);
   otherwise the MDC value is used, else a fresh UUID.
 - **Request ids.** `Request.id` is fresh per attempt. A retried command must carry its own business id in the payload.
-- **JWT.** The bearer token is forwarded on the hub path only. The receiving service validates it with its own
-  `JwtDecoder`; `MessageContext.userId` and `roles` come from the validated token. Role authorisation is left to the
-  handlers. Builder call.
+- **Identity.** The caller's bearer token is forwarded on the hub path only (`security.forward-jwt`). Requests are
+  trusted by default: a request without a token is anonymous and still handled. See [Security](#security) for
+  `@RequiresAuthentication`. Builder call.
 - **Events** carry `userId` only, not the token. Events published from an `@EventHandler` carry an empty `userId`:
   the consumer has no forwarded token, only the incoming event's `userId` in `MessageContext`.
 - **Outbox ordering.** Events with the same key are published in order per publishing instance, using a `seq` field on the
@@ -253,11 +309,9 @@ docker build -t kraken-hub:dev .
   publishing instance.
 - No scatter-gather (one command or query reaches one handler instance).
 - Library metrics are not exported yet; OpenTelemetry comes from the application.
-- The `require-jwt` check lives in the core auto-configuration, so Kafka-only tools must set `require-jwt: false` or
-  provide a `JwtDecoder`.
 - Configuration metadata is hand-maintained in `META-INF/spring-configuration-metadata.json`.
 - `TraceHeaders` is only active with Micrometer Tracing on the classpath.
 - Trace context is injected on outbound messages (hub requests, outbox events) but not yet extracted on inbound hub
   requests or Kafka records, so a handler's spans do not join the caller's trace.
-- With `require-jwt: false` and no `JwtDecoder`, a forwarded token is ignored (the caller is anonymous and the token is
-  not re-forwarded); a warning is logged once.
+- No service-to-service identity yet: commands sent from event handlers or scheduled jobs carry no token, so they can
+  only reach handlers without `@RequiresAuthentication` (a `kraken-system` client-credentials token is future work).
