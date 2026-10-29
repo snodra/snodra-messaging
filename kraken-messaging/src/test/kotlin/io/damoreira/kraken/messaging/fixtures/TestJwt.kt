@@ -4,6 +4,7 @@ import com.nimbusds.jose.JWSAlgorithm
 import com.nimbusds.jose.JWSHeader
 import com.nimbusds.jose.crypto.RSASSASigner
 import com.nimbusds.jwt.JWTClaimsSet
+import com.nimbusds.jwt.PlainJWT
 import com.nimbusds.jwt.SignedJWT
 import org.springframework.security.oauth2.jwt.JwtDecoder
 import org.springframework.security.oauth2.jwt.NimbusJwtDecoder
@@ -36,6 +37,16 @@ object TestJwt {
             .claim("realm_access", mapOf("roles" to roles))
             .build()
         return SignedJWT(JWSHeader(JWSAlgorithm.RS256), claims).apply { sign(RSASSASigner(privateKey)) }.serialize()
+    }
+
+    /** An unsigned (`alg: none`) token with the same claim shape; readable without a key, rejected by any decoder. */
+    fun unsignedToken(subject: String?, roles: List<String>): String {
+        val claims = JWTClaimsSet.Builder()
+            .subject(subject)
+            .issuer("https://issuer.test/realms/kraken")
+            .claim("realm_access", mapOf("roles" to roles))
+            .build()
+        return PlainJWT(claims).serialize()
     }
 
     fun decoder(): JwtDecoder = NimbusJwtDecoder.withPublicKey(publicKey).build()

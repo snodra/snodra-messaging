@@ -10,7 +10,7 @@ import io.damoreira.kraken.messaging.hub.HubBus
 import io.damoreira.kraken.messaging.hub.HubConnection
 import io.damoreira.kraken.messaging.hub.HubSettings
 import io.damoreira.kraken.messaging.hub.InboundRequestDispatcher
-import io.damoreira.kraken.messaging.security.ForwardedJwtAuthenticator
+import io.damoreira.kraken.messaging.security.ForwardedIdentityResolver
 import io.damoreira.kraken.messaging.tracing.TraceHeaders
 import io.grpc.ManagedChannel
 import io.grpc.ManagedChannelBuilder
@@ -61,8 +61,8 @@ class HubAutoConfiguration {
 
     @Bean
     @ConditionalOnMissingBean
-    fun inboundRequestDispatcher(invoker: HandlerInvoker, authenticator: ForwardedJwtAuthenticator, codec: JsonCodec) =
-        InboundRequestDispatcher(invoker, authenticator, codec)
+    fun inboundRequestDispatcher(invoker: HandlerInvoker, identities: ForwardedIdentityResolver, codec: JsonCodec) =
+        InboundRequestDispatcher(invoker, identities, codec)
 
     @Bean
     @ConditionalOnMissingBean

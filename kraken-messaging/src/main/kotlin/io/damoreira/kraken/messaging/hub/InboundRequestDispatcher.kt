@@ -11,8 +11,7 @@ import io.damoreira.kraken.messaging.UnauthenticatedException
 import io.damoreira.kraken.messaging.codec.JsonCodec
 import io.damoreira.kraken.messaging.handler.HandlerInvoker
 import io.damoreira.kraken.messaging.handler.InvocationResult
-import io.damoreira.kraken.messaging.security.ForwardedJwtAuthenticator
-import io.damoreira.kraken.messaging.security.KrakenForwardedAuthentication
+import io.damoreira.kraken.messaging.security.ForwardedIdentityResolver
 import io.damoreira.kraken.messaging.security.SecurityContextElement
 import io.damoreira.kraken.messaging.tracing.CorrelationContext
 import kotlinx.coroutines.withContext
@@ -31,7 +30,7 @@ import org.springframework.security.core.context.SecurityContextHolder
  */
 class InboundRequestDispatcher(
     private val invoker: HandlerInvoker,
-    private val authenticator: ForwardedJwtAuthenticator,
+    private val identities: ForwardedIdentityResolver,
     @Suppress("unused") private val codec: JsonCodec,
 ) {
     private val log = LoggerFactory.getLogger(InboundRequestDispatcher::class.java)
@@ -39,8 +38,8 @@ class InboundRequestDispatcher(
     suspend fun dispatch(req: Request): Reply {
         val headers = req.headersMap.toMap()
         val authorization = headers["authorization"]
-        val principal = try {
-            authenticator.authenticate(authorization)
+        val identity = try {
+            identities.resolve(authorization)
         } catch (e: UnauthenticatedException) {
             log.debug("Rejected {} request {}: {}", req.type, req.id, e.message)
             return errorReply(req.id, ErrorCode.UNAUTHENTICATED, e.message ?: "unauthenticated", ByteArray(0))
@@ -49,15 +48,14 @@ class InboundRequestDispatcher(
             messageId = req.id,
             type = req.type,
             correlationId = headers["correlationId"] ?: req.id,
-            userId = principal.userId,
-            roles = principal.roles,
+            userId = identity?.userId,
+            roles = identity?.roles ?: emptySet(),
             authorization = authorization,
             headers = headers,
         )
+        // The resolved identity (verified or trusted) is visible to the handler and re-forwarded by nested sends.
         val securityContext = SecurityContextHolder.createEmptyContext().apply {
-            val token = authorization?.let(ForwardedJwtAuthenticator::bearerToken)
-            // An ignored (unvalidated) token is neither trusted nor re-forwarded: the caller stays anonymous.
-            if (token != null && principal.verified) authentication = KrakenForwardedAuthentication(token, principal)
+            if (identity != null) authentication = identity.authentication
         }
         val payload = req.payload.toByteArray()
         val result = withContext(SecurityContextElement(securityContext) + CorrelationContext(ctx.correlationId)) {

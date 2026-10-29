@@ -18,7 +18,7 @@ import io.damoreira.kraken.messaging.kafka.EventConsumer
 import io.damoreira.kraken.messaging.kafka.MessagingIndexes
 import io.damoreira.kraken.messaging.kafka.OutboxEventBus
 import io.damoreira.kraken.messaging.kafka.OutboxPublisher
-import io.damoreira.kraken.messaging.security.ForwardedJwtAuthenticator
+import io.damoreira.kraken.messaging.security.ForwardedIdentityResolver
 import io.damoreira.kraken.messaging.test.InProcessHub
 import io.damoreira.kraken.messaging.tracing.TraceHeaders
 import io.grpc.ManagedChannel
@@ -118,23 +118,12 @@ class AutoConfigurationTest {
             assertEquals(1, context.getBeansOfType(HandlerRegistry::class.java).size)
             assertEquals(1, context.getBeansOfType(HandlerInvoker::class.java).size)
             assertEquals(1, context.getBeansOfType(JsonCodec::class.java).size)
-            assertEquals(1, context.getBeansOfType(ForwardedJwtAuthenticator::class.java).size)
+            assertEquals(1, context.getBeansOfType(ForwardedIdentityResolver::class.java).size)
             assertEquals(1, context.getBeansOfType(MessageTypeResolver::class.java).size)
             assertEquals(1, context.getBeansOfType(TraceHeaders::class.java).size)
             // no MongoTemplate in this context: the Kafka/outbox configuration backs off
             assertTrue(context.getBeansOfType(EventBus::class.java).isEmpty())
         }
-    }
-
-    @Test fun `require-jwt without JwtDecoder fails startup with hint`() {
-        runner.withPropertyValues("kraken.messaging.security.require-jwt=true").run { context ->
-            val failure = assertNotNull(context.startupFailure)
-            val messages = generateSequence<Throwable>(failure) { it.cause }.mapNotNull { it.message }.toList()
-            assertTrue(messages.any { "kraken.messaging.security.require-jwt=true but no JwtDecoder bean" in it }, messages.joinToString(" | "))
-        }
-        runner.withPropertyValues("kraken.messaging.security.require-jwt=true")
-            .withUserConfiguration(JwtDecoderConfig::class.java)
-            .run { context -> assertEquals(null, context.startupFailure) }
     }
 
     @Test fun `user CommandBus bean overrides HubBus`() {

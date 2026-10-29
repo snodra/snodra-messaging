@@ -5,7 +5,7 @@ import io.damoreira.kraken.messaging.codec.MessageTypeResolver
 import io.damoreira.kraken.messaging.handler.HandlerBeanPostProcessor
 import io.damoreira.kraken.messaging.handler.HandlerInvoker
 import io.damoreira.kraken.messaging.handler.HandlerRegistry
-import io.damoreira.kraken.messaging.security.ForwardedJwtAuthenticator
+import io.damoreira.kraken.messaging.security.ForwardedIdentityResolver
 import io.damoreira.kraken.messaging.tracing.TraceHeaders
 import io.micrometer.tracing.Tracer
 import io.micrometer.tracing.propagation.Propagator
@@ -45,14 +45,7 @@ class KrakenMessagingAutoConfiguration {
 
     @Bean
     @ConditionalOnMissingBean
-    fun forwardedJwtAuthenticator(properties: KrakenMessagingProperties, decoder: ObjectProvider<JwtDecoder>): ForwardedJwtAuthenticator {
-        val jwtDecoder = decoder.ifAvailable
-        check(jwtDecoder != null || !properties.security.requireJwt) {
-            "kraken.messaging.security.require-jwt=true but no JwtDecoder bean is present; configure " +
-                "spring.security.oauth2.resourceserver.jwt.issuer-uri or set require-jwt=false"
-        }
-        return ForwardedJwtAuthenticator(jwtDecoder, properties.security.requireJwt)
-    }
+    fun forwardedIdentityResolver(decoder: ObjectProvider<JwtDecoder>) = ForwardedIdentityResolver(decoder.ifAvailable)
 
     /** Fallback when micrometer-tracing is absent: no trace headers. */
     @Bean
