@@ -19,3 +19,7 @@ out/
 .env.*
 !.env.example
 *.local.yaml
+
+# Local worktrees and SDD scratch
+.worktrees/
+.superpowers/
