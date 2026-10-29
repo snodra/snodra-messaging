@@ -76,6 +76,11 @@ publishing {
     publications {
         create<MavenPublication>("maven") {
             from(components["java"])
+            // Write the resolved versions so version-less (BOM-managed) dependencies carry a version in the POM and .module.
+            versionMapping {
+                usage("java-api") { fromResolutionOf("runtimeClasspath") }
+                usage("java-runtime") { fromResolutionResult() }
+            }
             artifactId = "kraken-messaging"
             pom {
                 name.set("kraken-messaging")

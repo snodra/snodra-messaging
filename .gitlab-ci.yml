@@ -32,6 +32,9 @@ test:
   stage: test
   services:
     - docker:28-dind
+  variables:
+    # The E2E test needs the hub image; it is skipped when the image cannot be pulled.
+    KRAKEN_HUB_IMAGE: "registry.gitlab.damoreira.ml/kraken/kraken-hub:latest"
   script:
     - ./gradlew test --no-daemon
   artifacts:
