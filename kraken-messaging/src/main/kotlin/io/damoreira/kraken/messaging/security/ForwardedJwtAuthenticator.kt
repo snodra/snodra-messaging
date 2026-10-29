@@ -15,10 +15,8 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 class ForwardedJwtAuthenticator(private val decoder: JwtDecoder?, private val requireJwt: Boolean) {
 
-    /** The caller; [validated] is false for an anonymous caller whose forwarded token was ignored or absent. */
-    data class Principal(val userId: String?, val roles: Set<String>, val validated: Boolean = true)
 
-    fun authenticate(authorization: String?): Principal {
+    fun authenticate(authorization: String?): MessagePrincipal {
         if (authorization.isNullOrBlank()) {
             if (requireJwt) throw UnauthenticatedException("missing bearer token")
             return ANONYMOUS
@@ -36,12 +34,12 @@ class ForwardedJwtAuthenticator(private val decoder: JwtDecoder?, private val re
         } catch (e: JwtException) {
             throw UnauthenticatedException(e.message ?: "invalid token")
         }
-        return Principal(jwt.subject, realmRoles(jwt))
+        return MessagePrincipal(jwt.subject, RealmRoles.fromClaims(jwt.claims), verified = true)
     }
 
     companion object {
         private const val PREFIX = "Bearer "
-        private val ANONYMOUS = Principal(null, emptySet(), validated = false)
+        private val ANONYMOUS = MessagePrincipal(null, emptySet(), verified = false)
         private val log = LoggerFactory.getLogger(ForwardedJwtAuthenticator::class.java)
         private val ignoredTokenWarned = AtomicBoolean(false)
 
@@ -53,11 +51,5 @@ class ForwardedJwtAuthenticator(private val decoder: JwtDecoder?, private val re
                 null
             }
 
-        /** Keycloak realm roles: the string entries of claim `realm_access.roles`; empty when absent. */
-        fun realmRoles(jwt: Jwt): Set<String> {
-            val realmAccess = jwt.claims["realm_access"] as? Map<*, *> ?: return emptySet()
-            val roles = realmAccess["roles"] as? Collection<*> ?: return emptySet()
-            return roles.filterIsInstance<String>().toSet()
-        }
     }
 }

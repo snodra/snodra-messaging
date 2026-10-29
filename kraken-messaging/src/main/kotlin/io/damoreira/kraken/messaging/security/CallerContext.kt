@@ -33,23 +33,26 @@ object CallerContext {
 
     /** Realm roles of the caller (without the `ROLE_` prefix). */
     fun currentRoles(): Set<String> = when (val auth = SecurityContextHolder.getContext().authentication) {
-        is JwtAuthenticationToken -> ForwardedJwtAuthenticator.realmRoles(auth.token)
+        is JwtAuthenticationToken -> RealmRoles.fromClaims(auth.token.claims)
         is KrakenForwardedAuthentication -> auth.principal.roles
         else -> emptySet()
     }
 }
 
-/** Authentication of a request received from the hub: the forwarded raw [token] and the validated [principal]. */
+/**
+ * Authentication of a request received from the hub: the forwarded raw [token] (null when the identity was resolved
+ * without a token to re-forward) and the resolved [principal]. Always authenticated; roles become `ROLE_<role>`.
+ */
 class KrakenForwardedAuthentication(
-    val token: String,
-    private val principal: ForwardedJwtAuthenticator.Principal,
-) : AbstractAuthenticationToken(principal.roles.map { SimpleGrantedAuthority("ROLE_$it") }) {
+    val token: String?,
+    private val principal: MessagePrincipal,
+) : AbstractAuthenticationToken(principal.roles.map { SimpleGrantedAuthority("${RealmRoles.ROLE_PREFIX}$it") }) {
     init {
         isAuthenticated = true
     }
 
-    override fun getCredentials(): Any = token
-    override fun getPrincipal(): ForwardedJwtAuthenticator.Principal = principal
+    override fun getCredentials(): Any? = token
+    override fun getPrincipal(): MessagePrincipal = principal
     override fun getName(): String = principal.userId.orEmpty()
 }
 

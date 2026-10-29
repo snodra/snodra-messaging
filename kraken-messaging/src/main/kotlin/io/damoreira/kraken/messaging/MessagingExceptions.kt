@@ -21,6 +21,9 @@ class UnauthenticatedException(message: String) : MessagingException(message)
 /** A message could not be encoded, decoded or validated. */
 class InvalidMessageException(message: String, cause: Throwable? = null) : MessagingException(message, cause)
 
+/** The caller is authenticated but the handler's `@RequiresAuthentication` expression denied it (hub code PERMISSION_DENIED). */
+class AccessDeniedException(message: String) : MessagingException(message)
+
 /** The hub cannot be reached. */
 class HubUnavailableException(message: String) : MessagingException(message)
 

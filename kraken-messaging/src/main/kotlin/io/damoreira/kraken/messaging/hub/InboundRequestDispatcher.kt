@@ -57,7 +57,7 @@ class InboundRequestDispatcher(
         val securityContext = SecurityContextHolder.createEmptyContext().apply {
             val token = authorization?.let(ForwardedJwtAuthenticator::bearerToken)
             // An ignored (unvalidated) token is neither trusted nor re-forwarded: the caller stays anonymous.
-            if (token != null && principal.validated) authentication = KrakenForwardedAuthentication(token, principal)
+            if (token != null && principal.verified) authentication = KrakenForwardedAuthentication(token, principal)
         }
         val payload = req.payload.toByteArray()
         val result = withContext(SecurityContextElement(securityContext) + CorrelationContext(ctx.correlationId)) {

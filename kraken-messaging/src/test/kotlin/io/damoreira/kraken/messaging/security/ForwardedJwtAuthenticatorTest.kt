@@ -60,7 +60,7 @@ class ForwardedJwtAuthenticatorTest {
             .authenticate("Bearer " + TestJwt.token("user-42", listOf("member")))
         assertNull(principal.userId)
         assertEquals(emptySet(), principal.roles)
-        assertFalse(principal.validated)
+        assertFalse(principal.verified)
     }
 
     @Test fun `token without decoder and require-jwt true is UnauthenticatedException`() {
