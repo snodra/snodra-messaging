@@ -10,6 +10,10 @@ dependencies {
     api(libs.testcontainers.kafka)
     api(libs.testcontainers.mongodb)
     api(libs.kotlinx.coroutines.core)
+    api(libs.grpc.inprocess)
+    implementation(libs.grpc.stub)
+    implementation(libs.grpc.protobuf)
+    implementation(libs.grpc.kotlin.stub)
 
     testImplementation(libs.kotlin.test.junit5)
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
