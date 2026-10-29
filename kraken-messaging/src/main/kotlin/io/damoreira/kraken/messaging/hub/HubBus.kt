@@ -91,17 +91,17 @@ class HubBus(
         correlationId: String,
         token: String?,
     ): Any {
+        val identity = LocalIdentity.current()
         val ctx = MessageContext(
             messageId = UUID.randomUUID().toString(),
             type = type,
             correlationId = correlationId,
-            userId = CallerContext.currentUserId(),
-            roles = CallerContext.currentRoles(),
+            userId = identity?.userId,
+            roles = identity?.roles ?: emptySet(),
             authorization = token?.let { "Bearer $it" },
             headers = mapOf("correlationId" to correlationId),
         )
         // Same thread and coroutine as the caller (so a thread-bound transaction of the caller is joined).
-        val identity = LocalIdentity.current()
         val result = withContext(CorrelationContext(correlationId)) {
             if (kind == RequestKind.COMMAND) invoker.invokeCommand(type, payload, ctx, identity) else invoker.invokeQuery(type, payload, ctx, identity)
         }

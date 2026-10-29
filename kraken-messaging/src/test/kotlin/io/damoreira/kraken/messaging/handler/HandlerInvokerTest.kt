@@ -74,6 +74,11 @@ class SpringDenyingHandlers {
     @CommandHandler fun handle(command: Ping): Pong = throw org.springframework.security.access.AccessDeniedException("spring denied")
 }
 
+class SpringAuthFailingHandlers {
+    @CommandHandler fun handle(command: Ping): Pong =
+        throw org.springframework.security.authentication.AuthenticationCredentialsNotFoundException("no auth")
+}
+
 class HandlerInvokerTest {
     private val codec = JsonCodec()
     private val registry = HandlerRegistry(MessageTypeResolver("test"))
@@ -195,5 +200,18 @@ class HandlerInvokerTest {
             assertEquals(ErrorCode.PERMISSION_DENIED, failure.code, bean::class.simpleName)
             assertTrue(failure.message.contains("denied"), failure.message)
         }
+    }
+
+    @Test fun `anonymous call to annotated handler is UNAUTHENTICATED before payload decoding`() = runBlocking {
+        val (invoker, _) = invokerFor(AuthHandlers())
+        val failure = assertIs<InvocationResult.Failure>(invoker.invokeCommand("test.Ping", "not json".toByteArray(), ctx("test.Ping"), null))
+        assertEquals(ErrorCode.UNAUTHENTICATED, failure.code)
+    }
+
+    @Test fun `handler throwing Spring AuthenticationException maps to UNAUTHENTICATED`() = runBlocking {
+        val (invoker, codec) = invokerFor(SpringAuthFailingHandlers())
+        val failure = assertIs<InvocationResult.Failure>(invoker.invokeCommand("test.Ping", codec.encode(Ping("x")), ctx("test.Ping"), identity("kraken-user")))
+        assertEquals(ErrorCode.UNAUTHENTICATED, failure.code)
+        assertEquals("no auth", failure.message)
     }
 }

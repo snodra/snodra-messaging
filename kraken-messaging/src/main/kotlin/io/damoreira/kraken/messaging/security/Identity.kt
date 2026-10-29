@@ -34,21 +34,26 @@ object RealmRoles {
     const val ROLE_PREFIX = "ROLE_"
 }
 
-/**
- * The identity of the current thread's caller for the local short-circuit path. Spring already validated the
- * [Authentication] at ingress, so nothing is re-validated here. Null means anonymous (no or anonymous authentication).
- */
+/** The identity of the current thread's caller for the local short-circuit path; null means anonymous. */
 object LocalIdentity {
+    /**
+     * Normalises the current [org.springframework.security.core.Authentication] to the same shape the hub path
+     * produces ([KrakenForwardedAuthentication] with `ROLE_<realm role>` authorities), so `@RequiresAuthentication`
+     * expressions evaluate identically whether a call is short-circuited locally or routed through the hub, whatever
+     * authority mapping the application's own resource-server converter applies (Spring's default yields `SCOPE_*`).
+     */
     fun current(): Identity? {
         val auth = SecurityContextHolder.getContext().authentication ?: return null
         if (!auth.isAuthenticated || auth is AnonymousAuthenticationToken) return null
-        val principal = when (auth) {
-            is JwtAuthenticationToken -> MessagePrincipal(auth.token.subject, RealmRoles.fromClaims(auth.token.claims), verified = true)
+        if (auth is KrakenForwardedAuthentication) return Identity(auth.principal, auth)
+        val (principal, token) = when (auth) {
+            is JwtAuthenticationToken ->
+                MessagePrincipal(auth.token.subject, RealmRoles.fromClaims(auth.token.claims), verified = true) to auth.token.tokenValue
             is BearerTokenAuthentication ->
-                MessagePrincipal(auth.tokenAttributes["sub"] as? String, RealmRoles.fromClaims(auth.tokenAttributes), verified = true)
-            is KrakenForwardedAuthentication -> auth.principal
-            else -> MessagePrincipal(auth.name, RealmRoles.fromAuthorities(auth), verified = true)
+                MessagePrincipal(auth.tokenAttributes["sub"] as? String, RealmRoles.fromClaims(auth.tokenAttributes), verified = true) to
+                    auth.token.tokenValue
+            else -> MessagePrincipal(auth.name, RealmRoles.fromAuthorities(auth), verified = true) to null
         }
-        return Identity(principal, auth)
+        return Identity(principal, KrakenForwardedAuthentication(token, principal))
     }
 }

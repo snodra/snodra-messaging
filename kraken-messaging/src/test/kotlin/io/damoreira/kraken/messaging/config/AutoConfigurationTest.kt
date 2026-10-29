@@ -230,6 +230,15 @@ class AutoConfigurationTest {
             }
             .run { context ->
                 assertTrue(context.startupFailure != null, "expected startup failure from the env-style property")
+                val message = generateSequence(context.startupFailure) { it.cause }.joinToString(" | ") { it.message.orEmpty() }
+                assertTrue(message.contains("kraken.messaging.security.require-jwt was removed"), message)
             }
+    }
+
+    @Test fun `require-jwt check also runs with a user supplied identity resolver bean`() {
+        runner
+            .withPropertyValues("kraken.messaging.security.require-jwt=true")
+            .withBean(ForwardedIdentityResolver::class.java, { ForwardedIdentityResolver(null) })
+            .run { context -> assertTrue(context.startupFailure != null, "expected startup failure despite the user bean") }
     }
 }

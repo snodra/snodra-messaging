@@ -20,6 +20,7 @@ import io.damoreira.kraken.messaging.handler.HandlerInvoker
 import io.damoreira.kraken.messaging.handler.HandlerRegistry
 import io.damoreira.kraken.messaging.test.InProcessHub
 import io.damoreira.kraken.messaging.AccessDeniedException
+import io.damoreira.kraken.messaging.MessageContext
 import io.damoreira.kraken.messaging.QueryBus
 import io.damoreira.kraken.messaging.handler.QueryHandler
 import io.damoreira.kraken.messaging.handler.RequiresAuthentication
@@ -76,6 +77,11 @@ class NestingHandlers(private val queries: () -> QueryBus) {
 class AdminCountHandlers {
     @QueryHandler @RequiresAuthentication("hasRole('kraken-admin')")
     fun handle(query: GetCount): Count = Count(42)
+}
+
+class OwnerCheckHandlers {
+    @CommandHandler @RequiresAuthentication("hasRole('kraken-user') and #message.text == #ctx.userId")
+    fun handle(command: Ping, ctx: MessageContext): Pong = Pong("owner:${ctx.userId}", Instant.EPOCH)
 }
 
 class HubBusTest {
@@ -305,5 +311,15 @@ class HubBusTest {
         val bus = callerBus()
 
         assertEquals(Pong("user:x", Instant.EPOCH), withTimeout(5_000) { bus.send(Ping("x")) })
+    }
+
+    @Test fun `local short-circuit uses realm roles and identity for ctx regardless of the app authorities`() = runBlocking {
+        registry.register(OwnerCheckHandlers())
+        val bus = bus(connection("lonely", hubName = "no-such-hub-" + UUID.randomUUID()))
+        val jwt = TestJwt.decoder().decode(TestJwt.token("u-7", listOf("kraken-user")))
+        SecurityContextHolder.getContext().authentication = JwtAuthenticationToken(jwt, listOf(SimpleGrantedAuthority("SCOPE_profile")))
+
+        assertEquals(Pong("owner:u-7", Instant.EPOCH), withTimeout(5_000) { bus.send(Ping("u-7")) })
+        assertFailsWith<AccessDeniedException> { withTimeout(5_000) { bus.send(Ping("someone-else")) } }
     }
 }

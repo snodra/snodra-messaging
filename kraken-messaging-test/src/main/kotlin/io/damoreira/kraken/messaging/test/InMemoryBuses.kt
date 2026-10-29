@@ -11,7 +11,10 @@ import io.damoreira.kraken.messaging.codec.JsonCodec
 import io.damoreira.kraken.messaging.codec.MessageTypeResolver
 import io.damoreira.kraken.messaging.codec.ResponseTypes
 import io.damoreira.kraken.messaging.handler.HandlerInvoker
+import io.damoreira.kraken.messaging.security.Identity
+import io.damoreira.kraken.messaging.security.KrakenForwardedAuthentication
 import io.damoreira.kraken.messaging.security.LocalIdentity
+import io.damoreira.kraken.messaging.security.MessagePrincipal
 import io.damoreira.kraken.messaging.handler.HandlerRegistry
 import io.damoreira.kraken.messaging.handler.InvocationResult
 import io.damoreira.kraken.messaging.hub.HubErrors
@@ -22,7 +25,11 @@ import java.util.concurrent.CopyOnWriteArrayList
  * Local, synchronous implementation of all three buses for unit tests. Messages still go through the JSON codec
  * so serialization problems show up in tests.
  */
-class InMemoryBuses(typePrefix: String = "test", private val userId: String? = "user-1") : EventBus, CommandBus, QueryBus {
+class InMemoryBuses(
+    typePrefix: String = "test",
+    private val userId: String? = "user-1",
+    private val roles: Set<String> = emptySet(),
+) : EventBus, CommandBus, QueryBus {
     private val resolver = MessageTypeResolver(typePrefix)
     private val codec = JsonCodec()
     val registry = HandlerRegistry(resolver)
@@ -47,13 +54,13 @@ class InMemoryBuses(typePrefix: String = "test", private val userId: String? = "
     @Suppress("UNCHECKED_CAST")
     override suspend fun <R> send(command: Command<R>, routingKey: String?): R {
         val type = resolver.typeNameOf(command::class)
-        return unwrap(type, command::class, invoker.invokeCommand(type, codec.encode(command), context(type), LocalIdentity.current())) as R
+        return unwrap(type, command::class, invoker.invokeCommand(type, codec.encode(command), context(type), identity())) as R
     }
 
     @Suppress("UNCHECKED_CAST")
     override suspend fun <R> send(query: Query<R>): R {
         val type = resolver.typeNameOf(query::class)
-        return unwrap(type, query::class, invoker.invokeQuery(type, codec.encode(query), context(type), LocalIdentity.current())) as R
+        return unwrap(type, query::class, invoker.invokeQuery(type, codec.encode(query), context(type), identity())) as R
     }
 
     private fun unwrap(type: String, messageClass: kotlin.reflect.KClass<*>, result: InvocationResult): Any = when (result) {
@@ -66,8 +73,17 @@ class InMemoryBuses(typePrefix: String = "test", private val userId: String? = "
         type = type,
         correlationId = UUID.randomUUID().toString(),
         userId = userId,
-        roles = emptySet(),
+        roles = roles,
         authorization = null,
         headers = emptyMap(),
     )
+
+    /**
+     * The caller for annotated handlers: the current `SecurityContext` when a test installed one, otherwise an
+     * identity synthesised from the configured `userId` and `roles` (anonymous when `userId` is null).
+     */
+    private fun identity(): Identity? = LocalIdentity.current() ?: userId?.let {
+        val principal = MessagePrincipal(it, roles, verified = true)
+        Identity(principal, KrakenForwardedAuthentication(null, principal))
+    }
 }

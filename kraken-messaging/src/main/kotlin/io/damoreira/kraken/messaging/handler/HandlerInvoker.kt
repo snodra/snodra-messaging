@@ -8,6 +8,7 @@ import io.damoreira.kraken.messaging.UnauthenticatedException
 import io.damoreira.kraken.messaging.codec.JsonCodec
 import io.damoreira.kraken.messaging.security.Identity
 import jakarta.validation.ConstraintViolationException
+import org.slf4j.LoggerFactory
 import kotlin.coroutines.cancellation.CancellationException
 
 sealed interface InvocationResult {
@@ -26,6 +27,7 @@ sealed interface InvocationResult {
  * Stack traces are never included.
  */
 class HandlerInvoker(private val registry: HandlerRegistry, private val codec: JsonCodec) {
+    private val log = LoggerFactory.getLogger(HandlerInvoker::class.java)
 
     /** [identity] is the resolved caller (null = anonymous); it is checked against the handler's `@RequiresAuthentication`. */
     suspend fun invokeCommand(type: String, payload: ByteArray, ctx: MessageContext, identity: Identity?): InvocationResult =
@@ -57,6 +59,10 @@ class HandlerInvoker(private val registry: HandlerRegistry, private val codec: J
         identity: Identity?,
     ): InvocationResult {
         if (handler == null) return InvocationResult.Failure(ErrorCode.NO_HANDLER, "no handler for type $type")
+        if (handler.authorization != null && identity == null) {
+            // Before decoding, so an anonymous caller cannot probe payload shapes of protected handlers.
+            return rejected(handler, ErrorCode.UNAUTHENTICATED, "handler ${handler.label} requires authentication")
+        }
         val message = try {
             codec.decode(payload, handler.messageClass)
         } catch (e: InvalidMessageException) {
@@ -64,8 +70,8 @@ class HandlerInvoker(private val registry: HandlerRegistry, private val codec: J
         }
         when (val decision = handler.authorization?.check(identity, message, ctx, handler.label)) {
             null, AuthorizationDecision.Granted -> Unit
-            is AuthorizationDecision.Unauthenticated -> return InvocationResult.Failure(ErrorCode.UNAUTHENTICATED, decision.message)
-            is AuthorizationDecision.Denied -> return InvocationResult.Failure(ErrorCode.PERMISSION_DENIED, decision.message)
+            is AuthorizationDecision.Unauthenticated -> return rejected(handler, ErrorCode.UNAUTHENTICATED, decision.message)
+            is AuthorizationDecision.Denied -> return rejected(handler, ErrorCode.PERMISSION_DENIED, decision.message)
         }
         return try {
             InvocationResult.Success(codec.encode(handler.invoke(message, ctx) ?: Unit))
@@ -77,6 +83,8 @@ class HandlerInvoker(private val registry: HandlerRegistry, private val codec: J
             InvocationResult.Failure(ErrorCode.PERMISSION_DENIED, e.message ?: "access denied")
         } catch (e: org.springframework.security.access.AccessDeniedException) {
             InvocationResult.Failure(ErrorCode.PERMISSION_DENIED, e.message ?: "access denied")
+        } catch (e: org.springframework.security.core.AuthenticationException) {
+            InvocationResult.Failure(ErrorCode.UNAUTHENTICATED, e.message ?: "unauthenticated")
         } catch (e: Throwable) {
             when {
                 e is IllegalArgumentException || isConstraintViolation(e) ->
@@ -84,6 +92,11 @@ class HandlerInvoker(private val registry: HandlerRegistry, private val codec: J
                 else -> InvocationResult.Failure(ErrorCode.HANDLER_ERROR, describe(e))
             }
         }
+    }
+
+    private fun rejected(handler: HandlerMethod, code: ErrorCode, message: String): InvocationResult.Failure {
+        log.debug("handler {} rejected request: {} {}", handler.label, code, message)
+        return InvocationResult.Failure(code, message)
     }
 
     private fun describe(e: Throwable) = "${e::class.simpleName}: ${e.message}"

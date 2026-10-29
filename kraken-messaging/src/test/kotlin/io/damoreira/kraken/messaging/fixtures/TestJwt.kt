@@ -49,5 +49,21 @@ object TestJwt {
         return PlainJWT(claims).serialize()
     }
 
+    private val foreignKey = KeyPairGenerator.getInstance("RSA").apply { initialize(2048) }.generateKeyPair()
+
+    /** An RS256 token signed by a key `decoder()` does not know: readable, but fails verification. */
+    fun foreignToken(subject: String?, roles: List<String>): String {
+        val claims = JWTClaimsSet.Builder()
+            .subject(subject)
+            .issuer("https://other.test/realms/kraken")
+            .issueTime(Date())
+            .expirationTime(Date(System.currentTimeMillis() + 300_000))
+            .claim("realm_access", mapOf("roles" to roles))
+            .build()
+        return SignedJWT(JWSHeader(JWSAlgorithm.RS256), claims)
+            .apply { sign(RSASSASigner(foreignKey.private as RSAPrivateKey)) }
+            .serialize()
+    }
+
     fun decoder(): JwtDecoder = NimbusJwtDecoder.withPublicKey(publicKey).build()
 }

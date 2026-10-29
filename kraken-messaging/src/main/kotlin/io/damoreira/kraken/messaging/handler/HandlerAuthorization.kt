@@ -3,13 +3,13 @@ package io.damoreira.kraken.messaging.handler
 import io.damoreira.kraken.messaging.MessageContext
 import io.damoreira.kraken.messaging.security.Identity
 import io.damoreira.kraken.messaging.security.MessagePrincipal
-import org.springframework.expression.EvaluationException
 import org.springframework.expression.Expression
 import org.springframework.expression.ParseException
 import org.springframework.expression.spel.standard.SpelExpressionParser
 import org.springframework.expression.spel.support.StandardEvaluationContext
 import org.springframework.security.access.expression.SecurityExpressionRoot
 import org.springframework.security.core.Authentication
+import kotlin.coroutines.cancellation.CancellationException
 
 /** Outcome of evaluating a handler's `@RequiresAuthentication` expression. */
 sealed interface AuthorizationDecision {
@@ -37,8 +37,11 @@ class CompiledAuthorization(val expression: Expression, val source: String) {
             setVariable("ctx", ctx)
         }
         val granted = try {
-            expression.getValue(context, Boolean::class.java) == true
-        } catch (e: EvaluationException) {
+            expression.getValue(context) == true // a real Boolean true; strings such as 'yes' never coerce to a grant
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // SpEL wraps property/navigation failures but rethrows exceptions from invoked methods unwrapped.
             return AuthorizationDecision.Denied("handler $label: access denied (${e::class.simpleName})")
         }
         return if (granted) AuthorizationDecision.Granted else AuthorizationDecision.Denied("handler $label: access denied")

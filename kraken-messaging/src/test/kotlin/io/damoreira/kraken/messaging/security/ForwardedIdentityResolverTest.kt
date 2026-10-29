@@ -65,7 +65,7 @@ class ForwardedIdentityResolverTest {
     }
 
     @Test fun `token without decoder is parsed unverified`() {
-        val token = TestJwt.unsignedToken("u-9", listOf("kraken-admin"))
+        val token = TestJwt.foreignToken("u-9", listOf("kraken-admin"))
 
         val identity = assertNotNull(withoutDecoder.resolve("Bearer $token"))
 
@@ -87,7 +87,7 @@ class ForwardedIdentityResolverTest {
     }
 
     @Test fun `missing sub without decoder yields identity with null userId`() {
-        val identity = assertNotNull(withoutDecoder.resolve("Bearer ${TestJwt.unsignedToken(null, listOf("kraken-user"))}"))
+        val identity = assertNotNull(withoutDecoder.resolve("Bearer ${TestJwt.foreignToken(null, listOf("kraken-user"))}"))
 
         assertNull(identity.userId)
         assertEquals(setOf("kraken-user"), identity.roles)
@@ -104,12 +104,20 @@ class ForwardedIdentityResolverTest {
             .setKind(RequestKind.COMMAND)
             .setType("test.Ping")
             .setPayload(ByteString.copyFrom(codec.encode(Ping("x"))))
-            .putHeaders("authorization", "Bearer ${TestJwt.unsignedToken("u-9", listOf("kraken-user"))}")
+            .putHeaders("authorization", "Bearer ${TestJwt.foreignToken("u-9", listOf("kraken-user"))}")
             .build()
 
         val reply = dispatcher.dispatch(request)
 
         assertTrue(reply.hasPayload(), "expected a payload, got ${reply.error.message}")
         assertEquals("u-9", handlers.seenUserId)
+    }
+
+    @Test fun `unsigned token without decoder is UnauthenticatedException`() {
+        val e = assertFailsWith<UnauthenticatedException> {
+            withoutDecoder.resolve("Bearer ${TestJwt.unsignedToken("u-9", listOf("kraken-admin"))}")
+        }
+
+        assertEquals("unsigned token", e.message)
     }
 }

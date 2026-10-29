@@ -11,6 +11,7 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
 import java.time.Instant
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 
 @MessageType("test.Ping")
 data class Ping(val text: String) : Command<Pong>
@@ -44,4 +45,19 @@ class InMemoryBusesTest {
         val buses = InMemoryBuses()
         assertThrows<NoHandlerException> { buses.send(Ping("x")) }
     }
+
+    @Test fun `annotated handler is reachable with the configured user and roles`() = runBlocking {
+        val buses = InMemoryBuses(userId = "alice", roles = setOf("kraken-admin")).register(AdminOnly())
+        assertEquals("admin:alice", buses.send(Ping("x")).echoed)
+
+        val anonymous = InMemoryBuses(userId = null).register(AdminOnly())
+        assertFailsWith<io.damoreira.kraken.messaging.UnauthenticatedException> { anonymous.send(Ping("x")) }
+    }
+}
+
+class AdminOnly {
+    @io.damoreira.kraken.messaging.handler.CommandHandler
+    @io.damoreira.kraken.messaging.handler.RequiresAuthentication("hasRole('kraken-admin')")
+    fun handle(command: Ping, ctx: io.damoreira.kraken.messaging.MessageContext) =
+        Pong("admin:${ctx.userId}", java.time.Instant.EPOCH)
 }

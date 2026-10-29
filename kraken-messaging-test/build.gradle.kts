@@ -11,6 +11,8 @@ dependencies {
     api(libs.testcontainers.mongodb)
     implementation(platform("org.springframework.boot:spring-boot-dependencies:${libs.versions.spring.boot.get()}"))
     api("org.apache.kafka:kafka-clients")
+    // InMemoryBuses synthesises a KrakenForwardedAuthentication (a Spring Security Authentication) for annotated handlers.
+    implementation("org.springframework.security:spring-security-core")
     api(libs.kotlinx.coroutines.core)
     api(libs.grpc.inprocess)
     implementation(libs.grpc.stub)

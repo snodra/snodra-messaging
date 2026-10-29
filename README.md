@@ -169,13 +169,27 @@ How the receiver resolves the forwarded identity (`ForwardedIdentityResolver`):
 | absent | any | anonymous; `MessageContext.userId = null`, request proceeds |
 | `Bearer <jwt>`, valid | present | identity `{sub, realm roles}`, `verified = true` |
 | `Bearer <jwt>`, invalid or expired | present | `UNAUTHENTICATED` (a forged or stale token is a bug or an attack) |
-| `Bearer <jwt>` | absent | claims read **without verification**, `verified = false`; warned once per process |
+| `Bearer <jwt>`, signed | absent | claims read **without verification**, `verified = false`; warned once per process |
+| `Bearer <jwt>`, unsigned (`alg: none`) or encrypted | absent | `UNAUTHENTICATED` (only signed tokens are read unverified) |
 | malformed | any | `UNAUTHENTICATED` |
 
 Builder call: an unverified identity counts as authenticated. The peer that forwarded it validated it at its own
 ingress and is trusted by the network model; verification is for catching forged or expired tokens where the
-service can, not for distrusting the peer. On the local short-circuit the current Spring `Authentication` is used
-as is (`JwtAuthenticationToken`, `BearerTokenAuthentication`, or any other authenticated token).
+service can, not for distrusting the peer. Without a `JwtDecoder` the checks are therefore advisory: any client on
+the private network can mint a signed token with any claims. Use `principal.verified` in an expression when a
+handler must insist on a verified identity (`"isAuthenticated() and principal.verified"`). On the local
+short-circuit the current Spring `Authentication` is normalised the same way: `sub` and `realm_access.roles` are
+read from the token (`JwtAuthenticationToken`, `BearerTokenAuthentication`), so `hasRole('x')` means the realm role
+regardless of how the application maps authorities for its own REST endpoints.
+
+Notes:
+
+- `@RequiresAuthentication` is read from the handler method itself and is not inherited from an interface or
+  superclass method.
+- `permitAll()`, `denyAll()` and `isAnonymous()` are accepted syntax but meaningless here: an anonymous caller is
+  rejected with `UNAUTHENTICATED` before any expression runs, so leave the annotation off a handler open to anyone.
+- A string result such as `'true'` is not a grant; the expression must evaluate to the Boolean `true`.
+- An expression that throws (for example `#message.owner.id` on a null `owner`) is a denial, not a handler error.
 
 The resolved identity is installed in the `SecurityContext` while the handler runs, so `CallerContext` works inside
 handlers and nested sends re-forward the same token. `kraken.messaging.security.require-jwt` was removed; setting it

@@ -11,6 +11,7 @@ import org.springframework.security.core.context.SecurityContextHolder
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
+import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
@@ -36,7 +37,8 @@ class IdentityTest {
         assertEquals("u-1", identity.userId)
         assertEquals(setOf("kraken-user", "kraken-admin"), identity.roles)
         assertTrue(identity.principal.verified)
-        assertSame(auth, identity.authentication)
+        val normalized = assertIs<KrakenForwardedAuthentication>(identity.authentication)
+        assertEquals(jwt.tokenValue, normalized.token)
     }
 
     @Test
@@ -82,5 +84,15 @@ class IdentityTest {
         assertTrue(auth.isAuthenticated)
         assertEquals(setOf("ROLE_kraken-user"), auth.authorities.map { it.authority }.toSet())
         assertNull(auth.token)
+    }
+
+    @Test fun `local identity evaluates realm roles even when the app maps scopes only`() {
+        val jwt = TestJwt.decoder().decode(TestJwt.token("u-1", listOf("kraken-admin")))
+        install(JwtAuthenticationToken(jwt, listOf(SimpleGrantedAuthority("SCOPE_profile")))) // Spring's default converter shape
+
+        val identity = assertNotNull(LocalIdentity.current())
+
+        assertEquals(setOf("ROLE_kraken-admin"), identity.authentication.authorities.map { it.authority }.toSet())
+        assertTrue(identity.authentication.isAuthenticated)
     }
 }

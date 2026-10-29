@@ -1,6 +1,8 @@
 package io.damoreira.kraken.messaging.security
 
 import com.nimbusds.jwt.JWTParser
+import com.nimbusds.jwt.PlainJWT
+import com.nimbusds.jwt.SignedJWT
 import io.damoreira.kraken.messaging.UnauthenticatedException
 import org.slf4j.LoggerFactory
 import org.springframework.security.oauth2.jwt.JwtDecoder
@@ -13,7 +15,8 @@ import java.util.concurrent.atomic.AtomicBoolean
  * Requests are trusted by default: no header means an anonymous caller and the request proceeds. A token is
  * validated when the service has a [JwtDecoder] (a bad token is rejected: that is a bug or an attack, not a trusted
  * peer); without a decoder the claims are read unverified, because the peer that forwarded the token validated it at
- * ingress. Whether an anonymous caller may run a handler is the handler's decision (`@RequiresAuthentication`).
+ * ingress; only signed tokens are accepted that way (`alg: none` is rejected). Whether an anonymous caller may run
+ * a handler is the handler's decision (`@RequiresAuthentication`).
  */
 class ForwardedIdentityResolver(private val decoder: JwtDecoder?) {
 
@@ -35,10 +38,15 @@ class ForwardedIdentityResolver(private val decoder: JwtDecoder?) {
     }
 
     private fun unverified(token: String): MessagePrincipal {
-        val claims = try {
-            JWTParser.parse(token).jwtClaimsSet
+        val parsed = try {
+            JWTParser.parse(token)
         } catch (e: Exception) {
             throw UnauthenticatedException("unreadable token")
+        }
+        val claims = when (parsed) {
+            is SignedJWT -> parsed.jwtClaimsSet
+            is PlainJWT -> throw UnauthenticatedException("unsigned token")
+            else -> throw UnauthenticatedException("unsupported token")
         }
         if (unverifiedWarned.compareAndSet(false, true)) {
             log.warn("forwarded identities are trusted without verification: no JwtDecoder bean")

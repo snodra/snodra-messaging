@@ -45,14 +45,13 @@ class KrakenMessagingAutoConfiguration {
     @ConditionalOnMissingBean
     fun handlerInvoker(registry: HandlerRegistry, codec: JsonCodec) = HandlerInvoker(registry, codec)
 
+    /** Fails startup when a removed property is still configured (runs regardless of user-supplied beans). */
+    @Bean
+    fun krakenRemovedPropertiesGuard(environment: Environment): RemovedPropertiesGuard = RemovedPropertiesGuard(environment)
+
     @Bean
     @ConditionalOnMissingBean
-    fun forwardedIdentityResolver(decoder: ObjectProvider<JwtDecoder>, environment: Environment): ForwardedIdentityResolver {
-        check(!Binder.get(environment).bind(REMOVED_REQUIRE_JWT, String::class.java).isBound) {
-            "$REMOVED_REQUIRE_JWT was removed; requests are trusted by default, annotate handlers with @RequiresAuthentication"
-        }
-        return ForwardedIdentityResolver(decoder.ifAvailable)
-    }
+    fun forwardedIdentityResolver(decoder: ObjectProvider<JwtDecoder>) = ForwardedIdentityResolver(decoder.ifAvailable)
 
     /** Fallback when micrometer-tracing is absent: no trace headers. */
     @Bean
@@ -70,11 +69,23 @@ class KrakenMessagingAutoConfiguration {
     }
 
     companion object {
-        private const val REMOVED_REQUIRE_JWT = "kraken.messaging.security.require-jwt"
         /** Static so it is registered before other beans without instantiating this configuration; registry is resolved lazily. */
         @JvmStatic
         @Bean
         fun krakenHandlerBeanPostProcessor(registry: ObjectProvider<HandlerRegistry>) =
             HandlerBeanPostProcessor { registry.getObject() }
+    }
+}
+
+/** Rejects configuration keys that no longer exist, with a hint about their replacement. */
+class RemovedPropertiesGuard(environment: Environment) {
+    init {
+        check(!Binder.get(environment).bind(REQUIRE_JWT, String::class.java).isBound) {
+            "$REQUIRE_JWT was removed; requests are trusted by default, annotate handlers with @RequiresAuthentication"
+        }
+    }
+
+    companion object {
+        const val REQUIRE_JWT = "kraken.messaging.security.require-jwt"
     }
 }

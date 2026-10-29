@@ -73,4 +73,17 @@ class HandlerAuthorizationTest {
         assertTrue(e.message!!.contains("Bean.handle"), e.message)
         assertTrue(e.message!!.contains("invalid @RequiresAuthentication expression"), e.message)
     }
+
+    @Test fun `throwing method call is Denied with handler label`() {
+        val denied = assertIs<AuthorizationDecision.Denied>(
+            compile("#message.text.substring(99) == 'x'").check(identity("u-1"), Ping("x"), ctx("u-1"), label),
+        )
+
+        assertTrue(denied.message.startsWith("handler Bean.handle: access denied"), denied.message)
+    }
+
+    @Test fun `non boolean result is Denied`() {
+        assertIs<AuthorizationDecision.Denied>(compile("'yes'").check(identity("u-1"), Ping("x"), ctx("u-1"), label))
+        assertIs<AuthorizationDecision.Denied>(compile("#message.text").check(identity("u-1"), Ping("x"), ctx("u-1"), label))
+    }
 }
