@@ -13,7 +13,14 @@ sealed interface InvocationResult {
     data class Failure(val code: ErrorCode, val message: String, val details: ByteArray = ByteArray(0)) : InvocationResult
 }
 
-/** Decodes a payload, calls the registered handler and maps the outcome (or exception) to an [InvocationResult]. */
+/**
+ * Decodes a payload, calls the registered handler and maps the outcome (or exception) to an [InvocationResult].
+ *
+ * `IllegalArgumentException` and `jakarta.validation.ConstraintViolationException` become `HANDLER_ERROR` with the plain
+ * exception message and `details` = JSON array of violation messages (`"<propertyPath>: <message>"`, or just
+ * `<message>` when the path is empty, sorted; `[]` when none). Other throwables become
+ * `HANDLER_ERROR` with `"<SimpleName>: <message>"`. Stack traces are never included.
+ */
 class HandlerInvoker(private val registry: HandlerRegistry, private val codec: JsonCodec) {
 
     suspend fun invokeCommand(type: String, payload: ByteArray, ctx: MessageContext): InvocationResult =
@@ -31,7 +38,7 @@ class HandlerInvoker(private val registry: HandlerRegistry, private val codec: J
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Throwable) {
-                if (first == null) first = e else first.addSuppressed(e)
+                if (first == null) first = e else if (e !== first) first.addSuppressed(e)
             }
         }
         first?.let { throw it }
@@ -50,13 +57,11 @@ class HandlerInvoker(private val registry: HandlerRegistry, private val codec: J
             throw e
         } catch (e: UnauthenticatedException) {
             InvocationResult.Failure(ErrorCode.UNAUTHENTICATED, e.message ?: "unauthenticated")
-        } catch (e: IllegalArgumentException) {
-            InvocationResult.Failure(ErrorCode.HANDLER_ERROR, describe(e), violations(e))
         } catch (e: Throwable) {
-            if (isConstraintViolation(e)) {
-                InvocationResult.Failure(ErrorCode.HANDLER_ERROR, describe(e), violations(e))
-            } else {
-                InvocationResult.Failure(ErrorCode.HANDLER_ERROR, describe(e))
+            when {
+                e is IllegalArgumentException || isConstraintViolation(e) ->
+                    InvocationResult.Failure(ErrorCode.HANDLER_ERROR, e.message ?: e::class.simpleName.orEmpty(), violations(e))
+                else -> InvocationResult.Failure(ErrorCode.HANDLER_ERROR, describe(e))
             }
         }
     }
@@ -83,5 +88,5 @@ private object ValidationSupport {
     fun isViolation(e: Throwable) = e is ConstraintViolationException
 
     fun messages(e: Throwable): List<String> =
-        (e as ConstraintViolationException).constraintViolations.map { "${it.propertyPath}: ${it.message}" }.sorted()
+        (e as ConstraintViolationException).constraintViolations.map { it.propertyPath.toString().let { path -> if (path.isEmpty()) it.message else "$path: ${it.message}" } }.sorted()
 }

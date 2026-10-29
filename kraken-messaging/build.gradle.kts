@@ -40,6 +40,7 @@ dependencies {
     testImplementation(libs.spring.boot.starter.test)
     testImplementation(libs.kotlin.test.junit5)
     testImplementation(libs.mockk)
+    testImplementation("jakarta.validation:jakarta.validation-api")
     testImplementation(libs.awaitility)
     testImplementation(libs.grpc.inprocess)
     testImplementation(project(":kraken-messaging-test"))

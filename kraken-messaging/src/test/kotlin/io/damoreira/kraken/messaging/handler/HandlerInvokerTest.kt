@@ -15,7 +15,12 @@ import org.junit.jupiter.api.Test
 import java.time.Instant
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
-import kotlin.test.assertTrue
+import io.mockk.every
+import io.mockk.mockk
+import jakarta.validation.ConstraintViolation
+import jakarta.validation.ConstraintViolationException
+import kotlin.test.assertFailsWith
+import kotlin.test.assertSame
 
 class InvokerHandlers {
     val seen = mutableListOf<String>()
@@ -30,6 +35,26 @@ class BoomHandlers {
 
 class UnauthHandlers {
     @CommandHandler fun handle(command: Ping): Pong = throw UnauthenticatedException("token expired")
+}
+
+class IllegalArgHandlers {
+    @CommandHandler fun handle(command: Ping): Pong = throw IllegalArgumentException("bad input")
+}
+
+class ViolationHandlers {
+    private fun violation(path: String, msg: String) = mockk<ConstraintViolation<Any>> {
+        every { propertyPath.toString() } returns path
+        every { message } returns msg
+    }
+    @CommandHandler fun handle(command: Ping): Pong =
+        throw ConstraintViolationException("invalid", setOf(violation("text", "must not be blank"), violation("", "global problem"), violation("a", "too short")))
+}
+
+class FailingEventHandlers {
+    val seen = mutableListOf<String>()
+    val failure = IllegalStateException("first failed")
+    @EventHandler fun a(event: Happened) { seen += "a"; throw failure }
+    @EventHandler fun b(event: Happened) { seen += "b" }
 }
 
 class HandlerInvokerTest {
@@ -57,7 +82,7 @@ class HandlerInvokerTest {
         val result = invoker.invokeCommand("test.Ping", "[1,2]".toByteArray(), ctx("test.Ping"))
         val failure = assertIs<InvocationResult.Failure>(result)
         assertEquals(ErrorCode.INVALID_REQUEST, failure.code)
-        assertTrue(failure.message.contains("Ping"), failure.message)
+        assertEquals("Cannot decode payload as io.damoreira.kraken.messaging.fixtures.Ping", failure.message)
     }
 
     @Test fun `handler exception is HANDLER_ERROR without stack trace`() = runBlocking {
@@ -80,6 +105,32 @@ class HandlerInvokerTest {
         val handlers = InvokerHandlers()
         registry.register(handlers)
         invoker.invokeEvent("test.Happened", codec.encode(Happened("e1", Instant.EPOCH)), ctx("test.Happened"))
-        assertEquals(setOf("first:e1", "second:e1"), handlers.seen.toSet())
+        assertEquals(listOf("first:e1", "second:e1"), handlers.seen)
+    }
+
+    @Test fun `event handler failure does not stop the others and is rethrown`() = runBlocking<Unit> {
+        val handlers = FailingEventHandlers()
+        registry.register(handlers)
+        val thrown = assertFailsWith<IllegalStateException> {
+            invoker.invokeEvent("test.Happened", codec.encode(Happened("e1", Instant.EPOCH)), ctx("test.Happened"))
+        }
+        assertSame(handlers.failure, thrown)
+        assertEquals(listOf("a", "b"), handlers.seen)
+    }
+
+    @Test fun `illegal argument maps to HANDLER_ERROR with plain message and empty details`() = runBlocking {
+        registry.register(IllegalArgHandlers())
+        val failure = assertIs<InvocationResult.Failure>(invoker.invokeCommand("test.Ping", codec.encode(Ping("x")), ctx("test.Ping")))
+        assertEquals(ErrorCode.HANDLER_ERROR, failure.code)
+        assertEquals("bad input", failure.message)
+        assertEquals("[]", String(failure.details))
+    }
+
+    @Test fun `constraint violations map to HANDLER_ERROR with details array`() = runBlocking {
+        registry.register(ViolationHandlers())
+        val failure = assertIs<InvocationResult.Failure>(invoker.invokeCommand("test.Ping", codec.encode(Ping("x")), ctx("test.Ping")))
+        assertEquals(ErrorCode.HANDLER_ERROR, failure.code)
+        assertEquals("invalid", failure.message)
+        assertEquals(listOf("a: too short", "global problem", "text: must not be blank"), codec.mapper.readValue(failure.details, List::class.java))
     }
 }
