@@ -1,16 +1,34 @@
 package io.damoreira.kraken.messaging.test
 
+import org.testcontainers.DockerClientFactory
+import org.testcontainers.containers.GenericContainer
+import org.testcontainers.containers.wait.strategy.Wait
+import org.testcontainers.kafka.KafkaContainer
+import org.testcontainers.mongodb.MongoDBContainer
+import org.testcontainers.utility.DockerImageName
+
 /**
- * Shared Testcontainers definitions for kraken integration tests:
- * Kafka (apache/kafka:4.4.0), MongoDB (mongo:8.3.13 as single-node replica set),
- * the kraken-hub image and RustFS. See ../kraken/docs/09-observability-and-testing.md.
+ * Shared Testcontainers definitions for kraken integration tests. Containers are returned unstarted;
+ * callers start them. Kafka and MongoDB (single-node replica set) are marked reusable.
  */
 object KrakenContainers {
     const val KAFKA_IMAGE = "apache/kafka:4.4.0"
     const val MONGO_IMAGE = "mongo:8.3.13"
-    const val HUB_IMAGE = "registry.gitlab.damoreira.ml/kraken/kraken-hub:latest"
-    const val RUSTFS_IMAGE = "rustfs/rustfs:1.0.4"
 
-    // TODO: expose started containers (KafkaContainer, MongoDBContainer, GenericContainer for hub and RustFS)
-    //       plus an InMemoryHub for unit tests that do not need Docker.
+    private val hubImage: String get() = System.getenv("KRAKEN_HUB_IMAGE") ?: "kraken-hub:dev"
+
+    fun kafka(): KafkaContainer = KafkaContainer(DockerImageName.parse(KAFKA_IMAGE)).withReuse(true)
+
+    fun mongo(): MongoDBContainer = MongoDBContainer(DockerImageName.parse(MONGO_IMAGE)).withReuse(true)
+
+    fun hub(): GenericContainer<*> = GenericContainer(DockerImageName.parse(hubImage))
+        .withExposedPorts(7000)
+        .waitingFor(Wait.forLogMessage(".*hub listening.*", 1))
+
+    fun hubImageAvailable(): Boolean = try {
+        DockerClientFactory.instance().client().inspectImageCmd(hubImage).exec()
+        true
+    } catch (_: Exception) {
+        false
+    }
 }

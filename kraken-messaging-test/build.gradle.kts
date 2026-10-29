@@ -9,6 +9,8 @@ dependencies {
     api(libs.testcontainers.junit)
     api(libs.testcontainers.kafka)
     api(libs.testcontainers.mongodb)
+    implementation(platform("org.springframework.boot:spring-boot-dependencies:${libs.versions.spring.boot.get()}"))
+    api("org.apache.kafka:kafka-clients")
     api(libs.kotlinx.coroutines.core)
     api(libs.grpc.inprocess)
     implementation(libs.grpc.stub)
