@@ -32,6 +32,7 @@ import org.springframework.transaction.support.TransactionTemplate
 import java.time.Duration
 import java.time.Instant
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -47,12 +48,13 @@ class OutboxTest {
     private val codec = JsonCodec()
     private val resolver = MessageTypeResolver("test")
     private lateinit var bus: OutboxEventBus
+    private val topic = "kraken.events.test-" + java.util.UUID.randomUUID()
 
     @BeforeAll
     fun start() {
         kafkaContainer.start()
         mongoContainer.start()
-        val factory = SimpleMongoClientDatabaseFactory(MongoClients.create(mongoContainer.connectionString), "outbox_test")
+        val factory = SimpleMongoClientDatabaseFactory(MongoClients.create(mongoContainer.connectionString + "/?directConnection=true"), "outbox_test")
         mongo = MongoTemplate(factory)
         txManager = MongoTransactionManager(factory)
         producerFactory = DefaultKafkaProducerFactory(
@@ -66,7 +68,11 @@ class OutboxTest {
         )
         kafka = KafkaTemplate(producerFactory)
         AdminClient.create(mapOf<String, Any>("bootstrap.servers" to kafkaContainer.bootstrapServers)).use {
-            it.createTopics(listOf(NewTopic("kraken.events", 6, 1.toShort()))).all().get()
+            try {
+                it.createTopics(listOf(NewTopic(topic, 6, 1.toShort()))).all().get()
+            } catch (e: java.util.concurrent.ExecutionException) {
+                if (e.cause !is org.apache.kafka.common.errors.TopicExistsException) throw e
+            }
         }
         bus = OutboxEventBus(mongo, codec, resolver, TraceHeaders(null, null))
     }
@@ -83,7 +89,7 @@ class OutboxTest {
         mongo.remove(Query(), "outbox")
     }
 
-    private fun publisher() = OutboxPublisher(mongo, kafka, "kraken.events", "orders", Duration.ofMillis(100), 100)
+    private fun publisher() = OutboxPublisher(mongo, kafka, topic, "orders", Duration.ofMillis(100), 100)
 
     @Test
     fun `publish writes outbox document with headers and camelCase payload`() {
@@ -103,12 +109,13 @@ class OutboxTest {
 
     @Test
     fun `publish inside failing transaction leaves no document`() {
-        runCatching {
+        val ex = assertFailsWith<RuntimeException> {
             TransactionTemplate(txManager).executeWithoutResult {
                 bus.publishBlocking(Happened("tx", Instant.now()))
                 throw RuntimeException("boom")
             }
         }
+        assertEquals("boom", ex.message)
         assertEquals(0, mongo.count(Query(), "outbox"))
     }
 
@@ -117,15 +124,18 @@ class OutboxTest {
         bus.publishBlocking(Happened("h-1", Instant.now()), key = "h-1")
         assertEquals(1, publisher().publishPendingNow())
 
-        val (event, headers) = KrakenTestKafka(kafkaContainer.bootstrapServers)
+        val (event, headers) = KrakenTestKafka(kafkaContainer.bootstrapServers, "test", topic)
             .awaitEvent<Happened> { it.id == "h-1" }
         assertEquals("h-1", event.id)
         for (h in listOf("type", "id", "correlationId", "timestamp", "source", "userId")) {
             assertTrue(headers.containsKey(h), "missing header $h in $headers")
         }
         assertEquals("orders", headers["source"])
-        val doc = mongo.findOne(Query(Criteria.where("payload.id").`is`("h-1")), OutboxDocument::class.java)
-        assertNotNull(doc?.sentAt)
+        val doc = mongo.findOne(Query(Criteria.where("payload.id").`is`("h-1")), OutboxDocument::class.java)!!
+        assertNotNull(doc.sentAt)
+        assertEquals(doc.id, headers["id"])
+        assertEquals(doc.type, headers["type"])
+        assertEquals(doc.createdAt.toString(), headers["timestamp"])
     }
 
     @Test
@@ -144,7 +154,7 @@ class OutboxTest {
             StringDeserializer(),
             ByteArrayDeserializer(),
         ).use { c ->
-            c.subscribe(listOf("kraken.events"))
+            c.subscribe(listOf(topic))
             val deadline = System.nanoTime() + Duration.ofSeconds(20).toNanos()
             while (seen.size < 20 && System.nanoTime() < deadline) {
                 c.poll(Duration.ofMillis(200)).filter { it.key() == "k" }.forEach {
@@ -163,7 +173,7 @@ class OutboxTest {
         fun indexes(collection: String): List<org.bson.Document> =
             mongo.getCollection(collection).listIndexes(org.bson.Document::class.java).into(mutableListOf())
         val outbox = indexes("outbox")
-        assertTrue(outbox.any { (it["key"] as org.bson.Document).keys.toList() == listOf("sentAt", "createdAt") })
+        assertTrue(outbox.any { (it["key"] as org.bson.Document).keys.toList() == listOf("sentAt", "createdAt", "seq") })
         assertTrue(outbox.any { (it["expireAfterSeconds"] as Number?)?.toLong() == Duration.ofDays(7).seconds })
         assertTrue(indexes("processed_events").any { (it["expireAfterSeconds"] as Number?)?.toLong() == Duration.ofDays(30).seconds })
     }

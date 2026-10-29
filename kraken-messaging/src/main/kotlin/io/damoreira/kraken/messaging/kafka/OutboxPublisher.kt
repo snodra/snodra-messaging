@@ -35,7 +35,7 @@ class OutboxPublisher(
     /** Sends one batch of pending documents sequentially; returns how many were sent. Stops at the first failure. */
     fun publishPendingNow(): Int {
         val pending = mongo.find(
-            Query(Criteria.where("sentAt").isNull).with(Sort.by(Sort.Direction.ASC, "createdAt")).limit(batchSize),
+            Query(Criteria.where("sentAt").isNull).with(Sort.by(Sort.Direction.ASC, "createdAt", "seq")).limit(batchSize),
             OutboxDocument::class.java,
         )
         var sent = 0

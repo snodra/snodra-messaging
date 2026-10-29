@@ -14,7 +14,8 @@ class MessagingIndexes(
 ) : InitializingBean {
     override fun afterPropertiesSet() {
         mongo.indexOps("outbox").createIndex(
-            Index().on("sentAt", Sort.Direction.ASC).on("createdAt", Sort.Direction.ASC).named("sentAt_1_createdAt_1"),
+            Index().on("sentAt", Sort.Direction.ASC).on("createdAt", Sort.Direction.ASC)
+                .on("seq", Sort.Direction.ASC).named("sentAt_1_createdAt_1_seq_1"),
         )
         // Documents with sentAt == null are never expired by the TTL monitor.
         mongo.indexOps("outbox").createIndex(

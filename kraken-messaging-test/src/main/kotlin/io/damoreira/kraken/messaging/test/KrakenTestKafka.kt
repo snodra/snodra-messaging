@@ -15,10 +15,12 @@ import kotlin.time.toJavaDuration
 /** Reads events back from the Kafka topic in tests: a fresh consumer group per call, from the earliest offset. */
 class KrakenTestKafka(
     private val bootstrap: String,
+    private val typePrefix: String,
     private val topic: String = "kraken.events",
     private val codec: JsonCodec = JsonCodec(),
-    private val typeResolver: MessageTypeResolver = MessageTypeResolver("test"),
 ) {
+    private val typeResolver = MessageTypeResolver(typePrefix)
+
     fun <T : Any> awaitEvent(
         type: KClass<T>,
         timeout: Duration = 10.seconds,

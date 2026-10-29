@@ -13,6 +13,8 @@ data class OutboxDocument(
     val headers: Map<String, String>,
     val payload: org.bson.Document,
     val createdAt: Instant,
+    /** Tie-breaker for events created in the same millisecond; see [OutboxEventBus]. */
+    val seq: Long,
     val sentAt: Instant? = null,
     val attempts: Int = 0,
 )

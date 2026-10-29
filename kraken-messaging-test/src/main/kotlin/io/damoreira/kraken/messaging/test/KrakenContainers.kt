@@ -19,7 +19,7 @@ object KrakenContainers {
 
     fun kafka(): KafkaContainer = KafkaContainer(DockerImageName.parse(KAFKA_IMAGE)).withReuse(true)
 
-    fun mongo(): MongoDBContainer = MongoDBContainer(DockerImageName.parse(MONGO_IMAGE)).withReuse(true)
+    fun mongo(): MongoDBContainer = MongoDBContainer(DockerImageName.parse(MONGO_IMAGE)).withReplicaSet().withReuse(true)
 
     fun hub(): GenericContainer<*> = GenericContainer(DockerImageName.parse(hubImage))
         .withExposedPorts(7000)
