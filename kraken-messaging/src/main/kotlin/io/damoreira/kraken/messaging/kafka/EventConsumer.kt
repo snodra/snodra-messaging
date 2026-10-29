@@ -61,7 +61,7 @@ class EventConsumer(
 
     @Synchronized
     override fun start() {
-        if (!running.compareAndSet(false, true)) return
+        if (running.get()) return
         val props = ContainerProperties(topic).apply {
             setGroupId(this@EventConsumer.groupId)
             setAckMode(ContainerProperties.AckMode.MANUAL_IMMEDIATE)
@@ -71,11 +71,13 @@ class EventConsumer(
             { record, ex -> logSkipped(record, ex) },
             FixedBackOff(backOffMs, (maxAttempts - 1).toLong()),
         ).apply { setCommitRecovered(true) }
-        container = ConcurrentMessageListenerContainer(factory, props).apply {
+        val started = ConcurrentMessageListenerContainer(factory, props).apply {
             concurrency = 1
             setCommonErrorHandler(errorHandler)
             start()
         }
+        container = started
+        running.set(true) // only once the container is up: a failed start leaves the consumer stopped and restartable
         log.info("EventConsumer started on topic {} group {} handling {} event types", topic, groupId, registry.eventTypes().size)
     }
 

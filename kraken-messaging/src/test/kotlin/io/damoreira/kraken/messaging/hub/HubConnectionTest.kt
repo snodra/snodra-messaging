@@ -17,6 +17,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -27,6 +28,7 @@ import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Test
 import java.time.Duration
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
@@ -161,6 +163,44 @@ class HubConnectionTest {
         assertTrue(conn.awaitRegistered(wait))
 
         await atMost Duration.ofMillis(500) until { hub.heartbeatsFrom("a") >= 3 }
+    }
+
+    @Test fun `throwing channel factory is retried with backoff`() = runBlocking {
+        val calls = AtomicInteger()
+        val conn = HubConnection(
+            channelFactory = {
+                val call = calls.incrementAndGet()
+                if (call <= 2) throw IllegalArgumentException("bad target $call")
+                InProcessChannelBuilder.forName(hub.name).build()
+            },
+            serviceName = "svc-flaky",
+            instanceId = "flaky",
+            settings = fast,
+            inbound = { req -> errorReply(req.id, ErrorCode.HANDLER_ERROR, "unexpected") },
+            scope = scope,
+        ).also { connections += it }
+        conn.register(setOf("test.Ping"), emptySet())
+        conn.start()
+
+        assertTrue(conn.awaitRegistered(wait))
+        assertEquals(3, calls.get())
+        assertEquals(setOf("test.Ping"), hub.registeredTypes())
+    }
+
+    @Test fun `cancellation leaking from a handler is answered as HANDLER_ERROR`() = runBlocking {
+        val handler = connection("b") { withTimeout(10) { delay(5_000) }; payloadReply(it.id, "{}") }
+        handler.register(setOf("test.Ping"), emptySet())
+        handler.start()
+        val sender = connection("a")
+        sender.start()
+        assertTrue(handler.awaitRegistered(wait))
+        assertTrue(sender.awaitRegistered(wait))
+
+        val response = withTimeout(5_000) { sender.send(request(timeoutMs = 4_000)) }
+
+        assertTrue(response.hasReply() && response.reply.hasError(), response.toString())
+        assertEquals(ErrorCode.HANDLER_ERROR, response.reply.error.code)
+        assertTrue(response.reply.error.message.startsWith("TimeoutCancellationException: "), response.reply.error.message)
     }
 
     private fun payloadReply(id: String, json: String): Reply =

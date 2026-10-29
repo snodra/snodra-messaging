@@ -158,11 +158,13 @@ class HubConnection(
         var backoff = settings.backoffMin
         var failures = 0
         while (currentCoroutineContext().isActive) {
-            val channel = channelFactory()
+            var channel: ManagedChannel? = null
             val stream = Stream(Channel(Channel.UNLIMITED))
             var status: Status = Status.CANCELLED
             var wasConnected = false
             try {
+                // Inside the try: a factory that throws (e.g. an unparsable address) is a failed attempt, not the end of the loop.
+                channel = channelFactory()
                 openAndCollect(channel, stream)
                 status = Status.UNAVAILABLE.withDescription("hub closed the stream")
             } catch (e: CancellationException) {
@@ -177,7 +179,7 @@ class HubConnection(
                 wasConnected = connectedState.value
                 connectedState.value = false
                 acknowledged.value = -1
-                channel.shutdownNow()
+                channel?.shutdownNow()
                 failPending(HubUnavailableException("hub stream closed: ${describe(status)}"))
             }
             if (wasConnected) {
@@ -256,9 +258,10 @@ class HubConnection(
         scope.launch {
             val reply = try {
                 inbound(request)
-            } catch (e: CancellationException) {
-                throw e
             } catch (e: Throwable) {
+                // Only this coroutine's own cancellation propagates; a CancellationException leaking out of the handler
+                // (e.g. a TimeoutCancellationException from its own withTimeout) is a handler failure like any other.
+                if (e is CancellationException && !currentCoroutineContext().isActive) throw e
                 log.warn("Dispatch of {} request {} failed", request.type, request.id, e)
                 Reply.newBuilder()
                     .setRequestId(request.id)
