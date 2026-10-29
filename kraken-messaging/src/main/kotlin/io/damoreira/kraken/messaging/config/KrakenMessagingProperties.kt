@@ -30,6 +30,8 @@ data class KrakenMessagingProperties(
         val heartbeatInterval: Duration = Duration.ofSeconds(10),
         /** Exponential backoff when the stream drops. */
         val reconnectBackoff: Backoff = Backoff(),
+        /** Incoming hub requests handled concurrently by this instance; further requests wait for a free slot. */
+        val maxConcurrentHandlers: Int = 256,
     )
 
     data class Backoff(
@@ -59,6 +61,8 @@ data class KrakenMessagingProperties(
         val batchSize: Int = 100,
         /** Sent documents older than this are deleted (TTL index). */
         val retention: Duration = Duration.ofDays(7),
+        /** Send attempts per document before it is marked failed (`failedAt`) and skipped. */
+        val maxAttempts: Int = 10,
     )
 
     data class Idempotency(

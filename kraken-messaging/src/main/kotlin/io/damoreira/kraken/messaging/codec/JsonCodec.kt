@@ -22,7 +22,9 @@ class JsonCodec(val mapper: JsonMapper = defaultMapper()) {
                 @Suppress("UNCHECKED_CAST")
                 return Unit as T
             }
+            // The JSON literal `null` decodes to null, which no message or response type admits.
             return mapper.readValue(bytes, type.java)
+                ?: throw InvalidMessageException("Cannot decode payload as ${type.qualifiedName}: null")
         } catch (e: JacksonException) {
             throw InvalidMessageException("Cannot decode payload as ${type.qualifiedName}", e)
         }

@@ -55,6 +55,20 @@ class ForwardedJwtAuthenticatorTest {
         assertEquals(emptySet(), principal.roles)
     }
 
+    @Test fun `token without decoder and require-jwt false is anonymous`() {
+        val principal = ForwardedJwtAuthenticator(null, requireJwt = false)
+            .authenticate("Bearer " + TestJwt.token("user-42", listOf("member")))
+        assertNull(principal.userId)
+        assertEquals(emptySet(), principal.roles)
+        assertFalse(principal.validated)
+    }
+
+    @Test fun `token without decoder and require-jwt true is UnauthenticatedException`() {
+        assertFailsWith<UnauthenticatedException> {
+            ForwardedJwtAuthenticator(null, requireJwt = true).authenticate("Bearer " + TestJwt.token("user-42", listOf("member")))
+        }
+    }
+
     @Test fun `dispatcher answers UNAUTHENTICATED reply for bad token`() = runBlocking {
         val codec = JsonCodec()
         val registry = HandlerRegistry(MessageTypeResolver("test"))

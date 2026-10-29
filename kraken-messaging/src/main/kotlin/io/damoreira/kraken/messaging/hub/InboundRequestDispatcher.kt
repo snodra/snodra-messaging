@@ -14,6 +14,7 @@ import io.damoreira.kraken.messaging.handler.InvocationResult
 import io.damoreira.kraken.messaging.security.ForwardedJwtAuthenticator
 import io.damoreira.kraken.messaging.security.KrakenForwardedAuthentication
 import io.damoreira.kraken.messaging.security.SecurityContextElement
+import io.damoreira.kraken.messaging.tracing.CorrelationContext
 import kotlinx.coroutines.withContext
 import org.slf4j.LoggerFactory
 import org.springframework.security.core.context.SecurityContextHolder
@@ -25,7 +26,8 @@ import org.springframework.security.core.context.SecurityContextHolder
  * While the handler runs, the Spring [org.springframework.security.core.context.SecurityContext] holds a
  * [KrakenForwardedAuthentication] (or no authentication for an anonymous caller), carried across suspensions and
  * thread switches by a coroutine context element, so nested sends from the handler re-forward the same token.
- * Threads the handler starts itself do not inherit it; such code should read [MessageContext] instead.
+ * Threads the handler starts itself do not inherit it; such code should read [MessageContext] instead. The request's
+ * correlation id travels the same way ([CorrelationContext]), so messages sent while handling carry it.
  */
 class InboundRequestDispatcher(
     private val invoker: HandlerInvoker,
@@ -54,10 +56,11 @@ class InboundRequestDispatcher(
         )
         val securityContext = SecurityContextHolder.createEmptyContext().apply {
             val token = authorization?.let(ForwardedJwtAuthenticator::bearerToken)
-            if (token != null) authentication = KrakenForwardedAuthentication(token, principal)
+            // An ignored (unvalidated) token is neither trusted nor re-forwarded: the caller stays anonymous.
+            if (token != null && principal.validated) authentication = KrakenForwardedAuthentication(token, principal)
         }
         val payload = req.payload.toByteArray()
-        val result = withContext(SecurityContextElement(securityContext)) {
+        val result = withContext(SecurityContextElement(securityContext) + CorrelationContext(ctx.correlationId)) {
             when (req.kind) {
                 RequestKind.QUERY -> invoker.invokeQuery(req.type, payload, ctx)
                 RequestKind.COMMAND -> invoker.invokeCommand(req.type, payload, ctx)

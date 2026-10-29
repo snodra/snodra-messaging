@@ -68,6 +68,11 @@ class KafkaEventsAutoConfiguration {
                 ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG to ByteArraySerializer::class.java,
                 ProducerConfig.ACKS_CONFIG to "all",
                 ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG to true,
+                // Bound a send: metadata/buffer wait, then delivery including retries (the publisher waits for both).
+                // delivery.timeout.ms must be >= linger.ms (5 ms default) + request.timeout.ms, hence 20 s per request.
+                ProducerConfig.MAX_BLOCK_MS_CONFIG to 10_000,
+                ProducerConfig.DELIVERY_TIMEOUT_MS_CONFIG to 30_000,
+                ProducerConfig.REQUEST_TIMEOUT_MS_CONFIG to 20_000,
             ),
         )
 
@@ -116,6 +121,7 @@ class KafkaEventsAutoConfiguration {
         source = properties.serviceName,
         pollInterval = properties.outbox.pollInterval,
         batchSize = properties.outbox.batchSize,
+        maxAttempts = properties.outbox.maxAttempts,
     )
 
     @Bean

@@ -48,6 +48,10 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
     @Volatile
     var replyTimeout: Duration = Duration.ofSeconds(5)
 
+    /** Set false to stop echoing heartbeats (still counted), simulating a hub that silently stopped answering. */
+    @Volatile
+    var echoHeartbeats: Boolean = true
+
     private class Session(val out: SendChannel<ServerMessage>) {
         @Volatile var serviceName: String = ""
         @Volatile var instanceId: String = ""
@@ -64,6 +68,7 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
     private val pending = HashMap<String, Pending>()
     private val rotation = HashMap<String, Int>()
     private val heartbeats = ConcurrentHashMap<String, Int>()
+    private val registrations = ConcurrentHashMap<String, Int>()
     private val channels = CopyOnWriteArrayList<ManagedChannel>()
     @Volatile private var lastHeaders: Map<String, String>? = null
     private var server: Server? = null
@@ -90,6 +95,9 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
     }
 
     fun heartbeatsFrom(instanceId: String): Int = heartbeats[instanceId] ?: 0
+
+    /** Accepted `Register` messages from [instanceId] over all of its streams. */
+    fun registrationsFrom(instanceId: String): Int = registrations[instanceId] ?: 0
 
     /** Headers of the most recently forwarded request, or null if none was forwarded yet. */
     fun lastRequestHeaders(): Map<String, String>? = lastHeaders
@@ -130,7 +138,7 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
             msg.hasReply() -> relay(session, msg)
             msg.hasHeartbeat() -> {
                 heartbeats.merge(session.instanceId, 1, Int::plus)
-                session.out.trySend(
+                if (echoHeartbeats) session.out.trySend(
                     ServerMessage.newBuilder().setHeartbeat(Heartbeat.newBuilder().setSentAtMs(msg.heartbeat.sentAtMs)).build(),
                 )
             }
@@ -154,6 +162,7 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
             session.registered = true
             session.types = types
         }
+        registrations.merge(reg.instanceId, 1, Int::plus)
     }
 
     private fun forward(sender: Session, req: Request) {

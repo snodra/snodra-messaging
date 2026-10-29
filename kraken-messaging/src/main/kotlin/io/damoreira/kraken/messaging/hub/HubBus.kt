@@ -17,7 +17,9 @@ import io.damoreira.kraken.messaging.handler.HandlerRegistry
 import io.damoreira.kraken.messaging.handler.InvocationResult
 import io.damoreira.kraken.messaging.security.CallerContext
 import io.damoreira.kraken.messaging.tracing.TraceHeaders
-import org.slf4j.MDC
+import io.damoreira.kraken.messaging.tracing.CorrelationContext
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.withContext
 import java.time.Duration
 import java.util.UUID
 import kotlin.reflect.KClass
@@ -50,7 +52,7 @@ class HubBus(
         val type = typeResolver.typeNameOf(message::class)
         val local = if (kind == RequestKind.COMMAND) registry.commandHandler(type) else registry.queryHandler(type)
         val payload = codec.encode(message)
-        val correlationId = MDC.get("correlationId") ?: UUID.randomUUID().toString()
+        val correlationId = CorrelationContext.resolve(currentCoroutineContext())
         val token = CallerContext.currentBearerToken()
         if (local != null) return invokeLocally(type, kind, message::class, payload, correlationId, token)
 
@@ -97,7 +99,10 @@ class HubBus(
             authorization = token?.let { "Bearer $it" },
             headers = mapOf("correlationId" to correlationId),
         )
-        val result = if (kind == RequestKind.COMMAND) invoker.invokeCommand(type, payload, ctx) else invoker.invokeQuery(type, payload, ctx)
+        // Same thread and coroutine as the caller (so a thread-bound transaction of the caller is joined).
+        val result = withContext(CorrelationContext(correlationId)) {
+            if (kind == RequestKind.COMMAND) invoker.invokeCommand(type, payload, ctx) else invoker.invokeQuery(type, payload, ctx)
+        }
         return when (result) {
             is InvocationResult.Success -> decodeReply(type, messageClass, result.payload)
             is InvocationResult.Failure -> throw HubErrors.toException(type, result.code, result.message, result.details)

@@ -17,4 +17,6 @@ data class OutboxDocument(
     val seq: Long,
     val sentAt: Instant? = null,
     val attempts: Int = 0,
+    /** Set when the document was given up on (non-retriable failure or `outbox.max-attempts`); excluded from relaying. */
+    val failedAt: Instant? = null,
 )

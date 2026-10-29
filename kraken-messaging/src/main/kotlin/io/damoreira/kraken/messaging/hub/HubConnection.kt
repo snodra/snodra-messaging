@@ -9,12 +9,14 @@ import io.damoreira.kraken.hub.v1.Register
 import io.damoreira.kraken.hub.v1.Reply
 import io.damoreira.kraken.hub.v1.Request
 import io.damoreira.kraken.hub.v1.ServerMessage
+import io.damoreira.kraken.messaging.HubRegistrationRejectedException
 import io.damoreira.kraken.messaging.HubUnavailableException
 import io.damoreira.kraken.messaging.MessageTimeoutException
 import io.grpc.ManagedChannel
 import io.grpc.Status
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
@@ -23,14 +25,18 @@ import kotlinx.coroutines.channels.ClosedSendChannelException
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.receiveAsFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withTimeoutOrNull
 import org.slf4j.LoggerFactory
 import java.time.Duration
@@ -56,6 +62,14 @@ data class HubSettings(
  *
  * Each stream gets its own outbound channel, so nothing queued for a broken stream (stale replies, requests whose
  * senders were already failed) leaks into the next one ahead of its `Register`.
+ *
+ * Liveness: every heartbeat expects an echo. When the oldest unanswered heartbeat is older than three
+ * `heartbeatInterval`s the stream is treated as dead (a half-open TCP connection never fails on its own) and the loop
+ * reconnects with backoff.
+ *
+ * Incoming requests run on [handlerDispatcher], never on [scope]'s dispatcher, so a handler that blocks (for example
+ * on a nested `sendBlocking`) cannot starve the stream collector that would deliver its own reply. At most
+ * [maxConcurrentHandlers] handlers run at once; further requests wait for a permit.
  */
 class HubConnection(
     private val channelFactory: () -> ManagedChannel,
@@ -64,6 +78,8 @@ class HubConnection(
     private val settings: HubSettings,
     private val inbound: suspend (Request) -> Reply,
     private val scope: CoroutineScope,
+    private val handlerDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    maxConcurrentHandlers: Int = 256,
 ) {
     private val log = LoggerFactory.getLogger(HubConnection::class.java)
 
@@ -74,6 +90,12 @@ class HubConnection(
     val lastRejection: StateFlow<Status?> = rejection.asStateFlow()
 
     private val pending = ConcurrentHashMap<String, CompletableDeferred<ServerMessage>>()
+
+    private val handlerPermits = Semaphore(maxConcurrentHandlers.also { require(it >= 1) { "maxConcurrentHandlers must be >= 1" } })
+    private val inFlight = MutableStateFlow(0) // incoming requests dispatched and not yet answered
+
+    /** Incoming requests currently being handled (or waiting for a handler permit). */
+    val inFlightHandlers: StateFlow<Int> = inFlight.asStateFlow()
 
     /** One open stream: its outbound queue and the heartbeats awaiting an echo (`sentAtMs` -> registration generation). */
     private class Stream(val out: Channel<ClientMessage>) {
@@ -97,10 +119,33 @@ class HubConnection(
         }
     }
 
-    /** True once the hub confirmed the most recent [register] call on a live stream, false if [timeout] passes first. */
-    suspend fun awaitRegistered(timeout: Duration): Boolean = withTimeoutOrNull(timeout.toMillis()) {
-        combine(connectedState, acknowledged, generation) { up, acked, wanted -> up && acked >= wanted }.first { it }
-    } != null
+    /**
+     * True once the hub confirmed the most recent [register] call on a live stream, false if [timeout] passes first.
+     *
+     * @throws HubRegistrationRejectedException if the hub rejects the registration (see [lastRejection]) while waiting
+     */
+    suspend fun awaitRegistered(timeout: Duration): Boolean {
+        val outcome = withTimeoutOrNull(timeout.toMillis()) {
+            combine(connectedState, acknowledged, generation, rejection) { up, acked, wanted, rejected ->
+                when {
+                    up && acked >= wanted -> true
+                    rejected != null -> false
+                    else -> null
+                }
+            }.first { it != null }
+        }
+        if (outcome == false) {
+            val status = rejection.value
+            throw HubRegistrationRejectedException(
+                "hub rejected the registration of $serviceName ($instanceId): " + (status?.let(::describe) ?: "unknown"),
+            )
+        }
+        return outcome == true
+    }
+
+    /** True once no incoming request is being handled, false if [timeout] passes first. */
+    suspend fun awaitHandlersIdle(timeout: Duration): Boolean =
+        withTimeoutOrNull(timeout.toMillis()) { inFlight.first { it == 0 } } != null
 
     /** Replaces the announced handler types; sent now if a stream is open and re-sent on every reconnect. */
     fun register(commandTypes: Set<String>, queryTypes: Set<String>) {
@@ -169,6 +214,8 @@ class HubConnection(
                 status = Status.UNAVAILABLE.withDescription("hub closed the stream")
             } catch (e: CancellationException) {
                 throw e
+            } catch (e: HeartbeatTimeoutException) {
+                status = Status.UNAVAILABLE.withDescription(e.message)
             } catch (e: Throwable) {
                 status = Status.fromThrowable(e)
             } finally {
@@ -207,8 +254,15 @@ class HubConnection(
             announce(stream) // the Register is the first message of every stream
         }
         val heartbeats = launch {
+            val interval = settings.heartbeatInterval.toMillis()
             while (true) {
-                delay(settings.heartbeatInterval.toMillis())
+                delay(interval)
+                // Throwing fails this coroutineScope, which cancels the collector and ends the stream like any failure.
+                val oldest = stream.probes.firstEntry()?.key
+                if (oldest != null && System.currentTimeMillis() - oldest > 3 * interval) {
+                    stream.probes.clear()
+                    throw HeartbeatTimeoutException("no heartbeat echo from the hub for ${System.currentTimeMillis() - oldest} ms")
+                }
                 heartbeat(stream)
             }
         }
@@ -253,11 +307,15 @@ class HubConnection(
         }
     }
 
-    /** Runs the inbound handler off the stream so a slow handler does not block it; always answers the request. */
+    /**
+     * Runs the inbound handler on [handlerDispatcher] (bounded by [handlerPermits]) so neither a slow nor a blocking
+     * handler holds up the stream; always answers the request.
+     */
     private fun dispatch(stream: Stream, request: Request) {
-        scope.launch {
+        inFlight.update { it + 1 }
+        val job = scope.launch(handlerDispatcher) {
             val reply = try {
-                inbound(request)
+                handlerPermits.withPermit { inbound(request) }
             } catch (e: Throwable) {
                 // Only this coroutine's own cancellation propagates; a CancellationException leaking out of the handler
                 // (e.g. a TimeoutCancellationException from its own withTimeout) is a handler failure like any other.
@@ -277,6 +335,7 @@ class HubConnection(
                 log.debug("Reply to {} request {} dropped: the stream it arrived on is closed", request.type, request.id)
             }
         }
+        job.invokeOnCompletion { inFlight.update { it - 1 } }
     }
 
     private fun failPending(cause: HubUnavailableException) {
@@ -284,4 +343,6 @@ class HubConnection(
     }
 
     private fun describe(status: Status) = status.code.name + (status.description?.let { " ($it)" } ?: "")
+
+    private class HeartbeatTimeoutException(message: String) : RuntimeException(message)
 }

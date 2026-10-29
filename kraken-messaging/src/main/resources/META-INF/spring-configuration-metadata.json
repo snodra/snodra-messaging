@@ -104,6 +104,13 @@
       "defaultValue": "30s"
     },
     {
+      "name": "kraken.messaging.hub.max-concurrent-handlers",
+      "type": "java.lang.Integer",
+      "description": "Incoming hub requests handled concurrently by this instance; further requests wait for a free slot.",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Hub",
+      "defaultValue": 256
+    },
+    {
       "name": "kraken.messaging.kafka.bootstrap-servers",
       "type": "java.lang.String",
       "description": "Kafka bootstrap servers.",
@@ -158,6 +165,13 @@
       "description": "Sent outbox documents older than this are deleted.",
       "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Outbox",
       "defaultValue": "7d"
+    },
+    {
+      "name": "kraken.messaging.outbox.max-attempts",
+      "type": "java.lang.Integer",
+      "description": "Send attempts per outbox document before it is marked failed (failedAt) and skipped.",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Outbox",
+      "defaultValue": 10
     },
     {
       "name": "kraken.messaging.idempotency.retention",

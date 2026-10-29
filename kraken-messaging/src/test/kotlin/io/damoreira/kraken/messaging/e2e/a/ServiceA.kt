@@ -1,5 +1,6 @@
 package io.damoreira.kraken.messaging.e2e.a
 
+import io.damoreira.kraken.messaging.MessageContext
 import io.damoreira.kraken.messaging.e2e.BHappened
 import io.damoreira.kraken.messaging.fixtures.TestJwt
 import io.damoreira.kraken.messaging.handler.EventHandler
@@ -19,9 +20,11 @@ class ServiceA {
 @Component
 class ServiceAEvents {
     val received = CopyOnWriteArrayList<BHappened>()
+    val contexts = CopyOnWriteArrayList<Pair<BHappened, MessageContext>>()
 
     @EventHandler
-    fun on(event: BHappened) {
+    fun on(event: BHappened, ctx: MessageContext) {
         received += event
+        contexts += event to ctx
     }
 }

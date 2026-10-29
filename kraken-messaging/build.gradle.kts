@@ -8,7 +8,8 @@ plugins {
 }
 
 // The Boot BOM manages kotlin.version (2.3.x) and, via the dependency-management plugin, also downgrades the
-// Kotlin compiler classpath below the Gradle plugin's 2.4.21 (see task-1 report). Pin it to the catalog version.
+// Kotlin compiler classpath below the Gradle plugin's 2.4.21, which makes compileKotlin fail with a
+// getPluginClasspaths() NullPointerException. Pin it to the catalog version.
 extra["kotlin.version"] = libs.versions.kotlin.get()
 
 dependencyManagement {

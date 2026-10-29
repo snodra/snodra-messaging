@@ -6,6 +6,7 @@ import io.damoreira.kraken.hub.v1.ErrorCode
 import io.damoreira.kraken.hub.v1.Reply
 import io.damoreira.kraken.hub.v1.Request
 import io.damoreira.kraken.hub.v1.RequestKind
+import io.damoreira.kraken.messaging.HubRegistrationRejectedException
 import io.damoreira.kraken.messaging.HubUnavailableException
 import io.damoreira.kraken.messaging.test.InProcessHub
 import io.grpc.Status
@@ -14,7 +15,10 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
@@ -28,6 +32,7 @@ import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Test
 import java.time.Duration
 import java.util.UUID
+import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -38,6 +43,7 @@ class HubConnectionTest {
     private var hub = InProcessHub().start()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val connections = mutableListOf<HubConnection>()
+    private val virtualThreads = Executors.newVirtualThreadPerTaskExecutor().asCoroutineDispatcher()
     private val fast = HubSettings(
         requestTimeout = Duration.ofSeconds(2),
         heartbeatInterval = Duration.ofSeconds(10),
@@ -49,6 +55,7 @@ class HubConnectionTest {
     @AfterEach fun tearDown() = runBlocking {
         connections.forEach { it.stop() }
         scope.cancel()
+        virtualThreads.close()
         hub.close()
     }
 
@@ -57,9 +64,11 @@ class HubConnectionTest {
         serviceName: String = "svc-$instanceId",
         settings: HubSettings = fast,
         hubName: String = hub.name,
+        handlerDispatcher: CoroutineDispatcher = kotlinx.coroutines.Dispatchers.IO,
         inbound: suspend (Request) -> Reply = { req -> errorReply(req.id, ErrorCode.HANDLER_ERROR, "unexpected") },
-    ) = HubConnection({ InProcessChannelBuilder.forName(hubName).build() }, serviceName, instanceId, settings, inbound, scope)
-        .also { connections += it }
+    ) = HubConnection(
+        { InProcessChannelBuilder.forName(hubName).build() }, serviceName, instanceId, settings, inbound, scope, handlerDispatcher,
+    ).also { connections += it }
 
     private fun request(type: String = "test.Ping", timeoutMs: Int = 2000) = Request.newBuilder()
         .setId(UUID.randomUUID().toString())
@@ -155,6 +164,61 @@ class HubConnectionTest {
         assertEquals(Status.Code.ALREADY_EXISTS, rejection!!.code)
         assertFalse(intruder.connected.value)
         assertEquals(setOf("a"), hub.connectedInstances())
+        val e = assertFailsWith<HubRegistrationRejectedException> { intruder.awaitRegistered(wait) }
+        assertTrue("ALREADY_EXISTS" in e.message!!, e.message)
+    }
+
+    /**
+     * Regression: the connection scope runs on Dispatchers.Default (as in the auto-configuration). B's handler blocks
+     * its thread on a nested send to C whose reply only B's stream collector can deliver. With handlers on the
+     * connection scope, more blocked handlers than Default threads starved the collector and the nested sends timed out.
+     */
+    @Test fun nested_blocking_send_inside_handler_does_not_starve_connection() = runBlocking {
+        val settings = fast.copy(requestTimeout = Duration.ofSeconds(3))
+        val inner = connection("c", settings = settings) { req -> payloadReply(req.id, "{}") }
+        inner.register(setOf("test.Inner"), emptySet())
+        inner.start()
+        lateinit var middle: HubConnection
+        middle = connection("b", settings = settings, handlerDispatcher = virtualThreads) { outer ->
+            // A non-suspend handler calling sendBlocking: blocks the handler thread until the nested reply arrives.
+            val nested = runBlocking { middle.send(request("test.Inner", timeoutMs = 3_000)) }
+            check(nested.hasReply() && !nested.reply.hasError()) { "nested send failed: $nested" }
+            payloadReply(outer.id, "{}")
+        }
+        middle.register(setOf("test.Outer"), emptySet())
+        middle.start()
+        val sender = connection("a", settings = settings)
+        sender.start()
+        for (c in listOf(inner, middle, sender)) assertTrue(c.awaitRegistered(wait))
+
+        val n = maxOf(20, Runtime.getRuntime().availableProcessors() * 2) // more blocked handlers than Default threads
+        val started = System.nanoTime()
+        val results = (1..n).map {
+            async(kotlinx.coroutines.Dispatchers.IO) { runCatching { sender.send(request("test.Outer", timeoutMs = 3_000)) } }
+        }.awaitAll()
+        val elapsed = Duration.ofNanos(System.nanoTime() - started)
+
+        val failures = results.filter { r -> r.getOrNull()?.let { it.hasReply() && !it.reply.hasError() } != true }
+        assertEquals(emptyList(), failures.map { it.exceptionOrNull()?.toString() ?: it.getOrNull().toString() })
+        assertTrue(elapsed < Duration.ofSeconds(3), "took $elapsed")
+        assertEquals(0, middle.inFlightHandlers.value)
+    }
+
+    @Test fun missing_heartbeat_echoes_trigger_reconnect() = runBlocking {
+        val conn = connection("a", settings = fast.copy(heartbeatInterval = Duration.ofMillis(100)))
+        conn.register(setOf("test.Ping"), emptySet())
+        conn.start()
+        assertTrue(conn.awaitRegistered(wait))
+        assertEquals(1, hub.registrationsFrom("a"))
+
+        hub.echoHeartbeats = false
+        withTimeout(3_000) { conn.connected.first { !it } } // > 3 intervals without an echo: stream failed
+        hub.echoHeartbeats = true
+
+        withTimeout(3_000) { conn.connected.first { it } }
+        assertTrue(conn.awaitRegistered(wait))
+        assertTrue(hub.registrationsFrom("a") >= 2, "registrations=${hub.registrationsFrom("a")}")
+        assertEquals(setOf("test.Ping"), hub.registeredTypes())
     }
 
     @Test fun `heartbeats are sent`() = runBlocking {

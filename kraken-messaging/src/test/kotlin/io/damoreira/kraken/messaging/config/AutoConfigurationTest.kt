@@ -30,11 +30,13 @@ import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Test
 import org.springframework.boot.autoconfigure.AutoConfigurations
 import org.springframework.boot.test.context.runner.ApplicationContextRunner
+import org.springframework.context.SmartLifecycle
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.data.mongodb.MongoDatabaseFactory
 import org.springframework.data.mongodb.core.MongoTemplate
 import org.springframework.kafka.core.KafkaTemplate
+import org.springframework.kafka.core.ProducerFactory
 import org.springframework.security.oauth2.jwt.JwtDecoder
 import org.springframework.transaction.support.TransactionTemplate
 import org.springframework.transaction.PlatformTransactionManager
@@ -172,17 +174,40 @@ class AutoConfigurationTest {
             assertEquals(null, context.startupFailure)
             val connection = context.getBean(HubConnection::class.java)
             await atMost Duration.ofSeconds(5) until { connection.connected.value && "test.Ping" in hub.registeredTypes() }
+            val registrations = hub.registrationsFrom(connection.instanceId)
             context.close()
             await atMost Duration.ofSeconds(5) until { hub.connectedInstances().isEmpty() }
+            // stop() announced an empty registration (no more routing) before closing the stream
+            assertEquals(registrations + 1, hub.registrationsFrom(connection.instanceId))
+        }
+    }
+
+    @Test fun `lifecycle phases stop after the web server drain`() {
+        val gracefulShutdown = SmartLifecycle.DEFAULT_PHASE - 1024 // WebServerApplicationContext.GRACEFUL_SHUTDOWN_PHASE
+        val webServerStartStop = gracefulShutdown - 1024 // WebServerApplicationContext.START_STOP_LIFECYCLE_PHASE
+        assertEquals(SmartLifecycle.DEFAULT_PHASE - 1900, EventConsumer.PHASE)
+        assertEquals(SmartLifecycle.DEFAULT_PHASE - 1950, OutboxPublisher.PHASE)
+        assertTrue(HubLifecycle.PHASE < webServerStartStop) // starts before the server, stops after it
+        // stop order (highest phase first): drain, consumer, publisher, web server, hub
+        assertTrue(gracefulShutdown > EventConsumer.PHASE && EventConsumer.PHASE > OutboxPublisher.PHASE)
+        withHub().run { context ->
+            assertEquals(HubLifecycle.PHASE, context.getBean(HubLifecycle::class.java).phase)
         }
     }
 
     @Test fun `kafka events wiring with an application MongoTemplate`() {
         runner.withUserConfiguration(MongoMockConfig::class.java)
             .withConfiguration(AutoConfigurations.of(TransactionAutoConfiguration::class.java))
+            .withPropertyValues("kraken.messaging.kafka.bootstrap-servers=localhost:9")
             .run { context ->
             assertEquals(null, context.startupFailure)
             assertIs<OutboxEventBus>(context.getBean(EventBus::class.java))
+            // The producer settings are accepted by the Kafka client (it validates timeouts when the producer is built).
+            @Suppress("UNCHECKED_CAST")
+            val producerFactory = context.getBean("krakenKafkaProducerFactory") as ProducerFactory<String, ByteArray>
+            assertEquals(10_000, producerFactory.configurationProperties["max.block.ms"])
+            assertEquals(30_000, producerFactory.configurationProperties["delivery.timeout.ms"])
+            producerFactory.createProducer().close(Duration.ZERO)
             assertIs<KafkaTemplate<*, *>>(context.getBean("krakenKafkaTemplate"))
             assertEquals(1, context.getBeansOfType(MessagingIndexes::class.java).size)
             assertEquals(1, context.getBeansOfType(TransactionTemplate::class.java).size)

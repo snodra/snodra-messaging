@@ -6,11 +6,13 @@ import io.damoreira.kraken.messaging.codec.JsonCodec
 import io.damoreira.kraken.messaging.codec.MessageTypeResolver
 import io.damoreira.kraken.messaging.security.CallerContext
 import io.damoreira.kraken.messaging.tracing.TraceHeaders
-import org.slf4j.MDC
+import io.damoreira.kraken.messaging.tracing.CorrelationContext
+import kotlinx.coroutines.currentCoroutineContext
 import org.springframework.data.mongodb.core.MongoTemplate
 import java.time.Instant
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.coroutines.CoroutineContext
 
 /**
  * Ordering per key is guaranteed for events published by one service instance (the per-process [seq] counter breaks
@@ -27,13 +29,14 @@ class OutboxEventBus(
 ) : EventBus {
     private val seq = AtomicLong(System.currentTimeMillis() shl 20)
 
-    override suspend fun publish(event: Event, key: String?) = insert(event, key)
+    override suspend fun publish(event: Event, key: String?) = insert(event, key, currentCoroutineContext())
 
-    override fun publishBlocking(event: Event, key: String?) = insert(event, key)
+    override fun publishBlocking(event: Event, key: String?) = insert(event, key, null)
 
-    private fun insert(event: Event, key: String?) {
+    /** The correlation id comes from [context]'s [CorrelationContext], else the MDC, else a fresh UUID. */
+    private fun insert(event: Event, key: String?, context: CoroutineContext?) {
         val headers = linkedMapOf(
-            EventHeaders.CORRELATION_ID to (MDC.get("correlationId") ?: UUID.randomUUID().toString()),
+            EventHeaders.CORRELATION_ID to CorrelationContext.resolve(context),
             EventHeaders.USER_ID to (CallerContext.currentUserId() ?: ""),
         )
         traceHeaders.inject(headers)

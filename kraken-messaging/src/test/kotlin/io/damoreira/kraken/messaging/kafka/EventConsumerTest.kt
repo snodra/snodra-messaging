@@ -47,6 +47,7 @@ class RecordingHandlers {
     val contexts = CopyOnWriteArrayList<MessageContext>()
     val failuresLeft = AtomicInteger(0)
     val failAlways = java.util.concurrent.atomic.AtomicReference<String?>(null)
+    val duplicateKeyFailuresLeft = AtomicInteger(0)
 
     @EventHandler
     fun on(event: Happened, ctx: MessageContext) {
@@ -54,6 +55,9 @@ class RecordingHandlers {
         contexts += ctx
         if (event.id == failAlways.get()) throw IllegalStateException("poison")
         if (event.id.startsWith("flaky") && failuresLeft.getAndDecrement() > 0) throw IllegalStateException("transient")
+        if (event.id.startsWith("dupkey") && duplicateKeyFailuresLeft.getAndDecrement() > 0) {
+            throw org.springframework.dao.DuplicateKeyException("handler's own unique index")
+        }
     }
 }
 
@@ -119,7 +123,7 @@ class EventConsumerTest {
         consumer = null
     }
 
-    private fun startConsumer(maxAttempts: Int = 5) {
+    private fun startConsumer(maxAttempts: Int = 5, backOffMs: Long = 100) {
         val factory = DefaultKafkaConsumerFactory(
             mapOf<String, Any>(
                 ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG to kafkaContainer.bootstrapServers,
@@ -131,7 +135,7 @@ class EventConsumerTest {
         )
         consumer = EventConsumer(
             factory, topic, "group-" + UUID.randomUUID(), registry, HandlerInvoker(registry, codec), tx, mongo,
-            maxAttempts, backOffMs = 100,
+            maxAttempts, backOffMs = backOffMs,
         ).also { it.start() }
     }
 
@@ -196,6 +200,29 @@ class EventConsumerTest {
         await().atMost(Duration.ofSeconds(10)).untilAsserted { assertEquals(1, mongo.count(Query(), "processed_events")) }
         Thread.sleep(500)
         assertEquals(3, handlers.seen.size)
+        assertEquals(1, mongo.count(Query(), "processed_events"))
+    }
+
+    @Test
+    fun `handler duplicate key error is retried not swallowed`() {
+        handlers.duplicateKeyFailuresLeft.set(2)
+        startConsumer()
+        send("dupkey-1", "test.Happened")
+        await().atMost(Duration.ofSeconds(10)).untilAsserted { assertEquals(3, handlers.seen.size) }
+        await().atMost(Duration.ofSeconds(10)).untilAsserted { assertEquals(1, mongo.count(Query(), "processed_events")) }
+        Thread.sleep(500)
+        assertEquals(listOf("dupkey-1", "dupkey-1", "dupkey-1"), handlers.seen.toList())
+        assertEquals(1, mongo.count(Query(), "processed_events"))
+    }
+
+    @Test
+    fun `payload not matching the handler class is not retried`() {
+        // Retried, the bad record would hold the partition for 4 x 5 s before e-5; awaitSeen gives up after 10 s.
+        startConsumer(maxAttempts = 5, backOffMs = 5_000)
+        send("bad-1", "test.Happened", payload = "{\"unexpected\":true}".toByteArray())
+        send("e-5", "test.Happened")
+        awaitSeen("e-5")
+        assertEquals(listOf("e-5"), handlers.seen.toList())
         assertEquals(1, mongo.count(Query(), "processed_events"))
     }
 

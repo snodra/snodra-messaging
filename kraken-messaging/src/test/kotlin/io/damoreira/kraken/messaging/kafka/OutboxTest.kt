@@ -12,6 +12,8 @@ import org.apache.kafka.clients.admin.NewTopic
 import org.apache.kafka.clients.consumer.ConsumerConfig
 import org.apache.kafka.clients.consumer.KafkaConsumer
 import org.apache.kafka.clients.producer.ProducerConfig
+import org.apache.kafka.clients.producer.ProducerRecord
+import org.apache.kafka.common.errors.RecordTooLargeException
 import org.apache.kafka.common.serialization.ByteArrayDeserializer
 import org.apache.kafka.common.serialization.ByteArraySerializer
 import org.apache.kafka.common.serialization.StringDeserializer
@@ -27,10 +29,13 @@ import org.springframework.data.mongodb.core.SimpleMongoClientDatabaseFactory
 import org.springframework.data.mongodb.core.query.Criteria
 import org.springframework.data.mongodb.core.query.Query
 import org.springframework.kafka.core.DefaultKafkaProducerFactory
+import org.springframework.kafka.core.KafkaProducerException
 import org.springframework.kafka.core.KafkaTemplate
+import org.springframework.kafka.support.SendResult
 import org.springframework.transaction.support.TransactionTemplate
 import java.time.Duration
 import java.time.Instant
+import java.util.concurrent.CompletableFuture
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
@@ -90,6 +95,52 @@ class OutboxTest {
     }
 
     private fun publisher() = OutboxPublisher(mongo, kafka, topic, "orders", Duration.ofMillis(100), 100)
+
+    /** A real template that fails records whose key is in [failing] with [failure]. */
+    private fun failingTemplate(failing: Set<String>, failure: () -> Throwable) =
+        object : KafkaTemplate<String, ByteArray>(producerFactory) {
+            override fun send(record: ProducerRecord<String, ByteArray>): CompletableFuture<SendResult<String, ByteArray>> =
+                if (record.key() in failing) CompletableFuture.failedFuture(KafkaProducerException(record, "Failed to send", failure()))
+                else super.send(record)
+        }
+
+    private fun doc(key: String) = mongo.findOne(Query(Criteria.where("key").`is`(key)), OutboxDocument::class.java)!!
+
+    @Test
+    fun `non retriable send failure marks document failed and continues`() {
+        bus.publishBlocking(Happened("nr-1", Instant.now()), key = "nr-1")
+        bus.publishBlocking(Happened("nr-poison", Instant.now()), key = "nr-poison")
+        bus.publishBlocking(Happened("nr-2", Instant.now()), key = "nr-2")
+        val template = failingTemplate(setOf("nr-poison")) { RecordTooLargeException("record too large") }
+        val publisher = OutboxPublisher(mongo, template, topic, "orders", Duration.ofMillis(100), 100, maxAttempts = 10)
+
+        assertEquals(2, publisher.publishPendingNow()) // the poison document did not stop the batch
+
+        val poison = doc("nr-poison")
+        assertNotNull(poison.failedAt)
+        assertNull(poison.sentAt)
+        assertEquals(1, poison.attempts)
+        assertNotNull(doc("nr-1").sentAt)
+        assertNotNull(doc("nr-2").sentAt)
+        assertEquals(0, publisher.publishPendingNow()) // failed documents are no longer pending
+        assertEquals(1, doc("nr-poison").attempts)
+    }
+
+    @Test
+    fun `retriable send failure stops the batch until max attempts then marks failed`() {
+        bus.publishBlocking(Happened("r-poison", Instant.now()), key = "r-poison")
+        bus.publishBlocking(Happened("r-1", Instant.now()), key = "r-1")
+        val template = failingTemplate(setOf("r-poison")) { org.apache.kafka.common.errors.TimeoutException("broker down") }
+        val publisher = OutboxPublisher(mongo, template, topic, "orders", Duration.ofMillis(100), 100, maxAttempts = 2)
+
+        assertEquals(0, publisher.publishPendingNow()) // retriable: attempts 1, batch stopped to keep order
+        assertNull(doc("r-poison").failedAt)
+        assertNull(doc("r-1").sentAt)
+        assertEquals(1, publisher.publishPendingNow()) // attempt 2 reaches max-attempts: marked failed, r-1 sent
+        assertNotNull(doc("r-poison").failedAt)
+        assertEquals(2, doc("r-poison").attempts)
+        assertNotNull(doc("r-1").sentAt)
+    }
 
     @Test
     fun `publish writes outbox document with headers and camelCase payload`() {

@@ -111,6 +111,7 @@ All keys (`kraken.messaging.*`; durations accept `200ms`, `5s`, `7d`; relaxed bi
 | `hub.heartbeat-interval` | `10s` | Heartbeat period on the hub stream. |
 | `hub.reconnect-backoff.min` | `500ms` | Initial reconnect delay when the stream drops. |
 | `hub.reconnect-backoff.max` | `30s` | Maximum reconnect delay (exponential). |
+| `hub.max-concurrent-handlers` | `256` | Incoming hub requests handled concurrently by this instance; further requests wait for a free slot. |
 | `kafka.bootstrap-servers` | `broker:19092` | Kafka bootstrap servers. |
 | `kafka.topic` | `kraken.events` | Events topic. |
 | `kafka.consumer.enabled` | `true` | Set `false` in tools that only publish. |
@@ -119,6 +120,7 @@ All keys (`kraken.messaging.*`; durations accept `200ms`, `5s`, `7d`; relaxed bi
 | `outbox.poll-interval` | `200ms` | Outbox poll period. |
 | `outbox.batch-size` | `100` | Documents per poll. |
 | `outbox.retention` | `7d` | Sent outbox documents older than this are deleted (TTL index). |
+| `outbox.max-attempts` | `10` | Send attempts per outbox document before it is marked failed (`failedAt`) and skipped. |
 | `idempotency.retention` | `30d` | `processed_events` documents older than this are deleted (TTL index). |
 | `security.forward-jwt` | `true` | Put the current request's bearer token in the hub request's `authorization` header. |
 | `security.require-jwt` | `true` | Reject forwarded requests without a valid JWT; requires a `JwtDecoder` bean. |
@@ -129,11 +131,12 @@ All keys (`kraken.messaging.*`; durations accept `200ms`, `5s`, `7d`; relaxed bi
 @Component
 class WorkoutHandlers(private val repo: WorkoutRepository, private val events: EventBus) {
 
+    // @Transactional handlers are plain (non-suspend) functions: see "Transactions" below.
     @CommandHandler
     @Transactional
-    suspend fun handle(cmd: LogWorkout, ctx: MessageContext): LogWorkoutResult {
+    fun handle(cmd: LogWorkout, ctx: MessageContext): LogWorkoutResult {
         val workout = repo.save(Workout.from(cmd, ownerId = ctx.userId))
-        events.publish(WorkoutLogged(workout.id, workout.ownerId, workout.loggedAt), key = workout.id)
+        events.publishBlocking(WorkoutLogged(workout.id, workout.ownerId, workout.loggedAt), key = workout.id)
         return LogWorkoutResult(workout.id)
     }
 
@@ -171,19 +174,51 @@ eventBus.publish(WorkoutLogged(id, owner, at), key = id)         // inside the c
 - **Typed facades.** `Command<R>` and `Query<R>` carry the response type; it is read from the interface type argument at
   runtime. Generic responses such as `List<X>` are erased, so wrap them in a response class. Builder call.
 - **Local short-circuit.** A command or query whose handler lives in the same service is invoked locally and does not go
-  through the hub.
+  through the hub. The handler runs on the caller's thread and coroutine, so it joins the caller's thread-bound
+  transaction (a failure in it rolls back the caller's writes too) and sees the caller's security context.
+- **Incoming hub requests** run on virtual threads, at most `hub.max-concurrent-handlers` at once, never on the threads
+  that read the hub stream; a handler may block (for example on a nested `sendBlocking`).
+- **Correlation id.** Every message carries a `correlationId`. Messages sent while handling a hub request or a Kafka
+  event reuse the incoming id (carried in the coroutine context and mirrored into the SLF4J MDC key `correlationId`);
+  otherwise the MDC value is used, else a fresh UUID.
 - **Request ids.** `Request.id` is fresh per attempt. A retried command must carry its own business id in the payload.
 - **JWT.** The bearer token is forwarded on the hub path only. The receiving service validates it with its own
   `JwtDecoder`; `MessageContext.userId` and `roles` come from the validated token. Role authorisation is left to the
   handlers. Builder call.
-- **Events** carry `userId` only, not the token.
+- **Events** carry `userId` only, not the token. Events published from an `@EventHandler` carry an empty `userId`:
+  the consumer has no forwarded token, only the incoming event's `userId` in `MessageContext`.
 - **Outbox ordering.** Events with the same key are published in order per publishing instance, using a `seq` field on the
   outbox document. Builder call.
+- **Outbox failures.** A send failure that retrying cannot fix (record too large, serialization, invalid topic,
+  authorization) or the `outbox.max-attempts`-th failure marks the document failed (`failedAt`), logs it once at error and
+  moves on; other failures stop the batch and are retried on the next poll. Failed documents stay in `outbox` (the TTL
+  only removes sent ones); clear `failedAt` and `attempts` to re-queue one.
 - **Consumer idempotency.** The consumer records processed event ids in `processed_events` and skips duplicates. A handler
-  gets up to `max-attempts` invocations with a 1 s back-off; a record that still fails is logged and skipped. There is no
-  dead-letter topic.
-- **Transactions.** Event handlers run inside the Mongo transaction on the Kafka listener thread. A handler that relies on
-  the transaction must not switch threads.
+  gets up to `max-attempts` invocations with a 1 s back-off; a record that still fails is logged and skipped. A payload
+  that does not decode into the handler's class is skipped at once. There is no dead-letter topic.
+- **Transactions.** The library invokes `@EventHandler`s inside its own Mongo transaction (idempotency marker plus the
+  handler's writes), on the Kafka listener thread via `runBlocking`; a handler that relies on it must not switch threads.
+  The `MongoTransactionManager` is thread-bound: Spring only carries a transaction across suspensions for reactive
+  transaction managers, so a `@Transactional suspend` function loses its transaction at the first real suspension (an
+  awaited `send`, `delay`, `withContext` to another dispatcher) and later writes are not part of it. Rules:
+  - make `@Transactional` handlers non-suspend functions, or make sure they do not suspend before their last write;
+  - `eventBus.publish`/`publishBlocking` only insert into `outbox` and never suspend, so they are safe inside the
+    transaction;
+  - to send a command or query as well, commit first and send afterwards, for example a non-suspend `@Transactional`
+    service method that does the writes, called from the handler, followed by `commandBus.send(...)`:
+
+    ```kotlin
+    @CommandHandler
+    suspend fun handle(cmd: CloseWorkout, ctx: MessageContext): Unit {
+        val workout = workouts.close(cmd.workoutId)          // @Transactional, non-suspend: commits on return
+        commandBus.send(NotifyOwner(workout.ownerId))        // after the commit
+    }
+    ```
+- **Shutdown.** The hub connection, outbox publisher and Kafka consumer start before the web server accepts traffic and
+  stop after its graceful drain. On stop the instance first announces an empty registration so the hub stops routing to
+  it, waits up to 5 s for incoming handlers still running, then closes the stream.
+- **Dead connections.** A hub stream whose heartbeats stay unanswered for three `hub.heartbeat-interval`s is closed and
+  re-established; HTTP/2 keepalive pings (20 s, 10 s timeout) also run on the channel.
 - **Hub errors.** The hub answers malformed or duplicate in-flight requests with `INVALID_REQUEST`; other hub errors map to
   the exception types in `io.damoreira.kraken.messaging` (`NoHandlerException`, `UnauthenticatedException`, ...).
 
@@ -191,8 +226,9 @@ eventBus.publish(WorkoutLogged(id, owner, at), key = id)         // inside the c
 
 - `InMemoryBuses(typePrefix, userId)`: implements `EventBus`, `CommandBus` and `QueryBus` in memory for unit tests without
   Docker. Messages still pass through the JSON codec. `register(handlerBean)` adds handlers; `published` lists events.
-- `InProcessHub`: in-JVM stand-in for the hub (`start()`, `channel()`, `dropInstance(...)`, `lastRequestHeaders()`), for
-  hub-client tests without a container.
+- `InProcessHub`: in-JVM stand-in for the hub (`start()`, `channel()`, `dropInstance(...)`, `lastRequestHeaders()`,
+  `registrationsFrom(...)`, `echoHeartbeats = false` to simulate a hub that stopped answering), for hub-client tests
+  without a container.
 - `KrakenContainers`: unstarted Testcontainers definitions. `kafka()`, `mongo()` (single-node replica set, needed for
   transactions), `hub()` from image `kraken-hub:dev` or the one named by `KRAKEN_HUB_IMAGE`, and `hubImageAvailable()`.
 - `KrakenTestKafka(bootstrap, typePrefix, topic).awaitEvent<T>()`: reads an event back from the topic.
@@ -221,3 +257,7 @@ docker build -t kraken-hub:dev .
   provide a `JwtDecoder`.
 - Configuration metadata is hand-maintained in `META-INF/spring-configuration-metadata.json`.
 - `TraceHeaders` is only active with Micrometer Tracing on the classpath.
+- Trace context is injected on outbound messages (hub requests, outbox events) but not yet extracted on inbound hub
+  requests or Kafka records, so a handler's spans do not join the caller's trace.
+- With `require-jwt: false` and no `JwtDecoder`, a forwarded token is ignored (the caller is anonymous and the token is
+  not re-forwarded); a warning is logged once.

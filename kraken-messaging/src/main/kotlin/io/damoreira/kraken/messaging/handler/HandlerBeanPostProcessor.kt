@@ -25,7 +25,7 @@ class HandlerBeanPostProcessor(private val registryProvider: () -> HandlerRegist
         } catch (e: Throwable) {
             // kotlin-reflect cannot introspect some synthetic classes; such a bean cannot carry handlers usable here.
             if (e !is UnsupportedOperationException && e::class.java.name != KOTLIN_REFLECTION_INTERNAL_ERROR) throw e
-            log.debug("Skipping handler scan of bean {} ({}): {}", beanName, target.name, e.toString())
+            log.warn("Skipping handler scan of bean {} ({}): {}", beanName, target.name, e.toString())
         }
         return bean
     }

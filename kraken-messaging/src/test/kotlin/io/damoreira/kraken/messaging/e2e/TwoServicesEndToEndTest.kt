@@ -11,6 +11,7 @@ import io.damoreira.kraken.messaging.api.Query
 import io.damoreira.kraken.messaging.e2e.a.ServiceA
 import io.damoreira.kraken.messaging.e2e.a.ServiceAEvents
 import io.damoreira.kraken.messaging.e2e.b.ServiceB
+import io.damoreira.kraken.messaging.e2e.b.ServiceBHandlers
 import io.damoreira.kraken.messaging.fixtures.TestJwt
 import io.damoreira.kraken.messaging.hub.HubConnection
 import io.damoreira.kraken.messaging.test.KrakenContainers
@@ -19,6 +20,7 @@ import org.apache.kafka.clients.admin.AdminClient
 import org.apache.kafka.clients.admin.NewTopic
 import org.apache.kafka.common.errors.TopicExistsException
 import org.awaitility.Awaitility.await
+import org.slf4j.MDC
 import org.junit.jupiter.api.AfterAll
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assumptions
@@ -74,13 +76,27 @@ class TwoServicesEndToEndTest {
     @Test
     fun `event published by B inside its handler reaches A exactly once`() {
         val id = "evt-" + UUID.randomUUID()
-        asUser(TestJwt.token("u-7", listOf("user"))) {
-            serviceA.getBean(CommandBus::class.java).sendBlocking(BPing(id))
+        val correlationId = "corr-" + UUID.randomUUID()
+        MDC.put("correlationId", correlationId) // the caller's correlation id, e.g. set by an HTTP filter
+        try {
+            asUser(TestJwt.token("u-42", listOf("user"))) {
+                serviceA.getBean(CommandBus::class.java).sendBlocking(BPing(id))
+            }
+        } finally {
+            MDC.remove("correlationId")
         }
-        val received = serviceA.getBean(ServiceAEvents::class.java).received
-        await().atMost(Duration.ofSeconds(20)).until { received.count { it.id == id } == 1 }
+        val events = serviceA.getBean(ServiceAEvents::class.java)
+        await().atMost(Duration.ofSeconds(20)).until { events.received.count { it.id == id } == 1 }
         Thread.sleep(2000)
-        assertEquals(1, received.count { it.id == id })
+        assertEquals(1, events.received.count { it.id == id })
+
+        // The correlation id travelled A -> hub -> B (command) -> outbox -> Kafka -> A (event), with the acting user.
+        assertEquals(correlationId, contextB!!.getBean(ServiceBHandlers::class.java).correlationIds[id])
+        val ctx = events.contexts.single { it.first.id == id }.second
+        assertEquals(correlationId, ctx.correlationId)
+        assertEquals(correlationId, ctx.headers["correlationId"])
+        assertEquals("u-42", ctx.userId)
+        assertEquals("u-42", ctx.headers["userId"])
     }
 
     @Test

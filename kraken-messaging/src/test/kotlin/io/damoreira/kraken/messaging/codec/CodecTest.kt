@@ -38,6 +38,11 @@ class CodecTest {
         assertEquals("Cannot decode payload as ${Count::class.qualifiedName}", e.message)
     }
 
+    @Test fun `json null literal is InvalidMessageException`() {
+        assertThrows<InvalidMessageException> { codec.decode("null".toByteArray(), Pong::class) }
+        assertThrows<InvalidMessageException> { codec.decode("null".toByteArray(), Unit::class) }
+    }
+
     @Test fun `response type read from Command supertype`() =
         assertEquals(Pong::class, ResponseTypes.responseTypeOf(Ping::class))
 

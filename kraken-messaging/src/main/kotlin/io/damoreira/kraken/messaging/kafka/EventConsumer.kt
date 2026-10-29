@@ -1,9 +1,11 @@
 package io.damoreira.kraken.messaging.kafka
 
+import io.damoreira.kraken.messaging.InvalidMessageException
 import io.damoreira.kraken.messaging.MessageContext
 import io.damoreira.kraken.messaging.codec.JsonCodec
 import io.damoreira.kraken.messaging.handler.HandlerInvoker
 import io.damoreira.kraken.messaging.handler.HandlerRegistry
+import io.damoreira.kraken.messaging.tracing.CorrelationContext
 import kotlinx.coroutines.runBlocking
 import org.apache.kafka.clients.consumer.ConsumerRecord
 import org.slf4j.LoggerFactory
@@ -26,9 +28,13 @@ import java.util.concurrent.atomic.AtomicBoolean
  *
  * Per record: the idempotency marker ([ProcessedEventDocument], keyed by the `id` header) is inserted and the handlers
  * run inside one Mongo transaction; the offset is acknowledged only after the transaction committed. A duplicate id
- * (`DuplicateKeyException`) is acknowledged and skipped. A handler failure rolls the marker back and the record is
- * redelivered by a [DefaultErrorHandler] up to [maxAttempts] invocations in total, then logged (never the payload)
- * and skipped with its offset committed.
+ * (`DuplicateKeyException` from the marker insert only) is acknowledged and skipped. A handler failure, including a
+ * `DuplicateKeyException` from the handler's own writes, rolls the marker back and the record is redelivered by a
+ * [DefaultErrorHandler] up to [maxAttempts] invocations in total, then logged (never the payload) and skipped with its
+ * offset committed. An [InvalidMessageException] (payload does not fit the handler's message class) is not retried.
+ *
+ * The record's correlation id is in the handlers' coroutine context ([CorrelationContext]) and the MDC, so events
+ * they publish carry it.
  *
  * Handlers run via `runBlocking` on the listener thread so the thread-bound Mongo transaction wraps them; handlers
  * that switch threads (other dispatchers, `withContext`) lose the transaction and their writes are not rolled back.
@@ -70,7 +76,10 @@ class EventConsumer(
         val errorHandler = DefaultErrorHandler(
             { record, ex -> logSkipped(record, ex) },
             FixedBackOff(backOffMs, (maxAttempts - 1).toLong()),
-        ).apply { setCommitRecovered(true) }
+        ).apply {
+            setCommitRecovered(true)
+            addNotRetryableExceptions(InvalidMessageException::class.java) // retrying cannot change the payload
+        }
         val started = ConcurrentMessageListenerContainer(factory, props).apply {
             concurrency = 1
             setCommonErrorHandler(errorHandler)
@@ -92,7 +101,8 @@ class EventConsumer(
 
     override fun isRunning(): Boolean = running.get()
     override fun isAutoStartup(): Boolean = true
-    override fun getPhase(): Int = Int.MAX_VALUE - 50
+    /** Starts after and stops before [OutboxPublisher]; both stop after the web server's graceful drain. */
+    override fun getPhase(): Int = PHASE
 
     private fun handle(record: ConsumerRecord<String, ByteArray>, ack: Acknowledgment) {
         val headers = record.headers().associate { it.key() to String(it.value() ?: ByteArray(0), Charsets.UTF_8) }
@@ -124,13 +134,26 @@ class EventConsumer(
         )
         try {
             tx.executeWithoutResult {
-                mongo.insert(ProcessedEventDocument(id, type, Instant.now()))
-                runBlocking { invoker.invokeEvent(type, payload, ctx) }
+                try {
+                    mongo.insert(ProcessedEventDocument(id, type, Instant.now()))
+                } catch (_: DuplicateKeyException) {
+                    throw AlreadyProcessed // only the marker's duplicate means "seen before"; a handler's is a failure
+                }
+                runBlocking(CorrelationContext(ctx.correlationId)) { invoker.invokeEvent(type, payload, ctx) }
             }
-        } catch (_: DuplicateKeyException) {
+        } catch (_: AlreadyProcessed) {
             log.debug("Event {} of type {} already processed, skipping", id, type)
         }
         ack.acknowledge()
+    }
+
+    /** Thrown inside the transaction when the idempotency marker already exists; rolls it back and skips the record. */
+    private object AlreadyProcessed : RuntimeException("event already processed", null, false, false) {
+        private fun readResolve(): Any = AlreadyProcessed
+    }
+
+    companion object {
+        const val PHASE = SmartLifecycle.DEFAULT_PHASE - 1900
     }
 
     private fun logSkipped(record: ConsumerRecord<*, *>, ex: Exception) {
