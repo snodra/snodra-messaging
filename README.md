@@ -148,6 +148,8 @@ class WorkoutHandlers(private val repo: WorkoutRepository, private val events: E
 }
 ```
 
+`Workout`, `WorkoutRepository` and `NotFoundException` are illustrative service types, not library classes.
+
 Messages are plain data classes implementing the marker interfaces from the api module:
 
 ```kotlin
@@ -158,8 +160,8 @@ data class LogWorkout(val name: String) : Command<LogWorkoutResult>
 ### Sending
 
 ```kotlin
-val result = commandBus.send(LogWorkout("legs"))                 // suspend
-val result = commandBus.sendBlocking(LogWorkout("legs"))         // blocking, for MVC controllers
+val logged = commandBus.send(LogWorkout("legs"))                 // suspend
+val loggedNow = commandBus.sendBlocking(LogWorkout("legs"))      // blocking, for MVC controllers
 val workout = queryBus.send(GetWorkout(id))
 eventBus.publish(WorkoutLogged(id, owner, at), key = id)         // inside the caller's Mongo transaction
 ```
@@ -202,7 +204,7 @@ val result = buses.sendBlocking(LogWorkout("legs"))
 ```
 
 The end-to-end test (`TwoServicesEndToEndTest`) starts Kafka, MongoDB, the real hub and two Spring Boot services. It is
-skipped when the hub image is absent. Build the image from the kraken-hub repo:
+skipped when `kraken-hub:dev` (or the image named by `KRAKEN_HUB_IMAGE`) is not present in the local Docker daemon. Build the image from the kraken-hub repo:
 
 ```bash
 docker build -t kraken-hub:dev .

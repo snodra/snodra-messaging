@@ -38,10 +38,11 @@ import org.springframework.transaction.support.TransactionTemplate
  * `outbox` collection to the topic, [EventConsumer] running `@EventHandler`s, and the TTL/relay indexes.
  *
  * Needs the application's [MongoTemplate] (Boot's Mongo auto-configuration provides it when
- * `spring.mongodb.uri` is set; Spring Boot 4 no longer binds `spring.data.mongodb.uri`), hence ordered after it. The [MongoTransactionManager] (when the application has
- * none) also backs the application's `@Transactional` methods, so business writes and outbox inserts commit together. The Kafka factories and template are private to the
- * starter (`defaultCandidate = false`, injected by name): they neither satisfy nor suppress the application's own
- * Kafka beans.
+ * `spring.mongodb.uri` is set; Spring Boot 4 no longer binds `spring.data.mongodb.uri`), hence ordered after it.
+ * The [MongoTransactionManager] (when the application has none) also backs the application's `@Transactional`
+ * methods, so business writes and outbox inserts commit together. The Kafka factories and template are private to
+ * the starter (`defaultCandidate = false`, injected by name): they neither satisfy nor suppress the application's
+ * own Kafka beans.
  */
 @AutoConfiguration(
     after = [KrakenMessagingAutoConfiguration::class],
