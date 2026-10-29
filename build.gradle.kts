@@ -18,7 +18,7 @@ subprojects {
             jvmToolchain(25)
             compilerOptions {
                 jvmTarget.set(JvmTarget.JVM_25)
-                freeCompilerArgs.addAll("-Xjsr305=strict", "-Xannotation-default-target=param-property")
+                freeCompilerArgs.addAll("-Xjsr305=strict")
             }
         }
     }

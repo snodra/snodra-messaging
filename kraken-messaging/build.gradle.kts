@@ -4,7 +4,12 @@ plugins {
     alias(libs.plugins.spring.dependency.management)
     `java-library`
     `maven-publish`
+    alias(libs.plugins.protobuf)
 }
+
+// The Boot BOM manages kotlin.version (2.3.x) and, via the dependency-management plugin, also downgrades the
+// Kotlin compiler classpath below the Gradle plugin's 2.4.21 (see task-1 report). Pin it to the catalog version.
+extra["kotlin.version"] = libs.versions.kotlin.get()
 
 dependencyManagement {
     imports {
@@ -17,19 +22,49 @@ dependencies {
     api(libs.kotlinx.coroutines.core)
     implementation(libs.spring.boot.starter)
     implementation(libs.spring.kafka)
-    implementation(libs.spring.boot.starter.grpc.client)
     implementation(libs.spring.boot.starter.data.mongodb)
     implementation(libs.jackson.module.kotlin)
     implementation(libs.kotlin.reflect)
-    // gRPC stubs for protocol/hub.proto will be generated here once the proto is wired (see proto/README.md).
+    // gRPC stubs generated from src/main/proto/hub.proto (see proto/README.md).
     implementation(libs.grpc.stub)
     implementation(libs.grpc.protobuf)
     implementation(libs.grpc.kotlin.stub)
+    implementation(libs.grpc.netty.shaded)
     implementation(libs.protobuf.kotlin)
+    implementation(libs.spring.security.oauth2.resource.server)
+    implementation(libs.spring.security.oauth2.jose)
+    compileOnly(libs.micrometer.tracing)
     annotationProcessor(libs.spring.boot.configuration.processor)
 
     testImplementation(libs.spring.boot.starter.test)
+    testImplementation(libs.kotlin.test.junit5)
     testImplementation(libs.mockk)
+    testImplementation(libs.awaitility)
+    testImplementation(libs.grpc.inprocess)
+    testImplementation(project(":kraken-messaging-test"))
+    testImplementation(libs.spring.boot.testcontainers)
+    testImplementation(libs.testcontainers.kafka)
+    testImplementation(libs.testcontainers.mongodb)
+    testImplementation(libs.nimbus.jose.jwt)
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+}
+
+val protobufVersion = libs.versions.protobuf.asProvider().get()
+val grpcVersion = libs.versions.grpc.asProvider().get()
+val grpcKotlinVersion = libs.versions.grpc.kotlin.get()
+
+protobuf {
+    protoc { artifact = "com.google.protobuf:protoc:$protobufVersion" }
+    plugins {
+        create("grpc") { artifact = "io.grpc:protoc-gen-grpc-java:$grpcVersion" }
+        create("grpckt") { artifact = "io.grpc:protoc-gen-grpc-kotlin:${grpcKotlinVersion}:jdk8@jar" }
+    }
+    generateProtoTasks {
+        all().forEach {
+            it.plugins { create("grpc"); create("grpckt") }
+            it.builtins { create("kotlin") }
+        }
+    }
 }
 
 java {
