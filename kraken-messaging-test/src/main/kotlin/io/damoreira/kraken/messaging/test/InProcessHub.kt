@@ -151,8 +151,8 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
             }
             session.serviceName = reg.serviceName
             session.instanceId = reg.instanceId
-            session.types = types
             session.registered = true
+            session.types = types
         }
     }
 
