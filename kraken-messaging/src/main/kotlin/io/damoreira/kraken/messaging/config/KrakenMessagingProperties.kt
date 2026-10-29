@@ -73,7 +73,5 @@ data class KrakenMessagingProperties(
     data class Security(
         /** Put the current request's bearer token in the hub request's `authorization` header. */
         val forwardJwt: Boolean = true,
-        /** Reject forwarded requests without a valid JWT; requires a `JwtDecoder` bean. */
-        val requireJwt: Boolean = true,
     )
 }

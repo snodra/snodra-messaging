@@ -102,7 +102,6 @@ class AutoConfigurationTest {
             "kraken.messaging.hub.enabled=false",
             "kraken.messaging.kafka.consumer.enabled=false",
             "kraken.messaging.outbox.enabled=false",
-            "kraken.messaging.security.require-jwt=false",
         )
 
     /** Hub enabled and pointed at the in-process hub through the channel factory override. */
@@ -206,5 +205,31 @@ class AutoConfigurationTest {
             assertIs<MongoTransactionManager>(context.getBean(PlatformTransactionManager::class.java))
             assertTrue(context.containsBean(TransactionManagementConfigUtils.TRANSACTION_ADVISOR_BEAN_NAME))
         }
+    }
+
+    @Test fun `starts without JwtDecoder`() {
+        runner.run { context ->
+            assertNotNull(context.getBean(ForwardedIdentityResolver::class.java))
+        }
+    }
+
+    @Test fun `require-jwt property fails startup with removal hint`() {
+        runner.withPropertyValues("kraken.messaging.security.require-jwt=true").run { context ->
+            assertTrue(context.startupFailure != null, "expected startup failure")
+            val message = generateSequence(context.startupFailure) { it.cause }.joinToString(" | ") { it.message.orEmpty() }
+            assertTrue(message.contains("kraken.messaging.security.require-jwt was removed"), message)
+        }
+        runner
+            .withInitializer { ctx ->
+                ctx.environment.propertySources.addFirst(
+                    org.springframework.core.env.SystemEnvironmentPropertySource(
+                        "test-systemEnvironment",
+                        mapOf("KRAKEN_MESSAGING_SECURITY_REQUIRE_JWT" to "false"),
+                    ),
+                )
+            }
+            .run { context ->
+                assertTrue(context.startupFailure != null, "expected startup failure from the env-style property")
+            }
     }
 }

@@ -186,13 +186,6 @@
       "description": "Put the current request's bearer token in the hub request's authorization header.",
       "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Security",
       "defaultValue": true
-    },
-    {
-      "name": "kraken.messaging.security.require-jwt",
-      "type": "java.lang.Boolean",
-      "description": "Reject forwarded requests without a valid JWT; requires a JwtDecoder bean.",
-      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Security",
-      "defaultValue": true
     }
   ]
 }

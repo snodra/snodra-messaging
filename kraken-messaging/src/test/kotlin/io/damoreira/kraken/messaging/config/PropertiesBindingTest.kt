@@ -42,7 +42,6 @@ class PropertiesBindingTest {
             assertEquals(Duration.ofDays(7), p.outbox.retention)
             assertEquals(Duration.ofDays(30), p.idempotency.retention)
             assertEquals(true, p.security.forwardJwt)
-            assertEquals(true, p.security.requireJwt)
         }
     }
 

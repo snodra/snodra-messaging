@@ -1,7 +1,9 @@
 package io.damoreira.kraken.messaging.e2e.a
 
+import io.damoreira.kraken.messaging.CommandBus
 import io.damoreira.kraken.messaging.MessageContext
 import io.damoreira.kraken.messaging.e2e.BHappened
+import io.damoreira.kraken.messaging.e2e.BRecord
 import io.damoreira.kraken.messaging.fixtures.TestJwt
 import io.damoreira.kraken.messaging.handler.EventHandler
 import org.springframework.boot.autoconfigure.SpringBootApplication
@@ -18,7 +20,7 @@ class ServiceA {
 }
 
 @Component
-class ServiceAEvents {
+class ServiceAEvents(private val commands: CommandBus) {
     val received = CopyOnWriteArrayList<BHappened>()
     val contexts = CopyOnWriteArrayList<Pair<BHappened, MessageContext>>()
 
@@ -26,5 +28,7 @@ class ServiceAEvents {
     fun on(event: BHappened, ctx: MessageContext) {
         received += event
         contexts += event to ctx
+        // No caller token here (events carry only userId): the command reaches B's unannotated handler anonymously.
+        commands.sendBlocking(BRecord(event.id))
     }
 }

@@ -1,5 +1,6 @@
 package io.damoreira.kraken.messaging.e2e
 
+import io.damoreira.kraken.messaging.AccessDeniedException
 import io.damoreira.kraken.messaging.CommandBus
 import io.damoreira.kraken.messaging.NoHandlerException
 import io.damoreira.kraken.messaging.QueryBus
@@ -59,6 +60,14 @@ data class Unowned(val key: String) : Query<BCount>
 
 data class BCount(val value: Int)
 
+/** Admin-only command owned by B (`@RequiresAuthentication("hasRole('kraken-admin')")`). */
+@MessageType("b.AdminOnly")
+data class BAdminOnly(val text: String) : Command<BPong>
+
+/** Sent by A's event handler (no caller token) to an unannotated handler on B. */
+@MessageType("b.Record")
+data class BRecord(val id: String) : Command<Unit>
+
 /** Two Spring Boot services talking through the real `kraken-hub:dev` image, Kafka and MongoDB. */
 class TwoServicesEndToEndTest {
 
@@ -113,6 +122,31 @@ class TwoServicesEndToEndTest {
             assertFailsWith<UnauthenticatedException> {
                 serviceA.getBean(CommandBus::class.java).sendBlocking(BPing("expired"))
             }
+        }
+    }
+
+
+    @Test
+    fun `command from event handler reaches unannotated handler without token`() {
+        val id = "rec-" + UUID.randomUUID()
+        asUser(TestJwt.token("u-42", listOf("user"))) {
+            serviceA.getBean(CommandBus::class.java).sendBlocking(BPing(id))
+        }
+        // A's @EventHandler for b.Happened sends b.Record with no token; B's unannotated handler must accept it.
+        val handlers = contextB!!.getBean(ServiceBHandlers::class.java)
+        await().atMost(Duration.ofSeconds(20)).until { handlers.recorded.contains(id) }
+    }
+
+    @Test
+    fun `annotated handler denies user without role end to end`() {
+        asUser(TestJwt.token("u-42", listOf("user"))) {
+            val e = assertFailsWith<AccessDeniedException> {
+                serviceA.getBean(CommandBus::class.java).sendBlocking(BAdminOnly("x"))
+            }
+            assertEquals("handler ServiceBHandlers.admin: access denied", e.message)
+        }
+        asUser(TestJwt.token("u-1", listOf("kraken-admin"))) {
+            assertEquals("u-1", serviceA.getBean(CommandBus::class.java).sendBlocking(BAdminOnly("x")).echoed)
         }
     }
 
@@ -191,7 +225,6 @@ class TwoServicesEndToEndTest {
                     "kraken.messaging.hub.request-timeout=10s",
                     "kraken.messaging.kafka.bootstrap-servers=${kafka!!.bootstrapServers}",
                     "kraken.messaging.kafka.topic=$TOPIC",
-                    "kraken.messaging.security.require-jwt=true",
                     "kraken.messaging.outbox.poll-interval=100ms",
                     "spring.mongodb.uri=$mongoUri", // Boot 4 key; spring.data.mongodb.uri is no longer bound
                     "spring.main.banner-mode=off",

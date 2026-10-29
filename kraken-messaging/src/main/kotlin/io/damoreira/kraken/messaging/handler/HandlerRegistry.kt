@@ -3,6 +3,7 @@ package io.damoreira.kraken.messaging.handler
 import io.damoreira.kraken.messaging.DuplicateHandlerException
 import io.damoreira.kraken.messaging.MessageContext
 import io.damoreira.kraken.messaging.codec.MessageTypeResolver
+import org.slf4j.LoggerFactory
 import org.springframework.aop.support.AopUtils
 import java.util.Collections
 import java.util.IdentityHashMap
@@ -15,6 +16,7 @@ import kotlin.reflect.full.memberFunctions
 
 /** Collects `@EventHandler`, `@CommandHandler` and `@QueryHandler` methods from beans. */
 class HandlerRegistry(private val typeResolver: MessageTypeResolver) {
+    private val log = LoggerFactory.getLogger(HandlerRegistry::class.java)
     private val events = ConcurrentHashMap<String, CopyOnWriteArrayList<HandlerMethod>>()
     private val commands = ConcurrentHashMap<String, HandlerMethod>()
     private val queries = ConcurrentHashMap<String, HandlerMethod>()
@@ -89,6 +91,7 @@ class HandlerRegistry(private val typeResolver: MessageTypeResolver) {
     }
 
     private fun add(handler: HandlerMethod) {
+        handler.authorization?.let { log.info("handler {} requires authentication: {}", handler.label, it.source) }
         when (handler.kind) {
             HandlerKind.EVENT -> events.computeIfAbsent(handler.typeName) { CopyOnWriteArrayList() }.add(handler)
             HandlerKind.COMMAND -> commands[handler.typeName] = handler
