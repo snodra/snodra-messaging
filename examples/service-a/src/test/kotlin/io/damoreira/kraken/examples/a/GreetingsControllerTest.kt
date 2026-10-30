@@ -71,6 +71,7 @@ class GreetingsControllerTest {
         buses.register(owner)
         assertThat(mvc.post().uri("/greetings").contentType(MediaType.APPLICATION_JSON).content("""{"name":"  "}"""))
             .hasStatus(HttpStatus.BAD_REQUEST)
+            .bodyJson().extractingPath("$.detail").isEqualTo("name must not be blank") // RFC 9457 problem detail, so curl shows the reason
         assertTrue(owner.commands.isEmpty())
         assertTrue(buses.published.isEmpty())
     }

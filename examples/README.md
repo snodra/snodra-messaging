@@ -73,7 +73,7 @@ service-b | B: answered CountGreetings name=Ada count=1
 service-a | A: asked CountGreetings name=Ada -> count=1
 ```
 
-`examples/smoke.sh` runs the whole sequence and checks every step (it waits for service-a, posts two greetings,
+`examples/smoke.sh` runs the whole sequence and checks every step (it waits for service-a and for service-b to own its types on the hub, posts two greetings,
 waits for both events, asserts the count grew by two, and asserts both services are on the topology):
 
 ```bash
@@ -85,8 +85,9 @@ bash examples/smoke.sh          # from kraken-messaging; prints SMOKE OK
 - **Nobody owns the command.** `docker compose ... stop service-b`, then post a greeting:
   `503 {"error":"NoHandlerException","message":"No handler registered for 'examples.SendGreeting'"}`.
   `docker compose ... start service-b` and the next post is a `200` once B has re-registered (a few seconds).
-- **Hub restart.** `docker compose ... restart hub`; both apps reconnect and re-register on their own, the next
-  post succeeds.
+- **Hub restart.** `docker compose ... restart hub`; both apps reconnect and re-register on their own. A post sent
+  in the first seconds can still get a 503 (B not yet re-registered) or 502 (A still reconnecting); after a few
+  seconds posts succeed again.
 - **Counts are in memory.** Restarting service-b resets `count` to 0; the events service-a already received stay in
   its own memory until it restarts.
 - **Run one side from the IDE.** `./gradlew :examples:service-a:bootRun` (or `service-b`) works against the compose
@@ -103,7 +104,7 @@ bash examples/smoke.sh          # from kraken-messaging; prints SMOKE OK
 | owner disconnected mid-request | 503 | `{"error":"HandlerDisconnectedException", ...}` |
 | no reply within the request timeout | 504 | `{"error":"MessageTimeoutException", ...}` |
 | any other messaging failure | 502 | `{"error":"<exception>", ...}` |
-| blank `name` | 400 | Spring's problem detail |
+| blank `name` | 400 | RFC 9457 problem detail: `{"type":"about:blank","title":"Bad Request","status":400,"detail":"name must not be blank",...}` |
 
 ## Tear down
 

@@ -15,6 +15,14 @@ for i in $(seq 1 90); do
   sleep 1
 done
 
+echo "1b. waiting for service-b to own examples.CountGreetings on the hub ($HUB) ..."
+for i in $(seq 1 90); do
+  TOPO=$(curl -fsS "$HUB/topology" 2>/dev/null || true)
+  if echo "$TOPO" | grep -q '"type":"examples.CountGreetings","kind":"QUERY","ownerService":"service-b","liveInstances":[1-9]'; then break; fi
+  [ "$i" -eq 90 ] && fail "service-b did not register on the hub in 90s; topology: $TOPO"
+  sleep 1
+done
+
 post_greeting() {
   local body
   body=$(curl -fsS -X POST "$A/greetings" -H 'content-type: application/json' -d '{"name":"Ada"}') \

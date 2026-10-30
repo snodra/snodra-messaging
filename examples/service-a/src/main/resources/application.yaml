@@ -9,6 +9,9 @@ kraken:
     kafka:
       bootstrap-servers: ${KRAKEN_KAFKA_BOOTSTRAP:localhost:9092}
 spring:
+  mvc:
+    problemdetails:
+      enabled: true   # 400s carry their reason as RFC 9457 `detail`
   application:
     name: ${KRAKEN_SERVICE_NAME:service-a}
   mongodb:
