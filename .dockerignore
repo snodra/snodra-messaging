@@ -1,0 +1,8 @@
+**/build/
+.gradle/
+.kotlin/
+.worktrees/
+.superpowers/
+.idea/
+docs/
+*.iml
