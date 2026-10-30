@@ -38,7 +38,7 @@ docker compose -f compose.yaml -f compose.local.yaml --profile examples up --bui
 
 This builds `kraken-hub:dev`, `kraken-examples-service-a:dev`, `kraken-examples-service-b:dev` and
 `kraken-examples-service-c:dev` from source (the first build takes several minutes, Rust compiles librdkafka; later
-ones are cached) and starts only what the two apps need: hub, Kafka,
+ones are cached) and starts only what the three apps need: hub, Kafka,
 the topic init job and MongoDB. Keycloak, RustFS and Grafana stay down. The hub's gRPC port is published on host
 **7002** (macOS AirPlay owns 7000) and its topology view on **7001**.
 
@@ -97,7 +97,9 @@ Add `service-c` to the `logs -f` command to see the `C:` lines.
 
 `examples/smoke.sh` runs the whole sequence and checks every step (it waits for service-a and for service-b to own its types on the hub, posts two greetings,
 waits for both events, asserts the count grew by two, asserts both services are on the topology, then waits for
-service-c, shouts and reverses `abc` and waits for both text events to reach A):
+service-c, shouts and reverses a per-run unique text and waits for both text events to reach A). It asserts only
+what A exposes over HTTP: B's and C's log lines and the order in which the text events arrive are not asserted;
+read them in the logs.:
 
 ```bash
 bash examples/smoke.sh          # from kraken-messaging; prints SMOKE OK

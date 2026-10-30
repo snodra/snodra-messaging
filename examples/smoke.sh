@@ -66,20 +66,24 @@ for i in $(seq 1 90); do
   sleep 1
 done
 
-echo "7. shouting 'abc' through service-c ..."
-SHOUTED=$(curl -fsS -X POST "$A/shouts" -H 'content-type: application/json' -d '{"text":"abc"}') || fail "POST /shouts failed"
-echo "$SHOUTED" | grep -q '"text":"ABC"' || fail "expected \"text\":\"ABC\", got: $SHOUTED"
+# A unique text per run: service-a keeps delivered events in memory, so a fixed text would pass on a previous run's data.
+T="abc$(date +%s)"
+UP=$(printf '%s' "$T" | tr a-z A-Z)
+REV=$(printf '%s' "$T" | rev)
+echo "7. shouting '$T' through service-c ..."
+SHOUTED=$(curl -fsS -X POST "$A/shouts" -H 'content-type: application/json' -d "{\"text\":\"$T\"}") || fail "POST /shouts failed"
+echo "$SHOUTED" | grep -q "\"text\":\"$UP\"" || fail "expected \"text\":\"$UP\", got: $SHOUTED"
 echo "   $SHOUTED"
 
-echo "8. reversing 'abc' through service-c ..."
-REVERSED=$(curl -fsS "$A/reverse/abc") || fail "GET /reverse/abc failed"
-echo "$REVERSED" | grep -q '"text":"cba"' || fail "expected \"text\":\"cba\", got: $REVERSED"
+echo "8. reversing '$T' through service-c ..."
+REVERSED=$(curl -fsS "$A/reverse/$T") || fail "GET /reverse/$T failed"
+echo "$REVERSED" | grep -q "\"text\":\"$REV\"" || fail "expected \"text\":\"$REV\", got: $REVERSED"
 echo "   $REVERSED"
 
 echo "9. waiting for TextShouted and TextReversed to reach service-a ..."
 for i in $(seq 1 90); do
   TEXTS=$(curl -fsS "$A/texts/delivered" || true)
-  if echo "$TEXTS" | grep -q '"kind":"shouted","text":"ABC"' && echo "$TEXTS" | grep -q '"kind":"reversed","text":"cba"'; then break; fi
+  if echo "$TEXTS" | grep -q "\"kind\":\"shouted\",\"text\":\"$UP\"" && echo "$TEXTS" | grep -q "\"kind\":\"reversed\",\"text\":\"$REV\""; then break; fi
   [ "$i" -eq 90 ] && fail "text events not delivered within 90s; last body: $TEXTS"
   sleep 1
 done

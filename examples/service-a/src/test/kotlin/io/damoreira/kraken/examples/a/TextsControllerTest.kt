@@ -38,8 +38,9 @@ class TextsControllerTest {
     /** Stand-in for service-c. */
     class StubC {
         val commands = CopyOnWriteArrayList<Shout>()
+        val queries = CopyOnWriteArrayList<Reverse>()
         @CommandHandler fun handle(c: Shout): Shouted { commands += c; return Shouted(c.text.uppercase()) }
-        @QueryHandler fun handle(q: Reverse): Reversed = Reversed(q.text.reversed())
+        @QueryHandler fun handle(q: Reverse): Reversed { queries += q; return Reversed(q.text.reversed()) }
     }
 
     @Autowired lateinit var mvc: MockMvcTester
@@ -66,6 +67,7 @@ class TextsControllerTest {
         assertThat(mvc.post().uri("/shouts").contentType(MediaType.APPLICATION_JSON).content("""{"text":"  "}""")).hasStatus(HttpStatus.BAD_REQUEST)
         assertThat(mvc.get().uri("/reverse/{text}", " ")).hasStatus(HttpStatus.BAD_REQUEST) // a URI variable, so the space is encoded once
         assertTrue(c.commands.isEmpty())
+        assertTrue(c.queries.isEmpty())
     }
 
     @Test fun `no handler maps to 503`() {
