@@ -1,0 +1,20 @@
+# Defaults point at the published ports of the umbrella compose (kraken/infra), so `bootRun` works from the IDE;
+# compose.local.yaml overrides them with in-network addresses.
+kraken:
+  messaging:
+    service-name: ${KRAKEN_SERVICE_NAME:service-a}
+    type-prefix: ${KRAKEN_SERVICE_NAME:service-a}
+    hub:
+      address: ${KRAKEN_HUB_ADDRESS:static://localhost:7002}
+    kafka:
+      bootstrap-servers: ${KRAKEN_KAFKA_BOOTSTRAP:localhost:9092}
+spring:
+  application:
+    name: ${KRAKEN_SERVICE_NAME:service-a}
+  mongodb:
+    uri: ${KRAKEN_MONGODB_URI:mongodb://localhost:27017/service-a?replicaSet=rs0&directConnection=true}
+server:
+  port: ${SERVER_PORT:8091}
+logging:
+  level:
+    io.damoreira.kraken: INFO
