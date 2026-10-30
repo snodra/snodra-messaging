@@ -42,7 +42,7 @@ publishing {
             pom {
                 name.set("kraken-messaging-test")
                 description.set("Testcontainers helpers for kraken services (Kafka, MongoDB, hub, RustFS)")
-                licenses { license { name.set("Apache-2.0") } }
+                licenses { license { name.set("MIT") } }
             }
         }
     }

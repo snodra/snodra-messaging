@@ -13,7 +13,7 @@
   <img alt="Kafka" src="https://img.shields.io/badge/Kafka-4.4-231F20?logo=apachekafka&logoColor=white">
   <img alt="gRPC" src="https://img.shields.io/badge/gRPC-1.85-244c5a?logo=grpc&logoColor=white">
   <a href="https://gitlab.damoreira.ml/kraken-org/kraken/-/tree/main/docs"><img alt="kraken docs" src="https://img.shields.io/badge/kraken-umbrella%20docs-0B5FFF"></a>
-  <img alt="license" src="https://img.shields.io/badge/license-pending-lightgrey">
+  <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT-green"></a>
 </p>
 
 ---
@@ -399,4 +399,4 @@ Conventions: [`../kraken/docs/04-repositories.md`](../kraken/docs/04-repositorie
 
 ## License
 
-No license has been chosen yet; all rights reserved until a `LICENSE` file lands.
+[MIT](LICENSE) © 2026 Guilherme D'Amoreira.

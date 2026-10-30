@@ -86,7 +86,7 @@ publishing {
             pom {
                 name.set("kraken-messaging")
                 description.set("Spring Boot starter: EventBus, CommandBus, QueryBus over Kafka and the kraken hub")
-                licenses { license { name.set("Apache-2.0") } }
+                licenses { license { name.set("MIT") } }
             }
         }
     }

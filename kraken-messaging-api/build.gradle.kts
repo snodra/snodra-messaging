@@ -21,7 +21,7 @@ publishing {
             pom {
                 name.set("kraken-messaging-api")
                 description.set("Annotations and marker types shared by all kraken *-api modules")
-                licenses { license { name.set("Apache-2.0") } }
+                licenses { license { name.set("MIT") } }
             }
         }
     }
