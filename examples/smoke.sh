@@ -22,7 +22,9 @@ post_greeting() {
   echo "$body" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p'
 }
 
-echo "2. sending two greetings for Ada ..."
+echo "2. reading the current count for Ada, then sending two greetings ..."
+BEFORE=$(curl -fsS "$A/greetings/Ada/count" | sed -n 's/.*"count":\([0-9]*\).*/\1/p') || fail "GET /greetings/Ada/count failed"
+[ -n "$BEFORE" ] || fail "no count in the query reply"
 ID1=$(post_greeting); ID2=$(post_greeting)
 [ -n "$ID1" ] && [ -n "$ID2" ] || fail "no id in the command reply (got '$ID1' / '$ID2')"
 echo "   accepted ids: $ID1 $ID2"
@@ -36,9 +38,9 @@ for i in $(seq 1 30); do
 done
 echo "   delivered: $DELIVERED"
 
-echo "4. querying the count ..."
+echo "4. querying the count (expect $BEFORE + 2; service-b counts in memory, so it is 2 on a fresh B) ..."
 COUNT=$(curl -fsS "$A/greetings/Ada/count") || fail "GET /greetings/Ada/count failed"
-echo "$COUNT" | grep -q '"count":2' || fail "expected \"count\":2, got: $COUNT"
+echo "$COUNT" | grep -q "\"count\":$((BEFORE + 2))" || fail "expected \"count\":$((BEFORE + 2)), got: $COUNT"
 echo "   $COUNT"
 
 echo "5. hub topology ..."
