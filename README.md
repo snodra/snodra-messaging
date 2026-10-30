@@ -1,4 +1,22 @@
-# kraken-messaging
+<h1 align="center">kraken-messaging</h1>
+
+<p align="center">
+  Axon-shaped messaging for Kotlin services: event, command and query buses over Kafka and the kraken hub, as a Spring Boot starter.
+</p>
+
+<p align="center">
+  <a href="https://gitlab.damoreira.ml/kraken-org/kraken-messaging/-/pipelines"><img alt="pipeline" src="https://gitlab.damoreira.ml/kraken-org/kraken-messaging/badges/main/pipeline.svg"></a>
+  <a href="https://gitlab.damoreira.ml/kraken-org/kraken-messaging/-/releases"><img alt="release" src="https://gitlab.damoreira.ml/kraken-org/kraken-messaging/-/badges/release.svg"></a>
+  <a href="https://gitlab.damoreira.ml/kraken-org/kraken-messaging/-/packages"><img alt="maven" src="https://img.shields.io/badge/maven-io.damoreira.kraken-C71A36?logo=apachemaven&logoColor=white"></a>
+  <img alt="Kotlin" src="https://img.shields.io/badge/Kotlin-2.4.21-7F52FF?logo=kotlin&logoColor=white">
+  <img alt="Spring Boot" src="https://img.shields.io/badge/Spring_Boot-4.1.2-6DB33F?logo=springboot&logoColor=white">
+  <img alt="Kafka" src="https://img.shields.io/badge/Kafka-4.4-231F20?logo=apachekafka&logoColor=white">
+  <img alt="gRPC" src="https://img.shields.io/badge/gRPC-1.85-244c5a?logo=grpc&logoColor=white">
+  <a href="https://gitlab.damoreira.ml/kraken-org/kraken/-/tree/main/docs"><img alt="kraken docs" src="https://img.shields.io/badge/kraken-umbrella%20docs-0B5FFF"></a>
+  <img alt="license" src="https://img.shields.io/badge/license-pending-lightgrey">
+</p>
+
+---
 
 Kotlin library for service-to-service messaging in the kraken platform. It provides the Axon-shaped `EventBus`,
 `CommandBus` and `QueryBus` facades with `@EventHandler` / `@CommandHandler` / `@QueryHandler` annotations. Events travel
@@ -7,6 +25,20 @@ to the kraken hub. It ships as a Spring Boot 4.1 starter plus a test module.
 
 Design and wire protocol: `../kraken/docs/02-messaging.md`. Test strategy: `../kraken/docs/09-observability-and-testing.md`.
 Repo conventions: `../kraken/docs/04-repositories.md`.
+
+## Table of contents
+
+- [Modules](#modules)
+- [Requirements](#requirements)
+- [Build, test, publish](#build-test-publish)
+- [Using the starter](#using-the-starter)
+- [Semantics worth knowing](#semantics-worth-knowing)
+- [Test helpers (`kraken-messaging-test`)](#test-helpers-kraken-messaging-test)
+- [Examples](#examples)
+- [Known limitations](#known-limitations)
+- [CI/CD pipeline](#cicd-pipeline)
+- [Contributing](#contributing)
+- [License](#license)
 
 ## Modules
 
@@ -337,3 +369,34 @@ Docker Compose from local builds together with the real `kraken-hub` image, Kafk
   requests or Kafka records, so a handler's spans do not join the caller's trace.
 - No service-to-service identity yet: commands sent from event handlers or scheduled jobs carry no token, so they can
   only reach handlers without `@RequiresAuthentication` (a `kraken-system` client-credentials token is future work).
+
+
+## CI/CD pipeline
+
+Defined in [`.gitlab-ci.yml`](.gitlab-ci.yml); runs on every push and merge request on
+`eclipse-temurin:25-jdk`.
+
+```mermaid
+flowchart LR
+    build["build<br/>gradlew assemble"] --> test["test<br/>gradlew test (dind)"] --> publish["publish-api · tag api/vX.Y.Z<br/>Package Registry"]
+```
+
+| Stage | Job | Runs | Produces |
+|---|---|---|---|
+| build | `build` | always | compiled modules |
+| test | `test` | always, with a `docker:dind` service; the hub end-to-end test is skipped when the hub image is not reachable | JUnit report |
+| publish | `publish-api` | only on tags `api/vX.Y.Z` | `kraken-messaging-api`, `kraken-messaging` and `kraken-messaging-test` at `X.Y.Z` in the Package Registry |
+
+Consumers resolve the artifacts from the group endpoint
+`https://gitlab.damoreira.ml/api/v4/groups/kraken-org/-/packages/maven`. No Docker image is built: this
+is a library; the example services are built from source by the sandbox compose.
+
+## Contributing
+
+Branches `feat/<topic>`, `fix/<topic>`, `chore/<topic>` off `main`, merged by merge request with a
+green pipeline; conventional commit messages. Design changes go to the umbrella repo first.
+Conventions: [`../kraken/docs/04-repositories.md`](../kraken/docs/04-repositories.md).
+
+## License
+
+No license has been chosen yet; all rights reserved until a `LICENSE` file lands.
