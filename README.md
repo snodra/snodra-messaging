@@ -15,6 +15,7 @@ Repo conventions: `../kraken/docs/04-repositories.md`.
 | `kraken-messaging-api` | `io.damoreira.kraken:kraken-messaging-api:0.1.0-SNAPSHOT` | `@MessageType`, `Event`, `Command<R>`, `Query<R>`. No Spring. Depended on by every `*-api` module. |
 | `kraken-messaging` | `io.damoreira.kraken:kraken-messaging:0.1.0-SNAPSHOT` | Spring Boot starter: buses, handler annotations, hub client, outbox, Kafka consumer, auto-configuration. |
 | `kraken-messaging-test` | `io.damoreira.kraken:kraken-messaging-test:0.1.0-SNAPSHOT` | `InMemoryBuses`, `InProcessHub`, `KrakenContainers`, `KrakenTestKafka`. |
+| `examples/examples-api`, `examples/service-a`, `examples/service-b` | not published | Two sample services talking through the hub; see [Examples](#examples). |
 
 ## Requirements
 
@@ -315,6 +316,13 @@ skipped when `kraken-hub:dev` (or the image named by `KRAKEN_HUB_IMAGE`) is not 
 ```bash
 docker build -t kraken-hub:dev .
 ```
+
+## Examples
+
+`examples/` holds two tiny Spring Boot services built on this starter: service-a sends a command and a query over
+the hub and reacts to an event, service-b owns the command and the query and publishes the event. They run in
+Docker Compose from local builds together with the real `kraken-hub` image, Kafka and MongoDB, and are driven with
+`curl`. See [examples/README.md](examples/README.md).
 
 ## Known limitations
 
