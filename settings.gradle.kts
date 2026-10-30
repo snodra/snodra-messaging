@@ -31,3 +31,7 @@ include("kraken-messaging-api")
 include("kraken-messaging")
 include("kraken-messaging-test")
 
+
+// Example services (never published): see examples/README.md
+include("examples:examples-api")
+include("examples:service-b")
