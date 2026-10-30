@@ -37,11 +37,11 @@ ID1=$(post_greeting); ID2=$(post_greeting)
 [ -n "$ID1" ] && [ -n "$ID2" ] || fail "no id in the command reply (got '$ID1' / '$ID2')"
 echo "   accepted ids: $ID1 $ID2"
 
-echo "3. waiting for both GreetingDelivered events to reach service-a ..."
-for i in $(seq 1 30); do
+echo "3. waiting for both GreetingDelivered events to reach service-a (a cold Kotlin consumer can take ~45 s to join its group) ..."
+for i in $(seq 1 90); do
   DELIVERED=$(curl -fsS "$A/greetings/delivered")
   if echo "$DELIVERED" | grep -q "$ID1" && echo "$DELIVERED" | grep -q "$ID2"; then break; fi
-  [ "$i" -eq 30 ] && fail "events not delivered within 30s; last body: $DELIVERED"
+  [ "$i" -eq 90 ] && fail "events not delivered within 90s; last body: $DELIVERED"
   sleep 1
 done
 echo "   delivered: $DELIVERED"
@@ -56,5 +56,33 @@ TOPOLOGY=$(curl -fsS "$HUB/topology") || fail "GET $HUB/topology failed"
 echo "$TOPOLOGY"
 echo "$TOPOLOGY" | grep -q '"service-a"' || fail "service-a missing from topology"
 echo "$TOPOLOGY" | grep -q '"service-b"' || fail "service-b missing from topology"
+
+echo "6. waiting for service-c to own examples.Shout and examples.Reverse on the hub ..."
+for i in $(seq 1 90); do
+  TOPO=$(curl -fsS "$HUB/topology" 2>/dev/null || true)
+  if echo "$TOPO" | grep -q '"type":"examples.Reverse","kind":"QUERY","ownerService":"service-c","liveInstances":[1-9]' \
+     && echo "$TOPO" | grep -q '"type":"examples.Shout","kind":"COMMAND","ownerService":"service-c","liveInstances":[1-9]'; then break; fi
+  [ "$i" -eq 90 ] && fail "service-c did not register on the hub in 90s; topology: $TOPO"
+  sleep 1
+done
+
+echo "7. shouting 'abc' through service-c ..."
+SHOUTED=$(curl -fsS -X POST "$A/shouts" -H 'content-type: application/json' -d '{"text":"abc"}') || fail "POST /shouts failed"
+echo "$SHOUTED" | grep -q '"text":"ABC"' || fail "expected \"text\":\"ABC\", got: $SHOUTED"
+echo "   $SHOUTED"
+
+echo "8. reversing 'abc' through service-c ..."
+REVERSED=$(curl -fsS "$A/reverse/abc") || fail "GET /reverse/abc failed"
+echo "$REVERSED" | grep -q '"text":"cba"' || fail "expected \"text\":\"cba\", got: $REVERSED"
+echo "   $REVERSED"
+
+echo "9. waiting for TextShouted and TextReversed to reach service-a ..."
+for i in $(seq 1 90); do
+  TEXTS=$(curl -fsS "$A/texts/delivered" || true)
+  if echo "$TEXTS" | grep -q '"kind":"shouted","text":"ABC"' && echo "$TEXTS" | grep -q '"kind":"reversed","text":"cba"'; then break; fi
+  [ "$i" -eq 90 ] && fail "text events not delivered within 90s; last body: $TEXTS"
+  sleep 1
+done
+echo "   delivered: $TEXTS"
 
 echo "SMOKE OK"
