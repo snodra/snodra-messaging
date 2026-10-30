@@ -9,7 +9,7 @@ stages:
 variables:
   GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.caching=true"
   GRADLE_USER_HOME: "$CI_PROJECT_DIR/.gradle"
-  REGISTRY: "registry.gitlab.damoreira.ml/kraken"
+  REGISTRY: "registry.gitlab.damoreira.ml/kraken-org"
   # Testcontainers in CI (Docker-in-Docker service)
   DOCKER_HOST: "tcp://docker:2375"
   DOCKER_TLS_CERTDIR: ""
@@ -34,7 +34,7 @@ test:
     - docker:28-dind
   variables:
     # The E2E test runs only when the pull in before_script succeeds; otherwise it is skipped.
-    KRAKEN_HUB_IMAGE: "registry.gitlab.damoreira.ml/kraken/kraken-hub:latest"
+    KRAKEN_HUB_IMAGE: "registry.gitlab.damoreira.ml/kraken-org/kraken-hub:latest"
   before_script:
     # The job image (eclipse-temurin) has no docker CLI; install it, it talks to the dind service via DOCKER_HOST.
     # KrakenContainers.hubImageAvailable() only inspects the local daemon, so the image must be pulled here.
