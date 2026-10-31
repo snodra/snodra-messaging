@@ -103,21 +103,29 @@ read them in the logs. Last, it freezes service-b with `docker pause` during a `
 `503 HandlerDisconnectedException` after about 10 s: the hub evicts a v2 session after 10 s without heartbeats (it
 took 30 s before protocol v2), and the sandbox hub gives `examples.CountGreetings` a 20 s per-type timeout
 (`KRAKEN_HUB_TIMEOUT_OVERRIDES` in `compose.local.yaml`) so the call outlives the eviction instead of ending in a 5 s
-`TIMEOUT`. It then waits for service-b to answer again. Finally it checks flow control (P1): the sandbox runs
-service-b with one permit (`KRAKEN_MESSAGING_HUB_MAX_CONCURRENT_HANDLERS=1`) and a slowed `CountGreetings`
-(`examples.count-delay`, env `EXAMPLES_COUNT_DELAY=200ms`), and service-c (Rust) with one permit
-(`KRAKEN_MAX_CONCURRENT_HANDLERS=1`). Step 12 sends 20 parallel counts: all must answer 200, one at a time (at least
-4 s; about 5 s, since each permit comes back after the 50 ms batching delay), with the topology showing requests
-queued for service-b while they wait. Step 13 sends 10 parallel shouts from Kotlin service-a to Rust service-c: all
-must answer 200. After each burst the topology must show the instance `flowControlled` with its permit back and
-nothing queued. `SERVICE_B_MAX_CONCURRENT_HANDLERS`, `SERVICE_C_MAX_CONCURRENT_HANDLERS` and `EXAMPLES_COUNT_DELAY`
-override the sandbox values (the smoke expects the defaults).
+`TIMEOUT`. It then waits for service-b to answer again. Finally it checks flow control (P1). The sandbox runs every
+service with the libraries' default concurrency; the one-permit demo is the opt-in override
+`kraken/infra/compose.flow-demo.yaml` (service-b: `KRAKEN_MESSAGING_HUB_MAX_CONCURRENT_HANDLERS=1` and a slowed
+`CountGreetings`, `examples.count-delay` / env `EXAMPLES_COUNT_DELAY=200ms`; service-c (Rust):
+`KRAKEN_MAX_CONCURRENT_HANDLERS=1`). The smoke recreates service-b and service-c with it (step 11b), then step 12
+sends 20 parallel counts: all must answer 200, one at a time (at least 4 s; about 4.5 s, since a one-permit instance
+gets each permit back at once), with the topology showing requests queued for service-b while they wait. Step 13
+sends 10 parallel shouts from Kotlin service-a to Rust service-c: all must answer 200. After each burst the topology
+must show the instance `flowControlled` with its permit back and nothing queued. Step 14 recreates both with the
+default concurrency again (also when a step failed). `SERVICE_B_MAX_CONCURRENT_HANDLERS`,
+`SERVICE_C_MAX_CONCURRENT_HANDLERS` and `EXAMPLES_COUNT_DELAY` tune the demo (the smoke expects its defaults);
+`INFRA_DIR` points the smoke at `kraken/infra` when the checkouts are not siblings. To keep the demo running by hand:
+
+```bash
+docker compose -f compose.yaml -f compose.local.yaml -f compose.flow-demo.yaml --profile examples \
+  up -d --no-deps --no-build service-b service-c   # from kraken/infra
+```
 
 ```bash
 bash examples/smoke.sh          # from kraken-messaging; prints SMOKE OK
 SKIP_PAUSE=1 bash examples/smoke.sh   # without the docker pause step
-SKIP_FLOW=1 bash examples/smoke.sh    # without the flow-control steps
-ONLY_FLOW=1 bash examples/smoke.sh    # only the flow-control steps
+SKIP_FLOW=1 bash examples/smoke.sh    # without the flow-control steps (they recreate service-b and service-c)
+ONLY_FLOW=1 bash examples/smoke.sh    # only the flow-control steps (needs the docker CLI)
 ONLY_PAUSE=1 bash examples/smoke.sh   # only the docker pause step (needs the docker CLI)
 ```
 

@@ -2,7 +2,7 @@
 # Smoke test for the examples sandbox: drives service-a over HTTP and checks the hub topology.
 # Usage: bash examples/smoke.sh      (A=http://localhost:8091 HUB=http://localhost:7001 to override;
 #        SKIP_PAUSE=1 skips the docker-pause step, ONLY_PAUSE=1 runs only it, B_CONTAINER names service-b;
-#        SKIP_FLOW=1 skips the flow-control steps, ONLY_FLOW=1 runs only them)
+#        SKIP_FLOW=1 skips the flow-control steps, ONLY_FLOW=1 runs only them; INFRA_DIR names kraken/infra)
 set -euo pipefail
 
 A=${A:-http://localhost:8091}
@@ -10,9 +10,47 @@ HUB=${HUB:-http://localhost:7001}
 
 fail() { echo "SMOKE FAILED: $*" >&2; exit 1; }
 
-# F3 (P1): flow control. compose.local.yaml gives service-b one permit and a 200 ms CountGreetings, and service-c
-# (Rust) one permit. Parallel calls queue in the hub and come back as latency, not timeouts or 503s.
+# F3 (P1): flow control. The steps recreate service-b and service-c with kraken/infra/compose.flow-demo.yaml (one
+# permit each, a 200 ms CountGreetings), so parallel calls queue in the hub and come back as latency, not timeouts
+# or 503s, and revert them to the default concurrency afterwards (also when a step fails). Needs the docker CLI.
 # SKIP_FLOW=1 skips these steps; ONLY_FLOW=1 runs only them. Timings in ms need perl (Time::HiRes).
+INFRA=${INFRA_DIR:-$(cd "$(dirname "$0")/../../kraken/infra" 2>/dev/null && pwd || true)}
+
+# Recreates service-b and service-c from the sandbox compose files plus the given extra files, without touching
+# their dependencies, and waits until both are registered with permits matching <pattern>.
+recreate_b_and_c() { # <permits pattern> [extra compose file ...]
+  local pattern=$1 i topo b c
+  shift
+  local files=(-f compose.yaml -f compose.local.yaml)
+  for f in "$@"; do files+=(-f "$f"); done
+  (cd "$INFRA" && docker compose "${files[@]}" --profile examples up -d --no-deps --no-build service-b service-c) \
+    >/dev/null 2>&1 || fail "docker compose could not recreate service-b and service-c in $INFRA"
+  for i in $(seq 1 120); do
+    topo=$(curl -fsS "$HUB/topology" 2>/dev/null || true)
+    b=$(instance_fields "$topo" service-b)
+    c=$(instance_fields "$topo" service-c)
+    if echo "$b" | grep -Eq "\"permitsAvailable\":$pattern," && echo "$c" | grep -Eq "\"permitsAvailable\":$pattern," \
+       && echo "$topo" | grep -q '"type":"examples.CountGreetings","kind":"QUERY","ownerService":"service-b","liveInstances":1'; then
+      return 0
+    fi
+    sleep 1
+  done
+  fail "service-b and service-c did not come back with permits $pattern in 120s; service-b: $b; service-c: $c"
+}
+
+flow_demo_on() {
+  command -v docker >/dev/null || fail "docker CLI needed for the flow steps (or set SKIP_FLOW=1)"
+  [ -n "$INFRA" ] && [ -f "$INFRA/compose.flow-demo.yaml" ] || fail "kraken/infra not found (set INFRA_DIR)"
+  echo "11b. recreating service-b and service-c with compose.flow-demo.yaml (one permit each, 200 ms counts) ..."
+  trap flow_demo_off EXIT
+  recreate_b_and_c 1 compose.flow-demo.yaml
+}
+
+flow_demo_off() {
+  trap - EXIT
+  echo "14. reverting service-b and service-c to the default concurrency ..."
+  recreate_b_and_c '([2-9]|[1-9][0-9]+)'
+}
 parallel_calls() { # <n> <method> <url> [body]: prints one HTTP code per line
   local n=$1 method=$2 url=$3 body=${4:-} dir
   dir=$(mktemp -d)
@@ -32,8 +70,9 @@ now_ms() { perl -MTime::HiRes=time -e 'printf "%d\n", time * 1000'; }
 
 # The fields of <service>'s first instance on the hub topology, on one line ("instanceId": ... up to "tags":).
 # Splitting at '{' keeps it to grep and tr: the type arrays before "flowControlled" rule out a single regex.
+# Empty (never a failure, which pipefail and set -e would turn into a silent exit) while the service is not listed.
 instance_fields() { # <topology json> <service>
-  printf '%s' "$1" | tr '{' '\n' | grep -A1 "^\"serviceName\":\"$2\"" | tail -n 1
+  printf '%s' "$1" | tr '{' '\n' | { grep -A1 "^\"serviceName\":\"$2\"" || true; } | tail -n 1
 }
 
 # After a burst the permits must come back (a lost permit would stall the instance): flow-controlled, permits
@@ -49,6 +88,7 @@ expect_permit_back() { # <service>
 }
 
 flow_steps() {
+  flow_demo_on
   echo "12. 20 parallel CountGreetings calls into service-b (1 permit, 200 ms each): all succeed, queued in the hub ..."
   local started elapsed codes ok out pid queued max_queued=0
   out=$(mktemp)
@@ -80,6 +120,7 @@ flow_steps() {
   echo "   $ok of 10 answered 200 in ${elapsed} ms"
   [ "$ok" -eq 10 ] || fail "expected 10 x 200, got: $(echo "$codes" | sort | uniq -c | tr '\n' ' ')"
   expect_permit_back service-c
+  flow_demo_off
 }
 
 # F1 (P0): a frozen handler is evicted after the 10 s v2 heartbeat timeout, so a call to it fails in ~10 s
