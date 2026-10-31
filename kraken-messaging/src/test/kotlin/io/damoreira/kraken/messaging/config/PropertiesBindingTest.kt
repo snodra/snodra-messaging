@@ -109,6 +109,32 @@ class PropertiesBindingTest {
         }
     }
 
+    /** The messages of the startup failure (and its causes) with [properties] set; fails if the context started. */
+    private fun startupFailure(vararg properties: String): String {
+        var messages = ""
+        runner.withPropertyValues(*required, *properties).run { context ->
+            val failure = assertNotNull(context.startupFailure, "context started with ${properties.toList()}")
+            messages = generateSequence<Throwable>(failure) { it.cause }.joinToString(" | ") { it.message.orEmpty() }
+        }
+        return messages
+    }
+
+    @Test fun `invalid retry settings fail at startup whether or not retry is enabled`() {
+        for (enabled in listOf("false", "true")) {
+            val on = "kraken.messaging.hub.retry.enabled=$enabled"
+            for ((property, expected) in listOf(
+                "kraken.messaging.hub.retry.max-attempts=0" to "maxAttempts must be >= 1",
+                "kraken.messaging.hub.retry.multiplier=0.5" to "multiplier must be >= 1",
+                "kraken.messaging.hub.retry.initial-backoff=-1ms" to "backoffs must not be negative",
+                "kraken.messaging.hub.retry.max-backoff=-1s" to "backoffs must not be negative",
+            )) {
+                val messages = startupFailure(on, property)
+                assertTrue(expected in messages, "$on, $property: $messages")
+                assertTrue("kraken.messaging.hub.retry" in messages, "$on, $property: $messages")
+            }
+        }
+    }
+
     @Test fun `missing service-name fails binding`() {
         runner.withPropertyValues("kraken.messaging.type-prefix=kraken.orders").run { context ->
             val failure = assertNotNull(context.startupFailure)

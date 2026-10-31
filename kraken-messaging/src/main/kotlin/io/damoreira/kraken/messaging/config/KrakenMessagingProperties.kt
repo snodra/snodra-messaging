@@ -50,20 +50,32 @@ data class KrakenMessagingProperties(
         val retry: Retry = Retry(),
     )
 
+    /** `hub.retry.*`: validated by [RetryPolicy]'s rules at startup, also while [enabled] is false. */
     data class Retry(
         /** Retry failed sends that are safe to retry; off by default. */
         val enabled: Boolean = false,
-        /** Total attempts including the first. */
+        /** Total attempts including the first (>= 1; 1 = no retry). */
         val maxAttempts: Int = 3,
-        /** Wait before the second attempt. */
+        /** Wait before the second attempt (not negative). */
         val initialBackoff: Duration = Duration.ofMillis(100),
-        /** Growth of the wait per further attempt. */
+        /** Growth of the wait per further attempt (>= 1). */
         val multiplier: Double = 2.0,
-        /** Upper bound of a single wait. */
+        /** Upper bound of a single wait (not negative). */
         val maxBackoff: Duration = Duration.ofSeconds(2),
     ) {
+        init {
+            // A bad value fails the startup now, not later when someone switches retry on.
+            try {
+                toPolicy()
+            } catch (e: IllegalArgumentException) {
+                throw IllegalArgumentException("kraken.messaging.hub.retry: ${e.message}", e)
+            }
+        }
+
         /** The configured policy, or null when retry is disabled. */
-        fun policy(): RetryPolicy? = if (enabled) RetryPolicy(maxAttempts, initialBackoff, multiplier, maxBackoff) else null
+        fun policy(): RetryPolicy? = if (enabled) toPolicy() else null
+
+        private fun toPolicy() = RetryPolicy(maxAttempts, initialBackoff, multiplier, maxBackoff)
     }
 
     data class Backoff(

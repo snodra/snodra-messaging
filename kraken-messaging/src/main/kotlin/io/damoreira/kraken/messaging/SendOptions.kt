@@ -31,6 +31,10 @@ enum class MessageKind { COMMAND, QUERY }
  * request with a fresh id; all attempts together stay within the caller's time budget (see [SendOptions.timeout]), and
  * a retry is started only while at least `max(initialBackoff, MIN_ATTEMPT_BUDGET)` of it is left after the backoff.
  *
+ * Any `RetryPolicy` object is in force as given: there is no separate on/off switch on the policy, and
+ * `maxAttempts = 1` ([NONE]) is a single attempt, i.e. no retry. Invalid values are rejected on construction (and a
+ * misconfigured `kraken.messaging.hub.retry.*` fails the startup, even while retry is disabled).
+ *
  * @property maxAttempts total attempts, the first one included (1 = no retry)
  * @property initialBackoff wait before the second attempt
  * @property multiplier growth of the wait per further attempt (>= 1)
