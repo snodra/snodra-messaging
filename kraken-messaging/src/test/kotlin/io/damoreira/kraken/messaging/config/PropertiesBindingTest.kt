@@ -69,6 +69,40 @@ class PropertiesBindingTest {
             }
     }
 
+    @Test fun `P1 hub defaults`() {
+        runner.withPropertyValues(*required).run { context ->
+            val hub = context.getBean(KrakenMessagingProperties::class.java).hub
+            assertEquals(100, hub.loadFactor)
+            assertEquals(emptyMap(), hub.tags)
+            assertEquals(emptyMap(), hub.priorities)
+            assertEquals(false, hub.retry.enabled)
+            assertEquals(3, hub.retry.maxAttempts)
+            assertEquals(java.time.Duration.ofMillis(100), hub.retry.initialBackoff)
+            assertEquals(2.0, hub.retry.multiplier)
+            assertEquals(java.time.Duration.ofSeconds(2), hub.retry.maxBackoff)
+            assertEquals(null, hub.retry.policy())
+        }
+    }
+
+    @Test fun `load factor, tags, per-type priorities and retry bind`() {
+        runner.withPropertyValues(
+            *required,
+            "kraken.messaging.hub.load-factor=250",
+            "kraken.messaging.hub.tags.zone=eu-1",
+            "kraken.messaging.hub.priorities.orders.PlaceOrder=5",
+            "kraken.messaging.hub.priorities[orders.CancelOrder]=-1",
+            "kraken.messaging.hub.retry.enabled=true",
+            "kraken.messaging.hub.retry.max-attempts=4",
+            "kraken.messaging.hub.retry.initial-backoff=50ms",
+        ).run { context ->
+            val hub = context.getBean(KrakenMessagingProperties::class.java).hub
+            assertEquals(250, hub.loadFactor)
+            assertEquals(mapOf("zone" to "eu-1"), hub.tags)
+            assertEquals(mapOf("orders.PlaceOrder" to 5, "orders.CancelOrder" to -1), hub.priorities)
+            assertEquals(io.damoreira.kraken.messaging.RetryPolicy(maxAttempts = 4, initialBackoff = java.time.Duration.ofMillis(50)), hub.retry.policy())
+        }
+    }
+
     @Test fun `request-timeout binds when set`() {
         runner.withPropertyValues(*required, "kraken.messaging.hub.request-timeout=12s").run { context ->
             assertEquals(Duration.ofSeconds(12), context.getBean(KrakenMessagingProperties::class.java).hub.requestTimeout)

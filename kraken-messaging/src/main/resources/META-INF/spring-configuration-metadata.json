@@ -18,6 +18,12 @@
       "sourceMethod": "getReconnectBackoff()"
     },
     {
+      "name": "kraken.messaging.hub.retry",
+      "type": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Retry",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Hub",
+      "sourceMethod": "getRetry()"
+    },
+    {
       "name": "kraken.messaging.kafka",
       "type": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Kafka",
       "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties",
@@ -105,9 +111,63 @@
     {
       "name": "kraken.messaging.hub.max-concurrent-handlers",
       "type": "java.lang.Integer",
-      "description": "Incoming hub requests handled concurrently by this instance; further requests wait for a free slot.",
+      "description": "Incoming hub requests handled concurrently by this instance; further requests wait for a free slot. Also announced as initial_permits to a hub with flow control, which queues the excess.",
       "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Hub",
       "defaultValue": 256
+    },
+    {
+      "name": "kraken.messaging.hub.load-factor",
+      "type": "java.lang.Integer",
+      "description": "Relative capacity of this instance (Register.load_factor, 100 = normal); weights its share of the hub's routing.",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Hub",
+      "defaultValue": 100
+    },
+    {
+      "name": "kraken.messaging.hub.tags",
+      "type": "java.util.Map<java.lang.String,java.lang.String>",
+      "description": "Labels announced in Register.tags, for example zone=eu-1; unkeyed requests prefer instances whose tags match the sender's.",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Hub"
+    },
+    {
+      "name": "kraken.messaging.hub.priorities",
+      "type": "java.util.Map<java.lang.String,java.lang.Integer>",
+      "description": "Default Request.priority per message type name (types not listed send 0); higher is served first when the hub queues requests.",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Hub"
+    },
+    {
+      "name": "kraken.messaging.hub.retry.enabled",
+      "type": "java.lang.Boolean",
+      "description": "Retry failed sends that are safe to retry (see RetryClassification).",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Retry",
+      "defaultValue": false
+    },
+    {
+      "name": "kraken.messaging.hub.retry.max-attempts",
+      "type": "java.lang.Integer",
+      "description": "Total attempts including the first.",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Retry",
+      "defaultValue": 3
+    },
+    {
+      "name": "kraken.messaging.hub.retry.initial-backoff",
+      "type": "java.time.Duration",
+      "description": "Wait before the second attempt.",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Retry",
+      "defaultValue": "100ms"
+    },
+    {
+      "name": "kraken.messaging.hub.retry.multiplier",
+      "type": "java.lang.Double",
+      "description": "Growth of the wait per further attempt.",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Retry",
+      "defaultValue": 2.0
+    },
+    {
+      "name": "kraken.messaging.hub.retry.max-backoff",
+      "type": "java.time.Duration",
+      "description": "Upper bound of a single wait; all attempts stay within the caller's timeout budget.",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Retry",
+      "defaultValue": "2s"
     },
     {
       "name": "kraken.messaging.kafka.bootstrap-servers",

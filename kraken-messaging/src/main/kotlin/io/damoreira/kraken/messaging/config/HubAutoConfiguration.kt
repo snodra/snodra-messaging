@@ -86,6 +86,8 @@ class HubAutoConfiguration {
             scope = scope,
             handlerDispatcher = handlerDispatcher,
             maxConcurrentHandlers = hub.maxConcurrentHandlers,
+            loadFactor = hub.loadFactor,
+            tags = hub.tags,
         )
         return HubLifecycle(connection, registry, scope, handlerDispatcher)
     }
@@ -108,6 +110,8 @@ class HubAutoConfiguration {
         forwardJwt = properties.security.forwardJwt,
         traceHeaders = traceHeaders,
         requestTimeout = properties.hub.requestTimeout,
+        priorities = properties.hub.priorities,
+        retry = properties.hub.retry.policy(),
     )
 
     // Facades delegate instead of returning hubBus itself: an object implementing both interfaces would make each

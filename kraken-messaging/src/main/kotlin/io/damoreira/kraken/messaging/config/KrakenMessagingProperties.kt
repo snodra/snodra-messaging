@@ -1,5 +1,6 @@
 package io.damoreira.kraken.messaging.config
 
+import io.damoreira.kraken.messaging.RetryPolicy
 import org.springframework.boot.context.properties.ConfigurationProperties
 import java.time.Duration
 
@@ -34,9 +35,36 @@ data class KrakenMessagingProperties(
         val heartbeatInterval: Duration = Duration.ofSeconds(10),
         /** Jittered exponential backoff when the stream drops. */
         val reconnectBackoff: Backoff = Backoff(),
-        /** Incoming hub requests handled concurrently by this instance; further requests wait for a free slot. */
+        /**
+         * Incoming hub requests handled concurrently by this instance; further requests wait for a free slot. Also the
+         * `initial_permits` announced to a hub with flow control, which then queues the excess on its side.
+         */
         val maxConcurrentHandlers: Int = 256,
+        /** Relative capacity of this instance (`Register.load_factor`, 100 = normal): weights its share of routing. */
+        val loadFactor: Int = 100,
+        /** Labels announced in `Register.tags` (for example `zone: eu-1`); unkeyed requests prefer matching instances. */
+        val tags: Map<String, String> = emptyMap(),
+        /** Default `Request.priority` per message type name; types not listed send 0. Higher is served first when queued. */
+        val priorities: Map<String, Int> = emptyMap(),
+        /** Opt-in retry of failed sends (see `RetryClassification`). */
+        val retry: Retry = Retry(),
     )
+
+    data class Retry(
+        /** Retry failed sends that are safe to retry; off by default. */
+        val enabled: Boolean = false,
+        /** Total attempts including the first. */
+        val maxAttempts: Int = 3,
+        /** Wait before the second attempt. */
+        val initialBackoff: Duration = Duration.ofMillis(100),
+        /** Growth of the wait per further attempt. */
+        val multiplier: Double = 2.0,
+        /** Upper bound of a single wait. */
+        val maxBackoff: Duration = Duration.ofSeconds(2),
+    ) {
+        /** The configured policy, or null when retry is disabled. */
+        fun policy(): RetryPolicy? = if (enabled) RetryPolicy(maxAttempts, initialBackoff, multiplier, maxBackoff) else null
+    }
 
     data class Backoff(
         val min: Duration = Duration.ofMillis(500),

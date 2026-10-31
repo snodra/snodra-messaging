@@ -145,7 +145,15 @@ All keys (`kraken.messaging.*`; durations accept `200ms`, `5s`, `7d`; relaxed bi
 | `hub.heartbeat-interval` | `10s` | Fallback heartbeat period, used only when the hub does not announce one (legacy hubs); a v2 hub announces 3 s in its `RegisterAck`. |
 | `hub.reconnect-backoff.min` | `500ms` | Initial reconnect delay when the stream drops; doubles per failed attempt. |
 | `hub.reconnect-backoff.max` | `5s` | Maximum reconnect delay. Every wait is jittered by ±20 % and capped at this value (at the cap: 80-100 % of it); the delay resets to `min` once an attempt reached the hub's handshake. |
-| `hub.max-concurrent-handlers` | `256` | Incoming hub requests handled concurrently by this instance; further requests wait for a free slot. |
+| `hub.max-concurrent-handlers` | `256` | Incoming hub requests handled concurrently by this instance; further requests wait for a free slot. Also announced as `initial_permits` to a hub with flow control, which then queues the excess on its side. |
+| `hub.load-factor` | `100` | Relative capacity of this instance (`Register.load_factor`); weights its share of the hub's routing (keyed ring and load score). |
+| `hub.tags.<name>` | none | Labels announced in `Register.tags`, for example `hub.tags.zone=eu-1`; unkeyed requests prefer instances whose tags match the sender's. |
+| `hub.priorities.<type>` | none (0) | Default `Request.priority` per message type, for example `hub.priorities.orders.PlaceOrder=5`; higher is served first when the hub queues requests for a busy handler. `SendOptions.priority` wins. |
+| `hub.retry.enabled` | `false` | Retry failed sends that are safe to retry (see "Retry" below). `SendOptions.retry` overrides per call. |
+| `hub.retry.max-attempts` | `3` | Total attempts including the first. |
+| `hub.retry.initial-backoff` | `100ms` | Wait before the second attempt. |
+| `hub.retry.multiplier` | `2` | Growth of the wait per further attempt. |
+| `hub.retry.max-backoff` | `2s` | Upper bound of a single wait. |
 | `kafka.bootstrap-servers` | `broker:19092` | Kafka bootstrap servers. |
 | `kafka.topic` | `kraken.events` | Events topic. |
 | `kafka.consumer.enabled` | `true` | Set `false` in tools that only publish. |
@@ -270,6 +278,13 @@ val logged = commandBus.send(LogWorkout("legs"))                 // suspend
 val loggedNow = commandBus.sendBlocking(LogWorkout("legs"))      // blocking, for MVC controllers
 val workout = queryBus.send(GetWorkout(id))
 eventBus.publish(WorkoutLogged(id, owner, at), key = id)         // inside the caller's Mongo transaction
+
+// Per call: priority, timeout (the total budget with retry), routing key, retry policy.
+val urgent = commandBus.send(
+    LogWorkout("legs"),
+    SendOptions(priority = 10, timeout = Duration.ofSeconds(2), routingKey = id, retry = RetryPolicy(maxAttempts = 3)),
+)
+val quick = queryBus.sendBlocking(GetWorkout(id), SendOptions(retry = RetryPolicy.NONE)) // no retry for this call
 ```
 
 ## Semantics worth knowing
@@ -320,7 +335,7 @@ eventBus.publish(WorkoutLogged(id, owner, at), key = id)         // inside the c
 - **Shutdown.** The hub connection, outbox publisher and Kafka consumer start before the web server accepts traffic and
   stop after its graceful drain. On stop the instance first announces an empty registration so the hub stops routing to
   it, waits up to 5 s for incoming handlers still running, then closes the stream.
-- **Handshake.** `Register` announces protocol version 2 (`HubProtocol`), no capabilities yet and `client_version`
+- **Handshake.** `Register` announces protocol version 2 (`HubProtocol`), the `flow-control` capability and `client_version`
   `kraken-messaging/<version>`. A v2 hub answers with a `RegisterAck` (hub id, heartbeat interval and timeout, default,
   maximum and per-type request timeouts) before the echo of the first heartbeat; a hub whose echo arrives first is a
   legacy (v1) hub and the connection keeps the pre-v2 behaviour (10 s heartbeats, `timeout_ms` always sent).
@@ -334,6 +349,21 @@ eventBus.publish(WorkoutLogged(id, owner, at), key = id)         // inside the c
 - **Lost connections.** A request the stream never accepted fails with `HubUnavailableException` (the handler did not
   run, retrying is safe). A request written to a stream that broke before the answer fails with
   `HubConnectionLostException`: the outcome is unknown, as with a timeout.
+- **Flow control.** `Register` declares the `flow-control` capability with `initial_permits = hub.max-concurrent-handlers`.
+  A hub that shares it (its ack lists `flow-control`) forwards to this instance only against permits and queues the rest
+  per instance, highest `Request.priority` first, each request keeping its own deadline; every completed handler pays
+  one permit back on the stream the request arrived on, batched (one `Permits` message per 16 grants or 50 ms). A slow
+  handler therefore means latency, not timeouts or `handler busy`. Against a hub without the capability (P0 or older)
+  nothing changes and no `Permits` are sent.
+- **Busy handlers.** A full hub queue answers `HandlerBusyException` (`RESOURCE_EXHAUSTED`): the request was rejected
+  before any handler ran, so retrying later is safe. Older clients get `RemoteHandlerException` "handler busy" instead.
+- **Retry** (opt-in, `hub.retry.*` or `SendOptions.retry`). Only errors `RetryClassification.isRetryable` allows are
+  retried: for commands `HubUnavailableException`, `NoHandlerException`, `HandlerBusyException`; for queries also
+  `HandlerDisconnectedException`, `MessageTimeoutException`, `HubConnectionLostException`. A command is never retried after
+  a timeout or a lost connection (it may have run). Each attempt is a new request (fresh id, same correlation id); all
+  attempts share one budget, the chosen timeout or else the hub's deadline for the type (its per-type override or
+  default), each sending the remaining budget as `timeout_ms`; when the next backoff would exhaust the budget the last
+  error is thrown. Local handlers (same instance) are never retried.
 - **Hub errors.** The hub answers malformed or duplicate in-flight requests with `INVALID_REQUEST`; other hub errors map to
   the exception types in `io.damoreira.kraken.messaging` (`NoHandlerException`, `UnauthenticatedException`, ...).
 
@@ -345,11 +375,15 @@ eventBus.publish(WorkoutLogged(id, owner, at), key = id)         // inside the c
   `lastRequest()`, `registrationsFrom(...)`, `lastRegisterFrom(...)`, `acksSentTo(...)`, `echoHeartbeats = false` to
   simulate a hub that stopped answering), for hub-client tests without a container. It speaks protocol v2 (a
   `RegisterAck` with `heartbeatInterval`, `heartbeatTimeout`, `replyTimeout` as default, `maxTimeout`, `typeTimeouts`);
-  `legacy = true` emulates a v1 hub, `emitTimeouts = false` a hub that loses requests.
+  `legacy = true` emulates a v1 hub, `emitTimeouts = false` a hub that loses requests. Flow control as the real hub:
+  permits, a per-instance queue by priority (`queueCapacity`), `RESOURCE_EXHAUSTED` or "handler busy" by sender capability,
+  `permitsGrantedBy(...)`, `permitMessagesFrom(...)`, `permitsAvailable(...)`, `queuedFor(...)`, `forwardedOrder()`;
+  `flowControl = false` emulates the P0 hub (v2 without flow control).
 - `KrakenContainers`: unstarted Testcontainers definitions. `kafka()`, `mongo()` (single-node replica set, needed for
   transactions), `hub()` from image `kraken-hub:dev` or the one named by `KRAKEN_HUB_IMAGE`, `hubBaseline()` from the previous hub release
-  `kraken-hub:v1-baseline` or `KRAKEN_HUB_BASELINE_IMAGE` (compatibility tests), and `hubImageAvailable()` /
-  `hubBaselineImageAvailable()`.
+  `kraken-hub:v1-baseline` or `KRAKEN_HUB_BASELINE_IMAGE` and `hubP0()` from the P0 hub `kraken-hub:p0` or
+  `KRAKEN_HUB_P0_IMAGE` (compatibility tests), `hub(env)` for the hub under test with extra `KRAKEN_HUB_*` settings, and
+  `hubImageAvailable()` / `hubBaselineImageAvailable()` / `hubP0ImageAvailable()`.
 - `KrakenTestKafka(bootstrap, typePrefix, topic).awaitEvent<T>()`: reads an event back from the topic.
 
 ```kotlin
