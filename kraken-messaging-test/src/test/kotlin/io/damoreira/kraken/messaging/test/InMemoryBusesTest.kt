@@ -52,6 +52,7 @@ class InMemoryBusesTest {
 
         val anonymous = InMemoryBuses(userId = null).register(AdminOnly())
         assertFailsWith<io.damoreira.kraken.messaging.UnauthenticatedException> { anonymous.send(Ping("x")) }
+        Unit
     }
 }
 

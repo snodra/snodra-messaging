@@ -186,11 +186,13 @@ class HandlerInvokerTest {
     @Test fun `annotated handler with matching role runs`() = runBlocking {
         val (invoker, codec) = invokerFor(AuthHandlers())
         assertIs<InvocationResult.Success>(invoker.invokeCommand("test.Ping", codec.encode(Ping("x")), ctx("test.Ping"), identity("kraken-admin")))
+        Unit
     }
 
     @Test fun `unannotated handler accepts anonymous`() = runBlocking {
         val (invoker, codec) = invokerFor(InvokerHandlers())
         assertIs<InvocationResult.Success>(invoker.invokeCommand("test.Ping", codec.encode(Ping("x")), ctx("test.Ping"), null))
+        Unit
     }
 
     @Test fun `handler throwing AccessDeniedException maps to PERMISSION_DENIED`() = runBlocking {
