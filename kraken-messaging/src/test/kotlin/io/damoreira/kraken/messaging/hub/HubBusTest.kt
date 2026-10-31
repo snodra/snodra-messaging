@@ -253,14 +253,27 @@ class HubBusTest {
         assertTrue(sent.first() in 600..700 && sent.zipWithNext().all { (a, b) -> b < a }, "timeout_ms per attempt: $sent")
     }
 
+    @Test fun `no attempt is started on a near-zero remaining budget`() = runBlocking {
+        val attempts = CopyOnWriteArrayList<Request>()
+        val policy = RetryPolicy(maxAttempts = 100, initialBackoff = Duration.ofMillis(100), multiplier = 1.0)
+        val bus = remoteBus({ attempts += it; error(it.id, ErrorCode.NO_HANDLER, "gone") }) { bus(it, requestTimeout = null, retry = policy) }
+        val started = System.nanoTime()
+        assertFailsWith<NoHandlerException> { bus.send(Ping("x"), SendOptions(timeout = Duration.ofSeconds(1))) }
+        val elapsed = Duration.ofNanos(System.nanoTime() - started)
+        assertTrue(elapsed < Duration.ofSeconds(1), "took $elapsed for a 1 s budget")
+        val retried = attempts.drop(1).map { it.timeoutMs }
+        // Every retry still gets at least max(initialBackoff, 250 ms) of the budget.
+        assertTrue(retried.isNotEmpty() && retried.all { it >= 250 }, "timeout_ms of the retried attempts: $retried")
+    }
+
     @Test fun `without a chosen timeout the budget is the hub's bound for the type`() = runBlocking {
-        hub.typeTimeouts = mapOf("test.Ping" to Duration.ofMillis(400))
+        hub.typeTimeouts = mapOf("test.Ping" to Duration.ofMillis(600))
         val attempts = CopyOnWriteArrayList<Request>()
         val slow = RetryPolicy(maxAttempts = 10, initialBackoff = Duration.ofMillis(150), multiplier = 1.0, maxBackoff = Duration.ofMillis(150))
         val bus = remoteBus({ attempts += it; error(it.id, ErrorCode.RESOURCE_EXHAUSTED, "full") }) { bus(it, requestTimeout = null, retry = slow) }
         assertFailsWith<HandlerBusyException> { bus.send(Ping("x")) }
-        assertTrue(attempts.size in 2..3, "attempts=${attempts.size}")
-        assertTrue(attempts.first().timeoutMs in 300..400, "first attempt sent ${attempts.first().timeoutMs}")
+        assertTrue(attempts.size in 2..4, "attempts=${attempts.size}")
+        assertTrue(attempts.first().timeoutMs in 500..600, "first attempt sent ${attempts.first().timeoutMs}")
     }
 
     @Test fun `SendOptions retry NONE disables a configured policy`() = runBlocking {

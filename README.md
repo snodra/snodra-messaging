@@ -363,8 +363,9 @@ val quick = queryBus.sendBlocking(GetWorkout(id), SendOptions(retry = RetryPolic
   `HandlerDisconnectedException`, `MessageTimeoutException`, `HubConnectionLostException`. A command is never retried after
   a timeout or a lost connection (it may have run). Each attempt is a new request (fresh id, same correlation id); all
   attempts share one budget, the chosen timeout or else the hub's deadline for the type (its per-type override or
-  default), each sending the remaining budget as `timeout_ms`; when the next backoff would exhaust the budget the last
-  error is thrown. Local handlers (same instance) are never retried.
+  default), each sending the remaining budget as `timeout_ms`. A retry starts only if at least
+  `max(initial-backoff, 250ms)` of the budget is left after its backoff; otherwise the last error is thrown at once.
+  Local handlers (same instance) are never retried.
 - **Hub errors.** The hub answers malformed or duplicate in-flight requests with `INVALID_REQUEST`; other hub errors map to
   the exception types in `io.damoreira.kraken.messaging` (`NoHandlerException`, `UnauthenticatedException`, ...).
 

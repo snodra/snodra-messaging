@@ -40,8 +40,9 @@ import kotlin.reflect.KClass
  * [requestTimeout]) and the retry policy (default [retry], null = no retry). With retry, failures that
  * [RetryClassification] allows are re-sent as new requests (fresh id, same correlation id) after the policy's backoff,
  * all attempts within one budget: the chosen timeout, else the hub's deadline for the type
- * ([HubConnection.hubTimeoutFor]). Each attempt sends the remaining budget as `timeout_ms`; a backoff that would not
- * leave time for another attempt ends the retries and the last error is thrown. Local handlers never retry.
+ * ([HubConnection.hubTimeoutFor]). Each attempt sends the remaining budget as `timeout_ms` (at least 1 ms). A retry is
+ * started only if, after its backoff, at least `max(initialBackoff, RetryPolicy.MIN_ATTEMPT_BUDGET)` of the budget
+ * is left; otherwise the last error is thrown at once, without waiting. Local handlers never retry.
  */
 class HubBus(
     private val connection: HubConnection,
@@ -105,8 +106,9 @@ class HubBus(
             } catch (e: MessagingException) {
                 if (attemptNo >= policy.maxAttempts || !RetryClassification.isRetryable(messageKind, e)) throw e
                 val wait = policy.backoffBefore(attemptNo + 1)
-                // No time left for another attempt after the wait: give up with this error now.
-                if (System.nanoTime() + wait.toNanos() >= deadline) throw e
+                // Too little of the budget left after the wait for a useful attempt: give up with this error now.
+                val leftAfterWait = deadline - System.nanoTime() - wait.toNanos()
+                if (leftAfterWait < maxOf(policy.initialBackoff, RetryPolicy.MIN_ATTEMPT_BUDGET).toNanos()) throw e
                 delay(wait.toMillis())
                 attemptNo++
             }

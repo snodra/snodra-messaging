@@ -27,7 +27,8 @@ enum class MessageKind { COMMAND, QUERY }
 /**
  * Retries a failed send with exponential backoff, opt-in (`kraken.messaging.hub.retry.enabled`, or
  * [SendOptions.retry]). Only errors [RetryClassification] calls retryable are retried; every attempt is a new hub
- * request with a fresh id; all attempts together stay within the caller's time budget (see [SendOptions.timeout]).
+ * request with a fresh id; all attempts together stay within the caller's time budget (see [SendOptions.timeout]), and
+ * a retry is started only while at least `max(initialBackoff, MIN_ATTEMPT_BUDGET)` of it is left after the backoff.
  *
  * @property maxAttempts total attempts, the first one included (1 = no retry)
  * @property initialBackoff wait before the second attempt
@@ -56,6 +57,12 @@ data class RetryPolicy(
     companion object {
         /** One attempt, no retry: disables a configured policy for a single call. */
         val NONE = RetryPolicy(maxAttempts = 1)
+
+        /**
+         * A retry is started only if at least `max(initialBackoff, MIN_ATTEMPT_BUDGET)` of the budget is left after its
+         * backoff, so no attempt is sent with a near-zero `timeout_ms`.
+         */
+        val MIN_ATTEMPT_BUDGET: Duration = Duration.ofMillis(250)
     }
 }
 
