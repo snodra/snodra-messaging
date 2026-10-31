@@ -356,8 +356,9 @@ val quick = queryBus.sendBlocking(GetWorkout(id), SendOptions(retry = RetryPolic
   `min(16, initial_permits / 2)` of them for the stream (so a single permit is never held back), otherwise batched (one
   `Permits` message per 16 grants or 50 ms). A slow handler therefore means latency, not timeouts or `handler busy`. Against a hub without the capability (P0 or older)
   nothing changes and no `Permits` are sent.
-- **Busy handlers.** A full hub queue answers `HandlerBusyException` (`RESOURCE_EXHAUSTED`): the request was rejected
-  before any handler ran, so retrying later is safe. Older clients get `RemoteHandlerException` "handler busy" instead.
+- **Busy handlers.** A full hub queue or session buffer answers `HandlerBusyException` (`RESOURCE_EXHAUSTED`): the
+  request was rejected before any handler ran, so retrying later is safe. Older clients get `RemoteHandlerException`
+  "handler busy" instead.
 - **Retry** (opt-in, `hub.retry.*` or `SendOptions.retry`). Only errors `RetryClassification.isRetryable` allows are
   retried: for commands `HubUnavailableException`, `NoHandlerException`, `HandlerBusyException`; for queries also
   `HandlerDisconnectedException`, `MessageTimeoutException`, `HubConnectionLostException`. A command is never retried after

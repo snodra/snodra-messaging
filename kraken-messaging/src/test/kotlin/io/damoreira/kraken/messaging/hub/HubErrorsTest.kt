@@ -31,5 +31,7 @@ class HubErrorsTest {
 
         assertIs<HandlerBusyException>(e)
         assertEquals("c.R", e.type)
+        // RESOURCE_EXHAUSTED also answers a full session buffer, not only a full queue.
+        assertEquals("Handler for 'c.R' is busy: its hub queue or session buffer is full", e.message)
     }
 }
