@@ -1,13 +1,86 @@
 #!/usr/bin/env bash
 # Smoke test for the examples sandbox: drives service-a over HTTP and checks the hub topology.
 # Usage: bash examples/smoke.sh      (A=http://localhost:8091 HUB=http://localhost:7001 to override;
-#        SKIP_PAUSE=1 skips the docker-pause step, ONLY_PAUSE=1 runs only it, B_CONTAINER names service-b)
+#        SKIP_PAUSE=1 skips the docker-pause step, ONLY_PAUSE=1 runs only it, B_CONTAINER names service-b;
+#        SKIP_FLOW=1 skips the flow-control steps, ONLY_FLOW=1 runs only them)
 set -euo pipefail
 
 A=${A:-http://localhost:8091}
 HUB=${HUB:-http://localhost:7001}
 
 fail() { echo "SMOKE FAILED: $*" >&2; exit 1; }
+
+# F3 (P1): flow control. compose.local.yaml gives service-b one permit and a 200 ms CountGreetings, and service-c
+# (Rust) one permit. Parallel calls queue in the hub and come back as latency, not timeouts or 503s.
+# SKIP_FLOW=1 skips these steps; ONLY_FLOW=1 runs only them. Timings in ms need perl (Time::HiRes).
+parallel_calls() { # <n> <method> <url> [body]: prints one HTTP code per line
+  local n=$1 method=$2 url=$3 body=${4:-} dir
+  dir=$(mktemp -d)
+  for i in $(seq 1 "$n"); do
+    if [ -n "$body" ]; then
+      curl -s -o /dev/null -w '%{http_code}\n' --max-time 30 -X "$method" "$url" -H 'content-type: application/json' -d "$body" > "$dir/$i" &
+    else
+      curl -s -o /dev/null -w '%{http_code}\n' --max-time 30 -X "$method" "$url" > "$dir/$i" &
+    fi
+  done
+  wait
+  cat "$dir"/*
+  rm -rf "$dir"
+}
+
+now_ms() { perl -MTime::HiRes=time -e 'printf "%d\n", time * 1000'; }
+
+# The fields of <service>'s first instance on the hub topology, on one line ("instanceId": ... up to "tags":).
+# Splitting at '{' keeps it to grep and tr: the type arrays before "flowControlled" rule out a single regex.
+instance_fields() { # <topology json> <service>
+  printf '%s' "$1" | tr '{' '\n' | grep -A1 "^\"serviceName\":\"$2\"" | tail -n 1
+}
+
+# After a burst the permits must come back (a lost permit would stall the instance): flow-controlled, permits
+# available (the sandbox's one), nothing queued.
+expect_permit_back() { # <service>
+  local i fields
+  for i in $(seq 1 20); do
+    fields=$(instance_fields "$(curl -fsS "$HUB/topology" 2>/dev/null || true)" "$1")
+    if echo "$fields" | grep -q '"flowControlled":true,"permitsAvailable":[1-9][0-9]*,"queued":0'; then return 0; fi
+    sleep 0.1
+  done
+  fail "$1 is not flow-controlled with its permit back on the hub: $fields"
+}
+
+flow_steps() {
+  echo "12. 20 parallel CountGreetings calls into service-b (1 permit, 200 ms each): all succeed, queued in the hub ..."
+  local started elapsed codes ok out pid queued max_queued=0
+  out=$(mktemp)
+  started=$(now_ms)
+  parallel_calls 20 GET "$A/greetings/Ada/count" > "$out" &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    queued=$(instance_fields "$(curl -fsS "$HUB/topology" 2>/dev/null || true)" service-b \
+      | sed -n 's/.*"queued":\([0-9]*\).*/\1/p')
+    if [ "${queued:-0}" -gt "$max_queued" ]; then max_queued=$queued; fi
+    sleep 0.1
+  done
+  wait "$pid" || true
+  elapsed=$(( $(now_ms) - started ))
+  codes=$(cat "$out")
+  rm -f "$out"
+  ok=$(echo "$codes" | grep -c '^200$' || true)
+  echo "   $ok of 20 answered 200 in ${elapsed} ms (one at a time: at least 20 x 200 ms); up to $max_queued queued in the hub"
+  [ "$ok" -eq 20 ] || fail "expected 20 x 200, got: $(echo "$codes" | sort | uniq -c | tr '\n' ' ')"
+  [ "$elapsed" -ge 4000 ] || fail "20 calls of 200 ms finished in ${elapsed} ms: not serialised by the permit"
+  [ "$max_queued" -ge 1 ] || fail "the hub never showed a request queued for service-b"
+  expect_permit_back service-b
+
+  echo "13. cross-language under flow control: 10 parallel Shouts from Kotlin service-a to Rust service-c (1 permit) ..."
+  started=$(now_ms)
+  codes=$(parallel_calls 10 POST "$A/shouts" '{"text":"flow"}')
+  elapsed=$(( $(now_ms) - started ))
+  ok=$(echo "$codes" | grep -c '^200$' || true)
+  echo "   $ok of 10 answered 200 in ${elapsed} ms"
+  [ "$ok" -eq 10 ] || fail "expected 10 x 200, got: $(echo "$codes" | sort | uniq -c | tr '\n' ' ')"
+  expect_permit_back service-c
+}
 
 # F1 (P0): a frozen handler is evicted after the 10 s v2 heartbeat timeout, so a call to it fails in ~10 s
 # instead of the 30 s it took before (and instead of burning a 5 s TIMEOUT: compose.local.yaml gives
@@ -57,6 +130,12 @@ for i in $(seq 1 90); do
   [ "$i" -eq 90 ] && fail "service-b did not register on the hub in 90s; topology: $TOPO"
   sleep 1
 done
+
+if [ "${ONLY_FLOW:-0}" = "1" ]; then
+  flow_steps
+  echo "SMOKE OK (flow steps only)"
+  exit 0
+fi
 
 if [ "${ONLY_PAUSE:-0}" = "1" ]; then
   pause_step
@@ -131,5 +210,6 @@ done
 echo "   delivered: $TEXTS"
 
 [ "${SKIP_PAUSE:-0}" = "1" ] || pause_step
+[ "${SKIP_FLOW:-0}" = "1" ] || flow_steps
 
 echo "SMOKE OK"
