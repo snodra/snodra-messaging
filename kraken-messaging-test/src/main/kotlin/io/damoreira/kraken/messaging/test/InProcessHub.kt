@@ -48,6 +48,13 @@ import java.util.concurrent.TimeUnit
  * hub's rule: `timeoutMs > 0` -> `min(timeoutMs, override or maxTimeout)`, `timeoutMs == 0` -> `override or
  * replyTimeout`. Set [legacy] to emulate a protocol v1 hub that never sends an ack.
  *
+ * Flow control (protocol P1, capability `flow-control`): a registrant that declares the capability gets it back in the
+ * ack; with `initial_permits > 0` it is permit-managed: a request is forwarded only while it has permits (one per
+ * forward), otherwise queued per instance ordered by `Request.priority` (higher first) then arrival, keeping its own
+ * deadline. `Permits` messages add permits and drain the queue. A full queue ([queueCapacity]) answers
+ * `RESOURCE_EXHAUSTED` to senders that share `flow-control` and `HANDLER_ERROR "handler busy"` to others. Set
+ * [flowControl] false to emulate the P0 hub (protocol v2 without the capability: everything unlimited).
+ *
  * It does not implement consistent hashing on `routing_key`, metrics, or the real hub's owner grace period and
  * heartbeat expiry.
  */
@@ -88,13 +95,29 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
     @Volatile
     var emitTimeouts: Boolean = true
 
+    /** Set false to emulate the P0 hub: a v2 ack without the `flow-control` capability, every instance unlimited. */
+    @Volatile
+    var flowControl: Boolean = true
+
+    /** Requests queued per permit-managed instance before new ones are rejected (`KRAKEN_HUB_QUEUE_CAPACITY_PER_INSTANCE`). */
+    @Volatile
+    var queueCapacity: Int = 10_000
+
     private class Session(val out: SendChannel<ServerMessage>) {
         @Volatile var serviceName: String = ""
         @Volatile var instanceId: String = ""
         @Volatile var types: Set<String> = emptySet()
         @Volatile var registered = false
+        /** Shares `flow-control` with this hub (fixed by the stream's first Register). */
+        @Volatile var flowControl = false
+        /** Remaining permits; null = unlimited (not permit-managed). Guarded by [lock]. */
+        var permits: Int? = null
+        /** Requests waiting for a permit, highest priority first, then arrival. Guarded by [lock]. */
+        val queue = ArrayList<Queued>()
         lateinit var collector: Job
     }
+
+    private class Queued(val request: Request, val seq: Long)
 
     private class Pending(val sender: Session, val handler: Session, val timer: Job)
 
@@ -107,6 +130,10 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
     private val registrations = ConcurrentHashMap<String, Int>()
     private val lastRegisters = ConcurrentHashMap<String, Register>()
     private val acks = ConcurrentHashMap<String, Int>()
+    private val permitsGranted = ConcurrentHashMap<String, Int>()
+    private val permitMessages = ConcurrentHashMap<String, Int>()
+    private val forwardedOrder = CopyOnWriteArrayList<String>()
+    private var seq = 0L
     @Volatile private var lastRequest: Request? = null
     private val channels = CopyOnWriteArrayList<ManagedChannel>()
     @Volatile private var lastHeaders: Map<String, String>? = null
@@ -147,8 +174,28 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
     /** The most recent `Request` any client sent (as received, before routing), or null. */
     fun lastRequest(): Request? = lastRequest
 
-    /** The ack this hub sends to a v2 registrant. */
-    fun registerAck(): RegisterAck = RegisterAck.newBuilder()
+    /** Sum of `Permits.count` received from [instanceId] over all of its streams. */
+    fun permitsGrantedBy(instanceId: String): Int = permitsGranted[instanceId] ?: 0
+
+    /** Number of `Permits` messages received from [instanceId] over all of its streams. */
+    fun permitMessagesFrom(instanceId: String): Int = permitMessages[instanceId] ?: 0
+
+    /** Permits [instanceId] has left on its current stream; null when it is not permit-managed (unlimited). */
+    fun permitsAvailable(instanceId: String): Int? = synchronized(lock) {
+        sessions.firstOrNull { it.registered && it.instanceId == instanceId }?.permits
+    }
+
+    /** Requests waiting in [instanceId]'s queue. */
+    fun queuedFor(instanceId: String): Int = synchronized(lock) {
+        sessions.filter { it.registered && it.instanceId == instanceId }.sumOf { it.queue.size }
+    }
+
+    /** Request ids in the order they were forwarded to handlers. */
+    fun forwardedOrder(): List<String> = forwardedOrder.toList()
+
+    /** The ack this hub sends to a v2 registrant that declared [capabilities]. */
+    fun registerAck(capabilities: List<String> = emptyList()): RegisterAck = RegisterAck.newBuilder()
+        .addAllCapabilities(if (flowControl && FLOW_CONTROL in capabilities) listOf(FLOW_CONTROL) else emptyList())
         .setHubId(hubId)
         .setProtocolVersion(2)
         .setHeartbeatIntervalMs(heartbeatInterval.toMillis().toInt())
@@ -196,6 +243,7 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
             msg.hasRegister() -> register(session, msg.register)
             msg.hasRequest() -> forward(session, msg.request)
             msg.hasReply() -> relay(session, msg)
+            msg.hasPermits() -> grant(session, msg.permits.count)
             msg.hasHeartbeat() -> {
                 heartbeats.merge(session.instanceId, 1, Int::plus)
                 if (echoHeartbeats) session.out.trySend(
@@ -217,6 +265,10 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
                     throw Status.ALREADY_EXISTS.withDescription("type $type is owned by service ${owner.serviceName}").asException()
                 }
             }
+            if (!session.registered) { // like the real hub: the first Register of a stream fixes flow control
+                session.flowControl = !legacy && flowControl && reg.protocolVersion >= 2 && FLOW_CONTROL in reg.capabilitiesList
+                session.permits = if (session.flowControl && reg.initialPermits > 0) reg.initialPermits else null
+            }
             session.serviceName = reg.serviceName
             session.instanceId = reg.instanceId
             session.registered = true
@@ -226,7 +278,7 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
         lastRegisters[reg.instanceId] = reg
         if (!legacy && reg.protocolVersion >= 2) {
             // Enqueued before this stream's next message is handled, so it precedes the echo of the following heartbeat.
-            session.out.trySend(ServerMessage.newBuilder().setRegisterAck(registerAck()).build())
+            session.out.trySend(ServerMessage.newBuilder().setRegisterAck(registerAck(reg.capabilitiesList)).build())
             acks.merge(reg.instanceId, 1, Int::plus)
         }
     }
@@ -255,12 +307,49 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
             val timer = scope.launch {
                 delay(timeout.toMillis())
                 if (!emitTimeouts) return@launch
-                val expired = synchronized(lock) { pending.remove(req.id) }
+                val expired = synchronized(lock) {
+                    handler.queue.removeIf { it.request.id == req.id } // a queued request keeps its own deadline
+                    pending.remove(req.id)
+                }
                 expired?.sender?.fail(req.id, ErrorCode.TIMEOUT, "no reply for ${req.type} within ${timeout.toMillis()} ms")
+            }
+            val permits = handler.permits
+            if (permits != null && permits <= 0) {
+                if (handler.queue.size >= queueCapacity) {
+                    timer.cancel()
+                    if (sender.flowControl) sender.fail(req.id, ErrorCode.RESOURCE_EXHAUSTED, "queue of ${handler.instanceId} is full")
+                    else sender.fail(req.id, ErrorCode.HANDLER_ERROR, "handler busy")
+                    return
+                }
+                pending[req.id] = Pending(sender, handler, timer)
+                lastHeaders = req.headersMap.toMap()
+                handler.queue += Queued(req, seq++)
+                handler.queue.sortWith(compareByDescending<Queued> { it.request.priority }.thenBy { it.seq })
+                return
             }
             pending[req.id] = Pending(sender, handler, timer)
             lastHeaders = req.headersMap.toMap()
-            handler.out.trySend(ServerMessage.newBuilder().setRequest(req).build())
+            deliver(handler, req)
+        }
+    }
+
+    /** Forwards [req] to [handler], spending a permit when it is permit-managed. Caller holds [lock]. */
+    private fun deliver(handler: Session, req: Request) {
+        handler.permits = handler.permits?.minus(1)
+        forwardedOrder += req.id
+        handler.out.trySend(ServerMessage.newBuilder().setRequest(req).build())
+    }
+
+    private fun grant(session: Session, count: Int) {
+        permitMessages.merge(session.instanceId, 1, Int::plus)
+        permitsGranted.merge(session.instanceId, count, Int::plus)
+        synchronized(lock) {
+            val permits = session.permits ?: return // not permit-managed: ignored, like the real hub
+            session.permits = permits + count
+            while ((session.permits ?: 0) > 0 && session.queue.isNotEmpty()) {
+                val next = session.queue.removeAt(0)
+                if (next.request.id in pending) deliver(session, next.request) // skip entries that already timed out
+            }
         }
     }
 
@@ -277,6 +366,7 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
     private fun cleanup(session: Session) {
         val failed = synchronized(lock) {
             sessions.remove(session)
+            session.queue.clear() // its queued requests are pending with this handler: failed below
             val mine = pending.filterValues { it.handler === session || it.sender === session }
             mine.keys.forEach { pending.remove(it) }
             mine
@@ -287,6 +377,10 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
                 p.sender.fail(id, ErrorCode.HANDLER_DISCONNECTED, "handler ${session.instanceId} disconnected")
             }
         }
+    }
+
+    private companion object {
+        const val FLOW_CONTROL = "flow-control"
     }
 
     private fun Session.fail(requestId: String, code: ErrorCode, message: String) {

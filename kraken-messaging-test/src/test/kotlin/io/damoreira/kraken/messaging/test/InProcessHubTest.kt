@@ -57,6 +57,14 @@ class InProcessHubTest {
 
         fun send(msg: ClientMessage) = out.trySend(msg).getOrThrow()
 
+        /** A protocol v2 Register declaring `flow-control` with [permits] initial permits. */
+        fun registerFlowControlled(service: String, instance: String, permits: Int, vararg commands: String) = send(
+            ClientMessage.newBuilder().setRegister(
+                Register.newBuilder().setServiceName(service).setInstanceId(instance).addAllCommandTypes(commands.toList())
+                    .setProtocolVersion(2).addCapabilities("flow-control").setInitialPermits(permits),
+            ).build(),
+        )
+
         fun register(service: String, instance: String, vararg commands: String) = send(
             ClientMessage.newBuilder().setRegister(
                 Register.newBuilder().setServiceName(service).setInstanceId(instance).addAllCommandTypes(commands.toList()),
@@ -67,10 +75,70 @@ class InProcessHubTest {
         suspend fun awaitEnd(): Throwable? = withTimeout(TIMEOUT_MS) { ended.await() }
     }
 
-    private fun request(id: String, type: String, headers: Map<String, String> = emptyMap()) = ClientMessage.newBuilder().setRequest(
-        Request.newBuilder().setId(id).setKind(RequestKind.COMMAND).setType(type)
-            .setPayload(ByteString.copyFromUtf8("{}")).putAllHeaders(headers),
-    ).build()
+    private fun request(id: String, type: String, headers: Map<String, String> = emptyMap(), priority: Int = 0) =
+        ClientMessage.newBuilder().setRequest(
+            Request.newBuilder().setId(id).setKind(RequestKind.COMMAND).setType(type).setPriority(priority)
+                .setPayload(ByteString.copyFromUtf8("{}")).putAllHeaders(headers),
+        ).build()
+
+    private fun permits(count: Int) =
+        ClientMessage.newBuilder().setPermits(io.damoreira.kraken.hub.v1.Permits.newBuilder().setCount(count)).build()
+
+    @Test
+    fun `flow-controlled handler gets requests only with permits, highest priority first`() = runBlocking {
+        val handler = RawClient().also { it.registerFlowControlled("svc-a", "a-1", 1, "test.Ping") }
+        val ack = handler.next()
+        assertEquals(listOf("flow-control"), ack.registerAck.capabilitiesList)
+        awaitRegistered("test.Ping")
+        val sender = RawClient().also { it.register("svc-b", "b-1") }
+
+        sender.send(request("r1", "test.Ping"))
+        assertEquals("r1", handler.next().request.id) // the one permit
+        sender.send(request("low", "test.Ping", priority = 0))
+        sender.send(request("high", "test.Ping", priority = 5))
+        withTimeout(TIMEOUT_MS) { while (hub.queuedFor("a-1") < 2) kotlinx.coroutines.delay(10) }
+        assertEquals(0, hub.permitsAvailable("a-1"))
+
+        handler.send(permits(2))
+        assertEquals("high", handler.next().request.id)
+        assertEquals("low", handler.next().request.id)
+        assertEquals(2, hub.permitsGrantedBy("a-1"))
+    }
+
+    @Test
+    fun `full queue is RESOURCE_EXHAUSTED for flow-control senders and handler busy for others`() = runBlocking {
+        hub.queueCapacity = 1
+        val handler = RawClient().also { it.registerFlowControlled("svc-a", "a-1", 1, "test.Ping") }
+        handler.next() // ack
+        awaitRegistered("test.Ping")
+        val v1 = RawClient().also { it.register("svc-b", "b-1") }
+        val flow = RawClient().also { it.registerFlowControlled("svc-c", "c-1", 4) }
+        flow.next() // ack
+        v1.send(request("r1", "test.Ping")) // forwarded
+        handler.next()
+        v1.send(request("r2", "test.Ping")) // queued
+        withTimeout(TIMEOUT_MS) { while (hub.queuedFor("a-1") < 1) kotlinx.coroutines.delay(10) }
+        v1.send(request("r3", "test.Ping"))
+        flow.send(request("r4", "test.Ping"))
+        val busy = v1.next().error
+        assertEquals(ErrorCode.HANDLER_ERROR, busy.code)
+        assertEquals("handler busy", busy.message)
+        assertEquals(ErrorCode.RESOURCE_EXHAUSTED, flow.next().error.code)
+    }
+
+    @Test
+    fun `P0 emulation acks without flow-control and never queues`() = runBlocking {
+        hub.flowControl = false
+        val handler = RawClient().also { it.registerFlowControlled("svc-a", "a-1", 1, "test.Ping") }
+        assertEquals(emptyList(), handler.next().registerAck.capabilitiesList)
+        awaitRegistered("test.Ping")
+        val sender = RawClient().also { it.register("svc-b", "b-1") }
+        sender.send(request("r1", "test.Ping"))
+        sender.send(request("r2", "test.Ping"))
+        assertEquals("r1", handler.next().request.id)
+        assertEquals("r2", handler.next().request.id)
+        assertEquals(null, hub.permitsAvailable("a-1"))
+    }
 
     private suspend fun awaitRegistered(type: String) = withTimeout(TIMEOUT_MS) {
         while (type !in hub.registeredTypes()) kotlinx.coroutines.delay(10)
