@@ -11,7 +11,9 @@ COPY kraken-messaging-api ./kraken-messaging-api
 COPY kraken-messaging ./kraken-messaging
 COPY kraken-messaging-test ./kraken-messaging-test
 COPY examples ./examples
-RUN --mount=type=cache,target=/root/.gradle ./gradlew :examples:${SERVICE}:bootJar --no-daemon -x test \
+# sharing=locked: compose builds service-a and service-b in parallel, and two Gradle runs on one cache collide on its
+# journal lock ("Timeout waiting to lock journal cache").
+RUN --mount=type=cache,target=/root/.gradle,sharing=locked ./gradlew :examples:${SERVICE}:bootJar --no-daemon -x test \
     && cp examples/${SERVICE}/build/libs/*.jar /app.jar
 
 FROM eclipse-temurin:25-jre
