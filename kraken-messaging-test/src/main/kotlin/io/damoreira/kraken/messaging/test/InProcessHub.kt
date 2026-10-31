@@ -6,6 +6,7 @@ import io.damoreira.kraken.hub.v1.ErrorCode
 import io.damoreira.kraken.hub.v1.Heartbeat
 import io.damoreira.kraken.hub.v1.HubGrpcKt
 import io.damoreira.kraken.hub.v1.Register
+import io.damoreira.kraken.hub.v1.RegisterAck
 import io.damoreira.kraken.hub.v1.Request
 import io.damoreira.kraken.hub.v1.ServerMessage
 import io.grpc.ManagedChannel
@@ -37,10 +38,18 @@ import java.util.concurrent.TimeUnit
  * It mirrors the observable protocol behaviour: the first message must be a `Register` (`FAILED_PRECONDITION`), a type
  * owned by another service is refused (`ALREADY_EXISTS`), a later `Register` replaces an instance's types, requests are
  * forwarded unchanged round-robin to instances of the owning service (`NO_HANDLER` if nobody owns the type), replies are
- * relayed by request id, `TIMEOUT` fires after `Request.timeoutMs` (or [replyTimeout]) and a late reply is dropped,
+ * relayed by request id, `TIMEOUT` fires after the effective timeout and a late reply is dropped,
  * `HANDLER_DISCONNECTED` is sent for in-flight requests when the handler stream ends, heartbeats are echoed, empty
- * names are `INVALID_ARGUMENT` and malformed or duplicate in-flight requests are `INVALID_REQUEST`. It does not
- * implement consistent hashing on `routing_key`, metrics, or the real hub's owner grace period and heartbeat expiry.
+ * names are `INVALID_ARGUMENT` and malformed or duplicate in-flight requests are `INVALID_REQUEST`.
+ *
+ * Protocol v2 (the default): every accepted `Register` with `protocol_version >= 2` is answered with a `RegisterAck`
+ * (written before the echo of the heartbeat that follows it) carrying [hubId], [heartbeatInterval],
+ * [heartbeatTimeout], [replyTimeout] as the default, [maxTimeout] and [typeTimeouts]. The effective timeout follows the
+ * hub's rule: `timeoutMs > 0` -> `min(timeoutMs, override or maxTimeout)`, `timeoutMs == 0` -> `override or
+ * replyTimeout`. Set [legacy] to emulate a protocol v1 hub that never sends an ack.
+ *
+ * It does not implement consistent hashing on `routing_key`, metrics, or the real hub's owner grace period and
+ * heartbeat expiry.
  */
 class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoCloseable {
 
@@ -51,6 +60,33 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
     /** Set false to stop echoing heartbeats (still counted), simulating a hub that silently stopped answering. */
     @Volatile
     var echoHeartbeats: Boolean = true
+
+    /** Emulates a protocol v1 hub: no `RegisterAck`, ever. */
+    @Volatile
+    var legacy: Boolean = false
+
+    /** `RegisterAck.hub_id`. */
+    val hubId: String get() = name
+
+    /** Announced in the ack; this stand-in never evicts on missed heartbeats. */
+    @Volatile
+    var heartbeatInterval: Duration = Duration.ofSeconds(3)
+
+    /** Announced in the ack; this stand-in never evicts on missed heartbeats. */
+    @Volatile
+    var heartbeatTimeout: Duration = Duration.ofSeconds(10)
+
+    /** Upper clamp for `Request.timeoutMs` on types without an override. */
+    @Volatile
+    var maxTimeout: Duration = Duration.ofSeconds(60)
+
+    /** Per-type timeout overrides (`KRAKEN_HUB_TIMEOUT_OVERRIDES` of the real hub). */
+    @Volatile
+    var typeTimeouts: Map<String, Duration> = emptyMap()
+
+    /** Set false to never send `TIMEOUT` (a hub that loses requests), so the client's local guard is what fires. */
+    @Volatile
+    var emitTimeouts: Boolean = true
 
     private class Session(val out: SendChannel<ServerMessage>) {
         @Volatile var serviceName: String = ""
@@ -69,6 +105,9 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
     private val rotation = HashMap<String, Int>()
     private val heartbeats = ConcurrentHashMap<String, Int>()
     private val registrations = ConcurrentHashMap<String, Int>()
+    private val lastRegisters = ConcurrentHashMap<String, Register>()
+    private val acks = ConcurrentHashMap<String, Int>()
+    @Volatile private var lastRequest: Request? = null
     private val channels = CopyOnWriteArrayList<ManagedChannel>()
     @Volatile private var lastHeaders: Map<String, String>? = null
     private var server: Server? = null
@@ -98,6 +137,27 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
 
     /** Accepted `Register` messages from [instanceId] over all of its streams. */
     fun registrationsFrom(instanceId: String): Int = registrations[instanceId] ?: 0
+
+    /** The most recent accepted `Register` from [instanceId], or null. */
+    fun lastRegisterFrom(instanceId: String): Register? = lastRegisters[instanceId]
+
+    /** `RegisterAck`s sent to [instanceId] over all of its streams. */
+    fun acksSentTo(instanceId: String): Int = acks[instanceId] ?: 0
+
+    /** The most recent `Request` any client sent (as received, before routing), or null. */
+    fun lastRequest(): Request? = lastRequest
+
+    /** The ack this hub sends to a v2 registrant. */
+    fun registerAck(): RegisterAck = RegisterAck.newBuilder()
+        .setHubId(hubId)
+        .setProtocolVersion(2)
+        .setHeartbeatIntervalMs(heartbeatInterval.toMillis().toInt())
+        .setHeartbeatTimeoutMs(heartbeatTimeout.toMillis().toInt())
+        .setDefaultTimeoutMs(replyTimeout.toMillis().toInt())
+        .setMaxTimeoutMs(maxTimeout.toMillis().toInt())
+        .setContext("default")
+        .putAllTypeTimeoutsMs(typeTimeouts.mapValues { it.value.toMillis().toInt() })
+        .build()
 
     /** Headers of the most recently forwarded request, or null if none was forwarded yet. */
     fun lastRequestHeaders(): Map<String, String>? = lastHeaders
@@ -163,9 +223,16 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
             session.types = types
         }
         registrations.merge(reg.instanceId, 1, Int::plus)
+        lastRegisters[reg.instanceId] = reg
+        if (!legacy && reg.protocolVersion >= 2) {
+            // Enqueued before this stream's next message is handled, so it precedes the echo of the following heartbeat.
+            session.out.trySend(ServerMessage.newBuilder().setRegisterAck(registerAck()).build())
+            acks.merge(reg.instanceId, 1, Int::plus)
+        }
     }
 
     private fun forward(sender: Session, req: Request) {
+        lastRequest = req
         if (req.id.isEmpty() || req.type.isEmpty()) {
             sender.fail(req.id, ErrorCode.INVALID_REQUEST, "request id and type must not be empty")
             return
@@ -182,9 +249,12 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
             }
             val index = rotation.merge(req.type, 1, Int::plus)!! - 1
             val handler = candidates[index % candidates.size]
-            val timeout = if (req.timeoutMs > 0) Duration.ofMillis(req.timeoutMs.toLong()) else replyTimeout
+            val override = typeTimeouts[req.type]
+            val timeout = if (req.timeoutMs > 0) minOf(Duration.ofMillis(req.timeoutMs.toLong()), override ?: maxTimeout)
+            else override ?: replyTimeout
             val timer = scope.launch {
                 delay(timeout.toMillis())
+                if (!emitTimeouts) return@launch
                 val expired = synchronized(lock) { pending.remove(req.id) }
                 expired?.sender?.fail(req.id, ErrorCode.TIMEOUT, "no reply for ${req.type} within ${timeout.toMillis()} ms")
             }
