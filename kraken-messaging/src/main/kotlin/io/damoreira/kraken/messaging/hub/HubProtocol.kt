@@ -12,8 +12,17 @@ object HubProtocol {
     /** `Register.protocol_version`. 0 would be v1; a v2 hub answers with a `RegisterAck`, a v1 hub ignores the field. */
     const val PROTOCOL_VERSION = 2
 
-    /** `Register.capabilities`: optional protocol features this client supports. None are defined yet. */
-    val CAPABILITIES: List<String> = emptyList()
+    /** Capability name of hub flow control: permits, `Register.initial_permits`, `RESOURCE_EXHAUSTED` (P1). */
+    const val FLOW_CONTROL = "flow-control"
+
+    /** `Register.capabilities`: optional protocol features this client supports. */
+    val CAPABILITIES: List<String> = listOf(FLOW_CONTROL)
+
+    /** A `Permits` message is sent as soon as this many grants are pending ... */
+    const val PERMIT_BATCH = 16
+
+    /** ... or this long after the first unsent grant, whichever comes first. */
+    val PERMIT_FLUSH_DELAY: Duration = Duration.ofMillis(50)
 
     /** `Register.client_version`, for example `kraken-messaging/0.1.0`. */
     val CLIENT_VERSION: String = "kraken-messaging/" + (libraryVersion() ?: "unknown")

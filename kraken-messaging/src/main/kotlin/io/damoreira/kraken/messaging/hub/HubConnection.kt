@@ -5,6 +5,7 @@ import io.damoreira.kraken.hub.v1.Error
 import io.damoreira.kraken.hub.v1.ErrorCode
 import io.damoreira.kraken.hub.v1.Heartbeat
 import io.damoreira.kraken.hub.v1.HubGrpcKt
+import io.damoreira.kraken.hub.v1.Permits
 import io.damoreira.kraken.hub.v1.Register
 import io.damoreira.kraken.hub.v1.RegisterAck
 import io.damoreira.kraken.hub.v1.Reply
@@ -45,6 +46,8 @@ import org.slf4j.LoggerFactory
 import java.time.Duration
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentSkipListMap
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.random.Random
 
 data class HubSettings(
@@ -114,6 +117,12 @@ internal object ReconnectBackoff {
  * Incoming requests run on [handlerDispatcher], never on [scope]'s dispatcher, so a handler that blocks (for example
  * on a nested `sendBlocking`) cannot starve the stream collector that would deliver its own reply. At most
  * [maxConcurrentHandlers] handlers run at once; further requests wait for a permit.
+ *
+ * Flow control (P1): `Register` declares the `flow-control` capability with `initial_permits = maxConcurrentHandlers`,
+ * [loadFactor] and [tags]. When the stream's ack shares `flow-control`, the hub forwards only against permits, and every
+ * completed inbound handler grants one back on the stream the request arrived on (never on a newer stream, which
+ * starts again from its own initial permits), batched into `Permits` messages of [HubProtocol.PERMIT_BATCH] or after
+ * [HubProtocol.PERMIT_FLUSH_DELAY]. Against a hub without the capability (P0, legacy) no `Permits` are ever sent.
  */
 class HubConnection(
     private val channelFactory: () -> ManagedChannel,
@@ -123,7 +132,9 @@ class HubConnection(
     private val inbound: suspend (Request) -> Reply,
     private val scope: CoroutineScope,
     private val handlerDispatcher: CoroutineDispatcher = Dispatchers.IO,
-    maxConcurrentHandlers: Int = 256,
+    private val maxConcurrentHandlers: Int = 256,
+    private val loadFactor: Int = 100,
+    private val tags: Map<String, String> = emptyMap(),
 ) {
     private val log = LoggerFactory.getLogger(HubConnection::class.java)
 
@@ -151,6 +162,11 @@ class HubConnection(
     /** One open stream: its outbound queue, handshake and the heartbeats awaiting an echo (`sentAtMs` -> generation). */
     private class Stream(val out: Channel<ClientMessage>, fallbackHeartbeatMs: Long) {
         val probes = ConcurrentSkipListMap<Long, Long>()
+        /** Whether the hub shares `flow-control` on this stream; null until the handshake. */
+        @Volatile var flowControl: Boolean? = null
+        /** Handler completions not yet sent as `Permits`. */
+        val unsentPermits = AtomicInteger()
+        val flushScheduled = AtomicBoolean()
         @Volatile var registeredGeneration = -1L
         @Volatile var handshake: HubHandshake? = null
         @Volatile var heartbeatIntervalMs: Long = fallbackHeartbeatMs
@@ -353,6 +369,9 @@ class HubConnection(
         .setProtocolVersion(HubProtocol.PROTOCOL_VERSION)
         .addAllCapabilities(HubProtocol.CAPABILITIES)
         .setClientVersion(HubProtocol.CLIENT_VERSION)
+        .setInitialPermits(maxConcurrentHandlers)
+        .setLoadFactor(loadFactor)
+        .putAllTags(tags)
         .build()
 
     /** Writes the current registration followed by a heartbeat whose echo confirms it. Caller holds [lock]. */
@@ -405,6 +424,10 @@ class HubConnection(
 
     private fun completeHandshake(stream: Stream, handshake: HubHandshake) {
         if (handshake is HubHandshake.V2) applyAck(stream, handshake.ack)
+        val flowControl = handshake is HubHandshake.V2 && HubProtocol.FLOW_CONTROL in handshake.ack.capabilitiesList
+        stream.flowControl = flowControl
+        // Grants of requests completed before the handshake (requests may arrive before the ack) are sent or dropped now.
+        if (!flowControl) stream.unsentPermits.set(0) else if (stream.unsentPermits.get() > 0) scheduleFlush(stream)
         stream.handshake = handshake
         if (current === stream) {
             handshakeState.value = handshake
@@ -450,8 +473,33 @@ class HubConnection(
             } catch (_: ClosedSendChannelException) {
                 log.debug("Reply to {} request {} dropped: the stream it arrived on is closed", request.type, request.id)
             }
+            grantPermit(stream)
         }
         job.invokeOnCompletion { inFlight.update { it - 1 } }
+    }
+
+    /** One completed handler: pays a permit back to the stream the request arrived on (when it shares flow control). */
+    private fun grantPermit(stream: Stream) {
+        if (stream.flowControl == false) return
+        val unsent = stream.unsentPermits.incrementAndGet()
+        if (stream.flowControl != true) return // handshake pending: completeHandshake sends or drops it
+        if (unsent >= HubProtocol.PERMIT_BATCH) flushPermits(stream) else scheduleFlush(stream)
+    }
+
+    private fun scheduleFlush(stream: Stream) {
+        if (!stream.flushScheduled.compareAndSet(false, true)) return
+        scope.launch {
+            delay(HubProtocol.PERMIT_FLUSH_DELAY.toMillis())
+            stream.flushScheduled.set(false)
+            flushPermits(stream)
+        }
+    }
+
+    private fun flushPermits(stream: Stream) {
+        val count = stream.unsentPermits.getAndSet(0)
+        if (count <= 0) return
+        // A closed stream drops them: the hub forgot that session's permits with it.
+        stream.out.trySend(ClientMessage.newBuilder().setPermits(Permits.newBuilder().setCount(count)).build())
     }
 
     /** Fails the requests written to [stream] (every request when null) with [cause]. */

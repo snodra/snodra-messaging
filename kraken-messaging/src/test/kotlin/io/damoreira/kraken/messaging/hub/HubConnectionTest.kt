@@ -75,6 +75,134 @@ class HubConnectionTest {
         { InProcessChannelBuilder.forName(hubName).build() }, serviceName, instanceId, settings, inbound, scope, handlerDispatcher,
     ).also { connections += it }
 
+    private fun flowConnection(
+        instanceId: String,
+        maxConcurrentHandlers: Int,
+        loadFactor: Int = 100,
+        tags: Map<String, String> = emptyMap(),
+        inbound: suspend (Request) -> Reply,
+    ) = HubConnection(
+        { InProcessChannelBuilder.forName(hub.name).build() }, "svc-$instanceId", instanceId, fast, inbound, scope,
+        kotlinx.coroutines.Dispatchers.IO, maxConcurrentHandlers, loadFactor, tags,
+    ).also { connections += it }
+
+    // --- flow control (P1) ---
+
+    @Test fun `register declares flow-control with initial permits, load factor and tags`() = runBlocking {
+        val conn = flowConnection("a", maxConcurrentHandlers = 4, loadFactor = 150, tags = mapOf("zone" to "eu-1")) { req ->
+            payloadReply(req.id, "{}")
+        }
+        conn.register(setOf("test.Ping"), emptySet())
+        conn.start()
+        assertTrue(conn.awaitRegistered(wait))
+        val reg = hub.lastRegisterFrom("a")!!
+        assertEquals(listOf("flow-control"), reg.capabilitiesList)
+        assertEquals(4, reg.initialPermits)
+        assertEquals(150, reg.loadFactor)
+        assertEquals(mapOf("zone" to "eu-1"), reg.tagsMap)
+        assertEquals(listOf("flow-control"), assertIs<HubHandshake.V2>(conn.handshake.value).ack.capabilitiesList)
+    }
+
+    @Test fun `each completed handler grants one permit, batched`() = runBlocking {
+        val handler = flowConnection("b", maxConcurrentHandlers = 64) { req -> payloadReply(req.id, "{}") }
+        handler.register(setOf("test.Ping"), emptySet())
+        handler.start()
+        val sender = connection("a")
+        sender.start()
+        assertTrue(handler.awaitRegistered(wait) && sender.awaitRegistered(wait))
+
+        (1..40).map { async { sender.send(request()) } }.awaitAll()
+        await atMost Duration.ofSeconds(2) until { hub.permitsGrantedBy("b") == 40 }
+        val messages = hub.permitMessagesFrom("b")
+        assertTrue(messages in 3..39, "40 grants in $messages Permits messages") // batched at 16, rest after 50 ms
+        assertEquals(64, hub.permitsAvailable("b")) // every forward was paid back
+    }
+
+    @Test fun `a single grant is flushed after about 50 ms`() = runBlocking {
+        val handler = flowConnection("b", maxConcurrentHandlers = 8) { req -> payloadReply(req.id, "{}") }
+        handler.register(setOf("test.Ping"), emptySet())
+        handler.start()
+        val sender = connection("a")
+        sender.start()
+        assertTrue(handler.awaitRegistered(wait) && sender.awaitRegistered(wait))
+        sender.send(request())
+        await atMost Duration.ofMillis(1_000) until { hub.permitsGrantedBy("b") == 1 }
+        assertEquals(1, hub.permitMessagesFrom("b"))
+    }
+
+    @Test fun `with one permit concurrent requests are served one after the other`() = runBlocking {
+        val running = AtomicInteger()
+        val maxRunning = AtomicInteger()
+        val handler = flowConnection("b", maxConcurrentHandlers = 1) { req ->
+            maxRunning.accumulateAndGet(running.incrementAndGet(), ::maxOf)
+            delay(100)
+            running.decrementAndGet()
+            payloadReply(req.id, "{}")
+        }
+        handler.register(setOf("test.Ping"), emptySet())
+        handler.start()
+        val sender = connection("a")
+        sender.start()
+        assertTrue(handler.awaitRegistered(wait) && sender.awaitRegistered(wait))
+
+        val results = (1..3).map { async { sender.send(request(timeoutMs = 4_000)) } }.awaitAll()
+        assertTrue(results.all { it.hasReply() && !it.reply.hasError() }, results.toString())
+        assertEquals(1, maxRunning.get())
+        await atMost Duration.ofSeconds(1) until { hub.permitsGrantedBy("b") == 3 } // the last one flushes after 50 ms
+    }
+
+    @Test fun `no permits are sent to a hub without flow-control`() = runBlocking {
+        hub.flowControl = false // the P0 hub
+        val handler = flowConnection("b", maxConcurrentHandlers = 4) { req -> payloadReply(req.id, "{}") }
+        handler.register(setOf("test.Ping"), emptySet())
+        handler.start()
+        val sender = connection("a")
+        sender.start()
+        assertTrue(handler.awaitRegistered(wait) && sender.awaitRegistered(wait))
+        assertEquals(emptyList(), assertIs<HubHandshake.V2>(handler.handshake.value).ack.capabilitiesList)
+        repeat(5) { sender.send(request()) }
+        delay(300)
+        assertEquals(0, hub.permitMessagesFrom("b"))
+    }
+
+    @Test fun `no permits are sent to a legacy hub`() = runBlocking {
+        hub.legacy = true
+        val handler = flowConnection("b", maxConcurrentHandlers = 4) { req -> payloadReply(req.id, "{}") }
+        handler.register(setOf("test.Ping"), emptySet())
+        handler.start()
+        val sender = connection("a")
+        sender.start()
+        assertTrue(handler.awaitRegistered(wait) && sender.awaitRegistered(wait))
+        repeat(3) { sender.send(request()) }
+        delay(300)
+        assertEquals(0, hub.permitMessagesFrom("b"))
+    }
+
+    @Test fun `a handler finishing after its stream broke grants nothing on the new stream`() = runBlocking {
+        val received = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val handler = flowConnection("b", maxConcurrentHandlers = 4) { req ->
+            received.complete(Unit)
+            release.await()
+            payloadReply(req.id, "{}")
+        }
+        handler.register(setOf("test.Ping"), emptySet())
+        handler.start()
+        val sender = connection("a")
+        sender.start()
+        assertTrue(handler.awaitRegistered(wait) && sender.awaitRegistered(wait))
+        val call = async { runCatching { sender.send(request(timeoutMs = 4_000)) } }
+        withTimeout(5_000) { received.await() }
+        hub.dropInstance("b")
+        await atMost Duration.ofSeconds(5) until { hub.registrationsFrom("b") >= 2 }
+        assertTrue(handler.awaitRegistered(wait))
+        release.complete(Unit)
+        call.await()
+        delay(300)
+        assertEquals(0, hub.permitsGrantedBy("b"), "the old stream's permit must not be paid to the new stream")
+        assertEquals(4, hub.permitsAvailable("b"))
+    }
+
     private fun request(type: String = "test.Ping", timeoutMs: Int = 2000) = Request.newBuilder()
         .setId(UUID.randomUUID().toString())
         .setKind(RequestKind.COMMAND)
@@ -285,7 +413,7 @@ class HubConnectionTest {
 
         val reg = assertNotNull(hub.lastRegisterFrom("a"))
         assertEquals(2, reg.protocolVersion)
-        assertEquals(emptyList(), reg.capabilitiesList)
+        assertEquals(listOf("flow-control"), reg.capabilitiesList)
         assertTrue(reg.clientVersion.startsWith("kraken-messaging/"), reg.clientVersion)
         assertFalse(reg.clientVersion.endsWith("/unknown"), reg.clientVersion)
         val handshake = assertIs<HubHandshake.V2>(conn.handshake.value)
