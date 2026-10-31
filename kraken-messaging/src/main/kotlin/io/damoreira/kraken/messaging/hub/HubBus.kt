@@ -6,7 +6,12 @@ import io.damoreira.kraken.hub.v1.RequestKind
 import io.damoreira.kraken.messaging.CommandBus
 import io.damoreira.kraken.messaging.InvalidMessageException
 import io.damoreira.kraken.messaging.MessageContext
+import io.damoreira.kraken.messaging.MessageKind
+import io.damoreira.kraken.messaging.MessagingException
 import io.damoreira.kraken.messaging.QueryBus
+import io.damoreira.kraken.messaging.RetryClassification
+import io.damoreira.kraken.messaging.RetryPolicy
+import io.damoreira.kraken.messaging.SendOptions
 import io.damoreira.kraken.messaging.api.Command
 import io.damoreira.kraken.messaging.api.Query
 import io.damoreira.kraken.messaging.codec.JsonCodec
@@ -20,6 +25,7 @@ import io.damoreira.kraken.messaging.security.LocalIdentity
 import io.damoreira.kraken.messaging.tracing.TraceHeaders
 import io.damoreira.kraken.messaging.tracing.CorrelationContext
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.time.Duration
 import java.util.UUID
@@ -29,6 +35,13 @@ import kotlin.reflect.KClass
  * [CommandBus] and [QueryBus] over the hub. A message whose handler lives in this instance is invoked directly (same
  * codec round trip and error mapping, no network); anything else becomes a hub `Request` carrying the caller's bearer
  * token (when [forwardJwt]), a correlation id and the trace context.
+ *
+ * Per call [SendOptions] choose the priority (default [priorities] per type, else 0), the timeout (default
+ * [requestTimeout]) and the retry policy (default [retry], null = no retry). With retry, failures that
+ * [RetryClassification] allows are re-sent as new requests (fresh id, same correlation id) after the policy's backoff,
+ * all attempts within one budget: the chosen timeout, else the hub's deadline for the type
+ * ([HubConnection.hubTimeoutFor]). Each attempt sends the remaining budget as `timeout_ms`; a backoff that would not
+ * leave time for another attempt ends the retries and the last error is thrown. Local handlers never retry.
  */
 class HubBus(
     private val connection: HubConnection,
@@ -40,17 +53,25 @@ class HubBus(
     private val traceHeaders: TraceHeaders,
     /** Sent as `timeout_ms` when set; null sends 0 so the hub's default or per-type override applies (see [HubConnection.send]). */
     private val requestTimeout: Duration?,
+    /** Default `Request.priority` per type name (`kraken.messaging.hub.priorities`); types not listed send 0. */
+    private val priorities: Map<String, Int> = emptyMap(),
+    /** Default retry policy (`kraken.messaging.hub.retry.*` when enabled); null = no retry. */
+    private val retry: RetryPolicy? = null,
 ) : CommandBus, QueryBus {
 
-    @Suppress("UNCHECKED_CAST")
-    override suspend fun <R> send(command: Command<R>, routingKey: String?): R =
-        dispatch(command, RequestKind.COMMAND, routingKey) as R
+    override suspend fun <R> send(command: Command<R>, routingKey: String?): R = send(command, SendOptions(routingKey = routingKey))
 
     @Suppress("UNCHECKED_CAST")
-    override suspend fun <R> send(query: Query<R>): R =
-        dispatch(query, RequestKind.QUERY, null) as R
+    override suspend fun <R> send(command: Command<R>, options: SendOptions): R =
+        dispatch(command, RequestKind.COMMAND, options) as R
 
-    private suspend fun dispatch(message: Any, kind: RequestKind, routingKey: String?): Any {
+    override suspend fun <R> send(query: Query<R>): R = send(query, SendOptions())
+
+    @Suppress("UNCHECKED_CAST")
+    override suspend fun <R> send(query: Query<R>, options: SendOptions): R =
+        dispatch(query, RequestKind.QUERY, options) as R
+
+    private suspend fun dispatch(message: Any, kind: RequestKind, options: SendOptions): Any {
         val type = typeResolver.typeNameOf(message::class)
         val local = if (kind == RequestKind.COMMAND) registry.commandHandler(type) else registry.queryHandler(type)
         val payload = codec.encode(message)
@@ -61,23 +82,51 @@ class HubBus(
         val headers = mutableMapOf("correlationId" to correlationId)
         if (forwardJwt && token != null) headers["authorization"] = "Bearer $token"
         traceHeaders.inject(headers)
-        val request = Request.newBuilder()
-            .setId(UUID.randomUUID().toString())
+        val template = Request.newBuilder()
             .setKind(kind)
             .setType(type)
-            .setRoutingKey(routingKey.orEmpty())
+            .setRoutingKey(options.routingKey.orEmpty())
             .setPayload(ByteString.copyFrom(payload))
             .putAllHeaders(headers)
-            // Unset, zero or negative: 0 on the wire, the hub decides (a legacy hub gets the 5 s default instead).
-            .setTimeoutMs(requestTimeout?.toMillis()?.coerceIn(0, Int.MAX_VALUE.toLong())?.toInt() ?: 0)
+            .setPriority(options.priority ?: priorities[type] ?: 0)
             .build()
+        val chosen = (options.timeout ?: requestTimeout)?.takeIf { !it.isZero && !it.isNegative }
+        val policy = (options.retry ?: retry)?.takeIf { it.maxAttempts > 1 }
+            ?: return attempt(template, message::class, chosen) // unset: 0 on the wire, the hub decides
 
+        val messageKind = if (kind == RequestKind.COMMAND) MessageKind.COMMAND else MessageKind.QUERY
+        val budget = chosen ?: connection.hubTimeoutFor(type)
+        val deadline = System.nanoTime() + budget.toNanos()
+        var attemptNo = 1
+        while (true) {
+            val remaining = Duration.ofNanos(deadline - System.nanoTime())
+            try {
+                return attempt(template, message::class, remaining.coerceAtLeast(Duration.ofMillis(1)))
+            } catch (e: MessagingException) {
+                if (attemptNo >= policy.maxAttempts || !RetryClassification.isRetryable(messageKind, e)) throw e
+                val wait = policy.backoffBefore(attemptNo + 1)
+                // No time left for another attempt after the wait: give up with this error now.
+                if (System.nanoTime() + wait.toNanos() >= deadline) throw e
+                delay(wait.toMillis())
+                attemptNo++
+            }
+        }
+    }
+
+    /** One hub request built from [template] with a fresh id and [timeout] as `timeout_ms` (null sends 0). */
+    private suspend fun attempt(template: Request, messageClass: KClass<*>, timeout: Duration?): Any {
+        val type = template.type
+        val request = template.toBuilder()
+            .setId(UUID.randomUUID().toString())
+            // Unset: 0 on the wire, the hub decides (a legacy hub gets the 5 s default instead).
+            .setTimeoutMs(timeout?.toMillis()?.coerceIn(0, Int.MAX_VALUE.toLong())?.toInt() ?: 0)
+            .build()
         val answer = connection.send(request)
         return when {
             answer.hasReply() && answer.reply.hasError() -> throw answer.reply.error.let {
                 HubErrors.toException(type, it.code, it.message, it.details.toByteArray())
             }
-            answer.hasReply() -> decodeReply(type, message::class, answer.reply.payload.toByteArray())
+            answer.hasReply() -> decodeReply(type, messageClass, answer.reply.payload.toByteArray())
             answer.hasError() -> throw answer.error.let {
                 HubErrors.toException(type, it.code, it.message, it.details.toByteArray())
             }

@@ -36,6 +36,12 @@ class HubUnavailableException(message: String) : MessagingException(message)
  */
 class HubConnectionLostException(message: String) : MessagingException(message)
 
+/**
+ * The handling instance's hub queue is full (hub error code RESOURCE_EXHAUSTED, flow control): the request was rejected
+ * before any handler ran. Retrying later is safe.
+ */
+class HandlerBusyException(val type: String) : MessagingException("Handler for '$type' is busy: its hub queue is full")
+
 /** Two handlers (`Bean.method` strings) claim the same single-handler message type. */
 class DuplicateHandlerException(val type: String, val existing: String, val duplicate: String) :
     MessagingException("Duplicate handler for '$type': $existing and $duplicate")

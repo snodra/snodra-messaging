@@ -272,6 +272,17 @@ class HubConnection(
         }
     }
 
+    /**
+     * The hub's deadline for a request of [type] sent with `timeout_ms = 0`: the ack's per-type override, else its
+     * default; [HubProtocol.DEFAULT_REQUEST_TIMEOUT] against a legacy hub or before any handshake. The retry budget when
+     * the caller chose no timeout.
+     */
+    fun hubTimeoutFor(type: String): Duration {
+        val ack = (handshakeState.value as? HubHandshake.V2)?.ack ?: return HubProtocol.DEFAULT_REQUEST_TIMEOUT
+        val ms = ack.typeTimeoutsMsMap[type]?.takeIf { it > 0 } ?: ack.defaultTimeoutMs.takeIf { it > 0 }
+        return ms?.let { Duration.ofMillis(it.toLong()) } ?: HubProtocol.DEFAULT_REQUEST_TIMEOUT
+    }
+
     /** Closes the stream, stops reconnecting and fails every request in flight. */
     suspend fun stop() {
         val job = synchronized(lock) {

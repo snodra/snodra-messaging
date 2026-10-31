@@ -2,6 +2,7 @@ package io.damoreira.kraken.messaging.hub
 
 import io.damoreira.kraken.hub.v1.ErrorCode
 import io.damoreira.kraken.messaging.AccessDeniedException
+import io.damoreira.kraken.messaging.HandlerBusyException
 import io.damoreira.kraken.messaging.HandlerDisconnectedException
 import io.damoreira.kraken.messaging.InvalidMessageException
 import io.damoreira.kraken.messaging.MessageTimeoutException
@@ -20,6 +21,7 @@ object HubErrors {
         ErrorCode.UNAUTHENTICATED -> UnauthenticatedException(message)
         ErrorCode.INVALID_REQUEST -> InvalidMessageException(message)
         ErrorCode.PERMISSION_DENIED -> AccessDeniedException(message)
+        ErrorCode.RESOURCE_EXHAUSTED -> HandlerBusyException(type)
         else -> RemoteHandlerException(type, message, details)
     }
 }

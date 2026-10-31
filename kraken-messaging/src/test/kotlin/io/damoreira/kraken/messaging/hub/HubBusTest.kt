@@ -53,6 +53,11 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import io.damoreira.kraken.messaging.UnauthenticatedException
+import io.damoreira.kraken.messaging.HandlerBusyException
+import io.damoreira.kraken.messaging.MessageTimeoutException
+import io.damoreira.kraken.messaging.RetryPolicy
+import io.damoreira.kraken.messaging.SendOptions
+import java.util.concurrent.CopyOnWriteArrayList
 
 class LocalPingHandlers {
     @CommandHandler fun handle(command: Ping): Pong = Pong("local:${command.text}", Instant.EPOCH)
@@ -115,8 +120,13 @@ class HubBusTest {
     ) = HubConnection({ InProcessChannelBuilder.forName(hubName).build() }, "svc-$instanceId", instanceId, settings, inbound, scope)
         .also { connections += it }
 
-    private fun bus(connection: HubConnection, forwardJwt: Boolean = true, requestTimeout: Duration? = Duration.ofSeconds(2)) =
-        HubBus(connection, registry, invoker, codec, resolver, forwardJwt, TraceHeaders(null, null), requestTimeout)
+    private fun bus(
+        connection: HubConnection,
+        forwardJwt: Boolean = true,
+        requestTimeout: Duration? = Duration.ofSeconds(2),
+        priorities: Map<String, Int> = emptyMap(),
+        retry: RetryPolicy? = null,
+    ) = HubBus(connection, registry, invoker, codec, resolver, forwardJwt, TraceHeaders(null, null), requestTimeout, priorities, retry)
 
     /** A connected caller plus, when [remoteTypes] is not empty, a remote service answering with [answer]. */
     private suspend fun connectedBus(
@@ -135,6 +145,129 @@ class HubBusTest {
         caller.start()
         assertTrue(caller.awaitRegistered(wait))
         return bus(caller, forwardJwt)
+    }
+
+    /** A caller bus (built by [build]) plus a remote owner of `test.Ping` and `test.GetCount` answering with [answer]. */
+    private suspend fun remoteBus(answer: (Request) -> Reply, build: (HubConnection) -> HubBus): HubBus {
+        val remote = connection("remote") { answer(it) }
+        remote.register(setOf("test.Ping"), setOf("test.GetCount"))
+        remote.start()
+        assertTrue(remote.awaitRegistered(wait))
+        val caller = connection("caller")
+        caller.start()
+        assertTrue(caller.awaitRegistered(wait))
+        return build(caller)
+    }
+
+    private val pong = "{\"echoed\":\"remote\",\"at\":\"1970-01-01T00:00:00Z\"}"
+
+    // --- SendOptions, priority (P1) ---
+
+    @Test fun `priority comes from the per-type property, SendOptions wins`() = runBlocking {
+        val bus = remoteBus({ payload(it.id, if (it.type == "test.GetCount") "{\"value\":1}" else pong) }) {
+            bus(it, priorities = mapOf("test.Ping" to 7))
+        }
+        bus.send(Ping("x"))
+        assertEquals(7, hub.lastRequest()!!.priority)
+        bus.send(Ping("x"), SendOptions(priority = -3))
+        assertEquals(-3, hub.lastRequest()!!.priority)
+        bus.send(GetCount("k"))
+        assertEquals(0, hub.lastRequest()!!.priority)
+    }
+
+    @Test fun `SendOptions carry timeout and routing key`() = runBlocking {
+        val bus = remoteBus({ payload(it.id, pong) }) { bus(it, requestTimeout = null) }
+        bus.send(Ping("x"), SendOptions(timeout = Duration.ofMillis(1_234), routingKey = "agg-1"))
+        assertEquals(1_234, hub.lastRequest()!!.timeoutMs)
+        assertEquals("agg-1", hub.lastRequest()!!.routingKey)
+        bus.send(Ping("x"))
+        assertEquals(0, hub.lastRequest()!!.timeoutMs) // nothing chosen: the hub decides
+        assertEquals(Pong("remote", Instant.EPOCH), bus.sendBlocking(Ping("x"), SendOptions(routingKey = "k")))
+    }
+
+    @Test fun `RESOURCE_EXHAUSTED surfaces as HandlerBusyException`() = runBlocking {
+        val bus = remoteBus({ error(it.id, ErrorCode.RESOURCE_EXHAUSTED, "queue full") }) { bus(it) }
+        val e = assertFailsWith<HandlerBusyException> { bus.send(Ping("x")) }
+        assertEquals("test.Ping", e.type)
+    }
+
+    // --- retry (P1) ---
+
+    private val fastRetry = RetryPolicy(maxAttempts = 3, initialBackoff = Duration.ofMillis(10), maxBackoff = Duration.ofMillis(50))
+
+    @Test fun `retry is off unless enabled`() = runBlocking {
+        val attempts = CopyOnWriteArrayList<String>()
+        val bus = remoteBus({ attempts += it.id; error(it.id, ErrorCode.RESOURCE_EXHAUSTED, "full") }) { bus(it) }
+        assertFailsWith<HandlerBusyException> { bus.send(Ping("x")) }
+        assertEquals(1, attempts.size)
+    }
+
+    @Test fun `a command retries HandlerBusy with a fresh request id until it succeeds`() = runBlocking {
+        val attempts = CopyOnWriteArrayList<Request>()
+        val bus = remoteBus({ req ->
+            attempts += req
+            if (attempts.size < 3) error(req.id, ErrorCode.RESOURCE_EXHAUSTED, "full") else payload(req.id, pong)
+        }) { bus(it, retry = fastRetry) }
+        assertEquals(Pong("remote", Instant.EPOCH), bus.send(Ping("x")))
+        assertEquals(3, attempts.size)
+        assertEquals(3, attempts.map { it.id }.toSet().size, "every attempt has its own id")
+        assertEquals(1, attempts.map { it.headersMap["correlationId"] }.toSet().size, "one correlation id for all attempts")
+    }
+
+    @Test fun `a command is never retried after a timeout, a query is`() = runBlocking {
+        val attempts = CopyOnWriteArrayList<Request>()
+        val bus = remoteBus({ req ->
+            attempts += req
+            if (attempts.count { it.type == req.type } < 2) error(req.id, ErrorCode.TIMEOUT, "late") else payload(req.id, if (req.type == "test.GetCount") "{\"value\":3}" else pong)
+        }) { bus(it, retry = fastRetry) }
+        assertFailsWith<MessageTimeoutException> { bus.send(Ping("x")) }
+        assertEquals(1, attempts.count { it.type == "test.Ping" })
+        assertEquals(Count(3), bus.send(GetCount("k")))
+        assertEquals(2, attempts.count { it.type == "test.GetCount" })
+    }
+
+    @Test fun `a non-retryable error is thrown at once`() = runBlocking {
+        val attempts = CopyOnWriteArrayList<String>()
+        val bus = remoteBus({ attempts += it.id; error(it.id, ErrorCode.HANDLER_ERROR, "boom") }) { bus(it, retry = fastRetry) }
+        assertFailsWith<RemoteHandlerException> { bus.send(Ping("x")) }
+        assertEquals(1, attempts.size)
+    }
+
+    @Test fun `after max attempts the last error is thrown`() = runBlocking {
+        val attempts = CopyOnWriteArrayList<String>()
+        val bus = remoteBus({ attempts += it.id; error(it.id, ErrorCode.NO_HANDLER, "gone") }) { bus(it, retry = fastRetry) }
+        assertFailsWith<NoHandlerException> { bus.send(Ping("x")) }
+        assertEquals(3, attempts.size)
+    }
+
+    @Test fun `all attempts stay within the caller's budget and send the remaining budget`() = runBlocking {
+        val attempts = CopyOnWriteArrayList<Request>()
+        val slow = RetryPolicy(maxAttempts = 10, initialBackoff = Duration.ofMillis(200), multiplier = 1.0, maxBackoff = Duration.ofMillis(200))
+        val bus = remoteBus({ attempts += it; error(it.id, ErrorCode.RESOURCE_EXHAUSTED, "full") }) { bus(it, requestTimeout = null, retry = slow) }
+        val started = System.nanoTime()
+        assertFailsWith<HandlerBusyException> { bus.send(Ping("x"), SendOptions(timeout = Duration.ofMillis(700))) }
+        val elapsed = Duration.ofNanos(System.nanoTime() - started)
+        assertTrue(elapsed < Duration.ofMillis(900), "took $elapsed for a 700 ms budget")
+        assertTrue(attempts.size in 2..4, "attempts=${attempts.size}")
+        val sent = attempts.map { it.timeoutMs }
+        assertTrue(sent.first() in 600..700 && sent.zipWithNext().all { (a, b) -> b < a }, "timeout_ms per attempt: $sent")
+    }
+
+    @Test fun `without a chosen timeout the budget is the hub's bound for the type`() = runBlocking {
+        hub.typeTimeouts = mapOf("test.Ping" to Duration.ofMillis(400))
+        val attempts = CopyOnWriteArrayList<Request>()
+        val slow = RetryPolicy(maxAttempts = 10, initialBackoff = Duration.ofMillis(150), multiplier = 1.0, maxBackoff = Duration.ofMillis(150))
+        val bus = remoteBus({ attempts += it; error(it.id, ErrorCode.RESOURCE_EXHAUSTED, "full") }) { bus(it, requestTimeout = null, retry = slow) }
+        assertFailsWith<HandlerBusyException> { bus.send(Ping("x")) }
+        assertTrue(attempts.size in 2..3, "attempts=${attempts.size}")
+        assertTrue(attempts.first().timeoutMs in 300..400, "first attempt sent ${attempts.first().timeoutMs}")
+    }
+
+    @Test fun `SendOptions retry NONE disables a configured policy`() = runBlocking {
+        val attempts = CopyOnWriteArrayList<String>()
+        val bus = remoteBus({ attempts += it.id; error(it.id, ErrorCode.RESOURCE_EXHAUSTED, "full") }) { bus(it, retry = fastRetry) }
+        assertFailsWith<HandlerBusyException> { bus.send(Ping("x"), SendOptions(retry = RetryPolicy.NONE)) }
+        assertEquals(1, attempts.size)
     }
 
     private fun authenticate(token: String) {
