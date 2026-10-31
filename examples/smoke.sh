@@ -1,12 +1,47 @@
 #!/usr/bin/env bash
 # Smoke test for the examples sandbox: drives service-a over HTTP and checks the hub topology.
-# Usage: bash examples/smoke.sh      (A=http://localhost:8091 HUB=http://localhost:7001 to override)
+# Usage: bash examples/smoke.sh      (A=http://localhost:8091 HUB=http://localhost:7001 to override;
+#        SKIP_PAUSE=1 skips the docker-pause step, ONLY_PAUSE=1 runs only it, B_CONTAINER names service-b)
 set -euo pipefail
 
 A=${A:-http://localhost:8091}
 HUB=${HUB:-http://localhost:7001}
 
 fail() { echo "SMOKE FAILED: $*" >&2; exit 1; }
+
+# F1 (P0): a frozen handler is evicted after the 10 s v2 heartbeat timeout, so a call to it fails in ~10 s
+# instead of the 30 s it took before (and instead of burning a 5 s TIMEOUT: compose.local.yaml gives
+# examples.CountGreetings a 20 s per-type override). SKIP_PAUSE=1 skips this step; ONLY_PAUSE=1 runs only this step.
+pause_step() {
+  local b=${B_CONTAINER:-kraken-example-b}
+  command -v docker >/dev/null || fail "docker CLI needed for the pause step (or set SKIP_PAUSE=1)"
+  docker inspect "$b" >/dev/null 2>&1 || fail "container $b not found (set B_CONTAINER)"
+  echo "10. pausing $b during a CountGreetings call: expect HANDLER_DISCONNECTED (503) in about 10 s ..."
+  local body
+  body=$(mktemp)
+  docker pause "$b" >/dev/null
+  trap 'docker unpause '"$b"' >/dev/null 2>&1 || true' EXIT
+  local started ended code
+  started=$(date +%s)
+  code=$(curl -s -o "$body" -w '%{http_code}' --max-time 45 "$A/greetings/Ada/count" || true)
+  ended=$(date +%s)
+  docker unpause "$b" >/dev/null
+  trap - EXIT
+  local elapsed=$((ended - started))
+  echo "   HTTP $code after ${elapsed}s: $(cat "$body")"
+  [ "$code" = "503" ] || fail "expected 503 (HandlerDisconnectedException), got $code after ${elapsed}s: $(cat "$body")"
+  grep -q 'HandlerDisconnectedException' "$body" || fail "expected HandlerDisconnectedException, got: $(cat "$body")"
+  [ "$elapsed" -ge 5 ] && [ "$elapsed" -le 16 ] || fail "expected about 10 s (5..16), took ${elapsed}s"
+  rm -f "$body"
+
+  echo "11. waiting for service-b to come back on the hub and answer again ..."
+  for i in $(seq 1 60); do
+    if curl -fsS "$A/greetings/Ada/count" >/dev/null 2>&1; then break; fi
+    [ "$i" -eq 60 ] && fail "service-b did not come back within 60s after unpause"
+    sleep 1
+  done
+  echo "   service-b answers again after ${i}s"
+}
 
 echo "1. waiting for service-a at $A ..."
 for i in $(seq 1 90); do
@@ -22,6 +57,12 @@ for i in $(seq 1 90); do
   [ "$i" -eq 90 ] && fail "service-b did not register on the hub in 90s; topology: $TOPO"
   sleep 1
 done
+
+if [ "${ONLY_PAUSE:-0}" = "1" ]; then
+  pause_step
+  echo "SMOKE OK (pause step only)"
+  exit 0
+fi
 
 post_greeting() {
   local body
@@ -88,5 +129,7 @@ for i in $(seq 1 90); do
   sleep 1
 done
 echo "   delivered: $TEXTS"
+
+[ "${SKIP_PAUSE:-0}" = "1" ] || pause_step
 
 echo "SMOKE OK"

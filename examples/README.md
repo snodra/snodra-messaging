@@ -99,10 +99,16 @@ Add `service-c` to the `logs -f` command to see the `C:` lines.
 waits for both events, asserts the count grew by two, asserts both services are on the topology, then waits for
 service-c, shouts and reverses a per-run unique text and waits for both text events to reach A). It asserts only
 what A exposes over HTTP: B's and C's log lines and the order in which the text events arrive are not asserted;
-read them in the logs.:
+read them in the logs. Last, it freezes service-b with `docker pause` during a `CountGreetings` call and expects
+`503 HandlerDisconnectedException` after about 10 s: the hub evicts a v2 session after 10 s without heartbeats (it
+took 30 s before protocol v2), and the sandbox hub gives `examples.CountGreetings` a 20 s per-type timeout
+(`KRAKEN_HUB_TIMEOUT_OVERRIDES` in `compose.local.yaml`) so the call outlives the eviction instead of ending in a 5 s
+`TIMEOUT`. It then waits for service-b to answer again.
 
 ```bash
 bash examples/smoke.sh          # from kraken-messaging; prints SMOKE OK
+SKIP_PAUSE=1 bash examples/smoke.sh   # without the docker pause step
+ONLY_PAUSE=1 bash examples/smoke.sh   # only the docker pause step (needs the docker CLI)
 ```
 
 ## Experiments
