@@ -1,5 +1,6 @@
 package io.damoreira.kraken.examples.a
 
+import io.damoreira.kraken.messaging.HandlerBusyException
 import io.damoreira.kraken.messaging.HandlerDisconnectedException
 import io.damoreira.kraken.messaging.MessageTimeoutException
 import io.damoreira.kraken.messaging.MessagingException
@@ -11,13 +12,16 @@ import org.springframework.web.bind.annotation.RestControllerAdvice
 
 data class ErrorBody(val error: String, val message: String)
 
-/** Maps hub failures to HTTP: nobody owns the type (503), the owner vanished (503), no reply in time (504), else 502. */
+/**
+ * Maps hub failures to HTTP: nobody owns the type (503), the owner vanished (503), the owner's hub queue is full (503),
+ * no reply in time (504), else 502.
+ */
 @RestControllerAdvice
 class MessagingErrorAdvice {
     @ExceptionHandler(MessagingException::class)
     fun handle(e: MessagingException): ResponseEntity<ErrorBody> {
         val status = when (e) {
-            is NoHandlerException, is HandlerDisconnectedException -> HttpStatus.SERVICE_UNAVAILABLE
+            is NoHandlerException, is HandlerDisconnectedException, is HandlerBusyException -> HttpStatus.SERVICE_UNAVAILABLE
             is MessageTimeoutException -> HttpStatus.GATEWAY_TIMEOUT
             else -> HttpStatus.BAD_GATEWAY
         }

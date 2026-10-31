@@ -1,5 +1,6 @@
 package io.damoreira.kraken.examples.a
 
+import io.damoreira.kraken.messaging.HandlerBusyException
 import io.damoreira.kraken.messaging.HandlerDisconnectedException
 import io.damoreira.kraken.messaging.HubUnavailableException
 import io.damoreira.kraken.messaging.MessageTimeoutException
@@ -19,6 +20,10 @@ class MessagingErrorAdviceTest {
 
     @Test fun `handler disconnected is 503`() {
         assertEquals(HttpStatus.SERVICE_UNAVAILABLE, advice.handle(HandlerDisconnectedException("x")).statusCode)
+    }
+
+    @Test fun `busy handler is 503`() {
+        assertEquals(HttpStatus.SERVICE_UNAVAILABLE, advice.handle(HandlerBusyException("x")).statusCode)
     }
 
     @Test fun `timeout is 504`() {

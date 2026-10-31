@@ -41,6 +41,14 @@ class GreetingHandlersTest {
         assertEquals(GreetingCount("Bob", 1), buses.send(CountGreetings("Bob")))
     }
 
+    @Test fun `a configured count delay slows the query down`() = runBlocking {
+        val buses = buses()
+        buses.register(GreetingHandlers(buses, java.time.Duration.ofMillis(150)))
+        val started = System.nanoTime()
+        assertEquals(GreetingCount("Ada", 0), buses.send(CountGreetings("Ada")))
+        assertTrue(System.nanoTime() - started >= 150_000_000, "the delay was not applied")
+    }
+
     @Test fun `count for unknown name is 0`() = runBlocking {
         val buses = buses()
         buses.register(GreetingHandlers(buses))

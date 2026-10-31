@@ -9,16 +9,26 @@ import io.damoreira.kraken.messaging.EventBus
 import io.damoreira.kraken.messaging.MessageContext
 import io.damoreira.kraken.messaging.handler.CommandHandler
 import io.damoreira.kraken.messaging.handler.QueryHandler
+import kotlinx.coroutines.delay
 import org.slf4j.LoggerFactory
+import org.springframework.beans.factory.annotation.Value
 import org.springframework.stereotype.Component
+import java.time.Duration
 import java.time.Instant
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 
-/** Owner of the greetings domain: counts greetings per name in memory (lost on restart, by design). */
+/**
+ * Owner of the greetings domain: counts greetings per name in memory (lost on restart, by design). [countDelay]
+ * (`examples.count-delay`, env `EXAMPLES_COUNT_DELAY`, default 0) slows the count query down so the sandbox can show
+ * hub flow control with a slow handler.
+ */
 @Component
-class GreetingHandlers(private val events: EventBus) {
+class GreetingHandlers(
+    private val events: EventBus,
+    @Value("\${examples.count-delay:0ms}") private val countDelay: Duration = Duration.ZERO,
+) {
     private val log = LoggerFactory.getLogger(GreetingHandlers::class.java)
     private val counts = ConcurrentHashMap<String, AtomicLong>()
 
@@ -32,7 +42,8 @@ class GreetingHandlers(private val events: EventBus) {
     }
 
     @QueryHandler
-    fun handle(q: CountGreetings): GreetingCount {
+    suspend fun handle(q: CountGreetings): GreetingCount {
+        if (!countDelay.isZero) delay(countDelay.toMillis())
         val count = counts[q.name]?.get() ?: 0L
         log.info("B: answered CountGreetings name={} count={}", q.name, count)
         return GreetingCount(q.name, count)
