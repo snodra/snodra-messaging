@@ -218,6 +218,9 @@ echo "$TOPOLOGY"
 echo "$TOPOLOGY" | grep -q '"service-a"' || fail "service-a missing from topology"
 echo "$TOPOLOGY" | grep -q '"service-b"' || fail "service-b missing from topology"
 
+echo "5b. hub dashboard graph: service-a -> examples.CountGreetings (owner service-b) counted ..."
+curl -fsS "$HUB/api/v1/graph" | grep -q '"from":"service:service-a","to":"type:examples.CountGreetings","role":"send","count":[1-9]' || fail "edge service-a -> examples.CountGreetings missing from $HUB/api/v1/graph"
+
 echo "6. waiting for service-c to own examples.Shout and examples.Reverse on the hub ..."
 for i in $(seq 1 90); do
   TOPO=$(curl -fsS "$HUB/topology" 2>/dev/null || true)
