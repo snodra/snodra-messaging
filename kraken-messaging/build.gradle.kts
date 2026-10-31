@@ -1,3 +1,5 @@
+import java.security.MessageDigest
+
 plugins {
     alias(libs.plugins.kotlin.jvm)
     alias(libs.plugins.kotlin.spring)
@@ -103,3 +105,31 @@ publishing {
         }
     }
 }
+
+// src/main/proto/hub.proto must stay byte-identical to the umbrella's kraken/protocol/hub.proto (same check as
+// scripts/check-proto-sync.sh). Skipped with a log line when the sibling checkout is absent (e.g. the examples
+// Docker build, which copies only this repo).
+val checkProtoSync = tasks.register("checkProtoSync") {
+    group = "verification"
+    description = "Compares the SHA-256 of src/main/proto/hub.proto with ../kraken/protocol/hub.proto"
+    val copy = layout.projectDirectory.file("src/main/proto/hub.proto").asFile
+    val source = rootProject.layout.projectDirectory.file(
+        System.getenv("KRAKEN_PROTO_SOURCE") ?: "../kraken/protocol/hub.proto",
+    ).asFile
+    inputs.file(copy)
+    doLast {
+        if (!source.exists()) {
+            logger.lifecycle("proto sync: umbrella proto not found at $source, skipping")
+            return@doLast
+        }
+        fun sha256(f: File) = MessageDigest.getInstance("SHA-256").digest(f.readBytes())
+            .joinToString("") { "%02x".format(it) }
+        val want = sha256(source)
+        val have = sha256(copy)
+        if (want != have) {
+            throw GradleException("proto sync: $copy (sha256 $have) drifted from $source (sha256 $want); run: cp $source $copy")
+        }
+        logger.lifecycle("proto sync: hub.proto matches $source (sha256 $want)")
+    }
+}
+tasks.named("check") { dependsOn(checkProtoSync) }
