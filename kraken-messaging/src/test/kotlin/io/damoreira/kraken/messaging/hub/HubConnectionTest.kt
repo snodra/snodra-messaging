@@ -103,6 +103,15 @@ class HubConnectionTest {
         assertEquals(listOf("flow-control"), assertIs<HubHandshake.V2>(conn.handshake.value).ack.capabilitiesList)
     }
 
+    @Test fun `fewer than one handler or a negative load factor is rejected`() {
+        assertFailsWith<IllegalArgumentException> { flowConnection("x", maxConcurrentHandlers = 0) { req -> payloadReply(req.id, "{}") } }
+        val e = assertFailsWith<IllegalArgumentException> {
+            flowConnection("x", maxConcurrentHandlers = 1, loadFactor = -1) { req -> payloadReply(req.id, "{}") }
+        }
+        assertEquals("loadFactor must not be negative, was -1", e.message)
+        flowConnection("x", maxConcurrentHandlers = 1, loadFactor = 0) { req -> payloadReply(req.id, "{}") } // 0 reads as 100
+    }
+
     @Test fun `each completed handler grants one permit, batched`() = runBlocking {
         val handler = flowConnection("b", maxConcurrentHandlers = 64) { req -> payloadReply(req.id, "{}") }
         handler.register(setOf("test.Ping"), emptySet())

@@ -36,11 +36,14 @@ data class KrakenMessagingProperties(
         /** Jittered exponential backoff when the stream drops. */
         val reconnectBackoff: Backoff = Backoff(),
         /**
-         * Incoming hub requests handled concurrently by this instance; further requests wait for a free slot. Also the
-         * `initial_permits` announced to a hub with flow control, which then queues the excess on its side.
+         * Incoming hub requests handled concurrently by this instance (>= 1); further requests wait for a free slot.
+         * Also the `initial_permits` announced to a hub with flow control, which then queues the excess on its side.
          */
         val maxConcurrentHandlers: Int = 256,
-        /** Relative capacity of this instance (`Register.load_factor`, 100 = normal): weights its share of routing. */
+        /**
+         * Relative capacity of this instance (`Register.load_factor`, 100 = normal, not negative; the hub reads 0 as
+         * 100): weights its share of routing.
+         */
         val loadFactor: Int = 100,
         /** Labels announced in `Register.tags` (for example `zone: eu-1`); unkeyed requests prefer matching instances. */
         val tags: Map<String, String> = emptyMap(),
@@ -48,7 +51,15 @@ data class KrakenMessagingProperties(
         val priorities: Map<String, Int> = emptyMap(),
         /** Opt-in retry of failed sends (see `RetryClassification`). */
         val retry: Retry = Retry(),
-    )
+    ) {
+        init {
+            // Checked at binding, so a bad value fails the startup even while the hub is disabled.
+            require(maxConcurrentHandlers >= 1) {
+                "kraken.messaging.hub.max-concurrent-handlers must be >= 1, was $maxConcurrentHandlers"
+            }
+            require(loadFactor >= 0) { "kraken.messaging.hub.load-factor must not be negative, was $loadFactor" }
+        }
+    }
 
     /** `hub.retry.*`: validated by [RetryPolicy]'s rules at startup, also while [enabled] is false. */
     data class Retry(

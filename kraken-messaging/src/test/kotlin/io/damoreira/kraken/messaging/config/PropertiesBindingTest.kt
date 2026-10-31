@@ -135,6 +135,22 @@ class PropertiesBindingTest {
         }
     }
 
+    @Test fun `max-concurrent-handlers below 1 fails at startup`() {
+        for (value in listOf("0", "-4")) {
+            val messages = startupFailure("kraken.messaging.hub.enabled=false", "kraken.messaging.hub.max-concurrent-handlers=$value")
+            assertTrue("kraken.messaging.hub.max-concurrent-handlers must be >= 1, was $value" in messages, messages)
+        }
+    }
+
+    @Test fun `a negative load factor fails at startup, 0 is allowed`() {
+        val messages = startupFailure("kraken.messaging.hub.enabled=false", "kraken.messaging.hub.load-factor=-1")
+        assertTrue("kraken.messaging.hub.load-factor must not be negative, was -1" in messages, messages)
+        runner.withPropertyValues(*required, "kraken.messaging.hub.load-factor=0").run { context ->
+            assertEquals(null, context.startupFailure) // the hub reads 0 as 100
+            assertEquals(0, context.getBean(KrakenMessagingProperties::class.java).hub.loadFactor)
+        }
+    }
+
     @Test fun `missing service-name fails binding`() {
         runner.withPropertyValues("kraken.messaging.type-prefix=kraken.orders").run { context ->
             val failure = assertNotNull(context.startupFailure)

@@ -154,6 +154,10 @@ class HubConnection(
     private val pending = ConcurrentHashMap<String, Pending>()
 
     private val handlerPermits = Semaphore(maxConcurrentHandlers.also { require(it >= 1) { "maxConcurrentHandlers must be >= 1" } })
+
+    init {
+        require(loadFactor >= 0) { "loadFactor must not be negative, was $loadFactor" } // uint32 on the wire, 0 reads as 100
+    }
     private val inFlight = MutableStateFlow(0) // incoming requests dispatched and not yet answered
 
     /** Incoming requests currently being handled (or waiting for a handler permit). */
