@@ -78,7 +78,7 @@
     {
       "name": "kraken.messaging.hub.request-timeout",
       "type": "java.time.Duration",
-      "description": "Per-request timeout sent as timeout_ms. Unset: a protocol v2 hub applies its default or per-type override, a legacy hub gets 5s.",
+      "description": "Per-request timeout sent as timeout_ms. Unset: a protocol v2 hub applies its default or per-type override, a legacy hub gets 5s. 0s counts as unset.",
       "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Hub"
     },
     {

@@ -424,6 +424,39 @@ class HubConnectionTest {
         Unit
     }
 
+    @Test fun `zero request-timeout counts as unset against a legacy hub`() = runBlocking {
+        hub.legacy = true
+        val zero = fast.copy(requestTimeout = Duration.ZERO)
+        val handler = connection("b", settings = zero) { req -> delay(200); payloadReply(req.id, "{}") }
+        handler.register(setOf("test.Ping"), emptySet())
+        handler.start()
+        val sender = connection("a", settings = zero)
+        sender.start()
+        assertTrue(handler.awaitRegistered(wait))
+        assertTrue(sender.awaitRegistered(wait))
+        assertIs<HubHandshake.Legacy>(sender.handshake.value)
+
+        // Before the fix: 0 ms sent and a 0 ms local guard, so this failed at once with MessageTimeoutException.
+        val response = withTimeout(5_000) { sender.send(request(timeoutMs = 0)) }
+        assertTrue(response.hasReply() && !response.reply.hasError(), response.toString())
+    }
+
+    @Test fun `zero request-timeout still waits the default for a stream`() = runBlocking {
+        val lateName = "late-hub-" + UUID.randomUUID()
+        val conn = connection("a", settings = fast.copy(requestTimeout = Duration.ZERO), hubName = lateName)
+        conn.start()
+        val answer = async { runCatching { conn.send(request(type = "nobody.Owns")) } }
+        delay(500)
+        InProcessHub(lateName).start().use {
+            // Before the fix the wait for a stream was 0 ms: HubUnavailableException at once.
+            val result = withTimeout(5_000) { answer.await() }
+            val message = result.getOrThrow()
+            assertTrue(message.hasError(), message.toString())
+            assertEquals(ErrorCode.NO_HANDLER, message.error.code)
+            conn.stop()
+        }
+    }
+
     @Test fun `reconnect waits are jittered within 20 percent and capped at the maximum`() {
         val random = Random(42)
         val base = Duration.ofMillis(1_000)

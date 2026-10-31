@@ -68,6 +68,7 @@ class HubBus(
             .setRoutingKey(routingKey.orEmpty())
             .setPayload(ByteString.copyFrom(payload))
             .putAllHeaders(headers)
+            // Unset, zero or negative: 0 on the wire, the hub decides (a legacy hub gets the 5 s default instead).
             .setTimeoutMs(requestTimeout?.toMillis()?.coerceIn(0, Int.MAX_VALUE.toLong())?.toInt() ?: 0)
             .build()
 

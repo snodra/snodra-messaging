@@ -58,7 +58,10 @@ data class HubSettings(
     val heartbeatInterval: Duration,
     val backoffMin: Duration,
     val backoffMax: Duration,
-)
+) {
+    /** [requestTimeout] when the caller chose one; zero (or negative) counts as unset, never as an instant deadline. */
+    val chosenRequestTimeout: Duration? get() = requestTimeout?.takeIf { !it.isZero && !it.isNegative }
+}
 
 /** What the hub answered on the current stream: a v2 `RegisterAck`, or only the heartbeat echo of a legacy (v1) hub. */
 sealed interface HubHandshake {
@@ -215,7 +218,7 @@ class HubConnection(
      *   [HubProtocol.LOCAL_GUARD_MARGIN] (v2), or `max(timeoutMs, requestTimeout)` (legacy)
      */
     suspend fun send(request: Request): ServerMessage {
-        val wait = settings.requestTimeout ?: HubProtocol.DEFAULT_REQUEST_TIMEOUT
+        val wait = settings.chosenRequestTimeout ?: HubProtocol.DEFAULT_REQUEST_TIMEOUT
         if (!connectedState.value) {
             withTimeoutOrNull(wait.toMillis()) { connectedState.first { it } }
                 ?: throw HubUnavailableException("hub not connected within $wait")
@@ -241,7 +244,7 @@ class HubConnection(
     private fun prepare(request: Request, handshake: HubHandshake): Pair<Request, Long> = when (handshake) {
         is HubHandshake.V2 -> request to HubProtocol.localGuardMs(request.timeoutMs, request.type, handshake.ack)
         HubHandshake.Legacy -> {
-            val fallback = (settings.requestTimeout ?: HubProtocol.DEFAULT_REQUEST_TIMEOUT).toMillis()
+            val fallback = (settings.chosenRequestTimeout ?: HubProtocol.DEFAULT_REQUEST_TIMEOUT).toMillis()
             val outgoing = if (request.timeoutMs > 0) request
             else request.toBuilder().setTimeoutMs(fallback.coerceIn(0, Int.MAX_VALUE.toLong()).toInt()).build()
             outgoing to outgoing.timeoutMs.toLong().coerceAtLeast(fallback)
