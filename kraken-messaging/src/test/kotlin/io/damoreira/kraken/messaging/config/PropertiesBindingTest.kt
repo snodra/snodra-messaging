@@ -26,11 +26,11 @@ class PropertiesBindingTest {
             assertEquals("kraken.orders", p.typePrefix)
             assertEquals(true, p.hub.enabled)
             assertEquals("static://kraken-hub:7000", p.hub.address)
-            assertEquals(Duration.ofSeconds(5), p.hub.requestTimeout)
+            assertEquals(null, p.hub.requestTimeout) // unset: the hub's default or per-type override applies
             assertEquals(Duration.ofSeconds(10), p.hub.heartbeatInterval)
             assertEquals(256, p.hub.maxConcurrentHandlers)
             assertEquals(Duration.ofMillis(500), p.hub.reconnectBackoff.min)
-            assertEquals(Duration.ofSeconds(30), p.hub.reconnectBackoff.max)
+            assertEquals(Duration.ofSeconds(5), p.hub.reconnectBackoff.max)
             assertEquals("broker:19092", p.kafka.bootstrapServers)
             assertEquals("kraken.events", p.kafka.topic)
             assertEquals(true, p.kafka.consumer.enabled)
@@ -64,9 +64,15 @@ class PropertiesBindingTest {
                 assertEquals("billing", p.serviceName)
                 assertEquals("static://hub.internal:7443", p.hub.address)
                 assertEquals(Duration.ofSeconds(1), p.hub.reconnectBackoff.min)
-                assertEquals(Duration.ofSeconds(30), p.hub.reconnectBackoff.max)
+                assertEquals(Duration.ofSeconds(5), p.hub.reconnectBackoff.max)
                 assertEquals(Duration.ofDays(3), p.outbox.retention)
             }
+    }
+
+    @Test fun `request-timeout binds when set`() {
+        runner.withPropertyValues(*required, "kraken.messaging.hub.request-timeout=12s").run { context ->
+            assertEquals(Duration.ofSeconds(12), context.getBean(KrakenMessagingProperties::class.java).hub.requestTimeout)
+        }
     }
 
     @Test fun `missing service-name fails binding`() {

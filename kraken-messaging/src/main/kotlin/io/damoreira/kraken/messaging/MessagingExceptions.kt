@@ -24,8 +24,17 @@ class InvalidMessageException(message: String, cause: Throwable? = null) : Messa
 /** The caller is authenticated but the handler's `@RequiresAuthentication` expression denied it (hub code PERMISSION_DENIED). */
 class AccessDeniedException(message: String) : MessagingException(message)
 
-/** The hub cannot be reached. */
+/**
+ * The request was never written to a live hub stream: no stream came up in time, or the stream closed before the
+ * request could be queued on it. The handler did not run; retrying is safe.
+ */
 class HubUnavailableException(message: String) : MessagingException(message)
+
+/**
+ * The request was written to a hub stream (accepted by its outbound queue) and that stream broke before an answer
+ * arrived. The outcome is unknown: the handler may or may not have run, as with a `TIMEOUT`.
+ */
+class HubConnectionLostException(message: String) : MessagingException(message)
 
 /** Two handlers (`Bean.method` strings) claim the same single-handler message type. */
 class DuplicateHandlerException(val type: String, val existing: String, val duplicate: String) :

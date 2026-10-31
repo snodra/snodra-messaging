@@ -6,8 +6,10 @@ import io.damoreira.kraken.hub.v1.ErrorCode
 import io.damoreira.kraken.hub.v1.Reply
 import io.damoreira.kraken.hub.v1.Request
 import io.damoreira.kraken.hub.v1.RequestKind
+import io.damoreira.kraken.messaging.HubConnectionLostException
 import io.damoreira.kraken.messaging.HubRegistrationRejectedException
 import io.damoreira.kraken.messaging.HubUnavailableException
+import io.damoreira.kraken.messaging.MessageTimeoutException
 import io.damoreira.kraken.messaging.test.InProcessHub
 import io.grpc.Status
 import io.grpc.inprocess.InProcessChannelBuilder
@@ -36,7 +38,10 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.random.Random
 import kotlin.test.assertFalse
+import kotlin.test.assertIs
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 class HubConnectionTest {
@@ -205,7 +210,8 @@ class HubConnectionTest {
     }
 
     @Test fun missing_heartbeat_echoes_trigger_reconnect() = runBlocking {
-        val conn = connection("a", settings = fast.copy(heartbeatInterval = Duration.ofMillis(100)))
+        hub.heartbeatInterval = Duration.ofMillis(100) // announced in the ack; the 10 s fallback is not used
+        val conn = connection("a")
         conn.register(setOf("test.Ping"), emptySet())
         conn.start()
         assertTrue(conn.awaitRegistered(wait))
@@ -221,8 +227,9 @@ class HubConnectionTest {
         assertEquals(setOf("test.Ping"), hub.registeredTypes())
     }
 
-    @Test fun `heartbeats are sent`() = runBlocking {
-        val conn = connection("a", settings = fast.copy(heartbeatInterval = Duration.ofMillis(50)))
+    @Test fun `heartbeats are sent at the interval the hub announces`() = runBlocking {
+        hub.heartbeatInterval = Duration.ofMillis(50)
+        val conn = connection("a") // fallback interval 10 s
         conn.start()
         assertTrue(conn.awaitRegistered(wait))
 
@@ -265,6 +272,186 @@ class HubConnectionTest {
         assertTrue(response.hasReply() && response.reply.hasError(), response.toString())
         assertEquals(ErrorCode.HANDLER_ERROR, response.reply.error.code)
         assertTrue(response.reply.error.message.startsWith("TimeoutCancellationException: "), response.reply.error.message)
+    }
+
+    // --- protocol v2 handshake, timeouts, error split, backoff (P0) ---
+
+    @Test fun `register announces protocol v2 and the ack is parsed`() = runBlocking {
+        hub.typeTimeouts = mapOf("test.Slow" to Duration.ofSeconds(30))
+        val conn = connection("a")
+        conn.register(setOf("test.Ping"), emptySet())
+        conn.start()
+        assertTrue(conn.awaitRegistered(wait))
+
+        val reg = assertNotNull(hub.lastRegisterFrom("a"))
+        assertEquals(2, reg.protocolVersion)
+        assertEquals(emptyList(), reg.capabilitiesList)
+        assertTrue(reg.clientVersion.startsWith("kraken-messaging/"), reg.clientVersion)
+        assertFalse(reg.clientVersion.endsWith("/unknown"), reg.clientVersion)
+        val handshake = assertIs<HubHandshake.V2>(conn.handshake.value)
+        assertEquals(hub.hubId, handshake.ack.hubId)
+        assertEquals(2, handshake.ack.protocolVersion)
+        assertEquals(3_000, handshake.ack.heartbeatIntervalMs)
+        assertEquals(10_000, handshake.ack.heartbeatTimeoutMs)
+        assertEquals("default", handshake.ack.context)
+        assertEquals(mapOf("test.Slow" to 30_000), handshake.ack.typeTimeoutsMsMap)
+    }
+
+    @Test fun `every accepted register is acknowledged on a v2 hub`() = runBlocking {
+        val conn = connection("a")
+        conn.register(setOf("test.Ping"), emptySet())
+        conn.start()
+        assertTrue(conn.awaitRegistered(wait))
+        conn.register(setOf("test.Ping", "test.Pong"), emptySet())
+        assertTrue(conn.awaitRegistered(wait))
+        await atMost Duration.ofSeconds(2) until { hub.acksSentTo("a") == 2 }
+        assertIs<HubHandshake.V2>(conn.handshake.value)
+        Unit
+    }
+
+    @Test fun `legacy hub is detected from an echo without ack and the fallback interval is used`() = runBlocking {
+        hub.legacy = true
+        val conn = connection("a", settings = fast.copy(heartbeatInterval = Duration.ofMillis(50)))
+        conn.register(setOf("test.Ping"), emptySet())
+        conn.start()
+        assertTrue(conn.awaitRegistered(wait))
+
+        assertEquals(HubHandshake.Legacy, conn.handshake.value)
+        assertEquals(0, hub.acksSentTo("a"))
+        await atMost Duration.ofMillis(500) until { hub.heartbeatsFrom("a") >= 3 }
+    }
+
+    @Test fun `v2 sends timeout 0 unless the caller chose one`() = runBlocking {
+        val handler = connection("b") { req -> payloadReply(req.id, "{}") }
+        handler.register(setOf("test.Ping"), emptySet())
+        handler.start()
+        val sender = connection("a", settings = fast.copy(requestTimeout = null))
+        sender.start()
+        assertTrue(handler.awaitRegistered(wait) && sender.awaitRegistered(wait))
+
+        withTimeout(5_000) { sender.send(request(timeoutMs = 0)) }
+        assertEquals(0, hub.lastRequest()!!.timeoutMs)
+        withTimeout(5_000) { sender.send(request(timeoutMs = 1_500)) }
+        assertEquals(1_500, hub.lastRequest()!!.timeoutMs)
+    }
+
+    @Test fun `legacy mode sends request-timeout or 5 s as before`() = runBlocking {
+        hub.legacy = true
+        val handler = connection("b") { req -> payloadReply(req.id, "{}") }
+        handler.register(setOf("test.Ping"), emptySet())
+        handler.start()
+        val unset = connection("a", settings = fast.copy(requestTimeout = null))
+        val configured = connection("c", settings = fast.copy(requestTimeout = Duration.ofSeconds(2)))
+        unset.start(); configured.start()
+        for (c in listOf(handler, unset, configured)) assertTrue(c.awaitRegistered(wait))
+
+        withTimeout(5_000) { unset.send(request(timeoutMs = 0)) }
+        assertEquals(5_000, hub.lastRequest()!!.timeoutMs)
+        withTimeout(5_000) { configured.send(request(timeoutMs = 0)) }
+        assertEquals(2_000, hub.lastRequest()!!.timeoutMs)
+    }
+
+    @Test fun `per-type override applies to a request without a timeout`() = runBlocking {
+        hub.typeTimeouts = mapOf("test.Slow" to Duration.ofMillis(300))
+        val handler = connection("b") { awaitCancellation() }
+        handler.register(setOf("test.Slow"), emptySet())
+        handler.start()
+        val sender = connection("a", settings = fast.copy(requestTimeout = null))
+        sender.start()
+        assertTrue(handler.awaitRegistered(wait) && sender.awaitRegistered(wait))
+
+        val started = System.nanoTime()
+        val answer = withTimeout(5_000) { sender.send(request("test.Slow", timeoutMs = 0)) }
+        val elapsed = Duration.ofNanos(System.nanoTime() - started)
+        assertEquals(ErrorCode.TIMEOUT, answer.error.code)
+        assertTrue(elapsed < Duration.ofSeconds(2), "override not applied: took $elapsed") // default would be 5 s
+    }
+
+    @Test fun `local guard fires at the hub bound plus margin when the hub never answers`() = runBlocking {
+        hub.emitTimeouts = false
+        hub.typeTimeouts = mapOf("test.Lost" to Duration.ofMillis(200))
+        val handler = connection("b") { awaitCancellation() }
+        handler.register(setOf("test.Lost"), emptySet())
+        handler.start()
+        val sender = connection("a", settings = fast.copy(requestTimeout = null))
+        sender.start()
+        assertTrue(handler.awaitRegistered(wait) && sender.awaitRegistered(wait))
+
+        val started = System.nanoTime()
+        assertFailsWith<MessageTimeoutException> { withTimeout(5_000) { sender.send(request("test.Lost", timeoutMs = 0)) } }
+        val elapsed = Duration.ofNanos(System.nanoTime() - started)
+        assertTrue(elapsed >= Duration.ofMillis(1_150) && elapsed < Duration.ofMillis(2_500), "guard after $elapsed")
+    }
+
+    @Test fun `local guard bound follows the hub's effective timeout rule`() {
+        val ack = hub.registerAck().toBuilder().setMaxTimeoutMs(60_000).putTypeTimeoutsMs("t.Long", 120_000)
+            .putTypeTimeoutsMs("t.Short", 2_000).build()
+        assertEquals(60_000, HubProtocol.hubDeadlineBoundMs(0, "t.Other", ack))
+        assertEquals(5_000, HubProtocol.hubDeadlineBoundMs(5_000, "t.Other", ack))
+        assertEquals(60_000, HubProtocol.hubDeadlineBoundMs(90_000, "t.Other", ack))
+        assertEquals(120_000, HubProtocol.hubDeadlineBoundMs(0, "t.Long", ack))
+        assertEquals(90_000, HubProtocol.hubDeadlineBoundMs(90_000, "t.Long", ack)) // the override raises the clamp
+        assertEquals(2_000, HubProtocol.hubDeadlineBoundMs(5_000, "t.Short", ack))
+        assertEquals(61_000, HubProtocol.localGuardMs(0, "t.Other", ack))
+    }
+
+    @Test fun `request written before the stream breaks fails with HubConnectionLostException`() = runBlocking {
+        val received = CompletableDeferred<Unit>()
+        val handler = connection("b") { received.complete(Unit); awaitCancellation() }
+        handler.register(setOf("test.Ping"), emptySet())
+        handler.start()
+        val sender = connection("a")
+        sender.start()
+        assertTrue(handler.awaitRegistered(wait) && sender.awaitRegistered(wait))
+
+        val response = async { runCatching { sender.send(request(timeoutMs = 4_000)) } }
+        withTimeout(5_000) { received.await() }
+        hub.dropInstance("a") // the sender's own stream breaks: the request was written, the outcome is unknown
+
+        val failure = withTimeout(5_000) { response.await() }.exceptionOrNull()
+        assertIs<HubConnectionLostException>(failure, failure.toString())
+        Unit
+    }
+
+    @Test fun `request that cannot be written to a live stream fails with HubUnavailableException`() = runBlocking {
+        val conn = connection("a", settings = fast.copy(requestTimeout = Duration.ofMillis(200)))
+        conn.start()
+        assertTrue(conn.awaitRegistered(wait))
+        hub.close()
+        withTimeout(5_000) { conn.connected.first { !it } }
+
+        assertFailsWith<HubUnavailableException> { withTimeout(5_000) { conn.send(request()) } }
+        Unit
+    }
+
+    @Test fun `reconnect waits are jittered within 20 percent and capped at the maximum`() {
+        val random = Random(42)
+        val base = Duration.ofMillis(1_000)
+        val max = Duration.ofSeconds(5)
+        val samples = (1..10_000).map { ReconnectBackoff.jittered(base, max, random).toMillis() }
+        assertTrue(samples.all { it in 800..1_200 }, "out of range: ${samples.min()}..${samples.max()}")
+        assertTrue(samples.min() < 850 && samples.max() > 1_150, "not spread: ${samples.min()}..${samples.max()}")
+        val atMax = (1..10_000).map { ReconnectBackoff.jittered(max, max, random).toMillis() }
+        assertTrue(atMax.all { it in 4_000..5_000 }, "out of range: ${atMax.min()}..${atMax.max()}")
+        assertEquals(Duration.ofSeconds(5), ReconnectBackoff.next(Duration.ofSeconds(4), max))
+        assertEquals(Duration.ofSeconds(2), ReconnectBackoff.next(Duration.ofSeconds(1), max))
+    }
+
+    @Test fun `after a long outage the connection comes back within the backoff maximum`() = runBlocking {
+        val conn = connection("a") // backoff 20 ms .. 200 ms
+        conn.register(setOf("test.Ping"), emptySet())
+        conn.start()
+        assertTrue(conn.awaitRegistered(wait))
+
+        hub.close()
+        withTimeout(5_000) { conn.connected.first { !it } }
+        delay(1_500) // many attempts: the backoff reached its maximum
+        hub = InProcessHub(hub.name).start()
+        val started = System.nanoTime()
+        withTimeout(5_000) { conn.connected.first { it } }
+        val elapsed = Duration.ofNanos(System.nanoTime() - started)
+        assertTrue(elapsed < Duration.ofMillis(600), "reconnected after $elapsed")
+        assertTrue(conn.awaitRegistered(wait))
     }
 
     private fun payloadReply(id: String, json: String): Reply =

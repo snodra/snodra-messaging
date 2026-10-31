@@ -115,8 +115,8 @@ class HubBusTest {
     ) = HubConnection({ InProcessChannelBuilder.forName(hubName).build() }, "svc-$instanceId", instanceId, settings, inbound, scope)
         .also { connections += it }
 
-    private fun bus(connection: HubConnection, forwardJwt: Boolean = true) =
-        HubBus(connection, registry, invoker, codec, resolver, forwardJwt, TraceHeaders(null, null), Duration.ofSeconds(2))
+    private fun bus(connection: HubConnection, forwardJwt: Boolean = true, requestTimeout: Duration? = Duration.ofSeconds(2)) =
+        HubBus(connection, registry, invoker, codec, resolver, forwardJwt, TraceHeaders(null, null), requestTimeout)
 
     /** A connected caller plus, when [remoteTypes] is not empty, a remote service answering with [answer]. */
     private suspend fun connectedBus(
@@ -173,6 +173,16 @@ class HubBusTest {
         val headers = assertNotNull(hub.lastRequestHeaders())
         assertFalse("authorization" in headers)
         assertTrue(headers["correlationId"]!!.isNotBlank())
+    }
+
+    @Test fun `unset request-timeout sends timeout 0 to a v2 hub and a set one is sent as is`() = runBlocking {
+        val configured = connectedBus(commandTypes = setOf("test.Ping"))
+        withTimeout(5_000) { configured.send(Ping("x")) }
+        assertEquals(2_000, hub.lastRequest()!!.timeoutMs)
+
+        val unset = bus(connections.last(), requestTimeout = null) // the connected caller, without a configured timeout
+        withTimeout(5_000) { unset.send(Ping("y")) }
+        assertEquals(0, hub.lastRequest()!!.timeoutMs)
     }
 
     @Test fun `NO_HANDLER maps to NoHandlerException`() = runBlocking {
@@ -321,5 +331,6 @@ class HubBusTest {
 
         assertEquals(Pong("owner:u-7", Instant.EPOCH), withTimeout(5_000) { bus.send(Ping("u-7")) })
         assertFailsWith<AccessDeniedException> { withTimeout(5_000) { bus.send(Ping("someone-else")) } }
+        Unit
     }
 }

@@ -75,6 +75,13 @@ java {
     withSourcesJar()
 }
 
+// Register.client_version: HubProtocol reads the library version from this resource.
+tasks.processResources {
+    val version = project.version.toString()
+    inputs.property("version", version)
+    filesMatching("META-INF/kraken-messaging/version.properties") { expand("version" to version) }
+}
+
 publishing {
     publications {
         create<MavenPublication>("maven") {

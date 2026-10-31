@@ -52,8 +52,9 @@ class HubAutoConfiguration {
         return {
             ManagedChannelBuilder.forTarget(target).usePlaintext()
                 // HTTP/2 pings detect a dead peer at the transport level even while the stream is idle.
-                .keepAliveTime(20, TimeUnit.SECONDS)
-                .keepAliveTimeout(10, TimeUnit.SECONDS)
+                // 10 s / 5 s: a one-way partition is caught by the transport about as fast as by the hub's 10 s heartbeat timeout.
+                .keepAliveTime(10, TimeUnit.SECONDS)
+                .keepAliveTimeout(5, TimeUnit.SECONDS)
                 .keepAliveWithoutCalls(true)
                 .build()
         }

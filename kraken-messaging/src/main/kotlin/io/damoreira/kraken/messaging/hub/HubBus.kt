@@ -38,7 +38,8 @@ class HubBus(
     private val typeResolver: MessageTypeResolver,
     private val forwardJwt: Boolean,
     private val traceHeaders: TraceHeaders,
-    private val requestTimeout: Duration,
+    /** Sent as `timeout_ms` when set; null sends 0 so the hub's default or per-type override applies (see [HubConnection.send]). */
+    private val requestTimeout: Duration?,
 ) : CommandBus, QueryBus {
 
     @Suppress("UNCHECKED_CAST")
@@ -67,7 +68,7 @@ class HubBus(
             .setRoutingKey(routingKey.orEmpty())
             .setPayload(ByteString.copyFrom(payload))
             .putAllHeaders(headers)
-            .setTimeoutMs(requestTimeout.toMillis().coerceIn(0, Int.MAX_VALUE.toLong()).toInt())
+            .setTimeoutMs(requestTimeout?.toMillis()?.coerceIn(0, Int.MAX_VALUE.toLong())?.toInt() ?: 0)
             .build()
 
         val answer = connection.send(request)

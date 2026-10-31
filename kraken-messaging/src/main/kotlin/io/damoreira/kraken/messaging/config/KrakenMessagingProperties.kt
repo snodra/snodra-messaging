@@ -24,11 +24,15 @@ data class KrakenMessagingProperties(
         val enabled: Boolean = true,
         /** gRPC target of the hub; an optional `static://` prefix is stripped. */
         val address: String = "static://kraken-hub:7000",
-        /** Default per-request timeout, sent as `timeout_ms`. */
-        val requestTimeout: Duration = Duration.ofSeconds(5),
-        /** Heartbeat period on the hub stream. */
+        /**
+         * Per-request timeout sent as `timeout_ms`. Unset (default): a v2 hub applies its default (5 s) or its per-type
+         * override (`KRAKEN_HUB_TIMEOUT_OVERRIDES`); a legacy hub gets 5 s. Set it only to force one timeout for every
+         * request of this service.
+         */
+        val requestTimeout: Duration? = null,
+        /** Heartbeat period used only when the hub does not announce one (legacy hubs); a v2 hub announces 3 s. */
         val heartbeatInterval: Duration = Duration.ofSeconds(10),
-        /** Exponential backoff when the stream drops. */
+        /** Jittered exponential backoff when the stream drops. */
         val reconnectBackoff: Backoff = Backoff(),
         /** Incoming hub requests handled concurrently by this instance; further requests wait for a free slot. */
         val maxConcurrentHandlers: Int = 256,
@@ -36,7 +40,7 @@ data class KrakenMessagingProperties(
 
     data class Backoff(
         val min: Duration = Duration.ofMillis(500),
-        val max: Duration = Duration.ofSeconds(30),
+        val max: Duration = Duration.ofSeconds(5),
     )
 
     data class Kafka(
