@@ -141,10 +141,10 @@ All keys (`kraken.messaging.*`; durations accept `200ms`, `5s`, `7d`; relaxed bi
 | `type-prefix` | required | Prefix of the wire type name for message classes without `@MessageType`. |
 | `hub.enabled` | `true` | Connect to the hub and expose the hub-backed `CommandBus`/`QueryBus` (addition beyond the spec table). |
 | `hub.address` | `static://kraken-hub:7000` | gRPC target; an optional `static://` prefix is stripped. |
-| `hub.request-timeout` | `5s` | Default per-request timeout, sent as `timeout_ms`. |
-| `hub.heartbeat-interval` | `10s` | Heartbeat period on the hub stream. |
-| `hub.reconnect-backoff.min` | `500ms` | Initial reconnect delay when the stream drops. |
-| `hub.reconnect-backoff.max` | `30s` | Maximum reconnect delay (exponential). |
+| `hub.request-timeout` | unset | Per-request timeout sent as `timeout_ms`. Unset: a v2 hub applies its default (5 s) or its per-type override (`KRAKEN_HUB_TIMEOUT_OVERRIDES`), a legacy hub gets 5 s. Also bounds the wait for a hub stream (5 s when unset). |
+| `hub.heartbeat-interval` | `10s` | Fallback heartbeat period, used only when the hub does not announce one (legacy hubs); a v2 hub announces 3 s in its `RegisterAck`. |
+| `hub.reconnect-backoff.min` | `500ms` | Initial reconnect delay when the stream drops; doubles per failed attempt. |
+| `hub.reconnect-backoff.max` | `5s` | Maximum reconnect delay. Every wait is jittered by ±20 % and capped at this value; the delay resets to `min` once an attempt reached the hub's handshake. |
 | `hub.max-concurrent-handlers` | `256` | Incoming hub requests handled concurrently by this instance; further requests wait for a free slot. |
 | `kafka.bootstrap-servers` | `broker:19092` | Kafka bootstrap servers. |
 | `kafka.topic` | `kraken.events` | Events topic. |
@@ -320,8 +320,20 @@ eventBus.publish(WorkoutLogged(id, owner, at), key = id)         // inside the c
 - **Shutdown.** The hub connection, outbox publisher and Kafka consumer start before the web server accepts traffic and
   stop after its graceful drain. On stop the instance first announces an empty registration so the hub stops routing to
   it, waits up to 5 s for incoming handlers still running, then closes the stream.
-- **Dead connections.** A hub stream whose heartbeats stay unanswered for three `hub.heartbeat-interval`s is closed and
-  re-established; HTTP/2 keepalive pings (20 s, 10 s timeout) also run on the channel.
+- **Handshake.** `Register` announces protocol version 2 (`HubProtocol`), no capabilities yet and `client_version`
+  `kraken-messaging/<version>`. A v2 hub answers with a `RegisterAck` (hub id, heartbeat interval and timeout, default,
+  maximum and per-type request timeouts) before the echo of the first heartbeat; a hub whose echo arrives first is a
+  legacy (v1) hub and the connection keeps the pre-v2 behaviour (10 s heartbeats, `timeout_ms` always sent).
+  `HubConnection.handshake` tells which.
+- **Timeouts.** Unless `hub.request-timeout` is set, requests go out with `timeout_ms = 0` and the hub decides (default
+  or per-type override). The client gives up locally only when the hub never answers: after the hub's deadline bound
+  from the ack (`min(timeout, override or max)`, or `override or max` for 0) plus 1 s, with `MessageTimeoutException`.
+- **Dead connections.** A hub stream whose heartbeats stay unanswered for three heartbeat intervals (9 s against a v2
+  hub) is closed and re-established; HTTP/2 keepalive pings (every 10 s, 5 s timeout, also without calls) run on the
+  channel.
+- **Lost connections.** A request the stream never accepted fails with `HubUnavailableException` (the handler did not
+  run, retrying is safe). A request written to a stream that broke before the answer fails with
+  `HubConnectionLostException`: the outcome is unknown, as with a timeout.
 - **Hub errors.** The hub answers malformed or duplicate in-flight requests with `INVALID_REQUEST`; other hub errors map to
   the exception types in `io.damoreira.kraken.messaging` (`NoHandlerException`, `UnauthenticatedException`, ...).
 
@@ -330,10 +342,14 @@ eventBus.publish(WorkoutLogged(id, owner, at), key = id)         // inside the c
 - `InMemoryBuses(typePrefix, userId)`: implements `EventBus`, `CommandBus` and `QueryBus` in memory for unit tests without
   Docker. Messages still pass through the JSON codec. `register(handlerBean)` adds handlers; `published` lists events.
 - `InProcessHub`: in-JVM stand-in for the hub (`start()`, `channel()`, `dropInstance(...)`, `lastRequestHeaders()`,
-  `registrationsFrom(...)`, `echoHeartbeats = false` to simulate a hub that stopped answering), for hub-client tests
-  without a container.
+  `lastRequest()`, `registrationsFrom(...)`, `lastRegisterFrom(...)`, `acksSentTo(...)`, `echoHeartbeats = false` to
+  simulate a hub that stopped answering), for hub-client tests without a container. It speaks protocol v2 (a
+  `RegisterAck` with `heartbeatInterval`, `heartbeatTimeout`, `replyTimeout` as default, `maxTimeout`, `typeTimeouts`);
+  `legacy = true` emulates a v1 hub, `emitTimeouts = false` a hub that loses requests.
 - `KrakenContainers`: unstarted Testcontainers definitions. `kafka()`, `mongo()` (single-node replica set, needed for
-  transactions), `hub()` from image `kraken-hub:dev` or the one named by `KRAKEN_HUB_IMAGE`, and `hubImageAvailable()`.
+  transactions), `hub()` from image `kraken-hub:dev` or the one named by `KRAKEN_HUB_IMAGE`, `hubBaseline()` from the previous hub release
+  `kraken-hub:v1-baseline` or `KRAKEN_HUB_BASELINE_IMAGE` (compatibility tests), and `hubImageAvailable()` /
+  `hubBaselineImageAvailable()`.
 - `KrakenTestKafka(bootstrap, typePrefix, topic).awaitEvent<T>()`: reads an event back from the topic.
 
 ```kotlin
