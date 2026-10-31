@@ -72,12 +72,17 @@ sealed interface HubHandshake {
     data object Legacy : HubHandshake
 }
 
-/** Reconnect delays: exponential from `backoffMin` to `backoffMax`, each wait jittered by ±20 % and capped at the max. */
+/**
+ * Reconnect delays: exponential from `backoffMin` to `backoffMax`, each wait jittered by ±20 % and capped at the max.
+ * At the max the wait is jittered downward only (80-100 % of it): clamping a ±20 % wait would put about half of a
+ * reconnecting fleet on exactly the maximum.
+ */
 internal object ReconnectBackoff {
     fun next(current: Duration, max: Duration): Duration = minOf(current.multipliedBy(2), max)
 
     fun jittered(base: Duration, max: Duration, random: Random = Random.Default): Duration {
-        val ms = (base.toMillis() * random.nextDouble(0.8, 1.2)).toLong()
+        val ms = if (base >= max) (max.toMillis() * random.nextDouble(0.8, 1.0)).toLong()
+        else (base.toMillis() * random.nextDouble(0.8, 1.2)).toLong()
         return Duration.ofMillis(ms.coerceIn(0, max.toMillis()))
     }
 }

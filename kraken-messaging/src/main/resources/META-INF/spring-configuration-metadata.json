@@ -98,7 +98,7 @@
     {
       "name": "kraken.messaging.hub.reconnect-backoff.max",
       "type": "java.time.Duration",
-      "description": "Maximum reconnect delay when the hub stream drops; every wait is jittered by +-20 % and capped at this value.",
+      "description": "Maximum reconnect delay when the hub stream drops; every wait is jittered by +-20 % and capped at this value (at the cap: 80-100 % of it).",
       "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Backoff",
       "defaultValue": "5s"
     },

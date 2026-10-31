@@ -457,6 +457,15 @@ class HubConnectionTest {
         }
     }
 
+    @Test fun `capped reconnect waits are jittered downward instead of pinned at the maximum`() {
+        val random = Random(7)
+        val max = Duration.ofSeconds(5)
+        val atMax = (1..10_000).map { ReconnectBackoff.jittered(max, max, random).toMillis() }
+        assertTrue(atMax.all { it in 4_000..5_000 }, "out of range: ${atMax.min()}..${atMax.max()}")
+        assertTrue(atMax.count { it == 5_000L } < 50, "pinned at the maximum: ${atMax.count { it == 5_000L }} of 10000")
+        assertTrue(atMax.min() < 4_050 && atMax.max() > 4_950, "not spread: ${atMax.min()}..${atMax.max()}")
+    }
+
     @Test fun `reconnect waits are jittered within 20 percent and capped at the maximum`() {
         val random = Random(42)
         val base = Duration.ofMillis(1_000)

@@ -144,7 +144,7 @@ All keys (`kraken.messaging.*`; durations accept `200ms`, `5s`, `7d`; relaxed bi
 | `hub.request-timeout` | unset | Per-request timeout sent as `timeout_ms`. Unset: a v2 hub applies its default (5 s) or its per-type override (`KRAKEN_HUB_TIMEOUT_OVERRIDES`), a legacy hub gets 5 s. Also bounds the wait for a hub stream (5 s when unset). `0s` counts as unset. |
 | `hub.heartbeat-interval` | `10s` | Fallback heartbeat period, used only when the hub does not announce one (legacy hubs); a v2 hub announces 3 s in its `RegisterAck`. |
 | `hub.reconnect-backoff.min` | `500ms` | Initial reconnect delay when the stream drops; doubles per failed attempt. |
-| `hub.reconnect-backoff.max` | `5s` | Maximum reconnect delay. Every wait is jittered by ±20 % and capped at this value; the delay resets to `min` once an attempt reached the hub's handshake. |
+| `hub.reconnect-backoff.max` | `5s` | Maximum reconnect delay. Every wait is jittered by ±20 % and capped at this value (at the cap: 80-100 % of it); the delay resets to `min` once an attempt reached the hub's handshake. |
 | `hub.max-concurrent-handlers` | `256` | Incoming hub requests handled concurrently by this instance; further requests wait for a free slot. |
 | `kafka.bootstrap-servers` | `broker:19092` | Kafka bootstrap servers. |
 | `kafka.topic` | `kraken.events` | Events topic. |
