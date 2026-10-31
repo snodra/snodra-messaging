@@ -46,8 +46,6 @@ import org.slf4j.LoggerFactory
 import java.time.Duration
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentSkipListMap
-import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicInteger
 import kotlin.random.Random
 
 data class HubSettings(
@@ -121,8 +119,10 @@ internal object ReconnectBackoff {
  * Flow control (P1): `Register` declares the `flow-control` capability with `initial_permits = maxConcurrentHandlers`,
  * [loadFactor] and [tags]. When the stream's ack shares `flow-control`, the hub forwards only against permits, and every
  * completed inbound handler grants one back on the stream the request arrived on (never on a newer stream, which
- * starts again from its own initial permits), batched into `Permits` messages of [HubProtocol.PERMIT_BATCH] or after
- * [HubProtocol.PERMIT_FLUSH_DELAY]. Against a hub without the capability (P0, legacy) no `Permits` are ever sent.
+ * starts again from its own initial permits). Grants go back at once while the hub holds at most
+ * `min(PERMIT_BATCH, initial_permits / 2)` permits for the stream, otherwise in `Permits` messages of
+ * [HubProtocol.PERMIT_BATCH] or after [HubProtocol.PERMIT_FLUSH_DELAY] ([PermitLedger] has the rule). Against a hub
+ * without the capability (P0, legacy) no `Permits` are ever sent.
  */
 class HubConnection(
     private val channelFactory: () -> ManagedChannel,
@@ -159,14 +159,13 @@ class HubConnection(
     /** Incoming requests currently being handled (or waiting for a handler permit). */
     val inFlightHandlers: StateFlow<Int> = inFlight.asStateFlow()
 
-    /** One open stream: its outbound queue, handshake and the heartbeats awaiting an echo (`sentAtMs` -> generation). */
-    private class Stream(val out: Channel<ClientMessage>, fallbackHeartbeatMs: Long) {
+    /**
+     * One open stream: its outbound queue, handshake, the heartbeats awaiting an echo (`sentAtMs` -> generation) and the
+     * permit accounting against its `initial_permits`.
+     */
+    private class Stream(val out: Channel<ClientMessage>, fallbackHeartbeatMs: Long, initialPermits: Int) {
         val probes = ConcurrentSkipListMap<Long, Long>()
-        /** Whether the hub shares `flow-control` on this stream; null until the handshake. */
-        @Volatile var flowControl: Boolean? = null
-        /** Handler completions not yet sent as `Permits`. */
-        val unsentPermits = AtomicInteger()
-        val flushScheduled = AtomicBoolean()
+        val permits = PermitLedger(initialPermits)
         @Volatile var registeredGeneration = -1L
         @Volatile var handshake: HubHandshake? = null
         @Volatile var heartbeatIntervalMs: Long = fallbackHeartbeatMs
@@ -299,7 +298,7 @@ class HubConnection(
         var failures = 0
         while (currentCoroutineContext().isActive) {
             var channel: ManagedChannel? = null
-            val stream = Stream(Channel(Channel.UNLIMITED), settings.heartbeatInterval.toMillis())
+            val stream = Stream(Channel(Channel.UNLIMITED), settings.heartbeatInterval.toMillis(), maxConcurrentHandlers)
             var status: Status = Status.CANCELLED
             var reachedHandshake = false
             try {
@@ -436,9 +435,8 @@ class HubConnection(
     private fun completeHandshake(stream: Stream, handshake: HubHandshake) {
         if (handshake is HubHandshake.V2) applyAck(stream, handshake.ack)
         val flowControl = handshake is HubHandshake.V2 && HubProtocol.FLOW_CONTROL in handshake.ack.capabilitiesList
-        stream.flowControl = flowControl
-        // Grants of requests completed before the handshake (requests may arrive before the ack) are sent or dropped now.
-        if (!flowControl) stream.unsentPermits.set(0) else if (stream.unsentPermits.get() > 0) scheduleFlush(stream)
+        // Grants of requests completed before the handshake (requests may arrive before the ack) are decided or dropped now.
+        apply(stream, stream.permits.handshake(flowControl))
         stream.handshake = handshake
         if (current === stream) {
             handshakeState.value = handshake
@@ -462,6 +460,7 @@ class HubConnection(
      * handler holds up the stream; always answers the request, on the stream it arrived on.
      */
     private fun dispatch(stream: Stream, request: Request) {
+        stream.permits.requestReceived()
         inFlight.update { it + 1 }
         val job = scope.launch(handlerDispatcher) {
             val reply = try {
@@ -490,24 +489,20 @@ class HubConnection(
     }
 
     /** One completed handler: pays a permit back to the stream the request arrived on (when it shares flow control). */
-    private fun grantPermit(stream: Stream) {
-        if (stream.flowControl == false) return
-        val unsent = stream.unsentPermits.incrementAndGet()
-        if (stream.flowControl != true) return // handshake pending: completeHandshake sends or drops it
-        if (unsent >= HubProtocol.PERMIT_BATCH) flushPermits(stream) else scheduleFlush(stream)
-    }
+    private fun grantPermit(stream: Stream) = apply(stream, stream.permits.handlerCompleted())
 
-    private fun scheduleFlush(stream: Stream) {
-        if (!stream.flushScheduled.compareAndSet(false, true)) return
-        scope.launch {
-            delay(HubProtocol.PERMIT_FLUSH_DELAY.toMillis())
-            stream.flushScheduled.set(false)
-            flushPermits(stream)
+    private fun apply(stream: Stream, step: PermitLedger.Step) {
+        when (step) {
+            is PermitLedger.Step.Flush -> writePermits(stream, step.count)
+            PermitLedger.Step.ArmTimer -> scope.launch {
+                delay(HubProtocol.PERMIT_FLUSH_DELAY.toMillis())
+                writePermits(stream, stream.permits.timerFired())
+            }
+            PermitLedger.Step.Wait -> Unit
         }
     }
 
-    private fun flushPermits(stream: Stream) {
-        val count = stream.unsentPermits.getAndSet(0)
+    private fun writePermits(stream: Stream, count: Int) {
         if (count <= 0) return
         // A closed stream drops them: the hub forgot that session's permits with it.
         stream.out.trySend(ClientMessage.newBuilder().setPermits(Permits.newBuilder().setCount(count)).build())

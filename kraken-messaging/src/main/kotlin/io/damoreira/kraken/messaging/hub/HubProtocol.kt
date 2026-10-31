@@ -18,10 +18,14 @@ object HubProtocol {
     /** `Register.capabilities`: optional protocol features this client supports. */
     val CAPABILITIES: List<String> = listOf(FLOW_CONTROL)
 
-    /** A `Permits` message is sent as soon as this many grants are pending ... */
+    /**
+     * Returned permits go back in one `Permits` message as soon as this many are pending, and at once (whatever is
+     * pending) when the hub holds at most `min(PERMIT_BATCH, initial_permits / 2)` permits for the stream
+     * ([PermitLedger]) ...
+     */
     const val PERMIT_BATCH = 16
 
-    /** ... or this long after the first unsent grant, whichever comes first. */
+    /** ... otherwise at the latest this long after the first unsent grant. */
     val PERMIT_FLUSH_DELAY: Duration = Duration.ofMillis(50)
 
     /** `Register.client_version`, for example `kraken-messaging/0.1.0`. */

@@ -148,7 +148,25 @@ class HubConnectionTest {
         val results = (1..3).map { async { sender.send(request(timeoutMs = 4_000)) } }.awaitAll()
         assertTrue(results.all { it.hasReply() && !it.reply.hasError() }, results.toString())
         assertEquals(1, maxRunning.get())
-        await atMost Duration.ofSeconds(1) until { hub.permitsGrantedBy("b") == 3 } // the last one flushes after 50 ms
+        await atMost Duration.ofSeconds(1) until { hub.permitsGrantedBy("b") == 3 }
+    }
+
+    @Test fun `one permit and a zero-time handler serve 100 parallel calls in under a second`() = runBlocking {
+        // The hub holds no permit while the only one is in use: each completion must go back at once, not after 50 ms.
+        val handler = flowConnection("b", maxConcurrentHandlers = 1) { req -> payloadReply(req.id, "{}") }
+        handler.register(setOf("test.Ping"), emptySet())
+        handler.start()
+        val sender = connection("a")
+        sender.start()
+        assertTrue(handler.awaitRegistered(wait) && sender.awaitRegistered(wait))
+
+        val started = System.nanoTime()
+        val results = (1..100).map { async { sender.send(request(timeoutMs = 10_000)) } }.awaitAll()
+        val elapsed = Duration.ofNanos(System.nanoTime() - started)
+        assertTrue(results.all { it.hasReply() && !it.reply.hasError() }, results.filter { !it.hasReply() || it.reply.hasError() }.toString())
+        assertTrue(elapsed < Duration.ofSeconds(1), "100 calls through one permit took $elapsed")
+        await atMost Duration.ofSeconds(1) until { hub.permitsAvailable("b") == 1 }
+        assertEquals(100, hub.permitsGrantedBy("b"))
     }
 
     @Test fun `no permits are sent to a hub without flow-control`() = runBlocking {

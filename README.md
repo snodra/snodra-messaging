@@ -352,8 +352,9 @@ val quick = queryBus.sendBlocking(GetWorkout(id), SendOptions(retry = RetryPolic
 - **Flow control.** `Register` declares the `flow-control` capability with `initial_permits = hub.max-concurrent-handlers`.
   A hub that shares it (its ack lists `flow-control`) forwards to this instance only against permits and queues the rest
   per instance, highest `Request.priority` first, each request keeping its own deadline; every completed handler pays
-  one permit back on the stream the request arrived on, batched (one `Permits` message per 16 grants or 50 ms). A slow
-  handler therefore means latency, not timeouts or `handler busy`. Against a hub without the capability (P0 or older)
+  one permit back on the stream the request arrived on. Permits go back at once while the hub holds at most
+  `min(16, initial_permits / 2)` of them for the stream (so a single permit is never held back), otherwise batched (one
+  `Permits` message per 16 grants or 50 ms). A slow handler therefore means latency, not timeouts or `handler busy`. Against a hub without the capability (P0 or older)
   nothing changes and no `Permits` are sent.
 - **Busy handlers.** A full hub queue answers `HandlerBusyException` (`RESOURCE_EXHAUSTED`): the request was rejected
   before any handler ran, so retrying later is safe. Older clients get `RemoteHandlerException` "handler busy" instead.
