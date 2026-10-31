@@ -151,7 +151,7 @@ All keys (`kraken.messaging.*`; durations accept `200ms`, `5s`, `7d`; relaxed bi
 | `hub.priorities.<type>` | none (0) | Default `Request.priority` per message type, for example `hub.priorities.orders.PlaceOrder=5`; higher is served first when the hub queues requests for a busy handler. `SendOptions.priority` wins. |
 | `hub.retry.enabled` | `false` | Retry failed sends that are safe to retry (see "Retry" below). `SendOptions.retry` overrides per call. |
 | `hub.retry.max-attempts` | `3` | Total attempts including the first. |
-| `hub.retry.initial-backoff` | `100ms` | Wait before the second attempt. |
+| `hub.retry.initial-backoff` | `100ms` | Wait before the second attempt. Every wait is jittered by ±20 % and capped at `max-backoff` (at the cap: 80-100 % of it). |
 | `hub.retry.multiplier` | `2` | Growth of the wait per further attempt. |
 | `hub.retry.max-backoff` | `2s` | Upper bound of a single wait. |
 | `kafka.bootstrap-servers` | `broker:19092` | Kafka bootstrap servers. |

@@ -1,6 +1,7 @@
 package io.damoreira.kraken.messaging
 
 import java.time.Duration
+import kotlin.random.Random
 
 /**
  * How one command or query is sent over the hub. Every field is optional; `null` keeps the configured default.
@@ -47,11 +48,25 @@ data class RetryPolicy(
         require(!initialBackoff.isNegative && !maxBackoff.isNegative) { "backoffs must not be negative" }
     }
 
-    /** The wait before attempt number [attempt] (2 for the first retry). */
+    /**
+     * The base wait before attempt number [attempt] (2 for the first retry), without jitter:
+     * `initialBackoff * multiplier^(attempt - 2)`, capped at [maxBackoff].
+     */
     fun backoffBefore(attempt: Int): Duration {
         require(attempt >= 2) { "attempt 1 has no backoff" }
         val ms = initialBackoff.toMillis() * Math.pow(multiplier, (attempt - 2).toDouble())
         return Duration.ofMillis(minOf(ms, maxBackoff.toMillis().toDouble()).toLong())
+    }
+
+    /**
+     * The wait the bus actually sleeps before attempt number [attempt]: `min(maxBackoff, base * U(0.8, 1.2))` with the
+     * base from [backoffBefore]. Below the cap it is the base +-20 %; at the cap it is 80-100 % of [maxBackoff], so
+     * callers that fail together do not retry in lockstep (like the reconnect backoff).
+     */
+    fun jitteredBackoffBefore(attempt: Int, random: Random = Random.Default): Duration {
+        val base = backoffBefore(attempt)
+        val jittered = (base.toNanos() * random.nextDouble(0.8, 1.2)).toLong()
+        return Duration.ofNanos(minOf(jittered, maxBackoff.toNanos()))
     }
 
     companion object {

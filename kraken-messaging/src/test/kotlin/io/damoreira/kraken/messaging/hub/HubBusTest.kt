@@ -266,6 +266,19 @@ class HubBusTest {
         assertTrue(retried.isNotEmpty() && retried.all { it >= 250 }, "timeout_ms of the retried attempts: $retried")
     }
 
+    @Test fun `retry waits are jittered`() = runBlocking {
+        val arrivals = CopyOnWriteArrayList<Long>()
+        val policy = RetryPolicy(maxAttempts = 13, initialBackoff = Duration.ofMillis(100), multiplier = 1.0)
+        val bus = remoteBus({ arrivals += System.nanoTime(); error(it.id, ErrorCode.RESOURCE_EXHAUSTED, "full") }) {
+            bus(it, requestTimeout = null, retry = policy)
+        }
+        assertFailsWith<HandlerBusyException> { bus.send(Ping("x"), SendOptions(timeout = Duration.ofSeconds(5))) }
+        assertEquals(13, arrivals.size)
+        val gaps = arrivals.zipWithNext { a, b -> Duration.ofNanos(b - a).toMillis() }
+        // 100 ms +-20 %: twelve waits spread over 80..120 ms, not twelve times the same 100 ms.
+        assertTrue(gaps.max() - gaps.min() >= 10, "waits between attempts: $gaps")
+    }
+
     @Test fun `without a chosen timeout the budget is the hub's bound for the type`() = runBlocking {
         hub.typeTimeouts = mapOf("test.Ping" to Duration.ofMillis(600))
         val attempts = CopyOnWriteArrayList<Request>()
