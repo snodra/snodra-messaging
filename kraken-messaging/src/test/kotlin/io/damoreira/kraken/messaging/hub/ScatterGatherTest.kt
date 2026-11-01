@@ -21,6 +21,7 @@ import io.damoreira.kraken.messaging.codec.JsonCodec
 import io.damoreira.kraken.messaging.codec.MessageTypeResolver
 import io.damoreira.kraken.messaging.fixtures.Count
 import io.damoreira.kraken.messaging.fixtures.GetCount
+import io.damoreira.kraken.messaging.fixtures.TestJwt
 import io.damoreira.kraken.messaging.handler.HandlerInvoker
 import io.damoreira.kraken.messaging.handler.HandlerRegistry
 import io.damoreira.kraken.messaging.handler.QueryHandler
@@ -36,9 +37,12 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Test
+import org.springframework.security.core.context.SecurityContextHolder
+import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken
 import java.time.Duration
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -79,6 +83,7 @@ class ScatterGatherTest {
     private val wait = Duration.ofSeconds(5)
 
     @AfterEach fun tearDown() = runBlocking {
+        SecurityContextHolder.clearContext()
         connections.forEach { it.stop() }
         multi.forEach { it.stop() }
         scope.cancel()
@@ -291,6 +296,22 @@ class ScatterGatherTest {
         withTimeout(3_000) { collected.await() }
         assertEquals(listOf("x-1", "y-1"), seen.map { it.instance })
         assertEquals(listOf(Count(1), Count(2)), seen.map { it.result })
+    }
+
+    @Test fun `scatterGatherFlow carries the bearer token of the thread that built it, not of the one collecting`() = runBlocking {
+        owner("svc-x", "x-1") { req -> count(req.id, 1) }
+        val bus = caller()
+        val token = TestJwt.token("user-42", listOf("member"))
+        SecurityContextHolder.getContext().authentication = JwtAuthenticationToken(TestJwt.decoder().decode(token))
+        val flow = bus.scatterGatherFlow(GetCount("k")) // built on the request thread, as a controller returning a Flow
+        SecurityContextHolder.clearContext()
+
+        // Collected elsewhere, on a thread without the caller's SecurityContext.
+        val parts = withContext(Dispatchers.IO) { flow.toList() }
+
+        assertEquals(listOf(Count(1)), parts.map { it.result })
+        val headers = assertNotNull(hub.lastRequestHeaders())
+        assertEquals("Bearer $token", headers["authorization"])
     }
 
     @Test fun `a unary query on a shared type round-robins over every owner`() = runBlocking {

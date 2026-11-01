@@ -60,7 +60,8 @@ import kotlin.reflect.KClass
  * (`NO_HANDLER` -> [io.damoreira.kraken.messaging.NoHandlerException], `INVALID_REQUEST` -> [InvalidMessageException],
  * `UNSUPPORTED` -> [io.damoreira.kraken.messaging.UnsupportedByHubException]). Retry applies to the whole gather with
  * the query rules: a retried gather is a new gather (fresh id) and its result holds only its own parts. A flow is
- * retried only while it has not emitted a part.
+ * retried only while it has not emitted a part. [scatterGatherFlow] reads the caller's bearer token and trace context
+ * when it is called, not when the flow is collected: a flow returned from a controller is collected on another thread.
  */
 class HubBus(
     private val connection: HubTransport,
@@ -102,8 +103,15 @@ class HubBus(
         }
     }
 
-    override fun <R> scatterGatherFlow(query: Query<R>, options: ScatterOptions): Flow<ScatterPart<R>> = channelFlow {
-        val template = template(query, RequestKind.QUERY, routingKey = null, options.priority).toBuilder()
+    override fun <R> scatterGatherFlow(query: Query<R>, options: ScatterOptions): Flow<ScatterPart<R>> {
+        // Read here, on the caller's thread: a flow returned from a controller is collected later on another thread,
+        // where the SecurityContextHolder (bearer token) and the current trace of the request are gone.
+        val caller = callerHeaders()
+        return scatterGatherFlow(query, options, caller)
+    }
+
+    private fun <R> scatterGatherFlow(query: Query<R>, options: ScatterOptions, caller: Map<String, String>): Flow<ScatterPart<R>> = channelFlow {
+        val template = template(query, RequestKind.QUERY, routingKey = null, options.priority, caller).toBuilder()
             .setMaxResults(options.maxResults)
             .build()
         var emitted = false
@@ -181,15 +189,34 @@ class HubBus(
         }
     }
 
-    /** The hub request for [message] without id and timeout: payload, correlation id, bearer token, trace, priority. */
-    private suspend fun template(message: Any, kind: RequestKind, routingKey: String?, priority: Int?): Request {
+    /**
+     * The headers bound to the calling thread: the caller's bearer token (when [forwardJwt]) and the trace context.
+     * Not suspending on purpose: read them before any suspension, on the thread that holds the security context.
+     */
+    private fun callerHeaders(): Map<String, String> {
+        val headers = mutableMapOf<String, String>()
+        val token = CallerContext.currentBearerToken()
+        if (forwardJwt && token != null) headers["authorization"] = "Bearer $token"
+        traceHeaders.inject(headers)
+        return headers
+    }
+
+    /**
+     * The hub request for [message] without id and timeout: payload, correlation id, [caller] headers (bearer token and
+     * trace, see [callerHeaders]), priority. The correlation id comes from the coroutine context, so it is resolved here.
+     */
+    private suspend fun template(
+        message: Any,
+        kind: RequestKind,
+        routingKey: String?,
+        priority: Int?,
+        caller: Map<String, String> = callerHeaders(),
+    ): Request {
         val type = typeResolver.typeNameOf(message::class)
         val payload = codec.encode(message)
         val correlationId = CorrelationContext.resolve(currentCoroutineContext())
-        val token = CallerContext.currentBearerToken()
         val headers = mutableMapOf("correlationId" to correlationId)
-        if (forwardJwt && token != null) headers["authorization"] = "Bearer $token"
-        traceHeaders.inject(headers)
+        headers += caller
         return Request.newBuilder()
             .setKind(kind)
             .setType(type)
