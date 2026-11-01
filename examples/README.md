@@ -9,7 +9,9 @@ A disposable sandbox that shows cross-service messaging on the real `kraken-hub`
 4. **service-a** sends the query `examples.CountGreetings` over the hub; **service-b** answers from its counts;
 5. **service-a** sends the command `examples.Shout` and the query `examples.Reverse` to **service-c**, a Rust
    service built on `kraken-messaging-rs`; C publishes `examples.TextShouted` / `examples.TextReversed` while
-   handling them, and A and B log those events; C also logs B's `GreetingDelivered`.
+   handling them, and A and B log those events; C also logs B's `GreetingDelivered`;
+6. **service-b** and **service-c** both own the shared query `examples.Inventory` (ADR 0017): **service-a** sends it as
+   a point query (one of them answers) and as a scatter-gather (both answer).
 
 Everything is anonymous, nothing is persisted by the apps (MongoDB is only there because the starter's outbox and
 idempotent consumer need it), and the modules are never published. They build against the starter as a project
@@ -17,10 +19,10 @@ dependency, so they always exercise the current library. Wire classes live in `e
 
 | Module | Role | Host port |
 |---|---|---|
-| `examples/examples-api` | `SendGreeting`, `GreetingAccepted`, `GreetingDelivered`, `CountGreetings`, `GreetingCount` | – |
+| `examples/examples-api` | `SendGreeting`, `GreetingAccepted`, `GreetingDelivered`, `CountGreetings`, `GreetingCount`; the texts types; the shared `Inventory` / `InventoryLevel` | – |
 | `examples/service-a` | REST caller + event listener | 8091 |
-| `examples/service-b` | owner of the greetings command and query; logs the text events | 8092 (actuator only) |
-| `kraken-messaging-rs/examples/service-c` | Rust: owner of `Shout` and `Reverse`, publishes the text events, logs `GreetingDelivered` | – (no HTTP) |
+| `examples/service-b` | owner of the greetings command and query, co-owner of the shared `Inventory`; logs the text events | 8092 (actuator only) |
+| `kraken-messaging-rs/examples/service-c` | Rust: owner of `Shout` and `Reverse`, co-owner of the shared `Inventory`, publishes the text events, logs `GreetingDelivered` | – (no HTTP) |
 
 ## Prerequisites
 
@@ -70,8 +72,17 @@ curl -s localhost:8091/reverse/abc
 curl -s localhost:8091/texts/delivered
 # [{"kind":"shouted","text":"ABC","at":"..."},{"kind":"reversed","text":"cba","at":"..."}]
 
-# who is registered for what (service-c owns examples.Shout and examples.Reverse)
+# 6: the shared query examples.Inventory: a point query (service-b or service-c answers, alternating) ...
+curl -s localhost:8091/inventory
+# {"service":"service-c","instance":"<container id>","item":"widget","count":3,"answered":1}
+# ... and a scatter-gather (every instance of both answers; ?item=...&maxResults=n to stop after n answers)
+curl -s localhost:8091/scatter/inventory
+# {"parts":[{"service":"service-b","instance":"<instance id>","result":{"service":"service-b",...,"count":7,...},"error":null},
+#           {"service":"service-c","instance":"<instance id>","result":{...,"count":3,...},"error":null}],"failed":0,"timedOut":0}
+
+# who is registered for what (service-c owns examples.Shout and examples.Reverse; examples.Inventory is shared)
 curl -s localhost:7001/topology
+curl -s localhost:7001/api/v1/types   # examples.Inventory: "shared":true, "owners":["service-b","service-c"]
 ```
 
 The logs tell the same story, one `INFO` line per step:
@@ -93,6 +104,11 @@ service-a | A: received TextShouted text=ABC at=...
 service-b | B: received TextShouted text=ABC at=...
 service-c | C: answered Reverse text=abc -> cba
 service-a | A: asked Reverse text=abc -> cba
+service-c | C: answered Inventory item=widget answered=1
+service-a | A: asked Inventory item=widget -> service-c (<container id>)
+service-b | B: answered Inventory item=widget answered=1
+service-c | C: answered Inventory item=widget answered=2
+service-a | A: scatter-gathered Inventory item=widget -> 2 parts (0 failed, 0 timed out) from [service-b, service-c]
 ```
 
 Add `service-c` to the `logs -f` command to see the `C:` lines.
@@ -129,6 +145,12 @@ call started a second after the hub was gone must succeed. It then starts the hu
 instance to be back on it (also on failure the hub is started again). They need `jq` or `python3`; `SKIP_HA=1` skips
 them, `ONLY_HA=1` runs only them, `HUB2` and `HUB2_CONTAINER` name the second hub.
 
+The scatter-gather steps (P4a, ADR 0017) close the run: step 18 waits until both hubs' `/api/v1/types` list
+`examples.Inventory` as `shared` with the owners `service-b` and `service-c`; step 18b calls `GET /scatter/inventory`
+and expects parts from both services with `failed` and `timedOut` 0; step 18c calls `GET /inventory` six times and
+expects both services among the answerers (one round-robin pool over both owners). `SKIP_SCATTER=1` skips them,
+`ONLY_SCATTER=1` runs only them.
+
 To keep the flow-control demo running by hand:
 
 ```bash
@@ -144,6 +166,8 @@ ONLY_FLOW=1 bash examples/smoke.sh    # only the flow-control steps (needs the d
 ONLY_PAUSE=1 bash examples/smoke.sh   # only the docker pause step (needs the docker CLI)
 SKIP_HA=1 bash examples/smoke.sh      # without the two-hub steps (they stop and start kraken-hub-2)
 ONLY_HA=1 bash examples/smoke.sh      # only the two-hub steps (needs the docker CLI and jq or python3)
+SKIP_SCATTER=1 bash examples/smoke.sh # without the scatter-gather steps
+ONLY_SCATTER=1 bash examples/smoke.sh # only the scatter-gather steps (needs jq or python3)
 ```
 
 ## Experiments
@@ -171,6 +195,7 @@ ONLY_HA=1 bash examples/smoke.sh      # only the two-hub steps (needs the docker
 | no handler registered for the type | 503 | `{"error":"NoHandlerException","message":"..."}` |
 | owner disconnected mid-request | 503 | `{"error":"HandlerDisconnectedException", ...}` |
 | no reply within the request timeout | 504 | `{"error":"MessageTimeoutException", ...}` |
+| the hub does not offer scatter-gather (a P3 or older hub) | 501 | `{"error":"UnsupportedByHubException", ...}` |
 | any other messaging failure | 502 | `{"error":"<exception>", ...}` |
 | blank `name` | 400 | RFC 9457 problem detail: `{"type":"about:blank","title":"Bad Request","status":400,"detail":"name must not be blank",...}` |
 
