@@ -10,11 +10,16 @@ import io.damoreira.kraken.messaging.security.MessagePrincipal
 import io.damoreira.kraken.messaging.codec.JsonCodec
 import io.damoreira.kraken.messaging.codec.MessageTypeResolver
 import io.damoreira.kraken.messaging.fixtures.Count
+import io.damoreira.kraken.messaging.fixtures.ExportRows
+import io.damoreira.kraken.messaging.fixtures.Row
 import io.damoreira.kraken.messaging.fixtures.GetCount
 import io.damoreira.kraken.messaging.fixtures.Happened
 import io.damoreira.kraken.messaging.fixtures.Ping
 import io.damoreira.kraken.messaging.fixtures.Pong
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.runBlocking
+import kotlin.test.assertNull
 import org.junit.jupiter.api.Test
 import java.time.Instant
 import kotlin.test.assertEquals
@@ -77,6 +82,19 @@ class SpringDenyingHandlers {
 class SpringAuthFailingHandlers {
     @CommandHandler fun handle(command: Ping): Pong =
         throw org.springframework.security.authentication.AuthenticationCredentialsNotFoundException("no auth")
+}
+
+class RowsHandlers {
+    @QueryHandler fun handle(query: ExportRows): Flow<Row> = flow {
+        repeat(query.count) { n ->
+            if (n == query.failAt) throw IllegalStateException("boom at $n")
+            emit(Row(n + 1))
+        }
+    }
+}
+
+class AuthRowsHandlers {
+    @QueryHandler @RequiresAuthentication("hasRole('kraken-admin')") fun handle(query: ExportRows): Flow<Row> = flow { emit(Row(1)) }
 }
 
 class HandlerInvokerTest {
@@ -215,5 +233,55 @@ class HandlerInvokerTest {
         val failure = assertIs<InvocationResult.Failure>(invoker.invokeCommand("test.Ping", codec.encode(Ping("x")), ctx("test.Ping"), identity("kraken-user")))
         assertEquals(ErrorCode.UNAUTHENTICATED, failure.code)
         assertEquals("no auth", failure.message)
+    }
+
+    // --- streaming queries (P4b) ---
+
+    @Test fun `invokeStream hands every encoded element to onPart and returns null at the end`() = runBlocking {
+        registry.register(RowsHandlers())
+        val parts = mutableListOf<String>()
+        val failure = invoker.invokeStream("test.ExportRows", codec.encode(ExportRows(3)), ctx("test.ExportRows"), null) { parts += String(it) }
+        assertNull(failure)
+        assertEquals(listOf("{\"n\":1}", "{\"n\":2}", "{\"n\":3}"), parts)
+    }
+
+    @Test fun `a flow that fails maps like a handler exception, after the parts it emitted`() = runBlocking {
+        registry.register(RowsHandlers())
+        val parts = mutableListOf<String>()
+        val failure = invoker.invokeStream("test.ExportRows", codec.encode(ExportRows(3, failAt = 1)), ctx("test.ExportRows"), null) { parts += String(it) }
+        assertEquals(ErrorCode.HANDLER_ERROR to "IllegalStateException: boom at 1", assertIs<InvocationResult.Failure>(failure).let { it.code to it.message })
+        assertEquals(listOf("{\"n\":1}"), parts)
+    }
+
+    @Test fun `invokeStream without a handler, with a unary handler, or with a bad payload fails before any part`() = runBlocking {
+        registry.register(InvokerHandlers())
+        registry.register(RowsHandlers())
+        val none = invoker.invokeStream("test.GetCount", codec.encode(GetCount("k")), ctx("test.GetCount"), null) { error("no part") }
+        assertEquals(ErrorCode.NO_HANDLER to "no handler for type test.GetCount", assertIs<InvocationResult.Failure>(none).let { it.code to it.message })
+        val bad = invoker.invokeStream("test.ExportRows", "[1]".toByteArray(), ctx("test.ExportRows"), null) { error("no part") }
+        assertEquals(ErrorCode.INVALID_REQUEST, assertIs<InvocationResult.Failure>(bad).code)
+        registry.register(object { @QueryHandler fun handle(query: GetCount): Count = Count(1) })
+        val unary = invoker.invokeStream("test.GetCount", codec.encode(GetCount("k")), ctx("test.GetCount"), null) { error("no part") }
+        assertEquals(ErrorCode.INVALID_REQUEST, assertIs<InvocationResult.Failure>(unary).code)
+        assertTrue(unary.message.contains("not a streaming query handler"), unary.message)
+    }
+
+    @Test fun `a unary request for a streaming query type is INVALID_REQUEST`() = runBlocking {
+        registry.register(RowsHandlers())
+        val result = invoker.invokeQuery("test.ExportRows", codec.encode(ExportRows(3)), ctx("test.ExportRows"), null)
+        val failure = assertIs<InvocationResult.Failure>(result)
+        assertEquals(ErrorCode.INVALID_REQUEST, failure.code)
+        assertEquals("test.ExportRows is a streaming query: send it with QueryBus.stream (mode STREAMING)", failure.message)
+    }
+
+    @Test fun `invokeStream checks RequiresAuthentication before the flow starts`() = runBlocking {
+        val (invoker, codec) = invokerFor(AuthRowsHandlers())
+        val anonymous = invoker.invokeStream("test.ExportRows", codec.encode(ExportRows(1)), ctx("test.ExportRows"), null) { error("no part") }
+        assertEquals(ErrorCode.UNAUTHENTICATED, assertIs<InvocationResult.Failure>(anonymous).code)
+        val denied = invoker.invokeStream("test.ExportRows", codec.encode(ExportRows(1)), ctx("test.ExportRows"), identity("kraken-user")) { error("no part") }
+        assertEquals(ErrorCode.PERMISSION_DENIED, assertIs<InvocationResult.Failure>(denied).code)
+        val parts = mutableListOf<String>()
+        assertNull(invoker.invokeStream("test.ExportRows", codec.encode(ExportRows(1)), ctx("test.ExportRows"), identity("kraken-admin")) { parts += String(it) })
+        assertEquals(1, parts.size)
     }
 }

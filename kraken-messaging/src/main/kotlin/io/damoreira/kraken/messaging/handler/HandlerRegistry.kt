@@ -2,7 +2,9 @@ package io.damoreira.kraken.messaging.handler
 
 import io.damoreira.kraken.messaging.DuplicateHandlerException
 import io.damoreira.kraken.messaging.MessageContext
+import io.damoreira.kraken.messaging.api.StreamingQuery
 import io.damoreira.kraken.messaging.codec.MessageTypeResolver
+import kotlinx.coroutines.flow.Flow
 import org.slf4j.LoggerFactory
 import org.springframework.aop.support.AopUtils
 import java.util.Collections
@@ -12,6 +14,7 @@ import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.reflect.KClass
 import kotlin.reflect.KFunction
 import kotlin.reflect.full.findAnnotation
+import kotlin.reflect.full.isSubclassOf
 import kotlin.reflect.full.memberFunctions
 
 /** Collects `@EventHandler`, `@CommandHandler` and `@QueryHandler` methods from beans. */
@@ -106,7 +109,15 @@ class HandlerRegistry(private val typeResolver: MessageTypeResolver) {
         }
         val authorization = requires?.let { HandlerAuthorizations.compile(it.expression, labelOf(klass, fn)) }
         val shared = kind == HandlerKind.QUERY && fn.findAnnotation<QueryHandler>()!!.shared
-        return HandlerMethod(bean, fn, kind, messageClass, typeResolver.typeNameOf(messageClass), wantsContext, authorization, shared)
+        // A StreamingQuery<R> (P4b) is served by a @QueryHandler returning Flow<R>; the hub routes it with mode STREAMING.
+        val streaming = messageClass.isSubclassOf(StreamingQuery::class)
+        if (streaming && kind != HandlerKind.QUERY) {
+            throw IllegalStateException("Handler ${labelOf(klass, fn)} takes a StreamingQuery: use @QueryHandler")
+        }
+        if (streaming && fn.returnType.classifier != Flow::class) {
+            throw IllegalStateException("Handler ${labelOf(klass, fn)} takes a StreamingQuery and must return kotlinx.coroutines.flow.Flow<R>")
+        }
+        return HandlerMethod(bean, fn, kind, messageClass, typeResolver.typeNameOf(messageClass), wantsContext, authorization, shared, streaming)
     }
 
     private fun add(handler: HandlerMethod) {

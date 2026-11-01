@@ -8,6 +8,7 @@ import io.damoreira.kraken.messaging.UnauthenticatedException
 import io.damoreira.kraken.messaging.codec.JsonCodec
 import io.damoreira.kraken.messaging.security.Identity
 import jakarta.validation.ConstraintViolationException
+import kotlinx.coroutines.flow.Flow
 import org.slf4j.LoggerFactory
 import kotlin.coroutines.cancellation.CancellationException
 
@@ -25,6 +26,11 @@ sealed interface InvocationResult {
  * `HANDLER_ERROR` with `"<SimpleName>: <message>"`. A handler's `@RequiresAuthentication` is checked before it runs
  * (`UNAUTHENTICATED` / `PERMISSION_DENIED`); a thrown `AccessDeniedException` (ours or Spring's) is `PERMISSION_DENIED`.
  * Stack traces are never included.
+ *
+ * A streaming query handler (`StreamingQuery<R>` -> `Flow<R>`, P4b) is run by [invokeStream]: every element is encoded
+ * and handed to the caller as it is emitted (the caller suspends the collection while the hub granted no credit), and an
+ * exception from the flow maps exactly like a unary handler's. The same handler reached by a unary request (mode
+ * `UNARY`, [invokeQuery]) is `INVALID_REQUEST`: its flow cannot be a single reply.
  */
 class HandlerInvoker(private val registry: HandlerRegistry, private val codec: JsonCodec) {
     private val log = LoggerFactory.getLogger(HandlerInvoker::class.java)
@@ -51,6 +57,64 @@ class HandlerInvoker(private val registry: HandlerRegistry, private val codec: J
         first?.let { throw it }
     }
 
+    /**
+     * Runs the streaming query handler of [type] (P4b): decodes [payload], checks `@RequiresAuthentication` as for a
+     * unary handler, then collects the handler's `Flow<R>`, encoding each element and handing it to [onPart] in order.
+     * Returns null when the flow completed, or the failure that ends the stream: the pre-checks' (`NO_HANDLER`,
+     * `INVALID_REQUEST` for a bad payload or a handler that is not a streaming one, `UNAUTHENTICATED`,
+     * `PERMISSION_DENIED`) or the flow's exception mapped like a unary handler's. Cancellation (the hub's `Cancel`)
+     * propagates and stops the collection.
+     */
+    suspend fun invokeStream(
+        type: String,
+        payload: ByteArray,
+        ctx: MessageContext,
+        identity: Identity?,
+        onPart: suspend (ByteArray) -> Unit,
+    ): InvocationResult.Failure? {
+        val handler = registry.queryHandler(type)
+        if (handler != null && !handler.streaming) {
+            return InvocationResult.Failure(ErrorCode.INVALID_REQUEST, "handler ${handler.label} for $type is not a streaming query handler (it answers mode UNARY)")
+        }
+        return when (val prepared = prepare(type, handler, payload, ctx, identity)) {
+            is Prepared.Rejected -> prepared.failure
+            is Prepared.Ready -> try {
+                @Suppress("UNCHECKED_CAST")
+                val flow = handler!!.invoke(prepared.message, ctx) as Flow<Any?>
+                flow.collect { element -> onPart(codec.encode(element ?: Unit)) }
+                null
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                failureOf(e)
+            }
+        }
+    }
+
+    private sealed interface Prepared {
+        class Ready(val message: Any) : Prepared
+        class Rejected(val failure: InvocationResult.Failure) : Prepared
+    }
+
+    /** The checks before a handler runs: it exists, the caller may call it, the payload decodes, the expression grants. */
+    private fun prepare(type: String, handler: HandlerMethod?, payload: ByteArray, ctx: MessageContext, identity: Identity?): Prepared {
+        if (handler == null) return Prepared.Rejected(InvocationResult.Failure(ErrorCode.NO_HANDLER, "no handler for type $type"))
+        if (handler.authorization != null && identity == null) {
+            // Before decoding, so an anonymous caller cannot probe payload shapes of protected handlers.
+            return Prepared.Rejected(rejected(handler, ErrorCode.UNAUTHENTICATED, "handler ${handler.label} requires authentication"))
+        }
+        val message = try {
+            codec.decode(payload, handler.messageClass)
+        } catch (e: InvalidMessageException) {
+            return Prepared.Rejected(InvocationResult.Failure(ErrorCode.INVALID_REQUEST, e.message ?: "Cannot decode payload as $type"))
+        }
+        return when (val decision = handler.authorization?.check(identity, message, ctx, handler.label)) {
+            null, AuthorizationDecision.Granted -> Prepared.Ready(message)
+            is AuthorizationDecision.Unauthenticated -> Prepared.Rejected(rejected(handler, ErrorCode.UNAUTHENTICATED, decision.message))
+            is AuthorizationDecision.Denied -> Prepared.Rejected(rejected(handler, ErrorCode.PERMISSION_DENIED, decision.message))
+        }
+    }
+
     private suspend fun invoke(
         type: String,
         handler: HandlerMethod?,
@@ -58,39 +122,32 @@ class HandlerInvoker(private val registry: HandlerRegistry, private val codec: J
         ctx: MessageContext,
         identity: Identity?,
     ): InvocationResult {
-        if (handler == null) return InvocationResult.Failure(ErrorCode.NO_HANDLER, "no handler for type $type")
-        if (handler.authorization != null && identity == null) {
-            // Before decoding, so an anonymous caller cannot probe payload shapes of protected handlers.
-            return rejected(handler, ErrorCode.UNAUTHENTICATED, "handler ${handler.label} requires authentication")
+        if (handler != null && handler.streaming) {
+            return InvocationResult.Failure(ErrorCode.INVALID_REQUEST, "$type is a streaming query: send it with QueryBus.stream (mode STREAMING)")
         }
-        val message = try {
-            codec.decode(payload, handler.messageClass)
-        } catch (e: InvalidMessageException) {
-            return InvocationResult.Failure(ErrorCode.INVALID_REQUEST, e.message ?: "Cannot decode payload as $type")
-        }
-        when (val decision = handler.authorization?.check(identity, message, ctx, handler.label)) {
-            null, AuthorizationDecision.Granted -> Unit
-            is AuthorizationDecision.Unauthenticated -> return rejected(handler, ErrorCode.UNAUTHENTICATED, decision.message)
-            is AuthorizationDecision.Denied -> return rejected(handler, ErrorCode.PERMISSION_DENIED, decision.message)
+        val message = when (val prepared = prepare(type, handler, payload, ctx, identity)) {
+            is Prepared.Rejected -> return prepared.failure
+            is Prepared.Ready -> prepared.message
         }
         return try {
-            InvocationResult.Success(codec.encode(handler.invoke(message, ctx) ?: Unit))
+            InvocationResult.Success(codec.encode(handler!!.invoke(message, ctx) ?: Unit))
         } catch (e: CancellationException) {
             throw e
-        } catch (e: UnauthenticatedException) {
-            InvocationResult.Failure(ErrorCode.UNAUTHENTICATED, e.message ?: "unauthenticated")
-        } catch (e: AccessDeniedException) {
-            InvocationResult.Failure(ErrorCode.PERMISSION_DENIED, e.message ?: "access denied")
-        } catch (e: org.springframework.security.access.AccessDeniedException) {
-            InvocationResult.Failure(ErrorCode.PERMISSION_DENIED, e.message ?: "access denied")
-        } catch (e: org.springframework.security.core.AuthenticationException) {
-            InvocationResult.Failure(ErrorCode.UNAUTHENTICATED, e.message ?: "unauthenticated")
         } catch (e: Throwable) {
-            when {
-                e is IllegalArgumentException || isConstraintViolation(e) ->
-                    InvocationResult.Failure(ErrorCode.HANDLER_ERROR, e.message ?: e::class.simpleName.orEmpty(), violations(e))
-                else -> InvocationResult.Failure(ErrorCode.HANDLER_ERROR, describe(e))
-            }
+            failureOf(e)
+        }
+    }
+
+    /** The failure a handler's (or its flow's) exception maps to; see the class comment. */
+    private fun failureOf(e: Throwable): InvocationResult.Failure = when (e) {
+        is UnauthenticatedException -> InvocationResult.Failure(ErrorCode.UNAUTHENTICATED, e.message ?: "unauthenticated")
+        is AccessDeniedException -> InvocationResult.Failure(ErrorCode.PERMISSION_DENIED, e.message ?: "access denied")
+        is org.springframework.security.access.AccessDeniedException -> InvocationResult.Failure(ErrorCode.PERMISSION_DENIED, e.message ?: "access denied")
+        is org.springframework.security.core.AuthenticationException -> InvocationResult.Failure(ErrorCode.UNAUTHENTICATED, e.message ?: "unauthenticated")
+        is IllegalArgumentException -> InvocationResult.Failure(ErrorCode.HANDLER_ERROR, e.message ?: e::class.simpleName.orEmpty(), violations(e))
+        else -> when {
+            isConstraintViolation(e) -> InvocationResult.Failure(ErrorCode.HANDLER_ERROR, e.message ?: e::class.simpleName.orEmpty(), violations(e))
+            else -> InvocationResult.Failure(ErrorCode.HANDLER_ERROR, describe(e))
         }
     }
 

@@ -2,6 +2,8 @@ package io.damoreira.kraken.messaging.codec
 
 import io.damoreira.kraken.messaging.InvalidMessageException
 import io.damoreira.kraken.messaging.fixtures.Count
+import io.damoreira.kraken.messaging.fixtures.ExportRows
+import io.damoreira.kraken.messaging.fixtures.Row
 import io.damoreira.kraken.messaging.fixtures.NoAnnotation
 import io.damoreira.kraken.messaging.fixtures.Ping
 import io.damoreira.kraken.messaging.fixtures.Pong
@@ -48,6 +50,9 @@ class CodecTest {
 
     @Test fun `response type of unit command is Unit`() =
         assertEquals(Unit::class, ResponseTypes.responseTypeOf(NoAnnotation::class))
+
+    @Test fun `response type of a StreamingQuery is its element type`() =
+        assertEquals(Row::class, ResponseTypes.responseTypeOf(ExportRows::class))
 
     @Test fun `plain class has no response type`() {
         assertThrows<IllegalArgumentException> { ResponseTypes.responseTypeOf(Pong::class) }

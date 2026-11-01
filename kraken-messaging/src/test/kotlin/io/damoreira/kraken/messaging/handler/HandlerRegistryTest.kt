@@ -4,10 +4,15 @@ import io.damoreira.kraken.messaging.DuplicateHandlerException
 import io.damoreira.kraken.messaging.MessageContext
 import io.damoreira.kraken.messaging.codec.MessageTypeResolver
 import io.damoreira.kraken.messaging.fixtures.Count
+import io.damoreira.kraken.messaging.fixtures.ExportRows
 import io.damoreira.kraken.messaging.fixtures.GetCount
 import io.damoreira.kraken.messaging.fixtures.Happened
 import io.damoreira.kraken.messaging.fixtures.Ping
 import io.damoreira.kraken.messaging.fixtures.Pong
+import io.damoreira.kraken.messaging.fixtures.Row
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
@@ -66,6 +71,22 @@ class ExclusiveCountHandlers {
 class BothWaysCountHandlers {
     @QueryHandler fun exclusive(query: GetCount): Count = Count(5)
     @QueryHandler(shared = true) fun shared(query: GetCount): Count = Count(6)
+}
+
+class StreamingRowsHandlers {
+    @QueryHandler fun handle(query: ExportRows): Flow<Row> = flow { repeat(query.count) { emit(Row(it + 1)) } }
+}
+
+class SharedStreamingRowsHandlers {
+    @QueryHandler(shared = true) suspend fun handle(query: ExportRows, ctx: MessageContext): Flow<Row> = flow { emit(Row(0)) }
+}
+
+class StreamingWithoutFlow {
+    @QueryHandler fun handle(query: ExportRows): List<Row> = emptyList()
+}
+
+class StreamingAsCommand {
+    @CommandHandler fun handle(query: ExportRows): Flow<Row> = flow { }
 }
 
 class HandlerRegistryTest {
@@ -173,5 +194,38 @@ class HandlerRegistryTest {
 
         val within = assertThrows<IllegalStateException> { HandlerRegistry(MessageTypeResolver("test")).register(BothWaysCountHandlers()) }
         assertTrue(within.message!!.contains("both exclusive and shared"), within.message)
+    }
+
+    // --- streaming queries (P4b) ---
+
+    @Test fun `a QueryHandler taking a StreamingQuery and returning a Flow is a streaming query handler`() = runBlocking {
+        registry.register(StreamingRowsHandlers())
+        val handler = assertNotNull(registry.queryHandler("test.ExportRows"))
+        assertTrue(handler.streaming)
+        assertEquals(false, handler.shared)
+        assertEquals(setOf("test.ExportRows"), registry.exclusiveQueryTypes())
+        assertEquals(setOf("test.ExportRows"), registry.queryTypes())
+        @Suppress("UNCHECKED_CAST")
+        val rows = (handler.invoke(ExportRows(3), ctx) as Flow<Row>).toList()
+        assertEquals(listOf(Row(1), Row(2), Row(3)), rows)
+        assertEquals(false, assertNotNull(HandlerRegistry(MessageTypeResolver("test")).apply { register(AllKindsHandlers()) }.queryHandler("test.GetCount")).streaming)
+    }
+
+    @Test fun `a shared streaming query handler is announced as a shared query type`() {
+        registry.register(SharedStreamingRowsHandlers())
+        val handler = assertNotNull(registry.queryHandler("test.ExportRows"))
+        assertTrue(handler.streaming && handler.shared && handler.wantsContext)
+        assertEquals(setOf("test.ExportRows"), registry.sharedQueryTypes())
+        assertEquals(emptySet(), registry.exclusiveQueryTypes())
+    }
+
+    @Test fun `a streaming query handler must return a Flow`() {
+        val e = assertThrows<IllegalStateException> { registry.register(StreamingWithoutFlow()) }
+        assertEquals("Handler StreamingWithoutFlow.handle takes a StreamingQuery and must return kotlinx.coroutines.flow.Flow<R>", e.message)
+    }
+
+    @Test fun `a command handler cannot take a StreamingQuery`() {
+        val e = assertThrows<IllegalStateException> { registry.register(StreamingAsCommand()) }
+        assertEquals("Handler StreamingAsCommand.handle takes a StreamingQuery: use @QueryHandler", e.message)
     }
 }

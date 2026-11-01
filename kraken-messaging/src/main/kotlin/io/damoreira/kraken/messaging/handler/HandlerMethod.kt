@@ -21,6 +21,8 @@ class HandlerMethod(
     val authorization: CompiledAuthorization? = null,
     /** `@QueryHandler(shared = true)`: the type is registered as a shared query type. */
     val shared: Boolean = false,
+    /** The message is a `StreamingQuery<R>` and the function returns `Flow<R>` (P4b): served part by part under credit. */
+    val streaming: Boolean = false,
 ) {
     init {
         function.isAccessible = true
