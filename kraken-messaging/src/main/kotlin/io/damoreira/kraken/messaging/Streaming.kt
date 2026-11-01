@@ -5,10 +5,11 @@ import java.time.Duration
 /**
  * How one streaming query is sent ([QueryBus.stream], P4b, ADR 0017). Every field is optional.
  *
- * @property timeout the **idle** timeout: the longest the hub waits for the next part (and for the handler to start),
- *   sent as `timeout_ms` (the hub clamps it). Same defaults as [SendOptions.timeout]: `kraken.messaging.hub.request-timeout`,
- *   else the hub decides; zero counts as unset. With retry it is the budget of the attempts before the first part.
- *   Expiry ends the stream with a [RemoteHandlerException] of code `TIMEOUT`.
+ * @property timeout the **idle** timeout: the longest the hub waits for the next part (and for the handler to start);
+ *   it does not run while the collector holds the handler at the window (credit 0). Sent whole as `timeout_ms` on
+ *   every attempt (the hub clamps it). Same defaults as [SendOptions.timeout]: `kraken.messaging.hub.request-timeout`,
+ *   else the hub decides; zero counts as unset. With retry it is also the budget of the attempts before the first part
+ *   (and, with several hubs, of the wait for one). Expiry ends the stream with a [MessageTimeoutException].
  * @property maxResults end the stream after this many parts (`Request.max_results`, enforced by the hub, which then
  *   cancels the handler); 0 = until the handler's flow completes.
  * @property priority `Request.priority` of the request forwarded to the handler. Default:

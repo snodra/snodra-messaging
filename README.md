@@ -91,12 +91,16 @@ POM also imports the Spring Boot BOM, so consumers do not need to manage them. B
 **To streaming queries (P4b).** Nothing breaks: existing handlers, senders and configuration behave as before. On the
 wire `Register` also declares the `streaming` capability (an older hub ignores it). Two behaviours are new for
 existing code: the hub may now send `Cancel` for a unary handler whose answer is no longer wanted (a scatter-gather
-target past `maxResults` or past the deadline), which this library honours by cancelling the handler's coroutine (a
-handler that must not be interrupted mid-way wraps that part in `withContext(NonCancellable)`); and the permit of an
-incoming request goes back to the hub when its handler coroutine completes, whichever way. `QueryBus` gained `stream`
+target past `maxResults` or past the deadline, or whose sender disconnected), which this library honours by cancelling
+the handler's coroutine (a suspending handler sees a `CancellationException` at its next suspension point; a blocking,
+non-`suspend` handler is **not** interrupted, it runs to its end and its reply is dropped; a handler that must not be
+interrupted mid-way wraps that part in `withContext(NonCancellable)`); and the permit of an incoming request goes back
+to the hub when its handler coroutine completes, whichever way. New setting `hub.stream-credit-timeout` (10 min): a
+streaming handler waiting that long for credit ends its stream with `TIMEOUT`. `QueryBus` gained `stream`
 with a default body (a custom `QueryBus` compiles and throws `UnsupportedOperationException` until it overrides it);
-`HubConnection` and `HubConnections` gained an optional last constructor parameter `inboundStream`; `HubErrors.toException`
-gained an optional `feature` parameter; `HandlerMethod` gained `streaming`.
+`HubConnection` and `HubConnections` gained an optional last constructor parameter `inboundStream`; `HubSettings` gained
+`streamCreditTimeout` (defaulted); `HubErrors.toException` gained an optional `feature` parameter; `HandlerMethod`
+gained `streaming`.
 
 **To scatter-gather (P4a).** Nothing breaks: existing handlers, senders and configuration behave as before. What
 changes on the wire: `Register` also declares the `scatter-gather` capability (an older hub ignores it) and lists
@@ -566,7 +570,10 @@ queryBus.stream(ExportWorkouts(ownerId), StreamOptions(initialCredit = 32, timeo
   credit**, then the end. An exception from the flow ends the stream with the handler's error, mapped exactly like a
   unary failure (`HANDLER_ERROR` with `IllegalArgumentException` / validation details, `AccessDeniedException`, ...);
   `@RequiresAuthentication` is checked before the flow starts. The handler counts against `max-concurrent-handlers`
-  for the whole stream.
+  for the whole stream. A part that waits for credit longer than `hub.stream-credit-timeout` (10 min by default, the
+  hub's default maximum stream duration) means the hub forgot the stream (a race, a lost `Flow` or `Cancel`): the
+  library ends it with `TIMEOUT` ("no credit within ... ms"), the flow seeing a `CancellationException` as at a hub
+  `Cancel`, and frees the handler slot and the hub permit.
 - **Routing.** Always through the hub, also when this instance owns the type: one instance of the owner (one of every
   owner's instances on a shared type), chosen like a point query but only among the instances that negotiated
   `streaming`. A `StreamingQuery` is not a `Query`: it cannot be sent with `send` or gathered, and a unary request
@@ -576,7 +583,10 @@ queryBus.stream(ExportWorkouts(ownerId), StreamOptions(initialCredit = 32, timeo
   collector that keeps up never stalls the handler and a slow one holds it at the window. A handler sending beyond its
   credit (never this library) ends the stream with `INVALID_REQUEST`.
 - **Options.** `timeout` is the **idle** timeout: the hub ends the stream with `TIMEOUT` when no part arrives within it
-  (reset by every part; a queue wait at the hub counts too), same defaults as `SendOptions.timeout`. `maxResults > 0`
+  (reset by every part; a queue wait at the hub counts too; it does not run while the credit is 0, so a collector that
+  holds the handler at the window is never an idle handler), same defaults as `SendOptions.timeout`. It is sent whole
+  as `timeout_ms` on every attempt: with retry the budget bounds the attempts before the first part (and, with several
+  hubs, the wait for a live one), never the idle timeout the stream runs with. `maxResults > 0`
   ends the stream after that many parts (the hub cancels the handler). `priority` is the forwarded request's. The hub
   also bounds a stream's whole life (`KRAKEN_HUB_MAX_STREAM_DURATION`, 10 min by default): `CANCELLED`.
 - **Errors.** Before any part, as for a unary query: no owner `NoHandlerException`, a command type
@@ -590,19 +600,29 @@ queryBus.stream(ExportWorkouts(ownerId), StreamOptions(initialCredit = 32, timeo
   instance's hub queue was full) `HandlerBusyException`, `INVALID_REQUEST` `InvalidMessageException`, and `CANCELLED`
   (the hub's maximum stream duration) the new `StreamCancelledException`. The parts emitted before it stay emitted. A
   part that does not decode into `R` fails the flow with `InvalidMessageException` and cancels the stream. The stream
-  to the hub breaking mid-stream is `HubConnectionLostException`.
+  to the hub breaking mid-stream is `HubConnectionLostException`. Parts carry the handler's `seq` (1, 2, 3, ...) and
+  the end carries the hub's count of parts: the hub drops a part it could not deliver within 5 s on a full buffer, so
+  the library checks both and fails the flow with `InvalidMessageException("stream <type> lost N part(s)")` on a jump
+  in `seq` (the stream is cancelled) or an end counting more parts than arrived (the stream had ended; nothing is sent).
+  An exception thrown **by the collector** is the collector's own failure and reaches it unchanged, also when it is a
+  `HubUnavailableException` or `HubConnectionLostException` of a nested send inside `collect {}`: the stream is
+  cancelled and never moved to another hub, since its request was written.
 - **Cancel.** Cancelling the collector (`take(n)`, a cancelled coroutine) or throwing in it sends `Cancel` to the hub,
   which cancels the handler's coroutine (its flow sees a `CancellationException`); nothing of the stream follows. The
   hub cancels the handler the same way at `maxResults`, at the idle timeout, at the max duration and when the
-  collector's instance disconnects; the handler's own hub stream closing cancels its streams too. A hub `Cancel` also
-  stops a unary or gather handler whose answer is no longer wanted (a gather past `maxResults` or its deadline).
+  collector's instance disconnects (`sender disconnected`); the handler's own hub stream closing cancels its streams
+  too. A hub `Cancel` also stops a unary or gather handler whose answer is no longer wanted (a gather past
+  `maxResults` or its deadline, or whose sender disconnected). A blocking (non-`suspend`) handler is not interrupted
+  by any of these: it runs to its end and its reply is dropped; only a suspending handler stops at its next suspension
+  point.
 - **Retries.** The configured or per-call `RetryPolicy` applies with the query rules only until the first part, to an
   end with an error as to an error before any part (`HandlerDisconnectedException`, `MessageTimeoutException`,
   `HandlerBusyException`, `NoHandlerException`, `HubConnectionLostException`, ... are retried; handler errors,
   `StreamCancelledException` and the rest are not): a retried stream is a new request (fresh id; with several hubs,
   round-robin to another capable one), so no part is ever emitted twice. After the first part nothing is retried: the
-  flow throws, a broken hub stream as `HubConnectionLostException`. The budget covers the attempts up to the first part;
-  each attempt sends what is left of it as its idle timeout.
+  flow throws, a broken hub stream as `HubConnectionLostException`. The budget covers the attempts up to the first part
+  (and the wait for a live hub); every attempt sends the chosen `timeout` whole as its idle timeout, never what is
+  left of the budget.
 - **Compatibility.** Against a P3 or P4a hub `stream` throws `UnsupportedByHubException` while unary queries and
   gathers keep working. Handlers must run this version: the hub streams only to instances that negotiated `streaming`,
   so during a rolling upgrade of an owner the old instances are simply never picked (owners with instances but none
@@ -631,9 +651,10 @@ queryBus.stream(ExportWorkouts(ownerId), StreamOptions(initialCredit = 32, timeo
   (P4a): shared query types, scatter-gather with parts, end, `max_results` and the deadline as the real hub;
   `scatterGather = false` emulates the P3 hub (no capability, `shared_query_types` ignored), and `inject(instanceId,
   message)` writes any server message to an instance's stream. Streaming queries (P4b): one capable target, credits
-  and `Flow`, parts and ends relayed, `max_results`, the idle timeout, `maxStreamDuration`, cancels both ways and the
-  gates as the real hub; `streaming = false` emulates the P4a hub, and `openStreams()`, `creditOf(requestId)`,
-  `flowsFrom(instanceId)` and `cancelsFrom(instanceId)` observe it.
+  (`uint32`) and `Flow`, parts and ends relayed, `max_results`, the idle timeout (paused while the credit is 0),
+  `maxStreamDuration`, cancels both ways and the gates as the real hub; `streaming = false` emulates the P4a hub,
+  `dropParts` drops relayed parts by `seq` (the real hub's full-buffer drop), and `openStreams()`,
+  `creditOf(requestId)`, `flowsFrom(instanceId)` and `cancelsFrom(instanceId)` observe it.
 - `KrakenContainers`: unstarted Testcontainers definitions. `kafka()`, `mongo()` (single-node replica set, needed for
   transactions), `hub()` from image `kraken-hub:dev` or the one named by `KRAKEN_HUB_IMAGE`, `hubBaseline()` from the previous hub release
   `kraken-hub:v1-baseline` or `KRAKEN_HUB_BASELINE_IMAGE` and `hubP0()` from the P0 hub `kraken-hub:p0` or

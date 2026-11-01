@@ -154,10 +154,11 @@ internal object ReconnectBackoff {
  * hub whose ack lists it ([supportsStreaming]), hands each `ReplyPart` to the caller (checking `seq` runs 1, 2, 3, ...
  * and, at the end, that `ReplyEnd.parts` is what arrived: a part the hub dropped fails the stream as lost), writes
  * `Flow{initial_credit / 2}` each time that many parts were consumed (the caller's callback returned) and `Cancel`
- * when the caller gives up before the end (cancellation, an exception, the local idle guard, a lost part). As a handler, a `STREAMING` request runs
- * [inboundStream] under the handler permit for the whole stream: each part waits for credit ([StreamCredit]: the
- * request's `initial_credit` plus every `Flow` for its id) and goes out with `seq` 1, 2, ..., then `ReplyEnd` (with the
- * error the handler returned, or `HANDLER_ERROR` for an exception that leaked). A `Cancel` from the hub cancels the
+ * when the caller gives up before the end (cancellation, an exception, the local idle guard, a lost part). As a
+ * handler, a `STREAMING` request runs [inboundStream] under the handler permit for the whole stream: each part waits
+ * for credit ([StreamCredit]: the request's `initial_credit` plus every `Flow` for its id, both `uint32`) and goes out
+ * with `seq` 1, 2, ..., then `ReplyEnd` (with the error the handler returned, or `HANDLER_ERROR` for an exception that
+ * leaked). A `Cancel` from the hub cancels the
  * handler's coroutine, for a stream (no end follows) as for a unary or gather request (no reply follows); the stream
  * closing cancels every streaming handler it carried, which would otherwise wait for credit forever. A handler that
  * waits for credit longer than [HubSettings.streamCreditTimeout] (the hub forgot the stream: a race, a lost `Flow` or
