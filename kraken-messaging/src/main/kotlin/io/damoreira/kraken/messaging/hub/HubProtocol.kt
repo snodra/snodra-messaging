@@ -18,8 +18,11 @@ object HubProtocol {
     /** Capability name of `InstanceStatus` reports (P3, multi-hub HA): sent only to a hub whose ack lists it. */
     const val INSTANCE_STATUS = "instance-status"
 
+    /** Capability name of scatter-gather queries (P4a, ADR 0017): `Request.mode = SCATTER_GATHER`, `ReplyPart`, `ReplyEnd`. */
+    const val SCATTER_GATHER = "scatter-gather"
+
     /** `Register.capabilities`: optional protocol features this client supports. */
-    val CAPABILITIES: List<String> = listOf(FLOW_CONTROL, INSTANCE_STATUS)
+    val CAPABILITIES: List<String> = listOf(FLOW_CONTROL, INSTANCE_STATUS, SCATTER_GATHER)
 
     /** Default period of `InstanceStatus` reports (`kraken.messaging.hub.status-interval`). */
     val STATUS_INTERVAL: Duration = Duration.ofSeconds(5)

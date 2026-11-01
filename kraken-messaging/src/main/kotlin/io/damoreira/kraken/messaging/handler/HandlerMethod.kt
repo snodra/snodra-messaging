@@ -19,6 +19,8 @@ class HandlerMethod(
     val wantsContext: Boolean,
     /** Compiled `@RequiresAuthentication` expression, or null when any caller may invoke the handler. */
     val authorization: CompiledAuthorization? = null,
+    /** `@QueryHandler(shared = true)`: the type is registered as a shared query type. */
+    val shared: Boolean = false,
 ) {
     init {
         function.isAccessible = true

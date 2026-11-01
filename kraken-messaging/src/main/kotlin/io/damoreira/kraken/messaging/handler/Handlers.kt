@@ -10,7 +10,15 @@ annotation class EventHandler
 @Retention(AnnotationRetention.RUNTIME)
 annotation class CommandHandler
 
-/** Marks a method `fun handle(query: Q): R` as the handler for query type Q. */
+/**
+ * Marks a method `fun handle(query: Q): R` as the handler for query type Q.
+ *
+ * [shared] (P4a, ADR 0017) registers Q as a shared query type: many services may own it, a point query goes to one
+ * instance of any owner (round-robin) and a scatter-gather asks all of them. Without it Q is exclusive: one owning
+ * service, and the hub refuses a second one. Every registrant of Q, in every service, must declare it the same way:
+ * the hub refuses a mix (`ALREADY_EXISTS` at register time, logged and surfaced as a registration failure like any
+ * conflict), and one service declaring Q both ways fails at startup.
+ */
 @Target(AnnotationTarget.FUNCTION)
 @Retention(AnnotationRetention.RUNTIME)
-annotation class QueryHandler
+annotation class QueryHandler(val shared: Boolean = false)

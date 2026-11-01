@@ -1,10 +1,12 @@
 package io.damoreira.kraken.messaging.hub
 
 import io.damoreira.kraken.hub.v1.Reply
+import io.damoreira.kraken.hub.v1.ReplyPart
 import io.damoreira.kraken.hub.v1.Request
 import io.damoreira.kraken.hub.v1.ServerMessage
 import io.damoreira.kraken.messaging.HubRegistrationRejectedException
 import io.damoreira.kraken.messaging.HubUnavailableException
+import io.damoreira.kraken.messaging.UnsupportedByHubException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
@@ -50,6 +52,10 @@ import java.util.concurrent.atomic.AtomicInteger
  *   `request-timeout`), else `requestTimeout`, else 5 s. Waiting ends there with [HubUnavailableException], and a request
  *   sent again carries what is left of its `timeout_ms`. A request already written fails with
  *   `HubConnectionLostException` as before.
+ * - **Scatter-gather**: one gather goes to one live hub, round-robin like an unkeyed request, chosen among the hubs whose
+ *   ack lists `scatter-gather` (during a rolling hub upgrade the others are skipped); with live hubs and none of them
+ *   capable it fails at once with [UnsupportedByHubException]. A gather not yet written fails over like a request; once
+ *   written, a broken stream fails it with `HubConnectionLostException` (the parts already received are not asked again).
  * - **Permits**: a stream announces `ceil(maxConcurrentHandlers / N)` initial permits, N = 1 (itself) + the other kept
  *   hubs that are live or still on their first connect attempt. Whenever that set changes, every live hub's stream is
  *   topped up to `ceil(maxConcurrentHandlers / N)` with N = the kept hubs that are live or on their first attempt:
@@ -96,7 +102,8 @@ class HubConnections(
     private val owners = HashMap<String, HubConnection>() // hub id -> the kept connection that answered it first
     private val parked = HashMap<String, String>() // target closed as a duplicate -> the hub id it answered
     private var resolvedTargets: List<String> = emptyList() // latest DNS answer (DNS targets only)
-    private var types: Pair<Set<String>, Set<String>>? = null
+    private class Types(val commands: Set<String>, val queries: Set<String>, val shared: Set<String>)
+    private var types: Types? = null
     private var started = false
     private var stopped = false
     private val jobs = mutableListOf<Job>()
@@ -139,13 +146,16 @@ class HubConnections(
         if (targets is HubTargets.Static) add(targets.targets)
     }
 
-    /** Replaces the announced handler types on every hub; re-sent on every reconnect and to hubs added later. */
-    fun register(commandTypes: Set<String>, queryTypes: Set<String>) {
+    /**
+     * Replaces the announced handler types (see [HubConnection.register]) on every hub; re-sent on every reconnect and to
+     * hubs added later.
+     */
+    fun register(commandTypes: Set<String>, queryTypes: Set<String>, sharedQueryTypes: Set<String> = emptySet()) {
         val connections = synchronized(lock) {
-            types = commandTypes to queryTypes
+            types = Types(commandTypes, queryTypes, sharedQueryTypes)
             active.values.map { it.connection }
         }
-        connections.forEach { it.register(commandTypes, queryTypes) }
+        connections.forEach { it.register(commandTypes, queryTypes, sharedQueryTypes) }
     }
 
     /**
@@ -182,7 +192,26 @@ class HubConnections(
      * Sends [request] through one live hub (see the class comment for the choice and the failover) and returns its
      * `Reply` or `Error`, with [HubConnection.send]'s exceptions.
      */
-    override suspend fun send(request: Request): ServerMessage {
+    override suspend fun send(request: Request): ServerMessage =
+        route(request, eligible = { true }) { connection, outgoing -> connection.send(outgoing, awaitStream = false) }
+
+    /**
+     * Sends [request] as a scatter-gather through one live hub that supports it (see the class comment), with
+     * [HubConnection.gather]'s parts, result and exceptions.
+     *
+     * @throws UnsupportedByHubException when hubs are live but none lists `scatter-gather`
+     */
+    override suspend fun gather(request: Request, onPart: suspend (ReplyPart) -> Unit): ServerMessage =
+        route(request, eligible = { it.supportsScatterGather }) { connection, outgoing ->
+            connection.gather(outgoing, awaitStream = false, onPart)
+        }
+
+    /** The hub choice and failover of [send] and [gather], restricted to the hubs that are [eligible]. */
+    private suspend fun <T> route(
+        request: Request,
+        eligible: (HubConnection) -> Boolean,
+        call: suspend (HubConnection, Request) -> T,
+    ): T {
         // One deadline for the whole call: the caller's timeout (timeout_ms), else request-timeout, else 5 s.
         val wait = if (request.timeoutMs > 0) Duration.ofMillis(request.timeoutMs.toLong())
         else settings.chosenRequestTimeout ?: HubProtocol.DEFAULT_REQUEST_TIMEOUT
@@ -191,7 +220,14 @@ class HubConnections(
         var waited = false
         while (true) {
             val hubs = live.value
-            val connection = choose(request, hubs.filter { it !in tried })
+            val capable = hubs.filter(eligible)
+            if (hubs.isNotEmpty() && capable.isEmpty()) {
+                throw UnsupportedByHubException(
+                    HubProtocol.SCATTER_GATHER,
+                    "no connected hub supports ${HubProtocol.SCATTER_GATHER} (hubs: ${hubs.joinToString { it.hubId ?: it.target }})",
+                )
+            }
+            val connection = choose(request, capable.filter { it !in tried })
             val leftMs = (deadline - System.nanoTime()) / 1_000_000
             if (connection == null || leftMs <= 0) {
                 val changed = connection == null && leftMs > 0 && withTimeoutOrNull(leftMs) { live.first { it != hubs } } != null
@@ -213,7 +249,7 @@ class HubConnections(
                 request
             }
             try {
-                return connection.send(outgoing, awaitStream = false)
+                return call(connection, outgoing)
             } catch (e: HubUnavailableException) {
                 log.debug("Request {} not taken by hub {}: {}; trying another hub", request.id, connection.target, e.message)
                 tried += connection
@@ -278,7 +314,7 @@ class HubConnections(
                     initialPermits = { HubProtocol.initialPermits(maxConcurrentHandlers, hubsFor(self)) },
                 )
                 self = connection
-                types?.let { (commands, queries) -> connection.register(commands, queries) }
+                types?.let { connection.register(it.commands, it.queries, it.shared) }
                 val watcher = scope.launch(start = CoroutineStart.LAZY) {
                     merge(connection.handshake, connection.firstAttemptOver).collect { onHandshake(connection) }
                 }
@@ -288,8 +324,9 @@ class HubConnections(
         }
         for (connection in revived) {
             log.info("Hub target {} is resolved again; keeping its connection", connection.target)
-            val (commands, queries) = synchronized(lock) { types } ?: (emptySet<String>() to emptySet())
-            connection.register(commands, queries) // replaces the empty registration it announced while draining
+            val announced = synchronized(lock) { types }
+            // Replaces the empty registration it announced while draining.
+            connection.register(announced?.commands.orEmpty(), announced?.queries.orEmpty(), announced?.shared.orEmpty())
             onHandshake(connection) // dedupe and the live hubs, as for a fresh handshake
         }
         // Every new target is counted before any of them opens a stream, so each gets its share of the permits.

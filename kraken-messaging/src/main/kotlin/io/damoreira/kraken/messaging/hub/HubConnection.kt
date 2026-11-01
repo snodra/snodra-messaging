@@ -10,13 +10,16 @@ import io.damoreira.kraken.hub.v1.Permits
 import io.damoreira.kraken.hub.v1.Register
 import io.damoreira.kraken.hub.v1.RegisterAck
 import io.damoreira.kraken.hub.v1.Reply
+import io.damoreira.kraken.hub.v1.ReplyPart
 import io.damoreira.kraken.hub.v1.Request
+import io.damoreira.kraken.hub.v1.RequestMode
 import io.damoreira.kraken.hub.v1.ServerMessage
 import io.damoreira.kraken.messaging.HubConnectionLostException
 import io.damoreira.kraken.messaging.HubRegistrationRejectedException
 import io.damoreira.kraken.messaging.HubUnavailableException
 import io.damoreira.kraken.messaging.MessageTimeoutException
 import io.damoreira.kraken.messaging.MessagingException
+import io.damoreira.kraken.messaging.UnsupportedByHubException
 import io.grpc.ManagedChannel
 import io.grpc.Status
 import kotlinx.coroutines.CancellationException
@@ -129,6 +132,11 @@ internal object ReconnectBackoff {
  * on handlers over every hub) and announcing [initialPermits] (read when each stream opens) as `initial_permits`. A
  * request still queued for a stream when it breaks was never written: it fails with [HubUnavailableException], so it
  * can go to another hub. [reportStatus] writes an `InstanceStatus` to a hub whose ack lists `instance-status`.
+ *
+ * Scatter-gather (P4a, ADR 0017): `Register` declares `scatter-gather` and lists shared query types in
+ * `shared_query_types`. [gather] sends a `SCATTER_GATHER` request only to a hub whose ack lists the capability
+ * ([supportsScatterGather]); its pending entry collects the `ReplyPart`s until the `ReplyEnd` (or an `Error`), under one
+ * local guard for the whole gather. Parts and ends for ids nobody waits for are ignored.
  */
 class HubConnection(
     private val channelFactory: () -> ManagedChannel,
@@ -161,7 +169,36 @@ class HubConnection(
     val lastRejection: StateFlow<Status?> = rejection.asStateFlow()
 
     /** A request in flight, with the stream it was written to (only that stream's failure fails it). */
-    private class Pending(val stream: Stream, val answer: CompletableDeferred<ServerMessage>)
+    private sealed class Pending(val stream: Stream) {
+        /** Fails the waiting caller with [cause]. */
+        abstract fun fail(cause: Throwable)
+
+        /** Delivers the request's terminal message (`Reply`, `Error` or `ReplyEnd`). */
+        abstract fun finish(message: ServerMessage)
+
+        /** A unary request: one `Reply` or `Error`. */
+        class Unary(stream: Stream) : Pending(stream) {
+            val answer = CompletableDeferred<ServerMessage>()
+            override fun fail(cause: Throwable) {
+                answer.completeExceptionally(cause)
+            }
+            override fun finish(message: ServerMessage) {
+                answer.complete(message)
+            }
+        }
+
+        /** A scatter-gather: its `ReplyPart`s in arrival order, then its `ReplyEnd` (or an `Error`), then closed. */
+        class Scatter(stream: Stream) : Pending(stream) {
+            val messages = Channel<ServerMessage>(Channel.UNLIMITED)
+            override fun fail(cause: Throwable) {
+                messages.close(cause)
+            }
+            override fun finish(message: ServerMessage) {
+                messages.trySend(message)
+                messages.close()
+            }
+        }
+    }
     private val pending = ConcurrentHashMap<String, Pending>()
 
     init {
@@ -188,7 +225,7 @@ class HubConnection(
     }
 
     private val lock = Any() // guards registration, generation and current
-    private var registration = buildRegister(emptySet(), emptySet())
+    private var registration = buildRegister(emptySet(), emptySet(), emptySet())
     private val generation = MutableStateFlow(0L) // bumped by every register(...)
     private val acknowledged = MutableStateFlow(-1L) // generation confirmed by the hub on the current stream
     @Volatile private var current: Stream? = null
@@ -256,10 +293,16 @@ class HubConnection(
     suspend fun awaitHandlersIdle(timeout: Duration): Boolean =
         withTimeoutOrNull(timeout.toMillis()) { inFlight.first { it == 0 } } != null
 
-    /** Replaces the announced handler types; sent now if a stream is open and re-sent on every reconnect. */
-    fun register(commandTypes: Set<String>, queryTypes: Set<String>) {
+    /** True while the current stream's ack lists `scatter-gather` (never for a legacy hub). */
+    val supportsScatterGather: Boolean get() = current?.handshake.supportsScatterGather()
+
+    /**
+     * Replaces the announced handler types ([sharedQueryTypes]: `@QueryHandler(shared = true)`, sent as
+     * `shared_query_types`); sent now if a stream is open and re-sent on every reconnect.
+     */
+    fun register(commandTypes: Set<String>, queryTypes: Set<String>, sharedQueryTypes: Set<String> = emptySet()) {
         synchronized(lock) {
-            registration = buildRegister(commandTypes, queryTypes)
+            registration = buildRegister(commandTypes, queryTypes, sharedQueryTypes)
             generation.value += 1
             current?.let(::announce)
         }
@@ -284,6 +327,67 @@ class HubConnection(
      * instead of waiting for one (the multi-hub client then tries another hub).
      */
     internal suspend fun send(request: Request, awaitStream: Boolean): ServerMessage {
+        val stream = liveStream(awaitStream)
+        val (outgoing, guardMs) = prepare(request, stream.handshake!!)
+        val entry = Pending.Unary(stream)
+        require(pending.putIfAbsent(request.id, entry) == null) { "request id ${request.id} is already in flight" }
+        try {
+            write(stream, outgoing)
+            return withTimeoutOrNull(guardMs) { entry.answer.await() } ?: throw MessageTimeoutException(request.type)
+        } finally {
+            pending.remove(request.id, entry)
+        }
+    }
+
+    /**
+     * Sends [request] as a scatter-gather (`mode = SCATTER_GATHER` is set here), hands every `ReplyPart` to [onPart] in
+     * arrival order and returns the terminal message: the `ReplyEnd`, or the hub's `Error` for the request itself (no
+     * owner, a command, ...). [Request.getId] must be fresh for every call.
+     *
+     * @throws UnsupportedByHubException if the stream's ack does not list `scatter-gather` (a legacy hub never does);
+     *   nothing is sent
+     * @throws HubUnavailableException, HubConnectionLostException as [send]; parts already handed to [onPart] stay
+     * @throws MessageTimeoutException if the end does not arrive within the local guard (the hub's deadline bound for the
+     *   whole gather plus [HubProtocol.LOCAL_GUARD_MARGIN])
+     */
+    override suspend fun gather(request: Request, onPart: suspend (ReplyPart) -> Unit): ServerMessage =
+        gather(request, awaitStream = true, onPart)
+
+    /** [gather]; [awaitStream] as for [send]. */
+    internal suspend fun gather(request: Request, awaitStream: Boolean, onPart: suspend (ReplyPart) -> Unit): ServerMessage {
+        val stream = liveStream(awaitStream)
+        val ack = (stream.handshake as? HubHandshake.V2)?.ack
+        if (!stream.handshake.supportsScatterGather() || ack == null) {
+            throw UnsupportedByHubException(
+                HubProtocol.SCATTER_GATHER,
+                "hub ${hubId ?: target} does not support ${HubProtocol.SCATTER_GATHER} (its RegisterAck does not list it)",
+            )
+        }
+        val outgoing = request.toBuilder().setMode(RequestMode.SCATTER_GATHER).build()
+        val guardMs = HubProtocol.localGuardMs(outgoing.timeoutMs, outgoing.type, ack)
+        val entry = Pending.Scatter(stream)
+        require(pending.putIfAbsent(request.id, entry) == null) { "request id ${request.id} is already in flight" }
+        try {
+            write(stream, outgoing)
+            var terminal: ServerMessage? = null
+            withTimeoutOrNull(guardMs) {
+                for (message in entry.messages) {
+                    if (message.hasPart()) {
+                        onPart(message.part)
+                    } else {
+                        terminal = message
+                        break
+                    }
+                }
+            }
+            return terminal ?: throw MessageTimeoutException(request.type)
+        } finally {
+            pending.remove(request.id, entry)
+        }
+    }
+
+    /** The live stream (waiting up to `requestTimeout` for one when [awaitStream]), its handshake completed. */
+    private suspend fun liveStream(awaitStream: Boolean): Stream {
         val wait = settings.chosenRequestTimeout ?: HubProtocol.DEFAULT_REQUEST_TIMEOUT
         if (!awaitStream && current?.handshake == null) throw HubUnavailableException("hub $target not connected")
         if (!connectedState.value) {
@@ -291,21 +395,20 @@ class HubConnection(
                 ?: throw HubUnavailableException("hub not connected within $wait")
         }
         val stream = current ?: throw HubUnavailableException("hub not connected")
-        val handshake = stream.handshake ?: throw HubUnavailableException("hub not connected")
-        val (outgoing, guardMs) = prepare(request, handshake)
-        val entry = Pending(stream, CompletableDeferred())
-        require(pending.putIfAbsent(request.id, entry) == null) { "request id ${request.id} is already in flight" }
+        if (stream.handshake == null) throw HubUnavailableException("hub not connected")
+        return stream
+    }
+
+    private suspend fun write(stream: Stream, request: Request) {
         try {
-            try {
-                stream.out.send(ClientMessage.newBuilder().setRequest(outgoing).build())
-            } catch (_: ClosedSendChannelException) {
-                throw HubUnavailableException("hub stream closed before the request was written")
-            }
-            return withTimeoutOrNull(guardMs) { entry.answer.await() } ?: throw MessageTimeoutException(request.type)
-        } finally {
-            pending.remove(request.id, entry)
+            stream.out.send(ClientMessage.newBuilder().setRequest(request).build())
+        } catch (_: ClosedSendChannelException) {
+            throw HubUnavailableException("hub stream closed before the request was written")
         }
     }
+
+    private fun HubHandshake?.supportsScatterGather(): Boolean =
+        this is HubHandshake.V2 && HubProtocol.SCATTER_GATHER in ack.capabilitiesList
 
     /** The request as written to [handshake]'s stream, and the local guard in milliseconds. */
     private fun prepare(request: Request, handshake: HubHandshake): Pair<Request, Long> = when (handshake) {
@@ -421,11 +524,12 @@ class HubConnection(
         heartbeats.cancel()
     }
 
-    private fun buildRegister(commandTypes: Set<String>, queryTypes: Set<String>): Register = Register.newBuilder()
+    private fun buildRegister(commandTypes: Set<String>, queryTypes: Set<String>, sharedQueryTypes: Set<String>): Register = Register.newBuilder()
         .setServiceName(serviceName)
         .setInstanceId(instanceId)
         .addAllCommandTypes(commandTypes.sorted())
         .addAllQueryTypes(queryTypes.sorted())
+        .addAllSharedQueryTypes(sharedQueryTypes.sorted())
         .setProtocolVersion(HubProtocol.PROTOCOL_VERSION)
         .addAllCapabilities(HubProtocol.CAPABILITIES)
         .setClientVersion(HubProtocol.CLIENT_VERSION)
@@ -493,8 +597,14 @@ class HubConnection(
     private fun handle(stream: Stream, message: ServerMessage) {
         when {
             message.hasRequest() -> dispatch(stream, message.request)
-            message.hasReply() -> pending.remove(message.reply.requestId)?.answer?.complete(message)
-            message.hasError() -> pending.remove(message.error.requestId)?.answer?.complete(message)
+            message.hasReply() -> pending.remove(message.reply.requestId)?.finish(message)
+            message.hasError() -> pending.remove(message.error.requestId)?.finish(message)
+            // Parts and ends of a gather nobody waits for (it timed out locally, or never was ours) are dropped.
+            message.hasPart() -> (pending[message.part.requestId] as? Pending.Scatter)?.messages?.trySend(message)
+            message.hasEnd() -> {
+                val id = message.end.requestId
+                (pending[id] as? Pending.Scatter)?.let { if (pending.remove(id, it)) it.finish(message) }
+            }
             message.hasRegisterAck() -> onAck(stream, message.registerAck)
             message.hasHeartbeat() -> {
                 if (stream.handshake == null) completeHandshake(stream, HubHandshake.Legacy) // echo before any ack: v1 hub
@@ -609,7 +719,7 @@ class HubConnection(
             if (!queued.hasRequest()) continue
             val id = queued.request.id
             val entry = pending[id] ?: continue
-            if (entry.stream === stream && pending.remove(id, entry)) entry.answer.completeExceptionally(HubUnavailableException(message))
+            if (entry.stream === stream && pending.remove(id, entry)) entry.fail(HubUnavailableException(message))
         }
     }
 
@@ -617,7 +727,7 @@ class HubConnection(
     private fun failPending(stream: Stream?, cause: MessagingException) {
         for ((id, entry) in pending.entries.toList()) {
             if (stream == null || entry.stream === stream) {
-                if (pending.remove(id, entry)) entry.answer.completeExceptionally(cause)
+                if (pending.remove(id, entry)) entry.fail(cause)
             }
         }
     }

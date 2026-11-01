@@ -18,7 +18,10 @@ import io.damoreira.kraken.messaging.RetryPolicy
 import io.damoreira.kraken.messaging.SendOptions
 import io.damoreira.kraken.messaging.codec.JsonCodec
 import io.damoreira.kraken.messaging.codec.MessageTypeResolver
+import io.damoreira.kraken.messaging.fixtures.Count
+import io.damoreira.kraken.messaging.fixtures.GetCount
 import io.damoreira.kraken.messaging.fixtures.Ping
+import io.damoreira.kraken.messaging.UnsupportedByHubException
 import io.damoreira.kraken.messaging.handler.HandlerInvoker
 import io.damoreira.kraken.messaging.handler.HandlerRegistry
 import io.damoreira.kraken.messaging.hub.HubBus
@@ -106,7 +109,7 @@ class HubCompatTest {
         val ack = assertIs<HubHandshake.V2>(conn.handshake.value).ack
         assertEquals("compat-hub", ack.hubId)
         assertEquals(2, ack.protocolVersion)
-        assertEquals(listOf("flow-control", "instance-status"), ack.capabilitiesList)
+        assertEquals(listOf("flow-control", "instance-status", "scatter-gather"), ack.capabilitiesList)
         assertEquals(3_000, ack.heartbeatIntervalMs)
         assertEquals(10_000, ack.heartbeatTimeoutMs)
         assertEquals(5_000, ack.defaultTimeoutMs)
@@ -328,6 +331,26 @@ class HubCompatTest {
         assertEquals(0, handler.connections().single().statusReportsWritten + sender.connections().single().statusReportsWritten)
     }
 
+    // --- the P3 hub: no scatter-gather (P4a clients against it) ---
+
+    @Test fun `P3 hub - scatter-gather is UnsupportedByHub without sending anything, unary queries still work`() = runBlocking {
+        val hub = start(p3Hub())
+        val owner = connection(hub, "b", "svc-b") { req -> payloadReply(req.id, "{\"value\":7}") }
+        owner.register(emptySet(), setOf("test.GetCount"))
+        owner.start()
+        val sender = connection(hub, "a", "svc-a")
+        sender.start()
+        assertTrue(owner.awaitRegistered(wait) && sender.awaitRegistered(wait))
+        val ack = assertIs<HubHandshake.V2>(sender.handshake.value).ack
+        assertEquals(listOf("flow-control", "instance-status"), ack.capabilitiesList)
+
+        val bus = bus(sender)
+        val e = assertFailsWith<UnsupportedByHubException> { bus.scatterGather(GetCount("k")) }
+        assertEquals("scatter-gather", e.feature)
+        assertEquals(Count(7), bus.send(GetCount("k")))
+        assertTrue(sender.connected.value) // the refusal is local: the stream is untouched
+    }
+
     // --- the previous hub release (protocol v1): legacy mode ---
 
     @Test fun `baseline hub - one target through HubConnections runs in legacy mode`() = runBlocking {
@@ -427,6 +450,11 @@ class HubCompatTest {
     private fun p2Hub(): GenericContainer<*> {
         Assumptions.assumeTrue(KrakenContainers.hubP2ImageAvailable(), "P2 hub image not available")
         return KrakenContainers.hubP2().withEnv("KRAKEN_HUB_OTLP_ENDPOINT", "")
+    }
+
+    private fun p3Hub(): GenericContainer<*> {
+        Assumptions.assumeTrue(KrakenContainers.hubP3ImageAvailable(), "P3 hub image not available")
+        return KrakenContainers.hubP3().withEnv("KRAKEN_HUB_OTLP_ENDPOINT", "")
     }
 
     private fun baselineHub(): GenericContainer<*> {

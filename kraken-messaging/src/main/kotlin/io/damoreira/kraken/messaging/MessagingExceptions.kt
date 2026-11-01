@@ -12,8 +12,17 @@ class MessageTimeoutException(val type: String) : MessagingException("Timed out 
 /** The handling instance disconnected mid-flight (hub error code HANDLER_DISCONNECTED). */
 class HandlerDisconnectedException(val type: String) : MessagingException("Handler for '$type' disconnected")
 
-/** The remote handler failed; [details] carries the serialized error payload. */
-class RemoteHandlerException(val type: String, message: String, val details: ByteArray) : MessagingException(message)
+/**
+ * The remote handler failed; [details] carries the serialized error payload. [code] is the hub's error code name:
+ * `HANDLER_ERROR` for a handler exception, another code for a scatter-gather part that failed on the hub's side (for
+ * example `HANDLER_DISCONNECTED`), or for a code this library does not map to its own exception.
+ */
+class RemoteHandlerException(
+    val type: String,
+    message: String,
+    val details: ByteArray,
+    val code: String = "HANDLER_ERROR",
+) : MessagingException(message)
 
 /** The hub rejected the caller's credentials. */
 class UnauthenticatedException(message: String) : MessagingException(message)
@@ -46,6 +55,12 @@ class HandlerBusyException(val type: String) :
 /** Two handlers (`Bean.method` strings) claim the same single-handler message type. */
 class DuplicateHandlerException(val type: String, val existing: String, val duplicate: String) :
     MessagingException("Duplicate handler for '$type': $existing and $duplicate")
+
+/**
+ * The connected hub does not offer [feature] (for example `scatter-gather`): its `RegisterAck` does not list the
+ * capability, or it is a legacy hub. Nothing was sent; retrying against the same hub fails the same way.
+ */
+class UnsupportedByHubException(val feature: String, message: String) : MessagingException(message)
 
 /** The hub refused this instance's handler registration. */
 class HubRegistrationRejectedException(message: String) : MessagingException(message)

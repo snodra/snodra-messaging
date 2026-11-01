@@ -10,6 +10,7 @@ import io.damoreira.kraken.messaging.MessagingException
 import io.damoreira.kraken.messaging.NoHandlerException
 import io.damoreira.kraken.messaging.RemoteHandlerException
 import io.damoreira.kraken.messaging.UnauthenticatedException
+import io.damoreira.kraken.messaging.UnsupportedByHubException
 
 /** Maps hub [ErrorCode]s to the exceptions thrown to callers of the buses. */
 object HubErrors {
@@ -22,6 +23,8 @@ object HubErrors {
         ErrorCode.INVALID_REQUEST -> InvalidMessageException(message)
         ErrorCode.PERMISSION_DENIED -> AccessDeniedException(message)
         ErrorCode.RESOURCE_EXHAUSTED -> HandlerBusyException(type)
-        else -> RemoteHandlerException(type, message, details)
+        // A request mode the hub does not implement, or one this session did not declare (ADR 0017).
+        ErrorCode.UNSUPPORTED -> UnsupportedByHubException(HubProtocol.SCATTER_GATHER, message.ifEmpty { "unsupported by the hub" })
+        else -> RemoteHandlerException(type, message, details, code.name)
     }
 }

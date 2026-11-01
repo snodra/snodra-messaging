@@ -55,6 +55,19 @@ class AuthOnCommand {
     @QueryHandler fun handle(query: GetCount): Count = Count(1)
 }
 
+class SharedCountHandlers {
+    @QueryHandler(shared = true) fun handle(query: GetCount): Count = Count(3)
+}
+
+class ExclusiveCountHandlers {
+    @QueryHandler fun handle(query: GetCount): Count = Count(4)
+}
+
+class BothWaysCountHandlers {
+    @QueryHandler fun exclusive(query: GetCount): Count = Count(5)
+    @QueryHandler(shared = true) fun shared(query: GetCount): Count = Count(6)
+}
+
 class HandlerRegistryTest {
     private val registry = HandlerRegistry(MessageTypeResolver("test"))
     private val ctx = MessageContext("m1", "test.Ping", "c1", "alice", setOf("USER"), null, emptyMap())
@@ -131,5 +144,34 @@ class HandlerRegistryTest {
         r.register(AuthOnCommand())
         assertEquals("hasRole('kraken-admin')", assertNotNull(r.commandHandler("test.Ping")).authorization?.source)
         assertNull(assertNotNull(r.queryHandler("test.GetCount")).authorization)
+    }
+
+    // --- shared query types (P4a) ---
+
+    @Test fun `a shared query handler is listed as a shared query type`() {
+        registry.register(SharedCountHandlers())
+        assertEquals(setOf("test.GetCount"), registry.queryTypes())
+        assertEquals(setOf("test.GetCount"), registry.sharedQueryTypes())
+        assertEquals(emptySet(), registry.exclusiveQueryTypes())
+        assertTrue(assertNotNull(registry.queryHandler("test.GetCount")).shared)
+    }
+
+    @Test fun `an exclusive query handler is not shared`() {
+        registry.register(ExclusiveCountHandlers())
+        assertEquals(setOf("test.GetCount"), registry.exclusiveQueryTypes())
+        assertEquals(emptySet(), registry.sharedQueryTypes())
+        assertEquals(false, assertNotNull(registry.queryHandler("test.GetCount")).shared)
+    }
+
+    @Test fun `one type registered exclusive and shared by one service fails at startup`() {
+        registry.register(ExclusiveCountHandlers())
+        val e = assertThrows<IllegalStateException> { registry.register(SharedCountHandlers()) }
+        assertTrue(e.message!!.contains("test.GetCount"), e.message)
+        assertTrue(e.message!!.contains("ExclusiveCountHandlers.handle"), e.message)
+        assertTrue(e.message!!.contains("SharedCountHandlers.handle"), e.message)
+        assertTrue(e.message!!.contains("both exclusive and shared"), e.message)
+
+        val within = assertThrows<IllegalStateException> { HandlerRegistry(MessageTypeResolver("test")).register(BothWaysCountHandlers()) }
+        assertTrue(within.message!!.contains("both exclusive and shared"), within.message)
     }
 }

@@ -132,7 +132,8 @@ class HubAutoConfiguration {
 
 /**
  * Starts the [connections] after every singleton is initialised (so every handler bean is in the registry), announcing
- * the registry's command and query types and re-announcing them whenever handlers are added later.
+ * the registry's command, exclusive query and shared query types and re-announcing them whenever handlers are added
+ * later.
  *
  * Phase [PHASE] is below the web server's start/stop phase (`WebServerApplicationContext.START_STOP_LIFECYCLE_PHASE`,
  * `DEFAULT_PHASE - 2048` in Boot 4.1), so the hub connection starts before the server accepts traffic and stops only
@@ -185,7 +186,7 @@ class HubLifecycle(
     override fun getPhase(): Int = PHASE
 
     private fun announce() {
-        if (running) connections.register(registry.commandTypes(), registry.queryTypes())
+        if (running) connections.register(registry.commandTypes(), registry.exclusiveQueryTypes(), registry.sharedQueryTypes())
     }
 
     companion object {

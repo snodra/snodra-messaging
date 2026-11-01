@@ -4,6 +4,10 @@ import io.damoreira.kraken.messaging.CommandBus
 import io.damoreira.kraken.messaging.EventBus
 import io.damoreira.kraken.messaging.MessageContext
 import io.damoreira.kraken.messaging.QueryBus
+import io.damoreira.kraken.messaging.RemoteHandlerException
+import io.damoreira.kraken.messaging.ScatterOptions
+import io.damoreira.kraken.messaging.ScatterPart
+import io.damoreira.kraken.messaging.ScatterResult
 import io.damoreira.kraken.messaging.api.Command
 import io.damoreira.kraken.messaging.api.Event
 import io.damoreira.kraken.messaging.api.Query
@@ -23,7 +27,8 @@ import java.util.concurrent.CopyOnWriteArrayList
 
 /**
  * Local, synchronous implementation of all three buses for unit tests. Messages still go through the JSON codec
- * so serialization problems show up in tests.
+ * so serialization problems show up in tests. A scatter-gather asks the one registered query handler: one part from
+ * service and instance [IN_MEMORY] (a handler error is a failed part), `NoHandlerException` without a handler.
  */
 class InMemoryBuses(
     typePrefix: String = "test",
@@ -63,6 +68,16 @@ class InMemoryBuses(
         return unwrap(type, query::class, invoker.invokeQuery(type, codec.encode(query), context(type), identity())) as R
     }
 
+    @Suppress("UNCHECKED_CAST")
+    override suspend fun <R> scatterGather(query: Query<R>, options: ScatterOptions): ScatterResult<R> {
+        val result = try {
+            ScatterPart(IN_MEMORY, IN_MEMORY, send(query), null)
+        } catch (e: RemoteHandlerException) {
+            ScatterPart<R>(IN_MEMORY, IN_MEMORY, null, e)
+        }
+        return ScatterResult(listOf(result), failed = if (result.error != null) 1 else 0, timedOut = 0)
+    }
+
     private fun unwrap(type: String, messageClass: kotlin.reflect.KClass<*>, result: InvocationResult): Any = when (result) {
         is InvocationResult.Success -> codec.decode(result.payload, ResponseTypes.responseTypeOf(messageClass))
         is InvocationResult.Failure -> throw HubErrors.toException(type, result.code, result.message, result.details)
@@ -85,5 +100,10 @@ class InMemoryBuses(
     private fun identity(): Identity? = LocalIdentity.current() ?: userId?.let {
         val principal = MessagePrincipal(it, roles, verified = true)
         Identity(principal, KrakenForwardedAuthentication(null, principal))
+    }
+
+    companion object {
+        /** Service and instance name of the one part of an in-memory scatter-gather. */
+        const val IN_MEMORY = "in-memory"
     }
 }

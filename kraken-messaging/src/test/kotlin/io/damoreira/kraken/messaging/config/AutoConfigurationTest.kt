@@ -10,6 +10,9 @@ import io.damoreira.kraken.messaging.fixtures.Ping
 import io.damoreira.kraken.messaging.fixtures.Pong
 import io.damoreira.kraken.messaging.fixtures.TestJwt
 import io.damoreira.kraken.messaging.handler.CommandHandler
+import io.damoreira.kraken.messaging.handler.QueryHandler
+import io.damoreira.kraken.messaging.fixtures.Count
+import io.damoreira.kraken.messaging.fixtures.GetCount
 import io.damoreira.kraken.messaging.handler.HandlerInvoker
 import io.damoreira.kraken.messaging.handler.HandlerRegistry
 import io.damoreira.kraken.messaging.hub.HubBus
@@ -57,6 +60,15 @@ class PingHandlers {
 @Configuration(proxyBeanMethods = false)
 class HandlersConfig {
     @Bean fun pingHandlers() = PingHandlers()
+}
+
+class SharedCountHandlers {
+    @QueryHandler(shared = true) fun handle(query: GetCount): Count = Count(1)
+}
+
+@Configuration(proxyBeanMethods = false)
+class SharedHandlersConfig {
+    @Bean fun sharedCountHandlers() = SharedCountHandlers()
 }
 
 @Configuration(proxyBeanMethods = false)
@@ -167,6 +179,18 @@ class AutoConfigurationTest {
             await atMost Duration.ofSeconds(5) until { hub.connectedInstances().isEmpty() }
             // stop() announced an empty registration (no more routing) before closing the stream
             assertEquals(registrations + 1, hub.registrationsFrom(connection.instanceId))
+        }
+    }
+
+    @Test fun `the lifecycle announces shared query handlers as shared query types`() {
+        withHub().withUserConfiguration(HandlersConfig::class.java, SharedHandlersConfig::class.java).run { context ->
+            assertEquals(null, context.startupFailure)
+            val connection = context.getBean(HubConnections::class.java)
+            await atMost Duration.ofSeconds(5) until { connection.connected.value && "test.GetCount" in hub.registeredTypes() }
+            val register = hub.lastRegisterFrom(connection.instanceId)!!
+            assertEquals(listOf("test.Ping"), register.commandTypesList)
+            assertEquals(emptyList(), register.queryTypesList)
+            assertEquals(listOf("test.GetCount"), register.sharedQueryTypesList)
         }
     }
 

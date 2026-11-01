@@ -34,4 +34,13 @@ interface HubTransport {
 
     /** See [HubConnection.hubTimeoutFor]. */
     fun hubTimeoutFor(type: String): java.time.Duration
+
+    /** See [HubConnection.gather]. A transport without scatter-gather fails with `UnsupportedByHubException`. */
+    suspend fun gather(
+        request: io.damoreira.kraken.hub.v1.Request,
+        onPart: suspend (io.damoreira.kraken.hub.v1.ReplyPart) -> Unit,
+    ): io.damoreira.kraken.hub.v1.ServerMessage = throw io.damoreira.kraken.messaging.UnsupportedByHubException(
+        HubProtocol.SCATTER_GATHER,
+        "${this::class.simpleName} does not support ${HubProtocol.SCATTER_GATHER}",
+    )
 }

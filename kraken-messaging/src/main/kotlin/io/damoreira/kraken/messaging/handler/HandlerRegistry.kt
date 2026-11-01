@@ -38,6 +38,12 @@ class HandlerRegistry(private val typeResolver: MessageTypeResolver) {
     fun queryHandler(type: String): HandlerMethod? = queries[type]
     fun commandTypes(): Set<String> = commands.keys.toSet()
     fun queryTypes(): Set<String> = queries.keys.toSet()
+
+    /** Query types of `@QueryHandler(shared = true)` handlers (announced as `shared_query_types`). */
+    fun sharedQueryTypes(): Set<String> = queries.filterValues { it.shared }.keys.toSet()
+
+    /** Query types of exclusive `@QueryHandler`s (announced as `query_types`). */
+    fun exclusiveQueryTypes(): Set<String> = queries.filterValues { !it.shared }.keys.toSet()
     fun eventTypes(): Set<String> = events.keys.toSet()
 
     /** Registers a listener called after each [register] that added handlers. */
@@ -48,25 +54,37 @@ class HandlerRegistry(private val typeResolver: MessageTypeResolver) {
     private fun scan(bean: Any): List<HandlerMethod> {
         val klass = AopUtils.getTargetClass(bean).kotlin
         val found = mutableListOf<HandlerMethod>()
-        val pending = mutableMapOf<String, String>() // "KIND:type" -> label, for duplicates within this bean
-        for (fn in klass.memberFunctions) {
+        val pending = mutableMapOf<String, HandlerMethod>() // "KIND:type" -> handler, for duplicates within this bean
+        for (fn in klass.memberFunctions.sortedBy { it.name }) {
             val kind = kindOf(fn) ?: continue
             val handler = toHandler(bean, klass, fn, kind)
             val key = "$kind:${handler.typeName}"
             if (kind != HandlerKind.EVENT) {
-                val existing = pending[key] ?: existingLabel(kind, handler.typeName)
-                if (existing != null) throw DuplicateHandlerException(handler.typeName, existing, labelOf(klass, fn))
-                pending[key] = labelOf(klass, fn)
+                val existing = pending[key] ?: existingHandler(kind, handler.typeName)
+                if (existing != null) {
+                    if (existing.shared != handler.shared) {
+                        val (exclusive, shared) = if (existing.shared) handler to existing else existing to handler
+                        throw IllegalStateException(
+                            "Query type '${handler.typeName}' is registered both exclusive and shared in one service " +
+                                "(exclusive: ${labelOf(exclusive)}, shared: ${labelOf(shared)}); declare it one way",
+                        )
+                    }
+                    throw DuplicateHandlerException(handler.typeName, labelOf(existing), labelOf(klass, fn))
+                }
+                pending[key] = handler
             }
             found += handler
         }
         return found
     }
 
+    private fun labelOf(handler: HandlerMethod) =
+        "${AopUtils.getTargetClass(handler.bean).kotlin.simpleName}.${handler.function.name}"
+
     private fun labelOf(klass: KClass<*>, fn: KFunction<*>) = "${klass.simpleName}.${fn.name}"
 
-    private fun existingLabel(kind: HandlerKind, type: String): String? =
-        (if (kind == HandlerKind.COMMAND) commands[type] else queries[type])?.label
+    private fun existingHandler(kind: HandlerKind, type: String): HandlerMethod? =
+        if (kind == HandlerKind.COMMAND) commands[type] else queries[type]
 
     private fun kindOf(fn: KFunction<*>): HandlerKind? = when {
         fn.findAnnotation<EventHandler>() != null -> HandlerKind.EVENT
@@ -87,7 +105,8 @@ class HandlerRegistry(private val typeResolver: MessageTypeResolver) {
             throw IllegalStateException("Handler ${labelOf(klass, fn)}: @RequiresAuthentication is not supported on @EventHandler")
         }
         val authorization = requires?.let { HandlerAuthorizations.compile(it.expression, labelOf(klass, fn)) }
-        return HandlerMethod(bean, fn, kind, messageClass, typeResolver.typeNameOf(messageClass), wantsContext, authorization)
+        val shared = kind == HandlerKind.QUERY && fn.findAnnotation<QueryHandler>()!!.shared
+        return HandlerMethod(bean, fn, kind, messageClass, typeResolver.typeNameOf(messageClass), wantsContext, authorization, shared)
     }
 
     private fun add(handler: HandlerMethod) {
