@@ -267,6 +267,9 @@ class HubConnections(
             try {
                 return call(connection, outgoing)
             } catch (e: HubUnavailableException) {
+                // Only the hub not taking the request: a collector's HubUnavailableException arrives wrapped in a
+                // StreamCollectorException (the request was written; it is never re-sent).
+
                 log.debug("Request {} not taken by hub {}: {}; trying another hub", request.id, connection.target, e.message)
                 tried += connection
             }

@@ -15,6 +15,14 @@ import kotlinx.coroutines.flow.update
  */
 typealias StreamingInbound = suspend (request: Request, emit: suspend (payload: ByteArray) -> Unit) -> Error?
 
+/**
+ * What [HubTransport.stream] throws when the caller's `onPart` callback threw (the collector failed, a part did not
+ * decode): [cause] is what it threw. It is the collector giving up, never the hub failing the request: the transport
+ * writes `Cancel` for the stream and a multi-hub transport never moves the request to another hub (it was written).
+ * [HubBus] unwraps it. A `CancellationException` from the callback is not wrapped: it is the collector's cancellation.
+ */
+internal class StreamCollectorException(cause: Throwable) : RuntimeException(cause)
+
 /** The [StreamingInbound] of an instance without streaming handlers: every stream ends with `INVALID_REQUEST`. */
 internal val NO_STREAMING_HANDLERS: StreamingInbound = { request, _ ->
     Error.newBuilder().setRequestId(request.id).setCode(ErrorCode.INVALID_REQUEST)

@@ -74,10 +74,13 @@ import kotlin.reflect.KClass
  * -> [io.damoreira.kraken.messaging.HandlerDisconnectedException], `HANDLER_ERROR` -> [RemoteHandlerException],
  * `CANCELLED` -> [io.damoreira.kraken.messaging.StreamCancelledException], ...), and so does an `Error` before any
  * part; a part that does not decode fails the flow with [InvalidMessageException] (the transport cancels the stream).
- * Retry applies with the query rules only until the first part, to ends with an error as to errors (a retried stream
- * is a new request); after the first part nothing is retried: the flow throws, a broken hub stream as
- * [io.damoreira.kraken.messaging.HubConnectionLostException]. The caller's bearer token and trace context are read
- * when [stream] is called, as for [scatterGatherFlow].
+ * An exception thrown by the collector (it runs inside the transport's part callback) is rethrown as it is, also when
+ * it is a `HubUnavailableException` or `HubConnectionLostException` of a nested send: the transport reports it as a
+ * [StreamCollectorException], so it never counts as this stream's transport failing (no failover to another hub; the
+ * stream is cancelled). Retry applies with the query rules only until the first part, to ends with an error as to
+ * errors (a retried stream is a new request); after the first part nothing is retried: the flow throws, a broken hub
+ * stream as [io.damoreira.kraken.messaging.HubConnectionLostException]. The caller's bearer token and trace context
+ * are read when [stream] is called, as for [scatterGatherFlow].
  */
 class HubBus(
     private val connection: HubTransport,
@@ -172,11 +175,17 @@ class HubBus(
     ) {
         val type = template.type
         val request = withFreshId(template, timeout)
-        @Suppress("UNCHECKED_CAST")
-        val terminal = connection.stream(request) { part ->
-            // The hub ends a stream instead of relaying an error part; one would be a hub that does it differently.
-            if (part.hasError()) throw RemoteHandlerException(type, part.error.message, part.error.details.toByteArray(), part.error.code.name)
-            onPart(decodeReply(type, messageClass, part.payload.toByteArray()) as R)
+        val terminal = try {
+            @Suppress("UNCHECKED_CAST")
+            connection.stream(request) { part ->
+                // The hub ends a stream instead of relaying an error part; one would be a hub that does it differently.
+                if (part.hasError()) throw RemoteHandlerException(type, part.error.message, part.error.details.toByteArray(), part.error.code.name)
+                onPart(decodeReply(type, messageClass, part.payload.toByteArray()) as R)
+            }
+        } catch (e: StreamCollectorException) {
+            // The collector's (or the decoder's) own exception, as thrown: the transport wrapped it so that a transport
+            // failure inside the collector (a nested send) is never taken for this stream's hub failing.
+            throw e.cause!!
         }
         when {
             // The end's error is the same failure a unary send would see as an Error with that code.

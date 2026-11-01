@@ -422,6 +422,9 @@ class HubConnection(
      * @throws UnsupportedByHubException if the stream's ack does not list `streaming` (a legacy hub never does); nothing is sent
      * @throws HubUnavailableException, HubConnectionLostException as [send]; parts already handed to [onPart] stay
      * @throws MessageTimeoutException if no part or end arrives within the local guard (a `Cancel` is written)
+     * @throws StreamCollectorException wrapping what [onPart] threw (other than a `CancellationException`): whatever it
+     *   was, also a `HubUnavailableException` of a nested send, it is the collector's failure, not this request's
+     *   transport failing; `Cancel` is written
      */
     override suspend fun stream(request: Request, onPart: suspend (ReplyPart) -> Unit): ServerMessage =
         stream(request, awaitStream = true, onPart)
@@ -450,7 +453,13 @@ class HubConnection(
                     terminal = message
                     break
                 }
-                onPart(message.part)
+                try {
+                    onPart(message.part)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Throwable) {
+                    throw StreamCollectorException(e)
+                }
                 if (++consumed >= refill) {
                     consumed = 0
                     stream.out.trySend(ClientMessage.newBuilder().setFlow(Flow.newBuilder().setRequestId(request.id).setCredits(refill)).build())
@@ -468,6 +477,7 @@ class HubConnection(
                 val reason = when (failure) {
                     null, is CancellationException -> "collector cancelled"
                     is MessageTimeoutException -> "no part within the local guard"
+                    is StreamCollectorException -> failure.cause!!.let { "collector failed: ${it::class.simpleName}: ${it.message}" }
                     else -> "collector failed: ${failure::class.simpleName}: ${failure.message}"
                 }
                 stream.out.trySend(ClientMessage.newBuilder().setCancel(Cancel.newBuilder().setRequestId(request.id).setReason(reason)).build())

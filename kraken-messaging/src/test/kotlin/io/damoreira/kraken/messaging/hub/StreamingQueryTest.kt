@@ -17,6 +17,7 @@ import io.damoreira.kraken.messaging.AccessDeniedException
 import io.damoreira.kraken.messaging.HandlerBusyException
 import io.damoreira.kraken.messaging.HandlerDisconnectedException
 import io.damoreira.kraken.messaging.HubConnectionLostException
+import io.damoreira.kraken.messaging.HubUnavailableException
 import io.damoreira.kraken.messaging.InvalidMessageException
 import io.damoreira.kraken.messaging.MessageTimeoutException
 import io.damoreira.kraken.messaging.NoHandlerException
@@ -197,6 +198,23 @@ class StreamingQueryTest {
 
     private fun callerId() = connections.first { it.instanceId.startsWith("caller-") }.instanceId
 
+    /** A `HubConnections` client named `caller` over [hubNames], registered on every one of them. */
+    private suspend fun multiCaller(vararg hubNames: String, settings: HubSettings = this.settings): HubConnections {
+        val conns = HubConnections(
+            targets = HubTargets.Static(hubNames.toList()),
+            channelFactory = { target -> InProcessChannelBuilder.forName(target).build() },
+            serviceName = "svc-caller",
+            instanceId = "caller",
+            settings = settings,
+            inbound = { req -> error(req.id, ErrorCode.HANDLER_ERROR, "unexpected") },
+            scope = scope,
+        ).also { multi += it }
+        conns.start()
+        assertTrue(conns.awaitRegistered(wait))
+        awaitUntil { conns.liveHubIds().size == hubNames.size }
+        return conns
+    }
+
     private suspend fun awaitUntil(ms: Long = 5_000, condition: () -> Boolean) = withTimeout(ms) { while (!condition()) delay(10) }
 
     // --- the handler side on the wire ---
@@ -367,6 +385,46 @@ class StreamingQueryTest {
         awaitUntil { hub.cancelsFrom(callerId()).size == 1 }
         assertTrue(hub.cancelsFrom(callerId()).single().reason.contains("stop"), hub.cancelsFrom(callerId()).toString())
         assertEquals(0, hub.openStreams())
+    }
+
+    @Test fun `a collector's transport exception is its own failure - it reaches the caller and cancels the stream`() = runBlocking {
+        // A nested send inside the collector failing (no hub, a lost hub stream) is not this stream's transport failing.
+        val failures = listOf(HubUnavailableException("nested send: no hub"), HubConnectionLostException("nested send: hub stream lost"))
+        val bus = caller()
+        failures.forEachIndexed { n, failure ->
+            val state = StreamerState()
+            val conn = owner("svc-x", "x-$n", RowsStreamer(state))
+            val e = assertFailsWith<Throwable> { bus.stream(ExportRows(5), StreamOptions(initialCredit = 2)).collect { throw failure } }
+            assertTrue(e === failure, "got $e")
+            assertEquals(n + 1, hub.requestsFrom(callerId()))
+            assertEquals("cancelled", withTimeout(2_000) { state.ended.await() })
+            awaitUntil { hub.cancelsFrom(callerId()).size == n + 1 }
+            assertTrue(hub.cancelsFrom(callerId()).last().reason.contains(failure::class.simpleName!!), hub.cancelsFrom(callerId()).toString())
+            assertEquals(0, hub.openStreams())
+            conn.stop()
+            connections.remove(conn)
+            awaitUntil { conn.instanceId !in hub.connectedInstances() }
+        }
+    }
+
+    @Test fun `a collector's HubUnavailableException never moves the stream to another hub`() = runBlocking {
+        val other = hub()
+        val a = StreamerState()
+        val b = StreamerState()
+        owner("svc-x", "x-a", RowsStreamer(a), hubName = hub.name)
+        owner("svc-x", "x-b", RowsStreamer(b), hubName = other.name)
+        val bus = bus(multiCaller(hub.name, other.name))
+        val failure = HubUnavailableException("nested send: no hub")
+        val e = assertFailsWith<HubUnavailableException> {
+            bus.stream(ExportRows(5), StreamOptions(initialCredit = 2)).collect { throw failure }
+        }
+        assertTrue(e === failure, "got $e")
+        assertEquals(1, hub.requestsFrom("caller") + other.requestsFrom("caller")) // written once: never re-sent to the other hub
+        val (used, unused) = if (hub.requestsFrom("caller") == 1) a to b else b to a
+        assertEquals("cancelled", withTimeout(2_000) { used.ended.await() })
+        assertEquals(false, unused.started.isCompleted)
+        awaitUntil { hub.cancelsFrom("caller").size + other.cancelsFrom("caller").size == 1 }
+        assertEquals(0, hub.openStreams() + other.openStreams())
     }
 
     @Test fun `a hub Cancel for a unary request cancels its handler job and pays the permit back`() = runBlocking {
