@@ -117,6 +117,10 @@ class HandlerRegistry(private val typeResolver: MessageTypeResolver) {
         if (streaming && fn.returnType.classifier != Flow::class) {
             throw IllegalStateException("Handler ${labelOf(klass, fn)} takes a StreamingQuery and must return kotlinx.coroutines.flow.Flow<R>")
         }
+        if (!streaming && kind == HandlerKind.QUERY && fn.returnType.classifier == Flow::class) {
+            // A Flow is no reply: it would be JSON-encoded as an empty object. Only a streaming query is served part by part.
+            throw IllegalStateException("Handler ${labelOf(klass, fn)} returns a Flow: its query must implement StreamingQuery<R>")
+        }
         return HandlerMethod(bean, fn, kind, messageClass, typeResolver.typeNameOf(messageClass), wantsContext, authorization, shared, streaming)
     }
 

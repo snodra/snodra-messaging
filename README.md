@@ -559,7 +559,8 @@ queryBus.stream(ExportWorkouts(ownerId), StreamOptions(initialCredit = 32, timeo
   is read only after the collector consumed the previous one. A controller may return the flow: the caller's bearer
   token and trace context are read when `stream` is called, not when the flow is collected.
 - **Handler.** `@QueryHandler` (plain or `shared = true`) on a method taking the `StreamingQuery<R>` (optionally with
-  a `MessageContext`) and returning `Flow<R>`; another return type, or `@CommandHandler`, fails at startup. The library
+  a `MessageContext`) and returning `Flow<R>`; another return type, `@CommandHandler`, or a `Flow` returned for a plain
+  `Query`, fails at startup. The library
   collects the flow and sends one part per element, **suspending the collection inside `emit` while the hub granted no
   credit**, then the end. An exception from the flow ends the stream with the handler's error, mapped exactly like a
   unary failure (`HANDLER_ERROR` with `IllegalArgumentException` / validation details, `AccessDeniedException`, ...);

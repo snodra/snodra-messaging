@@ -89,6 +89,10 @@ class StreamingAsCommand {
     @CommandHandler fun handle(query: ExportRows): Flow<Row> = flow { }
 }
 
+class FlowFromPlainQuery {
+    @QueryHandler fun handle(query: GetCount): Flow<Count> = flow { emit(Count(1)) }
+}
+
 class HandlerRegistryTest {
     private val registry = HandlerRegistry(MessageTypeResolver("test"))
     private val ctx = MessageContext("m1", "test.Ping", "c1", "alice", setOf("USER"), null, emptyMap())
@@ -222,6 +226,11 @@ class HandlerRegistryTest {
     @Test fun `a streaming query handler must return a Flow`() {
         val e = assertThrows<IllegalStateException> { registry.register(StreamingWithoutFlow()) }
         assertEquals("Handler StreamingWithoutFlow.handle takes a StreamingQuery and must return kotlinx.coroutines.flow.Flow<R>", e.message)
+    }
+
+    @Test fun `a query handler returning a Flow must take a StreamingQuery`() {
+        val e = assertThrows<IllegalStateException> { registry.register(FlowFromPlainQuery()) }
+        assertEquals("Handler FlowFromPlainQuery.handle returns a Flow: its query must implement StreamingQuery<R>", e.message)
     }
 
     @Test fun `a command handler cannot take a StreamingQuery`() {
