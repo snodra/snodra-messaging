@@ -151,6 +151,30 @@ class PropertiesBindingTest {
         }
     }
 
+    @Test fun `hub address takes a list or a dns target, and status-interval binds`() {
+        runner.withPropertyValues(*required, "kraken.messaging.hub.address=static://hub-1:7000,hub-2:7000", "kraken.messaging.hub.status-interval=2s")
+            .run { context ->
+                val hub = context.getBean(KrakenMessagingProperties::class.java).hub
+                assertEquals("static://hub-1:7000,hub-2:7000", hub.address)
+                assertEquals(Duration.ofSeconds(2), hub.statusInterval)
+            }
+        runner.withPropertyValues(*required).run { context ->
+            assertEquals(Duration.ofSeconds(5), context.getBean(KrakenMessagingProperties::class.java).hub.statusInterval)
+        }
+        runner.withPropertyValues(*required, "kraken.messaging.hub.address=dns:///kraken-hub:7000").run { context ->
+            assertEquals(null, context.startupFailure)
+        }
+    }
+
+    @Test fun `a malformed hub address or a zero status-interval fails at startup`() {
+        for (address in listOf("dns:///kraken-hub", "dns:///hub-a:7000,hub-b:7000", " , ")) {
+            val messages = startupFailure("kraken.messaging.hub.enabled=false", "kraken.messaging.hub.address=$address")
+            assertTrue("kraken.messaging.hub.address" in messages, "$address: $messages")
+        }
+        val messages = startupFailure("kraken.messaging.hub.status-interval=0s")
+        assertTrue("kraken.messaging.hub.status-interval must be positive" in messages, messages)
+    }
+
     @Test fun `missing service-name fails binding`() {
         runner.withPropertyValues("kraken.messaging.type-prefix=kraken.orders").run { context ->
             val failure = assertNotNull(context.startupFailure)

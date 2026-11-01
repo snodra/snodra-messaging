@@ -13,7 +13,8 @@ import io.damoreira.kraken.messaging.handler.CommandHandler
 import io.damoreira.kraken.messaging.handler.HandlerInvoker
 import io.damoreira.kraken.messaging.handler.HandlerRegistry
 import io.damoreira.kraken.messaging.hub.HubBus
-import io.damoreira.kraken.messaging.hub.HubConnection
+import io.damoreira.kraken.messaging.hub.HubChannelFactory
+import io.damoreira.kraken.messaging.hub.HubConnections
 import io.damoreira.kraken.messaging.kafka.EventConsumer
 import io.damoreira.kraken.messaging.kafka.MessagingIndexes
 import io.damoreira.kraken.messaging.kafka.OutboxEventBus
@@ -21,7 +22,6 @@ import io.damoreira.kraken.messaging.kafka.OutboxPublisher
 import io.damoreira.kraken.messaging.security.ForwardedIdentityResolver
 import io.damoreira.kraken.messaging.test.InProcessHub
 import io.damoreira.kraken.messaging.tracing.TraceHeaders
-import io.grpc.ManagedChannel
 import io.mockk.mockk
 import org.awaitility.kotlin.atMost
 import org.awaitility.kotlin.await
@@ -105,11 +105,11 @@ class AutoConfigurationTest {
         )
 
     /** Hub enabled and pointed at the in-process hub through the channel factory override. */
-    private val inProcessChannel: () -> ManagedChannel = { hub.channel() }
+    private val inProcessChannel = HubChannelFactory { hub.channel() }
 
     private fun withHub() = runner
         .withPropertyValues("kraken.messaging.hub.enabled=true")
-        .withBean("krakenHubChannelFactory", Function0::class.java, { inProcessChannel })
+        .withBean("krakenHubChannelFactory", HubChannelFactory::class.java, { inProcessChannel })
 
     @Test fun `core beans present`() {
         runner.run { context ->
@@ -140,10 +140,10 @@ class AutoConfigurationTest {
         }
     }
 
-    @Test fun `hub disabled leaves no HubConnection`() {
+    @Test fun `hub disabled leaves no HubConnections`() {
         runner.run { context ->
             assertEquals(null, context.startupFailure)
-            assertTrue(context.getBeansOfType(HubConnection::class.java).isEmpty())
+            assertTrue(context.getBeansOfType(HubConnections::class.java).isEmpty())
             assertTrue(context.getBeansOfType(HubBus::class.java).isEmpty())
             assertTrue(context.getBeansOfType(CommandBus::class.java).isEmpty())
             assertTrue(context.getBeansOfType(QueryBus::class.java).isEmpty())
@@ -160,7 +160,7 @@ class AutoConfigurationTest {
     @Test fun `hub lifecycle registers handler types with the hub and stops on close`() {
         withHub().withUserConfiguration(HandlersConfig::class.java).run { context ->
             assertEquals(null, context.startupFailure)
-            val connection = context.getBean(HubConnection::class.java)
+            val connection = context.getBean(HubConnections::class.java)
             await atMost Duration.ofSeconds(5) until { connection.connected.value && "test.Ping" in hub.registeredTypes() }
             val registrations = hub.registrationsFrom(connection.instanceId)
             context.close()

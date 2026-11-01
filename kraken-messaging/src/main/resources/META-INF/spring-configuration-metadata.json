@@ -77,9 +77,16 @@
     {
       "name": "kraken.messaging.hub.address",
       "type": "java.lang.String",
-      "description": "gRPC target of the hub; an optional static:// prefix is stripped.",
+      "description": "The hub or hubs: one gRPC target (host:port, optional static:// prefix), a comma-separated list of them (one connection per hub), or one dns:///name:port re-resolved every 30 s.",
       "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Hub",
       "defaultValue": "static://kraken-hub:7000"
+    },
+    {
+      "name": "kraken.messaging.hub.status-interval",
+      "type": "java.time.Duration",
+      "description": "Period of the InstanceStatus report sent to every hub whose RegisterAck lists the instance-status capability (must be positive).",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Hub",
+      "defaultValue": "5s"
     },
     {
       "name": "kraken.messaging.hub.request-timeout",

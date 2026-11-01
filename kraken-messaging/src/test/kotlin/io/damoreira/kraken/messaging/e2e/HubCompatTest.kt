@@ -27,7 +27,10 @@ import java.util.concurrent.CopyOnWriteArrayList
 import kotlinx.coroutines.awaitAll
 import io.damoreira.kraken.messaging.HubUnavailableException
 import io.damoreira.kraken.messaging.MessageTimeoutException
+import io.damoreira.kraken.messaging.hub.HubChannelFactory
 import io.damoreira.kraken.messaging.hub.HubConnection
+import io.damoreira.kraken.messaging.hub.HubConnections
+import io.damoreira.kraken.messaging.hub.HubTargets
 import io.damoreira.kraken.messaging.hub.HubHandshake
 import io.damoreira.kraken.messaging.hub.HubSettings
 import io.damoreira.kraken.messaging.test.KrakenContainers
@@ -72,6 +75,7 @@ class HubCompatTest {
     private val log = LoggerFactory.getLogger(HubCompatTest::class.java)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val connections = mutableListOf<HubConnection>()
+    private val multi = mutableListOf<HubConnections>()
     private val containers = mutableListOf<GenericContainer<*>>()
     private val channels = mutableListOf<ManagedChannel>()
     private val defaults = HubSettings(
@@ -84,6 +88,7 @@ class HubCompatTest {
 
     @AfterEach fun tearDown() = runBlocking {
         connections.forEach { it.stop() }
+        multi.forEach { it.stop() }
         scope.cancel()
         channels.forEach { it.shutdownNow() }
         containers.forEach { runCatching { it.stop() } }
@@ -101,7 +106,7 @@ class HubCompatTest {
         val ack = assertIs<HubHandshake.V2>(conn.handshake.value).ack
         assertEquals("compat-hub", ack.hubId)
         assertEquals(2, ack.protocolVersion)
-        assertEquals(listOf("flow-control"), ack.capabilitiesList)
+        assertEquals(listOf("flow-control", "instance-status"), ack.capabilitiesList)
         assertEquals(3_000, ack.heartbeatIntervalMs)
         assertEquals(10_000, ack.heartbeatTimeoutMs)
         assertEquals(5_000, ack.defaultTimeoutMs)
@@ -303,7 +308,44 @@ class HubCompatTest {
         reconnectsWithinFiveSeconds(p0Hub(), expectV2 = true)
     }
 
+    // --- the merged P2 hub: flow control without instance-status (P3 clients against it) ---
+
+    @Test fun `P2 hub - one target works as before and gets no InstanceStatus`() = runBlocking {
+        val hub = start(p2Hub())
+        val handler = hubConnections(hub, "svc-b") { req -> payloadReply(req.id, "{}") }
+        handler.register(setOf("t.Ping"), emptySet())
+        handler.start()
+        val sender = hubConnections(hub, "svc-a")
+        sender.start()
+        assertTrue(handler.awaitRegistered(wait) && sender.awaitRegistered(wait))
+        val ack = assertIs<HubHandshake.V2>(handler.connections().single().handshake.value).ack
+        assertEquals(listOf("flow-control"), ack.capabilitiesList)
+        assertEquals(listOf(ack.hubId), sender.liveHubIds())
+        assertEquals(256, permitsAnnounced(hub, "svc-b")) // one hub: the whole budget
+
+        repeat(5) { assertTrue(sender.send(request("t.Ping")).let { it.hasReply() && !it.reply.hasError() }) }
+        delay(600) // three status periods of 200 ms
+        assertEquals(0, handler.connections().single().statusReportsWritten + sender.connections().single().statusReportsWritten)
+    }
+
     // --- the previous hub release (protocol v1): legacy mode ---
+
+    @Test fun `baseline hub - one target through HubConnections runs in legacy mode`() = runBlocking {
+        val hub = start(baselineHub())
+        val handler = hubConnections(hub, "svc-b") { req -> payloadReply(req.id, "{}") }
+        handler.register(setOf("t.Ping"), emptySet())
+        handler.start()
+        val sender = hubConnections(hub, "svc-a")
+        sender.start()
+        assertTrue(handler.awaitRegistered(wait) && sender.awaitRegistered(wait))
+        assertEquals(HubHandshake.Legacy, sender.connections().single().handshake.value)
+        assertEquals(listOf("${hub.host}:${hub.getMappedPort(7000)}"), sender.liveHubIds()) // a v1 hub has no id: its target
+
+        repeat(5) { assertTrue(sender.send(request("t.Ping")).let { it.hasReply() && !it.reply.hasError() }) }
+        assertEquals(ErrorCode.NO_HANDLER, sender.send(request("t.Nobody")).error.code)
+        delay(600)
+        assertEquals(0, handler.connections().single().statusReportsWritten + sender.connections().single().statusReportsWritten)
+    }
 
     @Test fun `baseline hub runs the client in legacy mode without regression`() = runBlocking {
         val hub = start(baselineHub())
@@ -382,6 +424,11 @@ class HubCompatTest {
         return KrakenContainers.hubP0().withEnv("KRAKEN_HUB_OTLP_ENDPOINT", "")
     }
 
+    private fun p2Hub(): GenericContainer<*> {
+        Assumptions.assumeTrue(KrakenContainers.hubP2ImageAvailable(), "P2 hub image not available")
+        return KrakenContainers.hubP2().withEnv("KRAKEN_HUB_OTLP_ENDPOINT", "")
+    }
+
     private fun baselineHub(): GenericContainer<*> {
         Assumptions.assumeTrue(KrakenContainers.hubBaselineImageAvailable(), "baseline hub image not available")
         return KrakenContainers.hubBaseline().withEnv("KRAKEN_HUB_OTLP_ENDPOINT", "")
@@ -418,6 +465,30 @@ class HubCompatTest {
             maxConcurrentHandlers = maxConcurrentHandlers,
         ).also { connections += it }
     }
+
+    /** A multi-hub client with one target, [hub]; status reports every 200 ms. */
+    private fun hubConnections(
+        hub: GenericContainer<*>,
+        service: String,
+        inbound: suspend (Request) -> Reply = { req -> errorReply(req.id, "unexpected") },
+    ): HubConnections = HubConnections(
+        targets = HubTargets.parse("static://${hub.host}:${hub.getMappedPort(7000)}"),
+        channelFactory = HubChannelFactory { target ->
+            ManagedChannelBuilder.forTarget(target).usePlaintext()
+                .keepAliveTime(10, TimeUnit.SECONDS).keepAliveTimeout(5, TimeUnit.SECONDS).keepAliveWithoutCalls(true).build()
+        },
+        serviceName = service,
+        instanceId = "$service-" + UUID.randomUUID(),
+        settings = defaults,
+        inbound = inbound,
+        scope = scope,
+        statusInterval = Duration.ofMillis(200),
+    ).also { multi += it }
+
+    /** The `initial_permits` [service]'s instance announced, as the hub's topology shows them before any request. */
+    private suspend fun permitsAnnounced(hub: GenericContainer<*>, service: String): Int =
+        HubGrpcKt.HubCoroutineStub(channel(hub)).topology(TopologyRequest.getDefaultInstance()).servicesList
+            .single { it.serviceName == service }.instancesList.single().permitsAvailable
 
     private fun bus(connection: HubConnection, retry: RetryPolicy? = null): HubBus {
         val resolver = MessageTypeResolver("test")

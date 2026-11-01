@@ -14,7 +14,7 @@ import io.damoreira.kraken.messaging.e2e.a.ServiceAEvents
 import io.damoreira.kraken.messaging.e2e.b.ServiceB
 import io.damoreira.kraken.messaging.e2e.b.ServiceBHandlers
 import io.damoreira.kraken.messaging.fixtures.TestJwt
-import io.damoreira.kraken.messaging.hub.HubConnection
+import io.damoreira.kraken.messaging.hub.HubConnections
 import io.damoreira.kraken.messaging.test.KrakenContainers
 import kotlinx.coroutines.runBlocking
 import org.apache.kafka.clients.admin.AdminClient
@@ -190,7 +190,7 @@ class TwoServicesEndToEndTest {
             contextA = start(ServiceA::class.java, "svc-a", "a", "e2e_a")
             // The hub connects asynchronously after refresh: wait until it acknowledged both registrations (b.Ping).
             for (context in listOf(contextA!!, contextB!!)) {
-                val registered = runBlocking { context.getBean(HubConnection::class.java).awaitRegistered(Duration.ofSeconds(20)) }
+                val registered = runBlocking { context.getBean(HubConnections::class.java).awaitRegistered(Duration.ofSeconds(20)) }
                 check(registered) { "${context.id} was not registered at the hub within 20s" }
             }
         }

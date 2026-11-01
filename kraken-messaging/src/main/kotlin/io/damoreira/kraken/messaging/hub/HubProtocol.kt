@@ -15,8 +15,26 @@ object HubProtocol {
     /** Capability name of hub flow control: permits, `Register.initial_permits`, `RESOURCE_EXHAUSTED` (P1). */
     const val FLOW_CONTROL = "flow-control"
 
+    /** Capability name of `InstanceStatus` reports (P3, multi-hub HA): sent only to a hub whose ack lists it. */
+    const val INSTANCE_STATUS = "instance-status"
+
     /** `Register.capabilities`: optional protocol features this client supports. */
-    val CAPABILITIES: List<String> = listOf(FLOW_CONTROL)
+    val CAPABILITIES: List<String> = listOf(FLOW_CONTROL, INSTANCE_STATUS)
+
+    /** Default period of `InstanceStatus` reports (`kraken.messaging.hub.status-interval`). */
+    val STATUS_INTERVAL: Duration = Duration.ofSeconds(5)
+
+    /** How often a `dns:///` hub address is resolved again. */
+    val DNS_REFRESH: Duration = Duration.ofSeconds(30)
+
+    /**
+     * `Register.initial_permits` for one hub when the instance is connected to [hubs] hubs: `ceil(max / hubs)`, the
+     * whole budget when [hubs] is 0 or 1. Permits granted this way are never revoked when the number of hubs changes.
+     */
+    fun initialPermits(maxConcurrentHandlers: Int, hubs: Int): Int {
+        val n = hubs.coerceAtLeast(1)
+        return (maxConcurrentHandlers + n - 1) / n
+    }
 
     /**
      * Returned permits go back in one `Permits` message as soon as this many are pending, and at once (whatever is

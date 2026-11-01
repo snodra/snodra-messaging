@@ -5,6 +5,7 @@ import io.damoreira.kraken.hub.v1.Error
 import io.damoreira.kraken.hub.v1.ErrorCode
 import io.damoreira.kraken.hub.v1.Heartbeat
 import io.damoreira.kraken.hub.v1.HubGrpcKt
+import io.damoreira.kraken.hub.v1.InstanceStatus
 import io.damoreira.kraken.hub.v1.Permits
 import io.damoreira.kraken.hub.v1.Register
 import io.damoreira.kraken.hub.v1.RegisterAck
@@ -39,13 +40,13 @@ import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withTimeoutOrNull
 import org.slf4j.LoggerFactory
 import java.time.Duration
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentSkipListMap
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.random.Random
 
 data class HubSettings(
@@ -123,6 +124,11 @@ internal object ReconnectBackoff {
  * `min(PERMIT_BATCH, initial_permits / 2)` permits for the stream, otherwise in `Permits` messages of
  * [HubProtocol.PERMIT_BATCH] or after [HubProtocol.PERMIT_FLUSH_DELAY] ([PermitLedger] has the rule). Against a hub
  * without the capability (P0, legacy) no `Permits` are ever sent.
+ *
+ * Multi-hub (P3): [HubConnections] runs one connection per hub [target], all sharing one [HandlerGate] (the local bound
+ * on handlers over every hub) and announcing [initialPermits] (read when each stream opens) as `initial_permits`. A
+ * request still queued for a stream when it breaks was never written: it fails with [HubUnavailableException], so it
+ * can go to another hub. [reportStatus] writes an `InstanceStatus` to a hub whose ack lists `instance-status`.
  */
 class HubConnection(
     private val channelFactory: () -> ManagedChannel,
@@ -135,7 +141,12 @@ class HubConnection(
     private val maxConcurrentHandlers: Int = 256,
     private val loadFactor: Int = 100,
     private val tags: Map<String, String> = emptyMap(),
-) {
+    /** The hub's gRPC target (`host:port`); the hub's id for a legacy hub, which sends none. */
+    val target: String = "hub",
+    private val gate: HandlerGate = HandlerGate(maxConcurrentHandlers),
+    /** `Register.initial_permits` of a new stream (P3 splits `maxConcurrentHandlers` over the hubs). */
+    private val initialPermits: () -> Int = { maxConcurrentHandlers },
+) : HubTransport {
     private val log = LoggerFactory.getLogger(HubConnection::class.java)
 
     private val connectedState = MutableStateFlow(false)
@@ -153,21 +164,19 @@ class HubConnection(
     private class Pending(val stream: Stream, val answer: CompletableDeferred<ServerMessage>)
     private val pending = ConcurrentHashMap<String, Pending>()
 
-    private val handlerPermits = Semaphore(maxConcurrentHandlers.also { require(it >= 1) { "maxConcurrentHandlers must be >= 1" } })
-
     init {
         require(loadFactor >= 0) { "loadFactor must not be negative, was $loadFactor" } // uint32 on the wire, 0 reads as 100
     }
     private val inFlight = MutableStateFlow(0) // incoming requests dispatched and not yet answered
 
-    /** Incoming requests currently being handled (or waiting for a handler permit). */
+    /** Incoming requests of this hub currently being handled (or waiting for a handler permit). */
     val inFlightHandlers: StateFlow<Int> = inFlight.asStateFlow()
 
     /**
      * One open stream: its outbound queue, handshake, the heartbeats awaiting an echo (`sentAtMs` -> generation) and the
      * permit accounting against its `initial_permits`.
      */
-    private class Stream(val out: Channel<ClientMessage>, fallbackHeartbeatMs: Long, initialPermits: Int) {
+    private class Stream(val out: Channel<ClientMessage>, fallbackHeartbeatMs: Long, val initialPermits: Int) {
         val probes = ConcurrentSkipListMap<Long, Long>()
         val permits = PermitLedger(initialPermits)
         @Volatile var registeredGeneration = -1L
@@ -183,6 +192,28 @@ class HubConnection(
     @Volatile private var current: Stream? = null
     @Volatile private var loop: Job? = null
     private var lastHeartbeatAt = 0L
+
+    /**
+     * The hub's id: `RegisterAck.hub_id` of the current stream ([target] when it is empty), [target] for a legacy hub,
+     * null while no stream has completed its handshake.
+     */
+    val hubId: String?
+        get() = when (val handshake = handshakeState.value) {
+            is HubHandshake.V2 -> handshake.ack.hubId.ifEmpty { target }
+            HubHandshake.Legacy -> target
+            null -> null
+        }
+
+    /** True while the hub has confirmed the most recent [register] call on the live stream. */
+    internal val registered: Boolean get() = connectedState.value && acknowledged.value >= generation.value
+
+    @Volatile private var endedAttempts = 0
+
+    /** True until the first connection attempt has ended (the connect loop is still on its first stream). */
+    internal val onFirstAttempt: Boolean get() = endedAttempts == 0
+
+    /** No request of this instance is waiting for this hub's answer and no request of this hub is being handled. */
+    internal val idle: Boolean get() = pending.isEmpty() && inFlight.value == 0
 
     /** Starts the connect loop in the connection's scope. */
     fun start() {
@@ -241,8 +272,15 @@ class HubConnection(
      * @throws MessageTimeoutException if nothing arrives within the local guard: the hub's deadline bound plus
      *   [HubProtocol.LOCAL_GUARD_MARGIN] (v2), or `max(timeoutMs, requestTimeout)` (legacy)
      */
-    suspend fun send(request: Request): ServerMessage {
+    override suspend fun send(request: Request): ServerMessage = send(request, awaitStream = true)
+
+    /**
+     * [send]; with [awaitStream] false a connection without a live stream fails at once with [HubUnavailableException]
+     * instead of waiting for one (the multi-hub client then tries another hub).
+     */
+    internal suspend fun send(request: Request, awaitStream: Boolean): ServerMessage {
         val wait = settings.chosenRequestTimeout ?: HubProtocol.DEFAULT_REQUEST_TIMEOUT
+        if (!awaitStream && current?.handshake == null) throw HubUnavailableException("hub $target not connected")
         if (!connectedState.value) {
             withTimeoutOrNull(wait.toMillis()) { connectedState.first { it } }
                 ?: throw HubUnavailableException("hub not connected within $wait")
@@ -280,7 +318,7 @@ class HubConnection(
      * default; [HubProtocol.DEFAULT_REQUEST_TIMEOUT] against a legacy hub or before any handshake. The retry budget when
      * the caller chose no timeout.
      */
-    fun hubTimeoutFor(type: String): Duration {
+    override fun hubTimeoutFor(type: String): Duration {
         val ack = (handshakeState.value as? HubHandshake.V2)?.ack ?: return HubProtocol.DEFAULT_REQUEST_TIMEOUT
         val ms = ack.typeTimeoutsMsMap[type]?.takeIf { it > 0 } ?: ack.defaultTimeoutMs.takeIf { it > 0 }
         return ms?.let { Duration.ofMillis(it.toLong()) } ?: HubProtocol.DEFAULT_REQUEST_TIMEOUT
@@ -302,7 +340,7 @@ class HubConnection(
         var failures = 0
         while (currentCoroutineContext().isActive) {
             var channel: ManagedChannel? = null
-            val stream = Stream(Channel(Channel.UNLIMITED), settings.heartbeatInterval.toMillis(), maxConcurrentHandlers)
+            val stream = Stream(Channel(Channel.UNLIMITED), settings.heartbeatInterval.toMillis(), initialPermits().coerceAtLeast(1))
             var status: Status = Status.CANCELLED
             var reachedHandshake = false
             try {
@@ -322,10 +360,13 @@ class HubConnection(
                     stream.out.close()
                 }
                 reachedHandshake = stream.handshake != null
+                endedAttempts++
                 connectedState.value = false
                 handshakeState.value = null
                 acknowledged.value = -1
                 channel?.shutdownNow()
+                // Requests still in the closed outbound queue were never handed to gRPC: never sent, so retryable elsewhere.
+                failUnsent(stream, "hub stream to $target closed before the request was written: ${describe(status)}")
                 failPending(stream, HubConnectionLostException("hub stream closed: ${describe(status)}"))
             }
             // A stream the hub answered (ack or echo) proves the hub is back: start again from the floor.
@@ -383,17 +424,37 @@ class HubConnection(
         .setProtocolVersion(HubProtocol.PROTOCOL_VERSION)
         .addAllCapabilities(HubProtocol.CAPABILITIES)
         .setClientVersion(HubProtocol.CLIENT_VERSION)
-        .setInitialPermits(maxConcurrentHandlers)
         .setLoadFactor(loadFactor)
         .putAllTags(tags)
         .build()
 
     /** Writes the current registration followed by a heartbeat whose echo confirms it. Caller holds [lock]. */
     private fun announce(stream: Stream) {
-        stream.out.trySend(ClientMessage.newBuilder().setRegister(registration).build())
+        val register = registration.toBuilder().setInitialPermits(stream.initialPermits).build()
+        stream.out.trySend(ClientMessage.newBuilder().setRegister(register).build())
         stream.registeredGeneration = generation.value
         heartbeat(stream)
     }
+
+    /**
+     * Writes an `InstanceStatus` on the live stream when its ack lists `instance-status`; false (nothing written) for a
+     * hub without the capability, a legacy hub, or no live stream.
+     */
+    fun reportStatus(connectedHubIds: List<String>, handlersInFlight: Int): Boolean {
+        val stream = current ?: return false
+        val ack = (stream.handshake as? HubHandshake.V2)?.ack ?: return false
+        if (HubProtocol.INSTANCE_STATUS !in ack.capabilitiesList) return false
+        val status = InstanceStatus.newBuilder()
+            .addAllConnectedHubIds(connectedHubIds)
+            .setHandlersInFlight(handlersInFlight.coerceAtLeast(0))
+        return stream.out.trySend(ClientMessage.newBuilder().setStatus(status).build()).isSuccess
+            .also { if (it) statusReports.incrementAndGet() }
+    }
+
+    private val statusReports = AtomicLong()
+
+    /** `InstanceStatus` reports written to this hub over all of its streams. */
+    val statusReportsWritten: Long get() = statusReports.get()
 
     private fun heartbeat(stream: Stream) {
         val sentAt = synchronized(lock) {
@@ -466,9 +527,10 @@ class HubConnection(
     private fun dispatch(stream: Stream, request: Request) {
         stream.permits.requestReceived()
         inFlight.update { it + 1 }
+        gate.entered()
         val job = scope.launch(handlerDispatcher) {
             val reply = try {
-                handlerPermits.withPermit { inbound(request) }
+                gate.permits.withPermit { inbound(request) }
             } catch (e: Throwable) {
                 // Only this coroutine's own cancellation propagates; a CancellationException leaking out of the handler
                 // (e.g. a TimeoutCancellationException from its own withTimeout) is a handler failure like any other.
@@ -489,7 +551,10 @@ class HubConnection(
             }
             grantPermit(stream)
         }
-        job.invokeOnCompletion { inFlight.update { it - 1 } }
+        job.invokeOnCompletion {
+            inFlight.update { it - 1 }
+            gate.left()
+        }
     }
 
     /** One completed handler: pays a permit back to the stream the request arrived on (when it shares flow control). */
@@ -510,6 +575,17 @@ class HubConnection(
         if (count <= 0) return
         // A closed stream drops them: the hub forgot that session's permits with it.
         stream.out.trySend(ClientMessage.newBuilder().setPermits(Permits.newBuilder().setCount(count)).build())
+    }
+
+    /** Fails, with [HubUnavailableException], the requests left in [stream]'s closed outbound queue. */
+    private fun failUnsent(stream: Stream, message: String) {
+        while (true) {
+            val queued = stream.out.tryReceive().getOrNull() ?: break
+            if (!queued.hasRequest()) continue
+            val id = queued.request.id
+            val entry = pending[id] ?: continue
+            if (entry.stream === stream && pending.remove(id, entry)) entry.answer.completeExceptionally(HubUnavailableException(message))
+        }
     }
 
     /** Fails the requests written to [stream] (every request when null) with [cause]. */

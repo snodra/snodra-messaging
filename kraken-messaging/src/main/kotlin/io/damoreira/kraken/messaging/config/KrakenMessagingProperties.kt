@@ -1,6 +1,7 @@
 package io.damoreira.kraken.messaging.config
 
 import io.damoreira.kraken.messaging.RetryPolicy
+import io.damoreira.kraken.messaging.hub.HubTargets
 import org.springframework.boot.context.properties.ConfigurationProperties
 import java.time.Duration
 
@@ -23,8 +24,13 @@ data class KrakenMessagingProperties(
     data class Hub(
         /** Connect to the hub and expose the hub-backed `CommandBus`/`QueryBus` (addition beyond the spec table). */
         val enabled: Boolean = true,
-        /** gRPC target of the hub; an optional `static://` prefix is stripped. */
+        /**
+         * The hub or hubs (ADR 0016): one gRPC target (`host:port`, optional `static://` prefix), a comma-separated list
+         * of them (one connection per hub), or one `dns:///name:port` re-resolved every 30 s. Parsed by `HubTargets`.
+         */
         val address: String = "static://kraken-hub:7000",
+        /** How often an `InstanceStatus` report goes to every hub that supports it (capability `instance-status`). */
+        val statusInterval: Duration = Duration.ofSeconds(5),
         /**
          * Per-request timeout sent as `timeout_ms`. Unset (default): a v2 hub applies its default (5 s) or its per-type
          * override (`KRAKEN_HUB_TIMEOUT_OVERRIDES`); a legacy hub gets 5 s. Set it only to force one timeout for every
@@ -58,6 +64,10 @@ data class KrakenMessagingProperties(
                 "kraken.messaging.hub.max-concurrent-handlers must be >= 1, was $maxConcurrentHandlers"
             }
             require(loadFactor >= 0) { "kraken.messaging.hub.load-factor must not be negative, was $loadFactor" }
+            HubTargets.parse(address) // throws IllegalArgumentException naming the key
+            require(!statusInterval.isZero && !statusInterval.isNegative) {
+                "kraken.messaging.hub.status-interval must be positive, was $statusInterval"
+            }
         }
     }
 

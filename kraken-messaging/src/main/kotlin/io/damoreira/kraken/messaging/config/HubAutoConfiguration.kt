@@ -7,12 +7,13 @@ import io.damoreira.kraken.messaging.codec.MessageTypeResolver
 import io.damoreira.kraken.messaging.handler.HandlerInvoker
 import io.damoreira.kraken.messaging.handler.HandlerRegistry
 import io.damoreira.kraken.messaging.hub.HubBus
-import io.damoreira.kraken.messaging.hub.HubConnection
+import io.damoreira.kraken.messaging.hub.HubChannelFactory
+import io.damoreira.kraken.messaging.hub.HubConnections
 import io.damoreira.kraken.messaging.hub.HubSettings
+import io.damoreira.kraken.messaging.hub.HubTargets
 import io.damoreira.kraken.messaging.hub.InboundRequestDispatcher
 import io.damoreira.kraken.messaging.security.ForwardedIdentityResolver
 import io.damoreira.kraken.messaging.tracing.TraceHeaders
-import io.grpc.ManagedChannel
 import io.grpc.ManagedChannelBuilder
 import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
@@ -35,11 +36,12 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 /**
- * The hub transport: one [HubConnection] per instance, started by [HubLifecycle] once the context is refreshed, and
- * [HubBus] as the default [CommandBus] and [QueryBus]. Off with `kraken.messaging.hub.enabled=false`.
+ * The hub transport: [HubConnections] (one [io.damoreira.kraken.messaging.hub.HubConnection] per hub named by
+ * `kraken.messaging.hub.address`), started by [HubLifecycle] once the context is refreshed, and [HubBus] as the default
+ * [CommandBus] and [QueryBus]. Off with `kraken.messaging.hub.enabled=false`.
  *
- * The channel is built by the `krakenHubChannelFactory` bean (`() -> ManagedChannel`), called once per connection
- * attempt; define a bean with that name to override it (tests point it at an in-process hub).
+ * Channels are built by the `krakenHubChannelFactory` bean ([HubChannelFactory], target -> channel), called once per
+ * connection attempt; define a bean with that name to override it (tests point it at in-process hubs).
  */
 @AutoConfiguration(after = [KrakenMessagingAutoConfiguration::class])
 @ConditionalOnProperty(prefix = "kraken.messaging.hub", name = ["enabled"], havingValue = "true", matchIfMissing = true)
@@ -47,17 +49,14 @@ class HubAutoConfiguration {
 
     @Bean(defaultCandidate = false)
     @ConditionalOnMissingBean(name = [CHANNEL_FACTORY])
-    fun krakenHubChannelFactory(properties: KrakenMessagingProperties): () -> ManagedChannel {
-        val target = properties.hub.address.removePrefix("static://")
-        return {
-            ManagedChannelBuilder.forTarget(target).usePlaintext()
-                // HTTP/2 pings detect a dead peer at the transport level even while the stream is idle.
+    fun krakenHubChannelFactory(): HubChannelFactory = HubChannelFactory { target ->
+        ManagedChannelBuilder.forTarget(target).usePlaintext()
+            // HTTP/2 pings detect a dead peer at the transport level even while the stream is idle.
                 // 10 s / 5 s: a one-way partition is caught by the transport about as fast as by the hub's 10 s heartbeat timeout.
                 .keepAliveTime(10, TimeUnit.SECONDS)
                 .keepAliveTimeout(5, TimeUnit.SECONDS)
                 .keepAliveWithoutCalls(true)
                 .build()
-        }
     }
 
     @Bean
@@ -69,7 +68,7 @@ class HubAutoConfiguration {
     @ConditionalOnMissingBean
     fun hubLifecycle(
         properties: KrakenMessagingProperties,
-        @Qualifier(CHANNEL_FACTORY) channelFactory: () -> ManagedChannel,
+        @Qualifier(CHANNEL_FACTORY) channelFactory: HubChannelFactory,
         dispatcher: InboundRequestDispatcher,
         registry: HandlerRegistry,
     ): HubLifecycle {
@@ -77,7 +76,8 @@ class HubAutoConfiguration {
         // The connect loop, stream collector and heartbeats stay on Default; handlers get virtual threads (see HubConnection).
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default + CoroutineName("kraken-hub"))
         val handlerDispatcher = Executors.newVirtualThreadPerTaskExecutor().asCoroutineDispatcher()
-        val connection = HubConnection(
+        val connections = HubConnections(
+            targets = HubTargets.parse(hub.address),
             channelFactory = channelFactory,
             serviceName = properties.serviceName,
             instanceId = UUID.randomUUID().toString(),
@@ -88,17 +88,18 @@ class HubAutoConfiguration {
             maxConcurrentHandlers = hub.maxConcurrentHandlers,
             loadFactor = hub.loadFactor,
             tags = hub.tags,
+            statusInterval = hub.statusInterval,
         )
-        return HubLifecycle(connection, registry, scope, handlerDispatcher)
+        return HubLifecycle(connections, registry, scope, handlerDispatcher)
     }
 
     @Bean
-    fun hubConnection(lifecycle: HubLifecycle): HubConnection = lifecycle.connection
+    fun hubConnections(lifecycle: HubLifecycle): HubConnections = lifecycle.connections
 
     @Bean(defaultCandidate = false)
     @ConditionalOnMissingBean
     fun hubBus(
-        connection: HubConnection,
+        connections: HubConnections,
         registry: HandlerRegistry,
         invoker: HandlerInvoker,
         codec: JsonCodec,
@@ -106,7 +107,7 @@ class HubAutoConfiguration {
         traceHeaders: TraceHeaders,
         properties: KrakenMessagingProperties,
     ) = HubBus(
-        connection, registry, invoker, codec, typeResolver,
+        connections, registry, invoker, codec, typeResolver,
         forwardJwt = properties.security.forwardJwt,
         traceHeaders = traceHeaders,
         requestTimeout = properties.hub.requestTimeout,
@@ -130,19 +131,19 @@ class HubAutoConfiguration {
 }
 
 /**
- * Starts the [connection] after every singleton is initialised (so every handler bean is in the registry), announcing
+ * Starts the [connections] after every singleton is initialised (so every handler bean is in the registry), announcing
  * the registry's command and query types and re-announcing them whenever handlers are added later.
  *
  * Phase [PHASE] is below the web server's start/stop phase (`WebServerApplicationContext.START_STOP_LIFECYCLE_PHASE`,
  * `DEFAULT_PHASE - 2048` in Boot 4.1), so the hub connection starts before the server accepts traffic and stops only
  * after the graceful HTTP drain (`GRACEFUL_SHUTDOWN_PHASE`, `DEFAULT_PHASE - 1024`) and the server stop.
  *
- * On stop it first announces an empty registration so the hub stops routing to this instance, waits up to
+ * On stop it first announces an empty registration so the hubs stop routing to this instance, waits up to
  * [drainTimeout] for incoming handlers still running, then closes the stream, cancels [scope] and closes
  * [handlerDispatcher].
  */
 class HubLifecycle(
-    val connection: HubConnection,
+    val connections: HubConnections,
     private val registry: HandlerRegistry,
     private val scope: CoroutineScope,
     private val handlerDispatcher: ExecutorCoroutineDispatcher? = null,
@@ -157,7 +158,7 @@ class HubLifecycle(
         running = true // before the first announce: announce() is a no-op once stopped
         announce()
         registry.onChange(::announce)
-        connection.start()
+        connections.start()
     }
 
     @Synchronized
@@ -166,13 +167,13 @@ class HubLifecycle(
         running = false
         try {
             runBlocking {
-                connection.register(emptySet(), emptySet())
-                val deregistered = runCatching { connection.awaitRegistered(Duration.ofSeconds(1)) }.getOrDefault(false)
-                if (!deregistered) log.debug("Hub did not confirm the empty registration before shutdown")
-                if (!connection.awaitHandlersIdle(drainTimeout)) {
-                    log.warn("{} incoming hub request(s) still running after {}; stopping anyway", connection.inFlightHandlers.value, drainTimeout)
+                connections.register(emptySet(), emptySet())
+                val deregistered = runCatching { connections.awaitRegistered(Duration.ofSeconds(1)) }.getOrDefault(false)
+                if (!deregistered) log.debug("Not every hub confirmed the empty registration before shutdown")
+                if (!connections.awaitHandlersIdle(drainTimeout)) {
+                    log.warn("{} incoming hub request(s) still running after {}; stopping anyway", connections.inFlightHandlers.value, drainTimeout)
                 }
-                connection.stop()
+                connections.stop()
             }
         } finally {
             scope.cancel()
@@ -184,7 +185,7 @@ class HubLifecycle(
     override fun getPhase(): Int = PHASE
 
     private fun announce() {
-        if (running) connection.register(registry.commandTypes(), registry.queryTypes())
+        if (running) connections.register(registry.commandTypes(), registry.queryTypes())
     }
 
     companion object {
