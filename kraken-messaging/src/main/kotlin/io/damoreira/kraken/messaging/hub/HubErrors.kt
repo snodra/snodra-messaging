@@ -9,6 +9,7 @@ import io.damoreira.kraken.messaging.MessageTimeoutException
 import io.damoreira.kraken.messaging.MessagingException
 import io.damoreira.kraken.messaging.NoHandlerException
 import io.damoreira.kraken.messaging.RemoteHandlerException
+import io.damoreira.kraken.messaging.StreamCancelledException
 import io.damoreira.kraken.messaging.UnauthenticatedException
 import io.damoreira.kraken.messaging.UnsupportedByHubException
 
@@ -34,6 +35,8 @@ object HubErrors {
         ErrorCode.RESOURCE_EXHAUSTED -> HandlerBusyException(type)
         // A request mode the hub does not implement, or one this session did not declare (ADR 0017).
         ErrorCode.UNSUPPORTED -> UnsupportedByHubException(feature, message.ifEmpty { "unsupported by the hub" })
+        // A streaming query the hub ended for outliving its maximum duration (P4b).
+        ErrorCode.CANCELLED -> StreamCancelledException(message.ifEmpty { "cancelled by the hub" })
         else -> RemoteHandlerException(type, message, details, code.name)
     }
 }

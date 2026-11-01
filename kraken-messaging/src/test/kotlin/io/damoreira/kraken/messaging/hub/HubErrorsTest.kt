@@ -4,6 +4,7 @@ import io.damoreira.kraken.hub.v1.ErrorCode
 import io.damoreira.kraken.messaging.AccessDeniedException
 import io.damoreira.kraken.messaging.HandlerBusyException
 import io.damoreira.kraken.messaging.RemoteHandlerException
+import io.damoreira.kraken.messaging.StreamCancelledException
 import io.damoreira.kraken.messaging.UnauthenticatedException
 import io.damoreira.kraken.messaging.UnsupportedByHubException
 import org.junit.jupiter.api.Test
@@ -43,8 +44,12 @@ class HubErrorsTest {
         assertIs<UnsupportedByHubException>(e)
         assertEquals("mode STREAMING is not supported", e.message)
 
-        val other = HubErrors.toException("c.R", ErrorCode.CANCELLED, "cancelled", ByteArray(0))
-        assertEquals("CANCELLED", assertIs<RemoteHandlerException>(other).code)
+        val streaming = HubErrors.toException("c.R", ErrorCode.UNSUPPORTED, "no capable instance", ByteArray(0), feature = "streaming")
+        assertEquals("streaming", assertIs<UnsupportedByHubException>(streaming).feature)
+        val cancelled = HubErrors.toException("c.R", ErrorCode.CANCELLED, "max stream duration (600000 ms) exceeded", ByteArray(0))
+        assertEquals("max stream duration (600000 ms) exceeded", assertIs<StreamCancelledException>(cancelled).message)
+        val other = HubErrors.toException("c.R", ErrorCode.ERROR_CODE_UNSPECIFIED, "odd", ByteArray(0))
+        assertEquals("ERROR_CODE_UNSPECIFIED", assertIs<RemoteHandlerException>(other).code)
         assertEquals("HANDLER_ERROR", assertIs<RemoteHandlerException>(HubErrors.toException("c.R", ErrorCode.HANDLER_ERROR, "x", ByteArray(0))).code)
     }
 }

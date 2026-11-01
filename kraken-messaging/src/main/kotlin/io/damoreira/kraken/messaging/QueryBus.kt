@@ -48,11 +48,17 @@ interface QueryBus {
      * flow does. The handler is paced by credits ([StreamOptions.initialCredit]); cancelling the collector (or an
      * exception in it) cancels the handler. Always goes through the hub, also when this instance owns the type.
      *
+     * An end with an error fails the flow exactly like a unary [send] fails on an error with the same hub code; the
+     * parts emitted before it stay emitted. Retry (the configured policy or [StreamOptions.retry]) applies with the
+     * query rules only until the first part.
+     *
      * @throws UnsupportedByHubException when no live hub offers `streaming` (nothing is sent)
      * @throws NoHandlerException when nobody owns the type
-     * @throws RemoteHandlerException when the stream ends with an error: the handler's failure (`HANDLER_ERROR`), the
-     *   idle timeout (`TIMEOUT`), the handler leaving (`HANDLER_DISCONNECTED`), the hub's maximum stream duration
-     *   (`CANCELLED`), ...; the parts emitted before it stay emitted
+     * @throws RemoteHandlerException when the handler's flow failed (`HANDLER_ERROR`)
+     * @throws MessageTimeoutException when no part arrived within the idle timeout (`TIMEOUT`)
+     * @throws HandlerDisconnectedException when the handler's instance left mid-stream (`HANDLER_DISCONNECTED`)
+     * @throws HandlerBusyException when the handler's hub queue was full (`RESOURCE_EXHAUSTED`)
+     * @throws StreamCancelledException when the hub ended the stream for outliving its maximum duration (`CANCELLED`)
      * @throws HubConnectionLostException when the stream to the hub breaks before the end (outcome unknown)
      */
     fun <R> stream(query: StreamingQuery<R>, options: StreamOptions = StreamOptions()): Flow<R> =

@@ -69,12 +69,15 @@ import kotlin.reflect.KClass
  * Streaming queries ([stream], P4b, ADR 0017) always go through the hub too. The flow is cold and unbuffered: each
  * collection sends one `STREAMING` request to a hub that lists `streaming`, and each part is decoded (the query's
  * element type) and emitted before the next one is read, so the transport's credit refills ([HubTransport.stream])
- * follow what the collector consumed. A `ReplyEnd` with an error fails the flow with a [RemoteHandlerException] of
- * that code (`HANDLER_ERROR`, `TIMEOUT`, `HANDLER_DISCONNECTED`, `CANCELLED`, `INVALID_REQUEST`, ...); an `Error`
- * before any part maps as for a unary request; a part that does not decode fails the flow with
- * [InvalidMessageException] (the transport cancels the stream). Retry applies with the query rules only until the first
- * part; after it a broken hub stream is [io.damoreira.kraken.messaging.HubConnectionLostException]. The caller's bearer
- * token and trace context are read when [stream] is called, as for [scatterGatherFlow].
+ * follow what the collector consumed. A `ReplyEnd` with an error fails the flow exactly like a unary `Error` with the
+ * same code ([HubErrors]: `TIMEOUT` -> [io.damoreira.kraken.messaging.MessageTimeoutException], `HANDLER_DISCONNECTED`
+ * -> [io.damoreira.kraken.messaging.HandlerDisconnectedException], `HANDLER_ERROR` -> [RemoteHandlerException],
+ * `CANCELLED` -> [io.damoreira.kraken.messaging.StreamCancelledException], ...), and so does an `Error` before any
+ * part; a part that does not decode fails the flow with [InvalidMessageException] (the transport cancels the stream).
+ * Retry applies with the query rules only until the first part, to ends with an error as to errors (a retried stream
+ * is a new request); after the first part nothing is retried: the flow throws, a broken hub stream as
+ * [io.damoreira.kraken.messaging.HubConnectionLostException]. The caller's bearer token and trace context are read
+ * when [stream] is called, as for [scatterGatherFlow].
  */
 class HubBus(
     private val connection: HubTransport,
@@ -176,8 +179,9 @@ class HubBus(
             onPart(decodeReply(type, messageClass, part.payload.toByteArray()) as R)
         }
         when {
+            // The end's error is the same failure a unary send would see as an Error with that code.
             terminal.hasEnd() && terminal.end.hasError() -> throw terminal.end.error.let {
-                RemoteHandlerException(type, it.message, it.details.toByteArray(), it.code.name)
+                HubErrors.toException(type, it.code, it.message, it.details.toByteArray(), HubProtocol.STREAMING)
             }
             terminal.hasEnd() -> return
             terminal.hasError() -> throw terminal.error.let {

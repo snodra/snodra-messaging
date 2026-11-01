@@ -583,21 +583,25 @@ queryBus.stream(ExportWorkouts(ownerId), StreamOptions(initialCredit = 32, timeo
   `UnsupportedByHubException` on collection, before anything is sent; with several hubs the stream goes to one hub that
   lists the capability, and only when none of the live hubs does is it unsupported. Owners whose live instances all
   lack `streaming` are `UnsupportedByHubException` too (the hub's message names them). An end with an error fails the
-  flow with a `RemoteHandlerException` whose `code` is the hub's: `HANDLER_ERROR` (the handler's flow failed),
-  `TIMEOUT` (idle), `HANDLER_DISCONNECTED` (the instance left mid-stream: a stream never moves to another instance),
-  `CANCELLED` (max duration), `INVALID_REQUEST`, `RESOURCE_EXHAUSTED` (the instance's queue was full). The parts
-  emitted before it stay emitted. A part that does not decode into `R` fails the flow with `InvalidMessageException`
-  and cancels the stream. The stream to the hub breaking mid-stream is `HubConnectionLostException`.
+  flow **exactly like a unary `send` fails on the same hub code**: `HANDLER_ERROR` (the handler's flow failed)
+  `RemoteHandlerException`, `TIMEOUT` (idle) `MessageTimeoutException`, `HANDLER_DISCONNECTED` (the instance left
+  mid-stream: a stream never moves to another instance) `HandlerDisconnectedException`, `RESOURCE_EXHAUSTED` (the
+  instance's hub queue was full) `HandlerBusyException`, `INVALID_REQUEST` `InvalidMessageException`, and `CANCELLED`
+  (the hub's maximum stream duration) the new `StreamCancelledException`. The parts emitted before it stay emitted. A
+  part that does not decode into `R` fails the flow with `InvalidMessageException` and cancels the stream. The stream
+  to the hub breaking mid-stream is `HubConnectionLostException`.
 - **Cancel.** Cancelling the collector (`take(n)`, a cancelled coroutine) or throwing in it sends `Cancel` to the hub,
   which cancels the handler's coroutine (its flow sees a `CancellationException`); nothing of the stream follows. The
   hub cancels the handler the same way at `maxResults`, at the idle timeout, at the max duration and when the
   collector's instance disconnects; the handler's own hub stream closing cancels its streams too. A hub `Cancel` also
   stops a unary or gather handler whose answer is no longer wanted (a gather past `maxResults` or its deadline).
-- **Retries.** The configured or per-call `RetryPolicy` applies with the query rules only until the first part: a
-  retried stream is a new request (fresh id; with several hubs, round-robin to another capable one), so no part is
-  ever emitted twice. After the first part nothing is retried: a broken hub stream is `HubConnectionLostException`, an
-  end with an error a `RemoteHandlerException`. The budget covers the attempts up to the first part; each attempt sends
-  what is left of it as its idle timeout.
+- **Retries.** The configured or per-call `RetryPolicy` applies with the query rules only until the first part, to an
+  end with an error as to an error before any part (`HandlerDisconnectedException`, `MessageTimeoutException`,
+  `HandlerBusyException`, `NoHandlerException`, `HubConnectionLostException`, ... are retried; handler errors,
+  `StreamCancelledException` and the rest are not): a retried stream is a new request (fresh id; with several hubs,
+  round-robin to another capable one), so no part is ever emitted twice. After the first part nothing is retried: the
+  flow throws, a broken hub stream as `HubConnectionLostException`. The budget covers the attempts up to the first part;
+  each attempt sends what is left of it as its idle timeout.
 - **Compatibility.** Against a P3 or P4a hub `stream` throws `UnsupportedByHubException` while unary queries and
   gathers keep working. Handlers must run this version: the hub streams only to instances that negotiated `streaming`,
   so during a rolling upgrade of an owner the old instances are simply never picked (owners with instances but none

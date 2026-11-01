@@ -8,14 +8,21 @@ import io.damoreira.kraken.hub.v1.Flow as HubFlow
 import io.damoreira.kraken.hub.v1.HubGrpcKt
 import io.damoreira.kraken.hub.v1.Register
 import io.damoreira.kraken.hub.v1.Reply
+import io.damoreira.kraken.hub.v1.ReplyEnd
 import io.damoreira.kraken.hub.v1.Request
 import io.damoreira.kraken.hub.v1.RequestKind
 import io.damoreira.kraken.hub.v1.RequestMode
 import io.damoreira.kraken.hub.v1.ServerMessage
+import io.damoreira.kraken.messaging.AccessDeniedException
+import io.damoreira.kraken.messaging.HandlerBusyException
+import io.damoreira.kraken.messaging.HandlerDisconnectedException
 import io.damoreira.kraken.messaging.HubConnectionLostException
 import io.damoreira.kraken.messaging.InvalidMessageException
+import io.damoreira.kraken.messaging.MessageTimeoutException
 import io.damoreira.kraken.messaging.NoHandlerException
 import io.damoreira.kraken.messaging.RemoteHandlerException
+import io.damoreira.kraken.messaging.StreamCancelledException
+import io.damoreira.kraken.messaging.UnauthenticatedException
 import io.damoreira.kraken.messaging.RetryPolicy
 import io.damoreira.kraken.messaging.ScatterOptions
 import io.damoreira.kraken.messaging.StreamOptions
@@ -106,6 +113,11 @@ class HangingRowsStreamer(val state: StreamerState = StreamerState()) {
 
 class SharedRowsStreamer(val state: StreamerState = StreamerState()) {
     @QueryHandler(shared = true) fun handle(query: ExportRows): Flow<Row> = state.rows(query)
+}
+
+/** Never emits a part. */
+class SilentStreamer {
+    @QueryHandler fun handle(query: ExportRows): Flow<Row> = flow { awaitCancellation() }
 }
 
 /** Streaming queries (P4b, ADR 0017) over in-process hubs: the handler side, the sender side and their meeting. */
@@ -305,16 +317,15 @@ class StreamingQueryTest {
         assertEquals(0, hub.openStreams())
     }
 
-    @Test fun `the idle timeout is a RemoteHandlerException with code TIMEOUT and cancels the handler`() = runBlocking {
+    @Test fun `the idle timeout is a MessageTimeoutException and cancels the handler`() = runBlocking {
         val state = StreamerState()
         owner("svc-x", "x-1", HangingRowsStreamer(state))
         val seen = mutableListOf<Row>()
         val started = System.nanoTime()
-        val e = assertFailsWith<RemoteHandlerException> {
+        val e = assertFailsWith<MessageTimeoutException> {
             caller().stream(ExportRows(2), StreamOptions(timeout = Duration.ofMillis(400))).collect { seen += it }
         }
         assertTrue(Duration.ofNanos(System.nanoTime() - started) < Duration.ofSeconds(2))
-        assertEquals("TIMEOUT", e.code)
         assertEquals("test.ExportRows", e.type)
         assertEquals(listOf(Row(1), Row(2)), seen)
         assertEquals("cancelled", withTimeout(2_000) { state.ended.await() })
@@ -553,8 +564,8 @@ class StreamingQueryTest {
         val owner = connections.first { it.instanceId == "x-1" }
         awaitUntil { owner.inFlightHandlers.value == 0 }
         gate.complete(Unit)
-        val e = assertIs<RemoteHandlerException>(withTimeout(3_000) { collecting.await() }.exceptionOrNull())
-        assertEquals("HANDLER_DISCONNECTED", e.code)
+        val e = assertIs<HandlerDisconnectedException>(withTimeout(3_000) { collecting.await() }.exceptionOrNull())
+        assertEquals("test.ExportRows", e.type)
     }
 
     @Test fun `stream carries the bearer token of the thread that built it, not of the one collecting`() = runBlocking {
@@ -583,6 +594,91 @@ class StreamingQueryTest {
         repeat(4) { assertEquals(listOf(Row(1), Row(2)), bus.stream(ExportRows(2)).toList()) }
         assertEquals(4, x.emitted.get())
         assertEquals(4, y.emitted.get())
+    }
+
+    // --- ReplyEnd errors map like a unary Error ---
+
+    @Test fun `a ReplyEnd with an error maps like a unary Error with the same code`() = runBlocking {
+        owner("svc-x", "x-1", SilentStreamer())
+        val bus = caller()
+        val expectations = listOf<Pair<ErrorCode, (Throwable) -> Unit>>(
+            ErrorCode.NO_HANDLER to { assertEquals("test.ExportRows", assertIs<NoHandlerException>(it).type) },
+            ErrorCode.TIMEOUT to { assertEquals("test.ExportRows", assertIs<MessageTimeoutException>(it).type) },
+            ErrorCode.HANDLER_DISCONNECTED to { assertEquals("test.ExportRows", assertIs<HandlerDisconnectedException>(it).type) },
+            ErrorCode.HANDLER_ERROR to { assertEquals("HANDLER_ERROR" to "HANDLER_ERROR says", assertIs<RemoteHandlerException>(it).let { e -> e.code to e.message }) },
+            ErrorCode.UNAUTHENTICATED to { assertEquals("UNAUTHENTICATED says", assertIs<UnauthenticatedException>(it).message) },
+            ErrorCode.INVALID_REQUEST to { assertEquals("INVALID_REQUEST says", assertIs<InvalidMessageException>(it).message) },
+            ErrorCode.PERMISSION_DENIED to { assertEquals("PERMISSION_DENIED says", assertIs<AccessDeniedException>(it).message) },
+            ErrorCode.RESOURCE_EXHAUSTED to { assertEquals("test.ExportRows", assertIs<HandlerBusyException>(it).type) },
+            ErrorCode.CANCELLED to { assertEquals("CANCELLED says", assertIs<StreamCancelledException>(it).message) },
+            ErrorCode.UNSUPPORTED to { assertEquals("streaming", assertIs<UnsupportedByHubException>(it).feature) },
+        )
+        var previous: String? = null
+        for ((code, check) in expectations) {
+            val collecting = async { runCatching { bus.stream(ExportRows(1), StreamOptions(timeout = Duration.ofSeconds(10))).toList() } }
+            awaitUntil { hub.lastRequest()?.id != previous && hub.lastRequest()?.let { hub.creditOf(it.id) } != null }
+            val id = hub.lastRequest()!!.id
+            previous = id
+            // The hub ends the stream with that code (nothing was relayed yet).
+            val error = Error.newBuilder().setRequestId(id).setCode(code).setMessage("$code says")
+            hub.inject(callerId(), ServerMessage.newBuilder().setEnd(ReplyEnd.newBuilder().setRequestId(id).setError(error)).build())
+            val outcome = withTimeout(3_000) { collecting.await() }
+            val e = assertNotNull(outcome.exceptionOrNull(), "$code should fail the stream")
+            check(e)
+        }
+    }
+
+    @Test fun `the max stream duration is a StreamCancelledException and cancels the handler`() = runBlocking {
+        hub.maxStreamDuration = Duration.ofMillis(300)
+        val state = StreamerState()
+        owner("svc-x", "x-1", HangingRowsStreamer(state))
+        val seen = mutableListOf<Row>()
+        val e = assertFailsWith<StreamCancelledException> { caller().stream(ExportRows(1)).collect { seen += it } }
+        assertTrue(e.message!!.startsWith("max stream duration"), e.message)
+        assertEquals(listOf(Row(1)), seen)
+        assertEquals("cancelled", withTimeout(2_000) { state.ended.await() })
+    }
+
+    @Test fun `a full handler queue ends the stream with HandlerBusyException`() = runBlocking {
+        hub.queueCapacity = 0
+        owner("svc-x", "x-1", SilentStreamer(), maxConcurrentHandlers = 1)
+        val bus = caller()
+        val first = async { runCatching { bus.stream(ExportRows(1), StreamOptions(timeout = Duration.ofSeconds(10))).toList() } }
+        awaitUntil { hub.openStreams() == 1 } // the only permit is taken
+        assertEquals("test.ExportRows", assertFailsWith<HandlerBusyException> { bus.stream(ExportRows(1)).toList() }.type)
+        first.cancel()
+    }
+
+    @Test fun `a retryable ReplyEnd error before the first part is retried with a fresh id`() = runBlocking {
+        val retry = RetryPolicy(maxAttempts = 3, initialBackoff = Duration.ofMillis(300), maxBackoff = Duration.ofMillis(300))
+        val bus = caller(retry = retry)
+        val silent = owner("svc-x", "x-1", SilentStreamer())
+        val collecting = async { bus.stream(ExportRows(2), StreamOptions(timeout = Duration.ofSeconds(4))).toList() }
+        awaitUntil { hub.openStreams() == 1 } // pinned to x-1, which never answers
+        val second = StreamerState()
+        owner("svc-x", "x-2", RowsStreamer(second))
+        silent.stop() // the hub ends the stream with HANDLER_DISCONNECTED before any part
+        connections.remove(silent)
+        assertEquals(listOf(Row(1), Row(2)), withTimeout(5_000) { collecting.await() })
+        assertEquals(2, hub.requestsFrom(callerId())) // one retry, a new request
+        assertEquals("completed", second.ended.await())
+    }
+
+    @Test fun `a ReplyEnd error after the first part is not retried`() = runBlocking {
+        val retry = RetryPolicy(maxAttempts = 3, initialBackoff = Duration.ofMillis(300), maxBackoff = Duration.ofMillis(300))
+        val bus = caller(retry = retry)
+        val hanging = owner("svc-x", "x-1", HangingRowsStreamer())
+        val seen = CopyOnWriteArrayList<Row>()
+        val collecting = async { runCatching { bus.stream(ExportRows(2), StreamOptions(timeout = Duration.ofSeconds(4))).collect { seen += it } } }
+        awaitUntil { seen.size == 2 }
+        val other = StreamerState()
+        owner("svc-x", "x-2", RowsStreamer(other))
+        hanging.stop() // HANDLER_DISCONNECTED after two parts
+        connections.remove(hanging)
+        assertIs<HandlerDisconnectedException>(withTimeout(3_000) { collecting.await() }.exceptionOrNull())
+        delay(700) // longer than the backoff: a retry would have asked x-2
+        assertEquals(1, hub.requestsFrom(callerId()))
+        assertEquals(false, other.started.isCompleted)
     }
 
     // --- helpers ---

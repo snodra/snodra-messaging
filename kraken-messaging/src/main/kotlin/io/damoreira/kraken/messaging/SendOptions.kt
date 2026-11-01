@@ -92,7 +92,8 @@ data class RetryPolicy(
  *   [HandlerBusyException] (rejected before any handler ran).
  * - Queries only: [HandlerDisconnectedException], [MessageTimeoutException], [HubConnectionLostException]. A command in
  *   those states may have run, so retrying it could apply it twice.
- * - Nothing else: handler errors, authentication and authorization failures, invalid messages, other exceptions.
+ * - Nothing else: handler errors, authentication and authorization failures, invalid messages, a cancelled stream
+ *   ([StreamCancelledException]), other exceptions.
  */
 object RetryClassification {
     fun isRetryable(kind: MessageKind, error: Throwable): Boolean = when (error) {

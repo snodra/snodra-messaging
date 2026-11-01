@@ -64,3 +64,9 @@ class UnsupportedByHubException(val feature: String, message: String) : Messagin
 
 /** The hub refused this instance's handler registration. */
 class HubRegistrationRejectedException(message: String) : MessagingException(message)
+
+/**
+ * The hub cancelled a streaming query (hub error code CANCELLED): it outlived `KRAKEN_HUB_MAX_STREAM_DURATION`. The
+ * parts emitted before stay emitted; never retried.
+ */
+class StreamCancelledException(message: String) : MessagingException(message)
