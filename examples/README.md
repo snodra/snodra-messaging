@@ -38,9 +38,11 @@ docker compose -f compose.yaml -f compose.local.yaml --profile examples up --bui
 
 This builds `kraken-hub:dev`, `kraken-examples-service-a:dev`, `kraken-examples-service-b:dev` and
 `kraken-examples-service-c:dev` from source (the first build takes several minutes, Rust compiles librdkafka; later
-ones are cached) and starts only what the three apps need: hub, Kafka,
+ones are cached) and starts only what the three apps need: both hubs (`hub`, `hub-2`), Kafka,
 the topic init job and MongoDB. Keycloak, RustFS and Grafana stay down. The hub's gRPC port is published on host
-**7002** (macOS AirPlay owns 7000) and its topology view on **7001**.
+**7002** (macOS AirPlay owns 7000) and its topology view and dashboard on **7001**; `hub-2` uses **7012** and
+**7011**. Every example connects to both hubs (`KRAKEN_HUB_ADDRESS=static://hub:7000,hub-2:7000`, ADR 0016): it
+registers on each, sends unkeyed requests round-robin over them and keeps working when one stops.
 
 If the repos are not siblings of `kraken`, point the build contexts at them:
 `KRAKEN_HUB_DIR=... KRAKEN_MESSAGING_DIR=... KRAKEN_MESSAGING_RS_DIR=... docker compose ...`.
@@ -114,7 +116,20 @@ sends 10 parallel shouts from Kotlin service-a to Rust service-c: all must answe
 must show the instance `flowControlled` with its permit back and nothing queued. Step 14 recreates both with the
 default concurrency again (also when a step failed). `SERVICE_B_MAX_CONCURRENT_HANDLERS`,
 `SERVICE_C_MAX_CONCURRENT_HANDLERS` and `EXAMPLES_COUNT_DELAY` tune the demo (the smoke expects its defaults);
-`INFRA_DIR` points the smoke at `kraken/infra` when the checkouts are not siblings. To keep the demo running by hand:
+`INFRA_DIR` points the smoke at `kraken/infra` when the checkouts are not siblings. With two hubs each gets
+`ceil(1 / 2) = 1` permit of the one-permit instances, but an instance still runs one handler at a time, so step 12
+stays serialised (step 5b looks for its graph edge on either hub, since requests alternate between them).
+
+The two-hub steps (P3, ADR 0016) come last: step 15 waits up to 15 s until both hubs' `/topology` list the same
+service-a, service-b and service-c instances, each reporting both hub ids in `connectedHubIds`; step 16 checks that
+hub-2's `/api/v1/version` lists both dashboards as peers; step 17 runs a loop of calls through service-a (alternating
+`CountGreetings` to service-b and `Reverse` to service-c), stops `kraken-hub-2` after 2 s and keeps calling for 4 s:
+at most `HA_MAX_FAILURES` (5) calls may fail (in flight on the stopped hub), none may take more than 6 s, and every
+call started a second after the hub was gone must succeed. It then starts the hub again and waits up to 15 s for every
+instance to be back on it (also on failure the hub is started again). They need `jq` or `python3`; `SKIP_HA=1` skips
+them, `ONLY_HA=1` runs only them, `HUB2` and `HUB2_CONTAINER` name the second hub.
+
+To keep the flow-control demo running by hand:
 
 ```bash
 docker compose -f compose.yaml -f compose.local.yaml -f compose.flow-demo.yaml --profile examples \
@@ -127,6 +142,8 @@ SKIP_PAUSE=1 bash examples/smoke.sh   # without the docker pause step
 SKIP_FLOW=1 bash examples/smoke.sh    # without the flow-control steps (they recreate service-b and service-c)
 ONLY_FLOW=1 bash examples/smoke.sh    # only the flow-control steps (needs the docker CLI)
 ONLY_PAUSE=1 bash examples/smoke.sh   # only the docker pause step (needs the docker CLI)
+SKIP_HA=1 bash examples/smoke.sh      # without the two-hub steps (they stop and start kraken-hub-2)
+ONLY_HA=1 bash examples/smoke.sh      # only the two-hub steps (needs the docker CLI and jq or python3)
 ```
 
 ## Experiments
@@ -136,9 +153,9 @@ ONLY_PAUSE=1 bash examples/smoke.sh   # only the docker pause step (needs the do
 - **Nobody owns the command.** `docker compose ... stop service-b`, then post a greeting:
   `503 {"error":"NoHandlerException","message":"No handler registered for 'examples.SendGreeting'"}`.
   `docker compose ... start service-b` and the next post is a `200` once B has re-registered (a few seconds).
-- **Hub restart.** `docker compose ... restart hub`; both apps reconnect and re-register on their own. A post sent
-  in the first seconds can still get a 503 (B not yet re-registered) or 502 (A still reconnecting); after a few
-  seconds posts succeed again.
+- **Hub restart.** `docker compose ... restart hub`; the apps reconnect and re-register on their own, and meanwhile
+  every call goes through `hub-2`. Only a call in flight on the stopped hub can fail (502,
+  `HubConnectionLostException`). Stop both hubs to see the single-hub behaviour: 502 until a hub is back.
 - **Counts are in memory.** Restarting service-b resets `count` to 0; the events service-a already received stay in
   its own memory until it restarts.
 - **Run one side from the IDE.** `./gradlew :examples:service-a:bootRun` (or `service-b`) works against the compose

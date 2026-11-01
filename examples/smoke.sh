@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # Smoke test for the examples sandbox: drives service-a over HTTP and checks the hub topology.
-# Usage: bash examples/smoke.sh      (A=http://localhost:8091 HUB=http://localhost:7001 to override;
-#        SKIP_PAUSE=1 skips the docker-pause step, ONLY_PAUSE=1 runs only it, B_CONTAINER names service-b;
-#        SKIP_FLOW=1 skips the flow-control steps, ONLY_FLOW=1 runs only them; INFRA_DIR names kraken/infra)
+# Usage: bash examples/smoke.sh      (A=http://localhost:8091 HUB=http://localhost:7001 HUB2=http://localhost:7011 to
+#        override; SKIP_PAUSE=1 skips the docker-pause step, ONLY_PAUSE=1 runs only it, B_CONTAINER names service-b;
+#        SKIP_FLOW=1 skips the flow-control steps, ONLY_FLOW=1 runs only them; INFRA_DIR names kraken/infra;
+#        SKIP_HA=1 skips the two-hub steps, ONLY_HA=1 runs only them, HUB2_CONTAINER names the second hub)
 set -euo pipefail
 
 A=${A:-http://localhost:8091}
 HUB=${HUB:-http://localhost:7001}
+HUB2=${HUB2:-http://localhost:7011}
 
 fail() { echo "SMOKE FAILED: $*" >&2; exit 1; }
 
@@ -157,6 +159,129 @@ pause_step() {
   echo "   service-b answers again after ${i}s"
 }
 
+# P3 (ADR 0016): every example instance connects to both hubs. JSON is read with jq, else python3 (field order and
+# whitespace do not matter); SKIP_HA=1 skips these steps, ONLY_HA=1 runs only them.
+if command -v jq >/dev/null; then
+  hub_id_of() { jq -r '.hubId // empty' 2>/dev/null || true; }
+  # One line per instance of service-a, service-b and service-c: "<service> <instanceId> <connectedHubIds, comma-separated>".
+  example_instances() {
+    jq -r '.services[] | select(.serviceName | test("^service-[abc]$")) | .serviceName as $s | .instances[]
+           | "\($s) \(.instanceId) \((.connectedHubIds // []) | join(","))"' 2>/dev/null || true
+  }
+  peers_of() { jq -r '(.peers // [])[]' 2>/dev/null || true; }
+elif command -v python3 >/dev/null; then
+  hub_id_of() { python3 -I -c 'import json,sys
+try: print(json.load(sys.stdin).get("hubId") or "")
+except Exception: pass' || true; }
+  example_instances() { python3 -I -c 'import json,re,sys
+try: t = json.load(sys.stdin)
+except Exception: sys.exit(0)
+for s in t.get("services", []):
+    if re.fullmatch(r"service-[abc]", s.get("serviceName", "")):
+        for i in s.get("instances", []):
+            print(s["serviceName"], i["instanceId"], ",".join(i.get("connectedHubIds") or []))' || true; }
+  peers_of() { python3 -I -c 'import json,sys
+try: print("\n".join(json.load(sys.stdin).get("peers") or []))
+except Exception: pass' || true; }
+else
+  hub_id_of() { fail "jq or python3 needed for the two-hub steps (or set SKIP_HA=1)"; }
+  example_instances() { hub_id_of; }
+  peers_of() { hub_id_of; }
+fi
+
+# Succeeds (prints nothing) when both hubs list the same instances of service-a, service-b and service-c, each of
+# them at least once, and every instance reports both hub ids as connected; else prints why.
+both_hubs_problem() {
+  local t1 t2 id1 id2 l1 l2 svc
+  t1=$(curl -fsS --max-time 3 "$HUB/topology" 2>/dev/null || true)
+  t2=$(curl -fsS --max-time 3 "$HUB2/topology" 2>/dev/null || true)
+  id1=$(printf '%s' "$t1" | hub_id_of); id2=$(printf '%s' "$t2" | hub_id_of)
+  [ -n "$id1" ] || { echo "$HUB/topology unreachable"; return; }
+  [ -n "$id2" ] || { echo "$HUB2/topology unreachable"; return; }
+  l1=$(printf '%s' "$t1" | example_instances | sort); l2=$(printf '%s' "$t2" | example_instances | sort)
+  for svc in service-a service-b service-c; do
+    echo "$l1" | grep -q "^$svc " || { echo "$svc missing on $id1"; return; }
+    echo "$l2" | grep -q "^$svc " || { echo "$svc missing on $id2"; return; }
+  done
+  [ "$(echo "$l1" | cut -d' ' -f1,2)" = "$(echo "$l2" | cut -d' ' -f1,2)" ] \
+    || { echo "the hubs list different instances: $id1: $(echo "$l1" | cut -d' ' -f1,2 | tr '\n' ' ')/ $id2: $(echo "$l2" | cut -d' ' -f1,2 | tr '\n' ' ')"; return; }
+  printf '%s\n%s\n' "$l1" "$l2" | while read -r svc iid hubs; do
+    case ",$hubs," in *",$id1,"*) ;; *) echo "$svc $iid reports [$hubs], not $id1"; break ;; esac
+    case ",$hubs," in *",$id2,"*) ;; *) echo "$svc $iid reports [$hubs], not $id2"; break ;; esac
+  done
+}
+
+await_both_hubs() { # <seconds>: prints the seconds it took; fails after <seconds>
+  local started why
+  started=$(now_ms)
+  while :; do
+    why=$(both_hubs_problem)
+    [ -z "$why" ] && { echo $(( ($(now_ms) - started) / 1000 )); return 0; }
+    [ $(( $(now_ms) - started )) -ge $(( $1 * 1000 )) ] && fail "not every example instance is on both hubs after $1 s: $why"
+    sleep 0.5
+  done
+}
+
+# One call through service-a per line of <out>: "<http code> <ms> <started at, ms since <t0>>", alternating a Kotlin
+# (CountGreetings, service-b) and a Rust (Reverse, service-c) target, until <stop file> exists.
+ha_loop() { # <out> <stop file> <t0>
+  local n=0 started code url
+  while [ ! -e "$2" ]; do
+    n=$((n + 1))
+    if [ $((n % 2)) -eq 0 ]; then url="$A/reverse/ha$n"; else url="$A/greetings/Ada/count"; fi
+    started=$(now_ms)
+    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$url" || true)
+    echo "$code $(( $(now_ms) - started )) $(( started - $3 ))" >> "$1"
+  done
+}
+
+ha_steps() {
+  local h2=${HUB2_CONTAINER:-kraken-hub-2} secs peers p out stop t0 pid stopped_at gone_at total failed max late_failed after
+  command -v docker >/dev/null || fail "docker CLI needed for the two-hub steps (or set SKIP_HA=1)"
+  docker inspect "$h2" >/dev/null 2>&1 || fail "container $h2 not found (set HUB2_CONTAINER, or SKIP_HA=1)"
+
+  echo "15. both hubs ($HUB, $HUB2) list every example instance, each reporting both hub ids ..."
+  secs=$(await_both_hubs 15)
+  echo "   on both hubs after ${secs}s: $(curl -fsS "$HUB/topology" | example_instances | cut -d' ' -f1,3 | sort | uniq -c | tr -s ' ' | tr '\n' ';')"
+
+  echo "16. $HUB2/api/v1/version lists both dashboards as peers ..."
+  peers=$(curl -fsS "$HUB2/api/v1/version" | peers_of) || fail "GET $HUB2/api/v1/version failed"
+  for p in "$HUB" "$HUB2"; do
+    echo "$peers" | grep -qx "${p%/}" || fail "peer $p missing from $HUB2/api/v1/version: $(echo "$peers" | tr '\n' ' ')"
+  done
+  echo "   peers: $(echo "$peers" | tr '\n' ' ')"
+
+  echo "17. calls through service-a keep answering while $h2 is stopped, and every instance is back on it after a start ..."
+  out=$(mktemp); stop=$(mktemp -u); t0=$(now_ms)
+  trap 'touch '"$stop"'; docker start '"$h2"' >/dev/null 2>&1 || true' EXIT
+  ha_loop "$out" "$stop" "$t0" &
+  pid=$!
+  sleep 2
+  stopped_at=$(( $(now_ms) - t0 ))
+  docker stop "$h2" >/dev/null
+  gone_at=$(( $(now_ms) - t0 ))
+  echo "   $h2 stopped (docker stop took $((gone_at - stopped_at)) ms); calls continue for 4 s ..."
+  sleep 4
+  touch "$stop"; wait "$pid" || true
+  total=$(wc -l < "$out" | tr -d ' ')
+  failed=$(awk '$1 != "200"' "$out" | wc -l | tr -d ' ')
+  max=$(awk 'BEGIN { m = 0 } $2 > m { m = $2 } END { print m }' "$out")
+  # Calls started a second after the container was gone must all succeed: the clients noticed the closed streams.
+  after=$(awk -v s="$gone_at" '$3 > s + 1000' "$out" | wc -l | tr -d ' ')
+  late_failed=$(awk -v s="$gone_at" '$3 > s + 1000 && $1 != "200"' "$out" | wc -l | tr -d ' ')
+  echo "   $total calls, $failed failed ($(awk '$1 != "200" { print $1 }' "$out" | sort | uniq -c | tr -s ' ' | tr '\n' ' ')), max ${max} ms; $after calls from 1 s after the stop, $late_failed of them failed"
+  rm -f "$out"
+  [ "$failed" -le "${HA_MAX_FAILURES:-5}" ] || fail "$failed calls failed while $h2 stopped (at most ${HA_MAX_FAILURES:-5} in flight may)"
+  [ "$max" -le 6000 ] || fail "a call took ${max} ms while $h2 stopped (hang; at most 6000 ms)"
+  [ "$after" -ge 5 ] && [ "$late_failed" -eq 0 ] || fail "calls did not keep succeeding on the remaining hub ($late_failed of $after failed)"
+
+  t0=$(now_ms)
+  docker start "$h2" >/dev/null
+  trap - EXIT
+  secs=$(await_both_hubs 15)
+  echo "   every example instance is back on $h2 (and reports it) $(( $(now_ms) - t0 )) ms after docker start"
+}
+
 echo "1. waiting for service-a at $A ..."
 for i in $(seq 1 90); do
   if curl -fsS "$A/actuator/health" 2>/dev/null | grep -q '"UP"'; then break; fi
@@ -175,6 +300,12 @@ done
 if [ "${ONLY_FLOW:-0}" = "1" ]; then
   flow_steps
   echo "SMOKE OK (flow steps only)"
+  exit 0
+fi
+
+if [ "${ONLY_HA:-0}" = "1" ]; then
+  ha_steps
+  echo "SMOKE OK (two-hub steps only)"
   exit 0
 fi
 
@@ -219,7 +350,10 @@ echo "$TOPOLOGY" | grep -q '"service-a"' || fail "service-a missing from topolog
 echo "$TOPOLOGY" | grep -q '"service-b"' || fail "service-b missing from topology"
 
 echo "5b. hub dashboard graph: service-a -> examples.CountGreetings (owner service-b) counted ..."
-curl -fsS "$HUB/api/v1/graph" | grep -q '"from":"service:service-a","to":"type:examples.CountGreetings","role":"send","count":[1-9]' || fail "edge service-a -> examples.CountGreetings missing from $HUB/api/v1/graph"
+# With two hubs service-a sends unkeyed requests round-robin, so the edge is on either hub's graph (each hub keeps its own).
+EDGE='"from":"service:service-a","to":"type:examples.CountGreetings","role":"send","count":[1-9]'
+{ curl -fsS "$HUB/api/v1/graph" 2>/dev/null | grep -q "$EDGE"; } || { curl -fsS "$HUB2/api/v1/graph" 2>/dev/null | grep -q "$EDGE"; } \
+  || fail "edge service-a -> examples.CountGreetings missing from $HUB/api/v1/graph and $HUB2/api/v1/graph"
 
 echo "6. waiting for service-c to own examples.Shout and examples.Reverse on the hub ..."
 for i in $(seq 1 90); do
@@ -255,5 +389,6 @@ echo "   delivered: $TEXTS"
 
 [ "${SKIP_PAUSE:-0}" = "1" ] || pause_step
 [ "${SKIP_FLOW:-0}" = "1" ] || flow_steps
+[ "${SKIP_HA:-0}" = "1" ] || ha_steps
 
 echo "SMOKE OK"
