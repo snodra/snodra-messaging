@@ -57,6 +57,12 @@ data class KrakenMessagingProperties(
         val priorities: Map<String, Int> = emptyMap(),
         /** Opt-in retry of failed sends (see `RetryClassification`). */
         val retry: Retry = Retry(),
+        /**
+         * The longest a streaming handler of this instance waits for credit from the collector before it ends the
+         * stream with `TIMEOUT` and frees its handler slot and hub permit (a hub that forgot the stream would otherwise
+         * leave it waiting forever). Must be positive; the default is the hub's default maximum stream duration.
+         */
+        val streamCreditTimeout: Duration = Duration.ofMinutes(10),
     ) {
         init {
             // Checked at binding, so a bad value fails the startup even while the hub is disabled.
@@ -67,6 +73,9 @@ data class KrakenMessagingProperties(
             HubTargets.parse(address) // throws IllegalArgumentException naming the key
             require(!statusInterval.isZero && !statusInterval.isNegative) {
                 "kraken.messaging.hub.status-interval must be positive, was $statusInterval"
+            }
+            require(!streamCreditTimeout.isZero && !streamCreditTimeout.isNegative) {
+                "kraken.messaging.hub.stream-credit-timeout must be positive, was $streamCreditTimeout"
             }
         }
     }

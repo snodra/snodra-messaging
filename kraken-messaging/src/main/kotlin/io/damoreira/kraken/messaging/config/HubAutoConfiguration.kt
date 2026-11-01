@@ -81,7 +81,7 @@ class HubAutoConfiguration {
             channelFactory = channelFactory,
             serviceName = properties.serviceName,
             instanceId = UUID.randomUUID().toString(),
-            settings = HubSettings(hub.requestTimeout, hub.heartbeatInterval, hub.reconnectBackoff.min, hub.reconnectBackoff.max),
+            settings = HubSettings(hub.requestTimeout, hub.heartbeatInterval, hub.reconnectBackoff.min, hub.reconnectBackoff.max, hub.streamCreditTimeout),
             inbound = dispatcher::dispatch,
             scope = scope,
             handlerDispatcher = handlerDispatcher,

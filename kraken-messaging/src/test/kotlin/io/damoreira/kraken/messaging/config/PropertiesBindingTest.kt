@@ -31,6 +31,7 @@ class PropertiesBindingTest {
             assertEquals(256, p.hub.maxConcurrentHandlers)
             assertEquals(Duration.ofMillis(500), p.hub.reconnectBackoff.min)
             assertEquals(Duration.ofSeconds(5), p.hub.reconnectBackoff.max)
+            assertEquals(Duration.ofMinutes(10), p.hub.streamCreditTimeout) // the hub's default max stream duration
             assertEquals("broker:19092", p.kafka.bootstrapServers)
             assertEquals("kraken.events", p.kafka.topic)
             assertEquals(true, p.kafka.consumer.enabled)
@@ -106,6 +107,16 @@ class PropertiesBindingTest {
     @Test fun `request-timeout binds when set`() {
         runner.withPropertyValues(*required, "kraken.messaging.hub.request-timeout=12s").run { context ->
             assertEquals(Duration.ofSeconds(12), context.getBean(KrakenMessagingProperties::class.java).hub.requestTimeout)
+        }
+    }
+
+    @Test fun `stream-credit-timeout binds and must be positive`() {
+        runner.withPropertyValues(*required, "kraken.messaging.hub.stream-credit-timeout=30s").run { context ->
+            assertEquals(Duration.ofSeconds(30), context.getBean(KrakenMessagingProperties::class.java).hub.streamCreditTimeout)
+        }
+        for (value in listOf("0s", "-1s")) {
+            val messages = startupFailure("kraken.messaging.hub.stream-credit-timeout=$value")
+            assertTrue("kraken.messaging.hub.stream-credit-timeout must be positive" in messages, messages)
         }
     }
 

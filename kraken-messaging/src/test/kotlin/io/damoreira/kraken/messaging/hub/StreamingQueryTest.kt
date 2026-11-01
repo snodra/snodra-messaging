@@ -156,6 +156,7 @@ class StreamingQueryTest {
         hubName: String = hub.name,
         maxConcurrentHandlers: Int = 256,
         inboundStream: StreamingInbound? = null,
+        settings: HubSettings = this.settings,
         inbound: suspend (Request) -> Reply = { req -> error(req.id, ErrorCode.HANDLER_ERROR, "unexpected") },
     ) = HubConnection(
         channelFactory = { InProcessChannelBuilder.forName(hubName).build() },
@@ -178,11 +179,12 @@ class StreamingQueryTest {
         vararg beans: Any,
         hubName: String = hub.name,
         maxConcurrentHandlers: Int = 256,
+        settings: HubSettings = this.settings,
     ): HubConnection {
         val ownerRegistry = HandlerRegistry(resolver)
         beans.forEach { ownerRegistry.register(it) }
         val dispatcher = InboundRequestDispatcher(HandlerInvoker(ownerRegistry, codec), ForwardedIdentityResolver(null), codec)
-        return connection(instanceId, service, hubName, maxConcurrentHandlers, inboundStream = dispatcher::dispatchStream, inbound = dispatcher::dispatch).apply {
+        return connection(instanceId, service, hubName, maxConcurrentHandlers, inboundStream = dispatcher::dispatchStream, settings = settings, inbound = dispatcher::dispatch).apply {
             register(emptySet(), ownerRegistry.exclusiveQueryTypes(), ownerRegistry.sharedQueryTypes())
             start()
             assertTrue(awaitRegistered(wait))
@@ -247,6 +249,26 @@ class StreamingQueryTest {
         assertEquals(false, end.hasError())
         assertEquals("completed", state.ended.await())
         assertNull(withTimeoutOrNull(200) { sender.inbox.receive() })
+        assertEquals(0, hub.openStreams())
+    }
+
+    @Test fun `a handler waiting for credit longer than stream-credit-timeout ends the stream with TIMEOUT and frees its permits`() = runBlocking {
+        val state = StreamerState()
+        val conn = owner("svc-x", "x-1", RowsStreamer(state), maxConcurrentHandlers = 1, settings = settings.copy(streamCreditTimeout = Duration.ofMillis(300)))
+        val sender = RawSender("s-1")
+        sender.next() // ack
+        sender.send(streamRequest("s1", initialCredit = 2, timeoutMs = 10_000))
+        repeat(2) { sender.next().part }
+        // The sender never grants more: a hub that lost the stream would leave the handler (and its permit) waiting forever.
+        val end = sender.next().end
+        assertEquals("s1", end.requestId)
+        assertEquals(2, end.parts)
+        assertEquals(ErrorCode.TIMEOUT, end.error.code)
+        assertEquals("no credit within 300 ms", end.error.message)
+        assertEquals("cancelled", withTimeout(2_000) { state.ended.await() }) // the flow sees it as it sees a hub Cancel
+        assertEquals(2, state.emitted.get())
+        awaitUntil { conn.inFlightHandlers.value == 0 }
+        awaitUntil { hub.permitsAvailable("x-1") == 1 }
         assertEquals(0, hub.openStreams())
     }
 

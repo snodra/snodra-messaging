@@ -34,6 +34,9 @@ object HubProtocol {
     /** `Request.initial_credit` the hub assumes when a sender sends 0; the library always sends at least 1. */
     const val DEFAULT_INITIAL_CREDIT = 64
 
+    /** Default of `kraken.messaging.hub.stream-credit-timeout`: the hub's default maximum stream duration. */
+    val DEFAULT_STREAM_CREDIT_TIMEOUT: Duration = Duration.ofMinutes(10)
+
     /** Default period of `InstanceStatus` reports (`kraken.messaging.hub.status-interval`). */
     val STATUS_INTERVAL: Duration = Duration.ofSeconds(5)
 

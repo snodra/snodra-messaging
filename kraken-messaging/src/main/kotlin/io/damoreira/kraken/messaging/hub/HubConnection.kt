@@ -68,6 +68,12 @@ data class HubSettings(
     val heartbeatInterval: Duration,
     val backoffMin: Duration,
     val backoffMax: Duration,
+    /**
+     * The longest a streaming handler waits for credit before it ends its stream with `TIMEOUT` (`kraken.messaging.hub
+     * .stream-credit-timeout`, default 10 min = the hub's default maximum stream duration): a hub that forgot the
+     * stream (a race, a lost `Flow` or `Cancel`) would otherwise leave the handler's coroutine and permit held forever.
+     */
+    val streamCreditTimeout: Duration = HubProtocol.DEFAULT_STREAM_CREDIT_TIMEOUT,
 ) {
     /** [requestTimeout] when the caller chose one; zero (or negative) counts as unset, never as an instant deadline. */
     val chosenRequestTimeout: Duration? get() = requestTimeout?.takeIf { !it.isZero && !it.isNegative }
@@ -151,8 +157,11 @@ internal object ReconnectBackoff {
  * request's `initial_credit` plus every `Flow` for its id) and goes out with `seq` 1, 2, ..., then `ReplyEnd` (with the
  * error the handler returned, or `HANDLER_ERROR` for an exception that leaked). A `Cancel` from the hub cancels the
  * handler's coroutine, for a stream (no end follows) as for a unary or gather request (no reply follows); the stream
- * closing cancels every streaming handler it carried, which would otherwise wait for credit forever. The permit of
- * every inbound request goes back to the hub when its coroutine completes, whichever way.
+ * closing cancels every streaming handler it carried, which would otherwise wait for credit forever. A handler that
+ * waits for credit longer than [HubSettings.streamCreditTimeout] (the hub forgot the stream: a race, a lost `Flow` or
+ * `Cancel`) ends its stream with `ReplyEnd{TIMEOUT, "no credit within ..."}` (its flow sees a `CancellationException`,
+ * as at a hub `Cancel`) and releases its handler slot and hub permit. The permit of every inbound request goes back
+ * to the hub when its coroutine completes, whichever way.
  */
 class HubConnection(
     private val channelFactory: () -> ManagedChannel,
@@ -825,16 +834,18 @@ class HubConnection(
 
     /**
      * Serves a `STREAMING` request: [inboundStream] runs under the handler permit; each part it emits waits for credit
-     * and goes out with the next `seq`; then the `ReplyEnd` (with the error it returned, or `HANDLER_ERROR` for an
+     * (at most [HubSettings.streamCreditTimeout]: then the stream ends with `TIMEOUT`, the hub has forgotten it) and
+     * goes out with the next `seq`; then the `ReplyEnd` (with the error it returned, or `HANDLER_ERROR` for an
      * exception that leaked). Cancelled by the hub's `Cancel` or the stream closing: nothing goes back then.
      */
     private suspend fun serveStream(stream: Stream, request: Request, entry: Running) {
         val credit = entry.credit!!
+        val creditTimeoutMs = settings.streamCreditTimeout.toMillis()
         var seq = 0L
         val error: Error? = try {
             gate.permits.withPermit {
                 inboundStream(request) { payload ->
-                    credit.take()
+                    withTimeoutOrNull(creditTimeoutMs) { credit.take() } ?: throw NoCreditException(creditTimeoutMs)
                     val part = ReplyPart.newBuilder().setRequestId(request.id).setPayload(ByteString.copyFrom(payload)).setSeq(++seq)
                     try {
                         stream.out.send(ClientMessage.newBuilder().setPart(part).build())
@@ -845,6 +856,12 @@ class HubConnection(
                     }
                 }
             }
+        } catch (e: NoCreditException) {
+            // The handler's flow was held in emit for the whole wait: the hub lost the stream (or the collector stopped
+            // consuming without cancelling). The flow saw a cancellation, as at a hub Cancel; the permits go back with
+            // this coroutine.
+            log.warn("Streaming {} request {} ended: {}", request.type, request.id, e.message)
+            Error.newBuilder().setRequestId(request.id).setCode(ErrorCode.TIMEOUT).setMessage(e.message).build()
         } catch (e: Throwable) {
             if (e is CancellationException && !currentCoroutineContext().isActive) throw e // a hub Cancel: no end follows
             log.warn("Streaming {} request {} failed", request.type, request.id, e)
@@ -909,4 +926,11 @@ class HubConnection(
     private fun describe(status: Status) = status.code.name + (status.description?.let { " ($it)" } ?: "")
 
     private class HeartbeatTimeoutException(message: String) : RuntimeException(message)
+
+    /**
+     * A streaming handler waited [HubSettings.streamCreditTimeout] for credit: its stream ends with `TIMEOUT`. A
+     * cancellation, so the handler's flow and the invoker let it through as they do a hub `Cancel` (anything else
+     * would come back as the handler's own `HANDLER_ERROR`).
+     */
+    private class NoCreditException(timeoutMs: Long) : CancellationException("no credit within $timeoutMs ms")
 }

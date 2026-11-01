@@ -116,6 +116,13 @@
       "defaultValue": "5s"
     },
     {
+      "name": "kraken.messaging.hub.stream-credit-timeout",
+      "type": "java.time.Duration",
+      "description": "Longest a streaming handler waits for credit from the collector before it ends the stream with TIMEOUT and frees its handler slot and hub permit. Must be positive; the default is the hub's default maximum stream duration.",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Hub",
+      "defaultValue": "10m"
+    },
+    {
       "name": "kraken.messaging.hub.max-concurrent-handlers",
       "type": "java.lang.Integer",
       "description": "Incoming hub requests handled concurrently by this instance; further requests wait for a free slot. Also announced as initial_permits to a hub with flow control, which queues the excess.",
