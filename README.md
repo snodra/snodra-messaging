@@ -33,6 +33,7 @@ Repo conventions: `../kraken/docs/04-repositories.md`.
 - [Build, test, publish](#build-test-publish)
 - [Using the starter](#using-the-starter)
 - [Semantics worth knowing](#semantics-worth-knowing)
+- [Multiple hubs](#multiple-hubs)
 - [Test helpers (`kraken-messaging-test`)](#test-helpers-kraken-messaging-test)
 - [Examples](#examples)
 - [Known limitations](#known-limitations)
@@ -140,12 +141,13 @@ All keys (`kraken.messaging.*`; durations accept `200ms`, `5s`, `7d`; relaxed bi
 | `service-name` | required | Kafka consumer group, event `source`, hub `Register.service_name`. |
 | `type-prefix` | required | Prefix of the wire type name for message classes without `@MessageType`. |
 | `hub.enabled` | `true` | Connect to the hub and expose the hub-backed `CommandBus`/`QueryBus` (addition beyond the spec table). |
-| `hub.address` | `static://kraken-hub:7000` | gRPC target; an optional `static://` prefix is stripped. |
+| `hub.address` | `static://kraken-hub:7000` | The hub or hubs: one gRPC target (`host:port`, optional `static://` prefix), a comma-separated list of them (`hub-1:7000,hub-2:7000`, one connection per hub), or one `dns:///name:port` whose addresses are re-resolved every 30 s. See [Multiple hubs](#multiple-hubs). A malformed value fails the startup. |
+| `hub.status-interval` | `5s` | Period of the `InstanceStatus` report (connected hub ids, handlers in flight) sent to every hub whose ack lists `instance-status`; also sent whenever the set of live hubs changes. Must be positive. |
 | `hub.request-timeout` | unset | Per-request timeout sent as `timeout_ms`. Unset: a v2 hub applies its default (5 s) or its per-type override (`KRAKEN_HUB_TIMEOUT_OVERRIDES`), a legacy hub gets 5 s. Also bounds the wait for a hub stream (5 s when unset). `0s` counts as unset. |
 | `hub.heartbeat-interval` | `10s` | Fallback heartbeat period, used only when the hub does not announce one (legacy hubs); a v2 hub announces 3 s in its `RegisterAck`. |
 | `hub.reconnect-backoff.min` | `500ms` | Initial reconnect delay when the stream drops; doubles per failed attempt. |
 | `hub.reconnect-backoff.max` | `5s` | Maximum reconnect delay. Every wait is jittered by ±20 % and capped at this value (at the cap: 80-100 % of it); the delay resets to `min` once an attempt reached the hub's handshake. |
-| `hub.max-concurrent-handlers` | `256` | Incoming hub requests handled concurrently by this instance (at least 1, else the startup fails); further requests wait for a free slot. Also announced as `initial_permits` to a hub with flow control, which then queues the excess on its side. |
+| `hub.max-concurrent-handlers` | `256` | Incoming hub requests handled concurrently by this instance, over all hubs (at least 1, else the startup fails); further requests wait for a free slot. Also announced as `initial_permits` to a hub with flow control (split over N hubs: `ceil(max / N)` each), which then queues the excess on its side. |
 | `hub.load-factor` | `100` | Relative capacity of this instance (`Register.load_factor`); weights its share of the hub's routing (keyed ring and load score). A negative value fails the startup; 0 is allowed (the hub reads it as 100). |
 | `hub.tags.<name>` | none | Labels announced in `Register.tags`, for example `hub.tags.zone=eu-1`; unkeyed requests prefer instances whose tags match the sender's. |
 | `hub.priorities.<type>` | none (0) | Default `Request.priority` per message type, for example `hub.priorities.orders.PlaceOrder=5`; higher is served first when the hub queues requests for a busy handler. `SendOptions.priority` wins. |
@@ -339,15 +341,16 @@ val quick = queryBus.sendBlocking(GetWorkout(id), SendOptions(retry = RetryPolic
   `kraken-messaging/<version>`. A v2 hub answers with a `RegisterAck` (hub id, heartbeat interval and timeout, default,
   maximum and per-type request timeouts) before the echo of the first heartbeat; a hub whose echo arrives first is a
   legacy (v1) hub and the connection keeps the pre-v2 behaviour (10 s heartbeats, `timeout_ms` always sent).
-  `HubConnection.handshake` tells which.
+  `HubConnection.handshake` tells which (per hub: `HubConnections.connections()`).
 - **Timeouts.** Unless `hub.request-timeout` is set, requests go out with `timeout_ms = 0` and the hub decides (default
   or per-type override). The client gives up locally only when the hub never answers: after the hub's deadline bound
   from the ack (`min(timeout, override or max)`, or `override or max` for 0) plus 1 s, with `MessageTimeoutException`.
 - **Dead connections.** A hub stream whose heartbeats stay unanswered for three heartbeat intervals (9 s against a v2
   hub) is closed and re-established; HTTP/2 keepalive pings (every 10 s, 5 s timeout, also without calls) run on the
   channel.
-- **Lost connections.** A request the stream never accepted fails with `HubUnavailableException` (the handler did not
-  run, retrying is safe). A request written to a stream that broke before the answer fails with
+- **Lost connections.** A request the stream never accepted (including one still queued on the client when the stream
+  broke) fails with `HubUnavailableException` (the handler did not run, retrying is safe; with several hubs it is sent to
+  another hub first). A request written to a stream that broke before the answer fails with
   `HubConnectionLostException`: the outcome is unknown, as with a timeout.
 - **Flow control.** `Register` declares the `flow-control` capability with `initial_permits = hub.max-concurrent-handlers`.
   A hub that shares it (its ack lists `flow-control`) forwards to this instance only against permits and queues the rest
@@ -370,6 +373,50 @@ val quick = queryBus.sendBlocking(GetWorkout(id), SendOptions(retry = RetryPolic
 - **Hub errors.** The hub answers malformed or duplicate in-flight requests with `INVALID_REQUEST`; other hub errors map to
   the exception types in `io.damoreira.kraken.messaging` (`NoHandlerException`, `UnauthenticatedException`, ...).
 
+## Multiple hubs
+
+kraken-hub reaches high availability through several independent hubs that never talk to each other (ADR 0016 in the
+umbrella repo): every instance connects to every hub, and the client decides where each request goes.
+
+```yaml
+kraken.messaging.hub.address: static://hub-1:7000,static://hub-2:7000   # or: dns:///kraken-hub:7000
+```
+
+- **One connection per hub.** `HubConnections` opens one `Connect` stream per target, each with its own handshake,
+  heartbeat, reconnect backoff and legacy detection, and sends the identical `Register` on every one (re-sent on every
+  reconnect). One target behaves exactly like the single-hub client.
+- **Targets.** A comma-separated list (blank entries and repeats dropped, order kept), or a single `dns:///name:port`
+  (port required, not combinable with other entries) resolved at start and every 30 s: a new address gets a connection,
+  a vanished one first announces an empty registration, then is closed once idle (at most 30 s later). A failed or empty
+  resolution keeps the current connections.
+- **Hub identity.** A hub is its `RegisterAck.hub_id`; a legacy (v1) hub, which sends none, is its target string. When
+  two targets answer the same id, the one that acknowledged first is kept and the other closed (logged once).
+- **Live hubs** are the kept connections whose stream completed its handshake.
+- **Routing.** A request without a routing key goes round-robin over the live hubs; a hub that is reconnecting is
+  skipped. A request with a routing key (`SendOptions.routingKey`) goes to the live hub with the highest rendezvous score
+  for (routing key, hub id), so a key keeps its hub while the hubs are stable and only the keys of a hub that leaves
+  move; the hub's own consistent-hash ring then keeps it on one instance. Replies always go back on the stream the
+  request arrived on.
+- **Rendezvous score** (identical in the Rust library): `fmix64(fnv1a64(utf8(hub_id + "\u0000" + routing_key)))`, compared
+  as unsigned 64-bit; equal scores go to the smaller hub id. `fnv1a64` is 64-bit FNV-1a (offset basis
+  `0xcbf29ce484222325`, prime `0x100000001b3`); `fmix64` is MurmurHash3's 64-bit finalizer (`k ^= k >>> 33;
+  k *= 0xff51afd7ed558ccd; k ^= k >>> 33; k *= 0xc4ceb9fe1a85ec53; k ^= k >>> 33`). Vectors: `score("hub-a",
+  "order-1") = 0xd8d5618ff3a93f55`, `score("hub-b", "key-0") = 0xbd443f5acaf98254` (`RendezvousTest`).
+- **Failover.** A request its hub could not take before it was written (the stream had just closed, or broke while the
+  request was still queued on the client) is sent to another live hub, unchanged; with no hub left the call waits for
+  one, up to `hub.request-timeout` (5 s when unset), then fails with `HubUnavailableException`. A request already
+  written fails with `HubConnectionLostException` (or the hub's `HandlerDisconnectedException`), and the retry policy
+  applies as before. With no live hub at all: `HubUnavailableException`, as with one hub.
+- **Permits.** A stream announces `ceil(hub.max-concurrent-handlers / N)` initial permits, where N = 1 (the hub being
+  registered on) + the other hubs that are live or still on their first connect attempt (a hub down after a failed
+  attempt is not counted); permits are never revoked when N changes. Locally at most `hub.max-concurrent-handlers` handlers run in total, whichever hub sent the
+  requests. Permits are paid back per stream as before.
+- **Status.** Every `hub.status-interval`, and whenever the live set changes, each live hub whose ack lists the
+  `instance-status` capability gets an `InstanceStatus`: `connected_hub_ids` (the ids of the live protocol v2 hubs) and
+  `handlers_in_flight` (over all hubs). A hub without the capability (P2 or older, legacy) never gets one. The hub shows
+  the report in its topology (`connectedHubIds`, `statusAgeMs`) and the dashboard flags instances missing a hub.
+- **Shutdown** announces the empty registration on every hub, waits for the handlers, then closes every stream.
+
 ## Test helpers (`kraken-messaging-test`)
 
 - `InMemoryBuses(typePrefix, userId)`: implements `EventBus`, `CommandBus` and `QueryBus` in memory for unit tests without
@@ -381,12 +428,16 @@ val quick = queryBus.sendBlocking(GetWorkout(id), SendOptions(retry = RetryPolic
   `legacy = true` emulates a v1 hub, `emitTimeouts = false` a hub that loses requests. Flow control as the real hub:
   permits, a per-instance queue by priority (`queueCapacity`), `RESOURCE_EXHAUSTED` or "handler busy" by sender capability,
   `permitsGrantedBy(...)`, `permitMessagesFrom(...)`, `permitsAvailable(...)`, `queuedFor(...)`, `forwardedOrder()`;
-  `flowControl = false` emulates the P0 hub (v2 without flow control).
+  `flowControl = false` emulates the P0 hub (v2 without flow control). Multi-hub: `instanceStatus = false` emulates the
+  P2 hub (no `instance-status`), `lastStatusFrom(...)`, `statusMessagesFrom(...)`, `requestsFrom(...)`, `sessionsOf(...)`,
+  and `pauseReading = true` stops reading every stream.
 - `KrakenContainers`: unstarted Testcontainers definitions. `kafka()`, `mongo()` (single-node replica set, needed for
   transactions), `hub()` from image `kraken-hub:dev` or the one named by `KRAKEN_HUB_IMAGE`, `hubBaseline()` from the previous hub release
   `kraken-hub:v1-baseline` or `KRAKEN_HUB_BASELINE_IMAGE` and `hubP0()` from the P0 hub `kraken-hub:p0` or
-  `KRAKEN_HUB_P0_IMAGE` (compatibility tests), `hub(env)` for the hub under test with extra `KRAKEN_HUB_*` settings, and
-  `hubImageAvailable()` / `hubBaselineImageAvailable()` / `hubP0ImageAvailable()`.
+  `KRAKEN_HUB_P0_IMAGE`, `hubP2()` from `kraken-hub:p2` or `KRAKEN_HUB_P2_IMAGE` (compatibility tests), `hubP3()` from
+  `kraken-hub:p3-hub` or `KRAKEN_HUB_P3_IMAGE` with ports 7000 and 7001 (two-hub tests), `hub(env)` for the hub under test with extra `KRAKEN_HUB_*` settings, and
+  `hubImageAvailable()` / `hubBaselineImageAvailable()` / `hubP0ImageAvailable()` / `hubP2ImageAvailable()` /
+  `hubP3ImageAvailable()`.
 - `KrakenTestKafka(bootstrap, typePrefix, topic).awaitEvent<T>()`: reads an event back from the topic.
 
 ```kotlin
