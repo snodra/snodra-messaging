@@ -11,7 +11,9 @@ A disposable sandbox that shows cross-service messaging on the real `kraken-hub`
    service built on `kraken-messaging-rs`; C publishes `examples.TextShouted` / `examples.TextReversed` while
    handling them, and A and B log those events; C also logs B's `GreetingDelivered`;
 6. **service-b** and **service-c** both own the shared query `examples.Inventory` (ADR 0017): **service-a** sends it as
-   a point query (one of them answers) and as a scatter-gather (both answer).
+   a point query (one of them answers) and as a scatter-gather (both answer);
+7. **service-b** and **service-c** both own the shared streaming query `examples.Rows` (ADR 0017, P4b): **service-a**
+   opens a stream (one instance of either streams the rows under A's credits), collects it and returns the rows.
 
 Everything is anonymous, nothing is persisted by the apps (MongoDB is only there because the starter's outbox and
 idempotent consumer need it), and the modules are never published. They build against the starter as a project
@@ -19,10 +21,10 @@ dependency, so they always exercise the current library. Wire classes live in `e
 
 | Module | Role | Host port |
 |---|---|---|
-| `examples/examples-api` | `SendGreeting`, `GreetingAccepted`, `GreetingDelivered`, `CountGreetings`, `GreetingCount`; the texts types; the shared `Inventory` / `InventoryLevel` | – |
+| `examples/examples-api` | `SendGreeting`, `GreetingAccepted`, `GreetingDelivered`, `CountGreetings`, `GreetingCount`; the texts types; the shared `Inventory` / `InventoryLevel`; the streaming `Rows` / `Row` | – |
 | `examples/service-a` | REST caller + event listener | 8091 |
-| `examples/service-b` | owner of the greetings command and query, co-owner of the shared `Inventory`; logs the text events | 8092 (actuator only) |
-| `kraken-messaging-rs/examples/service-c` | Rust: owner of `Shout` and `Reverse`, co-owner of the shared `Inventory`, publishes the text events, logs `GreetingDelivered` | – (no HTTP) |
+| `examples/service-b` | owner of the greetings command and query, co-owner of the shared `Inventory` and the streaming `Rows`; logs the text events | 8092 (actuator only) |
+| `kraken-messaging-rs/examples/service-c` | Rust: owner of `Shout` and `Reverse`, co-owner of the shared `Inventory` and the streaming `Rows`, publishes the text events, logs `GreetingDelivered` | – (no HTTP) |
 
 ## Prerequisites
 
@@ -80,9 +82,17 @@ curl -s localhost:8091/scatter/inventory
 # {"parts":[{"service":"service-b","instance":"<instance id>","result":{"service":"service-b",...,"count":7,...},"error":null},
 #           {"service":"service-c","instance":"<instance id>","result":{...,"count":3,...},"error":null}],"failed":0,"timedOut":0}
 
-# who is registered for what (service-c owns examples.Shout and examples.Reverse; examples.Inventory is shared)
+# 7: the shared streaming query examples.Rows: one instance of service-b or service-c streams count rows under A's
+# credits (credit = the window, refilled at half; maxResults = the hub ends the stream after n rows; take = A cancels
+# after n rows; failAt = the handler fails on that row, after streaming the rows before it: 502 RemoteHandlerException)
+curl -s 'localhost:8091/stream/rows?count=5&credit=2'
+# {"rows":[{"service":"service-c","instance":"<container id>","n":1},...,{"service":"service-c","instance":"<container id>","n":5}],"count":5,"service":"service-c"}
+curl -s 'localhost:8091/stream/rows?count=1000&take=50'      # 50 rows, the handler is cancelled
+curl -s 'localhost:8091/stream/rows?count=10&failAt=3'       # {"error":"RemoteHandlerException","message":"...Rows failed at row 3"}
+
+# who is registered for what (service-c owns examples.Shout and examples.Reverse; examples.Inventory and examples.Rows are shared)
 curl -s localhost:7001/topology
-curl -s localhost:7001/api/v1/types   # examples.Inventory: "shared":true, "owners":["service-b","service-c"]
+curl -s localhost:7001/api/v1/types   # examples.Inventory and examples.Rows: "shared":true, "owners":["service-b","service-c"]
 ```
 
 The logs tell the same story, one `INFO` line per step:
@@ -109,6 +119,11 @@ service-a | A: asked Inventory item=widget -> service-c (<container id>)
 service-b | B: answered Inventory item=widget answered=1
 service-c | C: answered Inventory item=widget answered=2
 service-a | A: scatter-gathered Inventory item=widget -> 2 parts (0 failed, 0 timed out) from [service-b, service-c]
+service-b | B: streaming Rows count=5 failAt=0
+service-b | B: streamed Rows count=5
+service-a | A: streamed Rows count=5 credit=2 maxResults=0 take=0 -> 5 rows from service-b (<container id>)
+service-c | C: streaming Rows count=5 failAt=0
+service-a | A: streamed Rows count=5 credit=2 maxResults=0 take=0 -> 5 rows from service-c (<container id>)
 ```
 
 Add `service-c` to the `logs -f` command to see the `C:` lines.
@@ -151,6 +166,15 @@ and expects parts from both services with `failed` and `timedOut` 0; step 18c ca
 expects both services among the answerers (one round-robin pool over both owners). `SKIP_SCATTER=1` skips them,
 `ONLY_SCATTER=1` runs only them.
 
+The streaming-query steps (P4b, ADR 0017) come last: step 19 calls `GET /stream/rows?count=1000&credit=8` (up to
+twelve times, until both owners streamed once) and expects 1000 rows numbered 1..1000 in order, all from one
+service and instance; step 19b adds `take=50` (service-a cancels the collection after 50 rows, which cancels the
+handler through the hub) and expects 50 rows and both hubs' `/topology` in-flight counts (`totals.inFlight` and every
+instance's `inFlightAsHandler` + `inFlightAsSender`) back at 0 within 10 s; step 19c calls
+`GET /stream/rows?count=10&failAt=3` and expects `502 {"error":"RemoteHandlerException","message":"...Rows failed at
+row 3"}` (the two rows streamed before the failure are not reported: the endpoint returns the error only).
+`SKIP_STREAM=1` skips them, `ONLY_STREAM=1` runs only them.
+
 To keep the flow-control demo running by hand:
 
 ```bash
@@ -168,6 +192,8 @@ SKIP_HA=1 bash examples/smoke.sh      # without the two-hub steps (they stop and
 ONLY_HA=1 bash examples/smoke.sh      # only the two-hub steps (needs the docker CLI and jq or python3)
 SKIP_SCATTER=1 bash examples/smoke.sh # without the scatter-gather steps
 ONLY_SCATTER=1 bash examples/smoke.sh # only the scatter-gather steps (needs jq or python3)
+SKIP_STREAM=1 bash examples/smoke.sh  # without the streaming-query steps
+ONLY_STREAM=1 bash examples/smoke.sh  # only the streaming-query steps (needs jq or python3)
 ```
 
 ## Experiments
@@ -195,7 +221,9 @@ ONLY_SCATTER=1 bash examples/smoke.sh # only the scatter-gather steps (needs jq 
 | no handler registered for the type | 503 | `{"error":"NoHandlerException","message":"..."}` |
 | owner disconnected mid-request | 503 | `{"error":"HandlerDisconnectedException", ...}` |
 | no reply within the request timeout | 504 | `{"error":"MessageTimeoutException", ...}` |
-| the hub does not offer scatter-gather (a P3 or older hub) | 501 | `{"error":"UnsupportedByHubException", ...}` |
+| the hub does not offer scatter-gather or streaming (a P3 / P4a or older hub) | 501 | `{"error":"UnsupportedByHubException", ...}` |
+| the handler's flow failed (`/stream/rows?failAt=n`) | 502 | `{"error":"RemoteHandlerException","message":"...Rows failed at row n"}` (the rows before it are not reported) |
+| the hub ended a stream for outliving `KRAKEN_HUB_MAX_STREAM_DURATION` | 502 | `{"error":"StreamCancelledException", ...}` |
 | any other messaging failure | 502 | `{"error":"<exception>", ...}` |
 | blank `name` | 400 | RFC 9457 problem detail: `{"type":"about:blank","title":"Bad Request","status":400,"detail":"name must not be blank",...}` |
 

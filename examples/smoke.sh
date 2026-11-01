@@ -4,7 +4,8 @@
 #        override; SKIP_PAUSE=1 skips the docker-pause step, ONLY_PAUSE=1 runs only it, B_CONTAINER names service-b;
 #        SKIP_FLOW=1 skips the flow-control steps, ONLY_FLOW=1 runs only them; INFRA_DIR names kraken/infra;
 #        SKIP_HA=1 skips the two-hub steps, ONLY_HA=1 runs only them, HUB2_CONTAINER names the second hub;
-#        SKIP_SCATTER=1 skips the scatter-gather steps, ONLY_SCATTER=1 runs only them)
+#        SKIP_SCATTER=1 skips the scatter-gather steps, ONLY_SCATTER=1 runs only them;
+#        SKIP_STREAM=1 skips the streaming-query steps, ONLY_STREAM=1 runs only them)
 set -euo pipefail
 
 A=${A:-http://localhost:8091}
@@ -179,6 +180,14 @@ if command -v jq >/dev/null; then
     jq -r '"\(.parts | length) \(.failed) \(.timedOut) \([.parts[].service] | unique | join(","))"' 2>/dev/null || true
   }
   service_of() { jq -r '.service // empty' 2>/dev/null || true; }
+  # /stream/rows -> "<count> <service> <rows are n = 1..count in order> <distinct service/instance pairs>".
+  rows_summary() {
+    jq -r '"\(.count) \(.service // "-") \((.rows | map(.n)) == [range(1; (.rows | length) + 1)]) \([.rows[] | "\(.service)/\(.instance)"] | unique | length)"' 2>/dev/null || true
+  }
+  # /topology -> "<totals.inFlight> <sum over every instance of inFlightAsHandler + inFlightAsSender>".
+  in_flight() {
+    jq -r '"\(.totals.inFlight // 0) \([.services[].instances[] | (.inFlightAsHandler // 0) + (.inFlightAsSender // 0)] | add // 0)"' 2>/dev/null || true
+  }
 elif command -v python3 >/dev/null; then
   hub_id_of() { python3 -I -c 'import json,sys
 try: print(json.load(sys.stdin).get("hubId") or "")
@@ -207,6 +216,18 @@ except Exception: pass' || true; }
   service_of() { python3 -I -c 'import json,sys
 try: print(json.load(sys.stdin).get("service") or "")
 except Exception: pass' || true; }
+  rows_summary() { python3 -I -c 'import json,sys
+try:
+    r = json.load(sys.stdin); rows = r.get("rows") or []
+    ordered = [x.get("n") for x in rows] == list(range(1, len(rows) + 1))
+    print(r.get("count"), r.get("service") or "-", str(ordered).lower(), len({(x.get("service"), x.get("instance")) for x in rows}))
+except Exception: pass' || true; }
+  in_flight() { python3 -I -c 'import json,sys
+try:
+    t = json.load(sys.stdin)
+    per = sum((i.get("inFlightAsHandler") or 0) + (i.get("inFlightAsSender") or 0) for s in t.get("services", []) for i in s.get("instances", []))
+    print((t.get("totals") or {}).get("inFlight") or 0, per)
+except Exception: pass' || true; }
 else
   hub_id_of() { fail "jq or python3 needed for the two-hub steps (or set SKIP_HA=1)"; }
   example_instances() { hub_id_of; }
@@ -214,6 +235,8 @@ else
   inventory_type() { fail "jq or python3 needed for the scatter-gather steps (or set SKIP_SCATTER=1)"; }
   scatter_summary() { inventory_type; }
   service_of() { inventory_type; }
+  rows_summary() { fail "jq or python3 needed for the streaming-query steps (or set SKIP_STREAM=1)"; }
+  in_flight() { rows_summary; }
 fi
 
 # Succeeds (prints nothing) when both hubs list the same instances of service-a, service-b and service-c, each of
@@ -381,6 +404,58 @@ scatter_steps() {
   done
 }
 
+# P4b (ADR 0017): examples.Rows is a shared streaming query type owned by service-b (Kotlin) and service-c (Rust); a
+# stream from service-a goes to one instance of either, paced by credits. Step 19 streams 1000 rows with a window of
+# 8 credits (so the handler is held back and refilled many times) until both owners streamed once; 19b cancels a stream
+# from the collector's side (take=50) and expects both hubs' in-flight counts back at 0; 19c makes the handler fail on
+# row 3 and expects the handler's error as 502. Needs jq or python3; SKIP_STREAM=1 skips these steps, ONLY_STREAM=1
+# runs only them.
+stream_steps() {
+  local hubs=("$HUB") h i body summary count svc ordered responders seen="" t code
+  [ "${SKIP_HA:-0}" = "1" ] || hubs+=("$HUB2")
+  echo "19. GET /stream/rows?count=1000&credit=8 until service-b and service-c both streamed: 1000 rows in order (n = 1..1000) from one instance ..."
+  for i in $(seq 1 12); do
+    body=$(curl -fsS --max-time 30 "$A/stream/rows?count=1000&credit=8") \
+      || fail "GET /stream/rows failed (call $i): $(curl -s --max-time 30 "$A/stream/rows?count=1000&credit=8" | head -c 300)"
+    summary=$(printf '%s' "$body" | rows_summary)
+    read -r count svc ordered responders <<< "$summary"
+    [ "$count" = "1000" ] || fail "expected 1000 rows, got '$count' (call $i): $(printf '%s' "$body" | head -c 300)"
+    [ "$ordered" = "true" ] || fail "rows are not n = 1..1000 in order (call $i): $(printf '%s' "$body" | head -c 300)"
+    [ "$responders" = "1" ] || fail "expected one streaming instance, got $responders (call $i): $(printf '%s' "$body" | head -c 300)"
+    seen="$seen $svc"
+    case " $seen " in *" service-b "*) case " $seen " in *" service-c "*) break ;; esac ;; esac
+  done
+  echo "   streamed by:$seen (1000 rows each, in order, one instance per stream)"
+  for svc in service-b service-c; do
+    case " $seen " in *" $svc "*) ;; *) fail "twelve streams never reached $svc (streamed by:$seen)" ;; esac
+  done
+
+  echo "19b. GET /stream/rows?count=1000&credit=8&take=50: the collector cancels after 50 rows; the hubs' in-flight counts go back to 0 ..."
+  body=$(curl -fsS --max-time 30 "$A/stream/rows?count=1000&credit=8&take=50") \
+    || fail "GET /stream/rows?take=50 failed: $(curl -s --max-time 30 "$A/stream/rows?count=1000&credit=8&take=50" | head -c 300)"
+  summary=$(printf '%s' "$body" | rows_summary)
+  read -r count svc ordered responders <<< "$summary"
+  [ "$count" = "50" ] && [ "$ordered" = "true" ] || fail "expected 50 rows in order, got '$summary': $(printf '%s' "$body" | head -c 300)"
+  echo "   $count rows from $svc, then cancelled"
+  for h in "${hubs[@]}"; do
+    for i in $(seq 1 20); do
+      t=$(curl -fsS "$h/topology" 2>/dev/null | in_flight)
+      [ "$t" = "0 0" ] && break
+      [ "$i" -eq 20 ] && fail "$h still has requests in flight 10 s after the cancelled stream (totals.inFlight, per-instance sum: '$t')"
+      sleep 0.5
+    done
+    echo "   $h: totals.inFlight ${t%% *}, per-instance in-flight sum ${t#* }"
+  done
+
+  echo "19c. GET /stream/rows?count=10&failAt=3: the handler fails on row 3 (after 2 rows) and the error maps to 502 RemoteHandlerException ..."
+  body=$(curl -sS --max-time 30 -w '\n%{http_code}' "$A/stream/rows?count=10&failAt=3") || fail "GET /stream/rows?failAt=3 failed: $body"
+  code=${body##*$'\n'}; body=${body%$'\n'*}
+  [ "$code" = "502" ] || fail "expected HTTP 502 for the failed stream, got $code: $body"
+  printf '%s' "$body" | grep -q '"error":"RemoteHandlerException"' || fail "expected RemoteHandlerException: $body"
+  printf '%s' "$body" | grep -q 'Rows failed at row 3' || fail "expected the handler's message 'Rows failed at row 3': $body"
+  echo "   $code $body"
+}
+
 echo "1. waiting for service-a at $A ..."
 for i in $(seq 1 90); do
   if curl -fsS "$A/actuator/health" 2>/dev/null | grep -q '"UP"'; then break; fi
@@ -411,6 +486,12 @@ fi
 if [ "${ONLY_SCATTER:-0}" = "1" ]; then
   scatter_steps
   echo "SMOKE OK (scatter-gather steps only)"
+  exit 0
+fi
+
+if [ "${ONLY_STREAM:-0}" = "1" ]; then
+  stream_steps
+  echo "SMOKE OK (streaming-query steps only)"
   exit 0
 fi
 
@@ -496,5 +577,6 @@ echo "   delivered: $TEXTS"
 [ "${SKIP_FLOW:-0}" = "1" ] || flow_steps
 [ "${SKIP_HA:-0}" = "1" ] || ha_steps
 [ "${SKIP_SCATTER:-0}" = "1" ] || scatter_steps
+[ "${SKIP_STREAM:-0}" = "1" ] || stream_steps
 
 echo "SMOKE OK"
