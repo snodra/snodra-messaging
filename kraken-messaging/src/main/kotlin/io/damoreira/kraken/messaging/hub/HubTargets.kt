@@ -1,6 +1,7 @@
 package io.damoreira.kraken.messaging.hub
 
 import io.grpc.ManagedChannel
+import java.net.Inet4Address
 import java.net.Inet6Address
 import java.net.InetAddress
 
@@ -11,7 +12,7 @@ import java.net.InetAddress
  * - `host:port` or `static://host:port`: one hub, today's behaviour.
  * - `host-1:7000,static://host-2:7000`: one hub per entry (blank entries and repeats are dropped, order kept).
  * - `dns:///name:port`: every address `name` resolves to is a hub (`ip:port`), re-resolved every 30 s; it cannot be
- *   combined with other entries, and the port is required.
+ *   combined with other entries, and the port is required. Only one address family is used ([pickAddresses]).
  */
 sealed interface HubTargets {
     data class Static(val targets: List<String>) : HubTargets {
@@ -50,6 +51,18 @@ sealed interface HubTargets {
             require(host.isNotBlank() && '/' !in host) { "kraken.messaging.hub.address: bad host in '$entry'" }
             require(port != null && port in 1..65_535) { "kraken.messaging.hub.address: bad port in '$entry'" }
             return Dns(host, port)
+        }
+
+        /**
+         * The hub addresses of one DNS answer (same rule as the Rust library): the IPv4 addresses when there is any, else
+         * the IPv6 ones; repeats (an IPv6 address differing only in its scope id included) dropped, answer order kept.
+         * A dual-stack name lists every hub under both families: dialing both would open two streams to each hub with
+         * one instance id, and the hub keeps only the newer one.
+         */
+        fun pickAddresses(addresses: List<InetAddress>): List<InetAddress> {
+            val v4 = addresses.filterIsInstance<Inet4Address>()
+            val family: List<InetAddress> = v4.ifEmpty { addresses.filterIsInstance<Inet6Address>() }
+            return family.distinctBy { it.hostAddress.substringBefore('%') }
         }
 
         /** The gRPC target of one resolved hub address: `ip:port`, an IPv6 address in brackets. */

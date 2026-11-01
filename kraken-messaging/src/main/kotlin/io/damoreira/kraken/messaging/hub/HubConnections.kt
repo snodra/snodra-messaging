@@ -318,7 +318,7 @@ class HubConnections(
     private suspend fun resolveLoop(dns: HubTargets.Dns) {
         while (true) {
             val resolved = try {
-                resolver(dns.host).map { HubTargets.target(it, dns.port) }.distinct()
+                HubTargets.pickAddresses(resolver(dns.host)).map { HubTargets.target(it, dns.port) }.distinct()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
