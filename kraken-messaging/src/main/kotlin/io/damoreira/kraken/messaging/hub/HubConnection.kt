@@ -207,10 +207,13 @@ class HubConnection(
     /** True while the hub has confirmed the most recent [register] call on the live stream. */
     internal val registered: Boolean get() = connectedState.value && acknowledged.value >= generation.value
 
-    @Volatile private var endedAttempts = 0
+    private val firstAttemptEnded = MutableStateFlow(false)
 
     /** True until the first connection attempt has ended (the connect loop is still on its first stream). */
-    internal val onFirstAttempt: Boolean get() = endedAttempts == 0
+    internal val onFirstAttempt: Boolean get() = !firstAttemptEnded.value
+
+    /** Becomes true when the first connection attempt ends ([onFirstAttempt] turns false). */
+    internal val firstAttemptOver: StateFlow<Boolean> = firstAttemptEnded.asStateFlow()
 
     /** No request of this instance is waiting for this hub's answer and no request of this hub is being handled. */
     internal val idle: Boolean get() = pending.isEmpty() && inFlight.value == 0
@@ -360,7 +363,7 @@ class HubConnection(
                     stream.out.close()
                 }
                 reachedHandshake = stream.handshake != null
-                endedAttempts++
+                firstAttemptEnded.value = true
                 connectedState.value = false
                 handshakeState.value = null
                 acknowledged.value = -1
@@ -449,6 +452,17 @@ class HubConnection(
             .setHandlersInFlight(handlersInFlight.coerceAtLeast(0))
         return stream.out.trySend(ClientMessage.newBuilder().setStatus(status).build()).isSuccess
             .also { if (it) statusReports.incrementAndGet() }
+    }
+
+    /**
+     * Grants [count] extra permits on the live stream (multi-hub: a hub went away, [HubConnections] tops up the others).
+     * Written only when the stream's handshake shares flow control; false when nothing was written.
+     */
+    internal fun topUpPermits(count: Int): Boolean {
+        val stream = current ?: return false
+        if (stream.handshake == null || !stream.permits.toppedUp(count)) return false
+        writePermits(stream, count)
+        return true
     }
 
     private val statusReports = AtomicLong()

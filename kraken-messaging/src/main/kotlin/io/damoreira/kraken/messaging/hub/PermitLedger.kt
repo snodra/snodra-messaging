@@ -5,9 +5,9 @@ package io.damoreira.kraken.messaging.hub
  * written back in a `Permits` message.
  *
  * Per stream it keeps `initial` (the `Register.initial_permits` sent on it), `received` (requests that arrived on it,
- * counted whatever the flow-control mode), `returned` (permits written in `Permits` messages) and `pending` (handlers
- * completed, permits not yet written). The hub therefore still holds `initial - received + returned` permits for this
- * stream. On each completion, `pending += 1`, then:
+ * counted whatever the flow-control mode), `returned` (permits written in `Permits` messages, top-ups included) and
+ * `pending` (handlers completed, permits not yet written). The hub therefore still holds `initial - received +
+ * returned` permits for this stream. A top-up ([toppedUp], multi-hub: another hub went away) adds to `returned`. On each completion, `pending += 1`, then:
  *
  * - the hub holds at most the low-water mark `min(PERMIT_BATCH, initial / 2)`: flush now (with one permit, every
  *   completion goes back at once instead of after [HubProtocol.PERMIT_FLUSH_DELAY]);
@@ -59,6 +59,16 @@ internal class PermitLedger(private val initial: Int) {
             return Step.Wait
         }
         return if (pending > 0) decide() else Step.Wait
+    }
+
+    /**
+     * [count] extra permits are about to be written in a `Permits` message of their own (not paid for by handlers).
+     * False (write nothing) unless the stream's handshake confirmed flow control.
+     */
+    @Synchronized fun toppedUp(count: Int): Boolean {
+        if (flowControl != true || count <= 0) return false
+        returned += count
+        return true
     }
 
     /** The flush timer fired: the count to write now (0 = nothing). */

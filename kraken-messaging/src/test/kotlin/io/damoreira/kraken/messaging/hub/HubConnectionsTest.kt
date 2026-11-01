@@ -174,6 +174,34 @@ class HubConnectionsTest {
         assertEquals(5, a.lastRegisterFrom("x")!!.initialPermits)
     }
 
+    @Test fun `a hub going down tops up the survivors' permits, and nothing is revoked when it returns`() = runBlocking {
+        val a = hub()
+        val b = hub()
+        val x = client(listOf(a.name, b.name), "x", maxConcurrentHandlers = 8)
+        x.start()
+        assertTrue(x.awaitRegistered(wait))
+        assertEquals(4, a.lastRegisterFrom("x")!!.initialPermits)
+        assertEquals(4, b.lastRegisterFrom("x")!!.initialPermits)
+        assertEquals(0, a.permitsGrantedBy("x"))
+
+        // N 2 -> 1: the survivor gets ceil(8/1) - ceil(8/2) = 4 more.
+        b.close()
+        hubs.remove(b)
+        eventually(1_000) { a.permitsGrantedBy("x") == 4 }
+        assertEquals(1, a.permitMessagesFrom("x"))
+        assertEquals(8, a.permitsAvailable("x"))
+
+        // N 1 -> 2: the returning hub gets ceil(8/2) = 4 fresh; the survivor keeps its 8.
+        val back = InProcessHub(b.name).start().also { hubs += it }
+        eventually(5_000) { x.liveHubIds().size == 2 }
+        assertEquals(4, back.lastRegisterFrom("x")!!.initialPermits)
+        assertEquals(4, back.permitsAvailable("x"))
+        delay(300)
+        assertEquals(4, a.permitsGrantedBy("x"))
+        assertEquals(8, a.permitsAvailable("x"))
+        assertEquals(0, back.permitsGrantedBy("x"))
+    }
+
     @Test fun `the local guard stays max-concurrent-handlers in total over all hubs`() = runBlocking {
         // P0 hubs: unlimited forwarding from both, only the client's own guard holds handlers back.
         val a = hub { flowControl = false }

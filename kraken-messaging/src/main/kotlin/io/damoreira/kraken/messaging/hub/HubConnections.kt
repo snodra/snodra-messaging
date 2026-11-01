@@ -16,6 +16,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -48,8 +49,11 @@ import java.util.concurrent.atomic.AtomicInteger
  *   up to `requestTimeout` (default 5 s) in total, then fails with [HubUnavailableException]. A request already written
  *   fails with `HubConnectionLostException` as before.
  * - **Permits**: a stream announces `ceil(maxConcurrentHandlers / N)` initial permits, N = 1 (itself) + the other kept
- *   hubs that are live or still on their first connect attempt; never revoked. One [HandlerGate] keeps the local bound
- *   at [maxConcurrentHandlers] over all hubs.
+ *   hubs that are live or still on their first connect attempt. When N (the kept hubs that are live or on their first
+ *   attempt) shrinks from N_old to N_new >= 1, every live hub gets a top-up `Permits(ceil(max / N_new) - ceil(max /
+ *   N_old))`, so the survivors of an outage serve at full capacity; a hub that joins or returns gets its
+ *   `ceil(max / N_new)` initial permits; nothing is ever revoked (rule shared with the Rust library). One [HandlerGate]
+ *   keeps the local bound at [maxConcurrentHandlers] over all hubs.
  * - **Status**: every [statusInterval], and whenever the live set changes, each live hub whose ack lists
  *   `instance-status` gets an `InstanceStatus` with the ids of the acknowledged (protocol v2) live hubs and the handlers
  *   in flight. Hubs without the capability never get one.
@@ -88,6 +92,7 @@ class HubConnections(
     private val owners = HashMap<String, HubConnection>() // hub id -> the kept connection that answered it first
     private val parked = HashMap<String, String>() // target closed as a duplicate -> the hub id it answered
     private var resolvedTargets: List<String> = emptyList() // latest DNS answer (DNS targets only)
+    private var counted = 0 // N of the permit split at the last refresh
     private var types: Pair<Set<String>, Set<String>>? = null
     private var started = false
     private var stopped = false
@@ -258,7 +263,9 @@ class HubConnections(
                 )
                 self = connection
                 types?.let { (commands, queries) -> connection.register(commands, queries) }
-                val watcher = scope.launch(start = CoroutineStart.LAZY) { connection.handshake.collect { onHandshake(connection) } }
+                val watcher = scope.launch(start = CoroutineStart.LAZY) {
+                    merge(connection.handshake, connection.firstAttemptOver).collect { onHandshake(connection) }
+                }
                 active[target] = Member(connection, watcher)
                 connection to watcher
             }
@@ -335,12 +342,28 @@ class HubConnections(
         val now = active.values.map { it.connection }.filter { c -> c.hubId?.let { owners[it] === c } == true }
         live.value = now
         anyLive.value = now.isNotEmpty()
+        topUp(now)
         val orphaned = parked.filterValues { id -> id !in owners }.keys.toList()
         orphaned.forEach { parked.remove(it) }
         return if (stopped) emptyList() else when (targets) {
             is HubTargets.Static -> orphaned
             is HubTargets.Dns -> orphaned.filter { it in resolvedTargets }
         }
+    }
+
+    /**
+     * N of the permit split shrank (a hub went down, was parked or drained): tops up every live hub by the difference
+     * of the shares. Caller holds [lock].
+     */
+    private fun topUp(live: List<HubConnection>) {
+        val n = active.values.count { m -> m.connection in live || m.connection.onFirstAttempt }
+        val before = counted
+        counted = n
+        if (n < 1 || n >= before) return
+        val extra = HubProtocol.initialPermits(maxConcurrentHandlers, n) - HubProtocol.initialPermits(maxConcurrentHandlers, before)
+        if (extra <= 0) return
+        log.debug("Hubs counted for the permit split: {} -> {}; topping up {} live hub(s) by {}", before, n, live.size, extra)
+        live.forEach { it.topUpPermits(extra) }
     }
 
     private fun reportStatus() {
