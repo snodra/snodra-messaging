@@ -722,6 +722,41 @@ class StreamingQueryTest {
         assertEquals("completed", second.ended.await())
     }
 
+    @Test fun `a retried stream carries the full idle timeout, not what is left of the budget`() = runBlocking {
+        val retry = RetryPolicy(maxAttempts = 3, initialBackoff = Duration.ofMillis(300), maxBackoff = Duration.ofMillis(300))
+        val bus = caller(retry = retry)
+        val silent = owner("svc-x", "x-1", SilentStreamer())
+        val collecting = async { bus.stream(ExportRows(2), StreamOptions(timeout = Duration.ofSeconds(4))).toList() }
+        awaitUntil { hub.openStreams() == 1 }
+        val first = hub.lastRequest()!!
+        owner("svc-x", "x-2", RowsStreamer())
+        silent.stop() // HANDLER_DISCONNECTED before any part: retried after the backoff
+        connections.remove(silent)
+        assertEquals(listOf(Row(1), Row(2)), withTimeout(5_000) { collecting.await() })
+        val second = hub.lastRequest()!!
+        assertTrue(second.id != first.id)
+        assertEquals(4_000, first.timeoutMs)
+        assertEquals(4_000, second.timeoutMs) // the budget bounds the retries, the idle timeout is the stream's
+    }
+
+    @Test fun `a stream sent after waiting for a hub to come up carries the full idle timeout`() = runBlocking {
+        owner("svc-x", "x-1", RowsStreamer())
+        hub.ackDelay = Duration.ofMillis(600) // the caller's hub is slow to acknowledge: the stream waits for it
+        val conns = HubConnections(
+            targets = HubTargets.Static(listOf(hub.name)),
+            channelFactory = { target -> InProcessChannelBuilder.forName(target).build() },
+            serviceName = "svc-caller",
+            instanceId = "caller",
+            settings = settings,
+            inbound = { req -> error(req.id, ErrorCode.HANDLER_ERROR, "unexpected") },
+            scope = scope,
+        ).also { multi += it }
+        conns.start()
+        val rows = withTimeout(5_000) { bus(conns).stream(ExportRows(1), StreamOptions(timeout = Duration.ofSeconds(2))).toList() }
+        assertEquals(listOf(Row(1)), rows)
+        assertEquals(2_000, hub.lastRequest()!!.timeoutMs)
+    }
+
     @Test fun `a ReplyEnd error after the first part is not retried`() = runBlocking {
         val retry = RetryPolicy(maxAttempts = 3, initialBackoff = Duration.ofMillis(300), maxBackoff = Duration.ofMillis(300))
         val bus = caller(retry = retry)

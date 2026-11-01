@@ -69,7 +69,9 @@ import kotlin.reflect.KClass
  * Streaming queries ([stream], P4b, ADR 0017) always go through the hub too. The flow is cold and unbuffered: each
  * collection sends one `STREAMING` request to a hub that lists `streaming`, and each part is decoded (the query's
  * element type) and emitted before the next one is read, so the transport's credit refills ([HubTransport.stream])
- * follow what the collector consumed. A `ReplyEnd` with an error fails the flow exactly like a unary `Error` with the
+ * follow what the collector consumed. Unlike a unary attempt, every attempt of a stream sends the chosen timeout
+ * (`StreamOptions.timeout`, else [requestTimeout]) whole as `timeout_ms`: it is the stream's idle timeout, and the
+ * retry budget bounds only the attempts before the first part. A `ReplyEnd` with an error fails the flow exactly like a unary `Error` with the
  * same code ([HubErrors]: `TIMEOUT` -> [io.damoreira.kraken.messaging.MessageTimeoutException], `HANDLER_DISCONNECTED`
  * -> [io.damoreira.kraken.messaging.HandlerDisconnectedException], `HANDLER_ERROR` -> [RemoteHandlerException],
  * `CANCELLED` -> [io.damoreira.kraken.messaging.StreamCancelledException], ...), and so does an `Error` before any
@@ -154,9 +156,12 @@ class HubBus(
             .setInitialCredit(options.initialCredit)
             .build()
         var emitted = false
+        // The idle timeout is the stream's own, sent whole on every attempt: the retry budget bounds only the attempts
+        // (and, in the multi-hub transport, the wait for a hub), never how long the handler may take between parts.
+        val idleTimeout = chosenTimeout(options.timeout)
         // Parts already emitted cannot be taken back: once one is out, a failure ends the flow.
-        withRetry(template.type, MessageKind.QUERY, options.timeout, options.retry, retryIf = { !emitted }) { timeout ->
-            streamOnce<R>(template, query::class, timeout) { part ->
+        withRetry(template.type, MessageKind.QUERY, options.timeout, options.retry, retryIf = { !emitted }) { _ ->
+            streamOnce<R>(template, query::class, idleTimeout) { part ->
                 emitted = true
                 emit(part)
             }
@@ -164,8 +169,9 @@ class HubBus(
     }
 
     /**
-     * One streaming query built from [template] with a fresh id and [timeout] as `timeout_ms` (the idle timeout); hands
-     * each decoded part to [onPart] and returns when the `ReplyEnd` arrived without an error.
+     * One streaming query built from [template] with a fresh id and [timeout] as `timeout_ms` (the idle timeout, whole,
+     * not what is left of a retry budget); hands each decoded part to [onPart] and returns when the `ReplyEnd` arrived
+     * without an error.
      */
     private suspend fun <R> streamOnce(
         template: Request,
@@ -316,7 +322,7 @@ class HubBus(
         retryIf: () -> Boolean,
         attempt: suspend (Duration?) -> T,
     ): T {
-        val chosen = (timeout ?: requestTimeout)?.takeIf { !it.isZero && !it.isNegative }
+        val chosen = chosenTimeout(timeout)
         val effective = (policy ?: retry)?.takeIf { it.maxAttempts > 1 }
             ?: return attempt(chosen) // unset: 0 on the wire, the hub decides
 
@@ -338,6 +344,9 @@ class HubBus(
             }
         }
     }
+
+    /** The caller's [timeout], else [requestTimeout]; null (unset: the hub decides) when neither is positive. */
+    private fun chosenTimeout(timeout: Duration?): Duration? = (timeout ?: requestTimeout)?.takeIf { !it.isZero && !it.isNegative }
 
     /** [template] with a fresh id and [timeout] as `timeout_ms` (null sends 0). */
     private fun withFreshId(template: Request, timeout: Duration?): Request = template.toBuilder()

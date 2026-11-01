@@ -57,7 +57,9 @@ import java.util.concurrent.atomic.AtomicInteger
  *   capable it fails at once with [UnsupportedByHubException]. A gather not yet written fails over like a request; once
  *   written, a broken stream fails it with `HubConnectionLostException` (the parts already received are not asked again).
  * - **Streaming** (P4b): a streaming query goes to one live hub whose ack lists `streaming`, chosen and failed over
- *   exactly like a gather; with live hubs and none capable it fails at once with [UnsupportedByHubException].
+ *   exactly like a gather; with live hubs and none capable it fails at once with [UnsupportedByHubException]. Its
+ *   `timeout_ms` is the idle timeout and is sent whole, never reduced by a hub wait or a failover (the deadline of the
+ *   call bounds only those); a collector exception (`StreamCollectorException`) is never a reason to fail over.
  * - **Permits**: a stream announces `ceil(maxConcurrentHandlers / N)` initial permits, N = 1 (itself) + the other kept
  *   hubs that are live or still on their first connect attempt. Whenever that set changes, every live hub's stream is
  *   topped up to `ceil(maxConcurrentHandlers / N)` with N = the kept hubs that are live or on their first attempt:
@@ -217,15 +219,21 @@ class HubConnections(
      * @throws UnsupportedByHubException when hubs are live but none lists `streaming`
      */
     override suspend fun stream(request: Request, onPart: suspend (ReplyPart) -> Unit): ServerMessage =
-        route(request, eligible = { it.supportsStreaming }, feature = HubProtocol.STREAMING) { connection, outgoing ->
+        route(request, eligible = { it.supportsStreaming }, feature = HubProtocol.STREAMING, keepTimeout = true) { connection, outgoing ->
             connection.stream(outgoing, awaitStream = false, onPart)
         }
 
-    /** The hub choice and failover of [send], [gather] and [stream], restricted to the hubs that are [eligible] for [feature]. */
+    /**
+     * The hub choice and failover of [send], [gather] and [stream], restricted to the hubs that are [eligible] for
+     * [feature]. A positive `timeout_ms` is one deadline for the whole call: a hub wait or a hub that did not take the
+     * request uses some of it and the request is sent with what is left, unless [keepTimeout] (a stream: `timeout_ms`
+     * is its idle timeout, sent whole; the deadline bounds only the hub wait and the retries).
+     */
     private suspend fun <T> route(
         request: Request,
         eligible: (HubConnection) -> Boolean,
         feature: String = HubProtocol.SCATTER_GATHER,
+        keepTimeout: Boolean = false,
         call: suspend (HubConnection, Request) -> T,
     ): T {
         // One deadline for the whole call: the caller's timeout (timeout_ms), else request-timeout, else 5 s.
@@ -258,7 +266,7 @@ class HubConnections(
             }
             beforeWrite?.invoke(connection)
             // A caller's timeout is what is left of it once a wait or a hub that did not take the request used some.
-            val outgoing = if (request.timeoutMs > 0 && (tried.isNotEmpty() || waited)) {
+            val outgoing = if (!keepTimeout && request.timeoutMs > 0 && (tried.isNotEmpty() || waited)) {
                 val remaining = ((deadline - System.nanoTime()) / 1_000_000).coerceIn(1, request.timeoutMs.toLong())
                 request.toBuilder().setTimeoutMs(remaining.toInt()).build()
             } else {
