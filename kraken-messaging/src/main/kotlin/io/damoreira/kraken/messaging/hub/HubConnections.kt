@@ -187,6 +187,7 @@ class HubConnections(
         else settings.chosenRequestTimeout ?: HubProtocol.DEFAULT_REQUEST_TIMEOUT
         val deadline = System.nanoTime() + wait.toNanos()
         val tried = HashSet<HubConnection>()
+        var waited = false
         while (true) {
             val hubs = live.value
             val connection = choose(request, hubs.filter { it !in tried })
@@ -199,11 +200,12 @@ class HubConnections(
                     )
                 }
                 tried.clear() // the live hubs changed: a hub that failed before may have a new stream
+                waited = true
                 continue
             }
             beforeWrite?.invoke(connection)
             // A caller's timeout is what is left of it once a wait or a hub that did not take the request used some.
-            val outgoing = if (request.timeoutMs > 0 && (tried.isNotEmpty() || leftMs < request.timeoutMs)) {
+            val outgoing = if (request.timeoutMs > 0 && (tried.isNotEmpty() || waited)) {
                 val remaining = ((deadline - System.nanoTime()) / 1_000_000).coerceIn(1, request.timeoutMs.toLong())
                 request.toBuilder().setTimeoutMs(remaining.toInt()).build()
             } else {
