@@ -320,6 +320,36 @@ class HubConnectionsTest {
         assertEquals(1, a.sessionsOf("x"))
     }
 
+    @Test fun `a duplicate target that evicted the kept one's session never takes the hub over`() = runBlocking {
+        // The hub keeps one session per instance id (replaceSessions, the default): the alias's Register ends the
+        // session of the target that acknowledged first. The first one stays the hub's connection; the alias is parked.
+        // The ack delay (network latency, well below the reconnect backoff) lets the client see the eviction before the
+        // alias's ack.
+        val a = hub { ackDelay = Duration.ofMillis(30) }
+        routes["alias-of-a"] = a.name
+        val settings = fast.copy(backoffMin = Duration.ofMillis(150), backoffMax = Duration.ofMillis(300))
+        val x = client(listOf(a.name, "alias-of-a"), "x", settings = settings) { req -> payloadReply(req.id, "{}") }
+        x.register(setOf("test.Ping"), emptySet())
+        x.start()
+        eventually(5_000) { x.connections().size == 1 && x.liveHubIds() == listOf(a.hubId) && a.sessionsOf("x") == 1 }
+        val kept = x.connections().single()
+        val opened = a.streamsOpenedBy("x")
+        val sender = client(listOf(a.name), "s").apply { start(); assertTrue(awaitRegistered(wait)) }
+
+        val until = System.nanoTime() + 1_500_000_000L
+        var calls = 0
+        while (System.nanoTime() < until) {
+            val answer = sender.send(request(timeoutMs = 1_000))
+            assertTrue(answer.hasReply() && !answer.reply.hasError(), "call $calls: $answer")
+            assertEquals(1, a.sessionsOf("x"))
+            calls++
+            delay(10)
+        }
+        assertEquals(opened, a.streamsOpenedBy("x"), "no stream of x was opened (and none replaced) once settled")
+        assertTrue(x.connections().single() === kept)
+        assertTrue(x.awaitRegistered(wait))
+    }
+
     @Test fun `a legacy hub is identified by its target`() = runBlocking {
         val v1 = hub { legacy = true }
         val conns = client(listOf(v1.name), "x")

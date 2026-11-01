@@ -184,6 +184,53 @@ class MultiHubEndToEndTest {
         assertTrue(a.send(request()).hasReply())
     }
 
+    @Test fun `two targets of one hub - the instance stays registered and served without interruption`() = runBlocking {
+        // The real hub keeps one session per instance id: a second stream with the same id replaces the first. Two
+        // targets of one hub (an alias, or the A and AAAA records of one name) must settle on one stream and stay there.
+        Assumptions.assumeTrue(KrakenContainers.hubP3ImageAvailable(), "P3 hub image not available")
+        val hub = start("e2e-hub-alias-" + UUID.randomUUID().toString().take(8))
+        val aliasDialed = AtomicBoolean()
+        val b = HubConnections(
+            targets = HubTargets.parse("127.0.0.1:${hub.grpcPort},localhost:${hub.grpcPort}"),
+            channelFactory = HubChannelFactory { target ->
+                // The alias dials once the first stream is up, so its Register replaces an established session.
+                if (target.startsWith("localhost") && aliasDialed.compareAndSet(false, true)) Thread.sleep(500)
+                ManagedChannelBuilder.forTarget(target).usePlaintext().build()
+            },
+            serviceName = "svc-b",
+            instanceId = "svc-b-" + UUID.randomUUID(),
+            settings = defaults.copy(backoffMin = Duration.ofMillis(100)),
+            inbound = { req -> reply(req) },
+            scope = scope,
+        ).also { clients += it }
+        b.register(setOf("t.Ping"), emptySet())
+        b.start()
+        val a = client(listOf(hub), "svc-a")
+        a.start()
+        assertTrue(a.awaitRegistered(wait))
+        withTimeout(15_000) { while (b.connections().size != 1 || !b.awaitRegistered(Duration.ofMillis(50))) delay(50) }
+        delay(1_000) // the parked duplicate's close reaches the hub; from here on nothing may change
+
+        val absent = mutableListOf<Long>()
+        var calls = 0
+        val failures = mutableListOf<String>()
+        val until = System.nanoTime() + Duration.ofSeconds(10).toNanos()
+        while (System.nanoTime() < until) {
+            if (instance(hub, "svc-b", b.instanceId) == null) absent += System.currentTimeMillis()
+            val answer = runCatching { a.send(request(timeoutMs = 2_000)) }
+            val failure = answer.exceptionOrNull()?.toString()
+                ?: answer.getOrNull()!!.takeIf { !it.hasReply() || it.reply.hasError() }?.toString()
+            failure?.let { failures += it }
+            calls++
+            delay(50)
+        }
+        log.info("Alias test: {} polls/calls, absent {} times, {} failures", calls, absent.size, failures.size)
+        assertTrue(absent.isEmpty(), "svc-b missing from /topology at ${absent.size} of $calls polls")
+        assertTrue(failures.isEmpty(), "failed calls: $failures")
+        assertEquals(1, b.connections().size)
+        assertEquals(listOf(hub.id), b.liveHubIds())
+    }
+
     // --- helpers ---
 
     private fun startHubs(): Pair<Hub, Hub> {

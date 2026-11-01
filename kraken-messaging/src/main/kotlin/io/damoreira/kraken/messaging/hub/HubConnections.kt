@@ -33,9 +33,12 @@ import java.util.concurrent.atomic.AtomicInteger
  *   [dnsRefresh], connects to new addresses, and closes a vanished one once idle (it first announces an empty
  *   registration, then waits up to [dnsRefresh] for its requests and handlers). A failed or empty resolution keeps the
  *   current connections.
- * - **Dedupe**: a hub is its `RegisterAck.hub_id` (a legacy hub: its target). When a target acknowledges an id another
- *   target already answers on a live stream, the later one is closed (logged once); with DNS it stays closed while the
- *   one kept is resolved.
+ * - **Dedupe**: a hub is its `RegisterAck.hub_id` (a legacy hub: its target). The first target to acknowledge an id
+ *   owns it for as long as that target is kept, live or reconnecting: the hub keeps one session per instance id, so a
+ *   second target of the same hub (an alias) replaces the owner's session with its `Register`, and the owner's stream
+ *   ends before the alias's ack arrives. A target that acknowledges an owned id is therefore closed and parked
+ *   (logged once), never made the owner; the owner reconnects. A parked target is retried only once its owner is gone
+ *   (no longer resolved, or answering another id); with DNS it is dropped when no longer resolved.
  * - **Live hubs**: the kept connections whose stream completed its handshake ([liveHubIds]).
  * - **Routing**: a request with a routing key goes to the live hub chosen by [Rendezvous] over (key, hub id); any other
  *   round-robin over the live hubs. Replies to incoming requests go on the stream they arrived on ([HubConnection]).
@@ -81,8 +84,9 @@ class HubConnections(
     private val lock = Any() // guards everything below except the flows
     private val active = LinkedHashMap<String, Member>() // target -> member, in configuration or resolution order
     private val draining = mutableListOf<Member>()
-    private val owners = HashMap<String, HubConnection>() // hub id -> the connection that answered it first
-    private val duplicates = HashMap<String, String>() // target closed as a duplicate -> target kept
+    private val owners = HashMap<String, HubConnection>() // hub id -> the kept connection that answered it first
+    private val parked = HashMap<String, String>() // target closed as a duplicate -> the hub id it answered
+    private var resolvedTargets: List<String> = emptyList() // latest DNS answer (DNS targets only)
     private var types: Pair<Set<String>, Set<String>>? = null
     private var started = false
     private var stopped = false
@@ -225,7 +229,7 @@ class HubConnections(
     private fun add(newTargets: List<String>) {
         val added = synchronized(lock) {
             if (stopped) return
-            newTargets.filter { it !in active && it !in duplicates }.map { target ->
+            newTargets.filter { it !in active && it !in parked }.map { target ->
                 lateinit var self: HubConnection
                 val connection = HubConnection(
                     channelFactory = { channelFactory.channel(target) },
@@ -270,25 +274,31 @@ class HubConnections(
     private fun onHandshake(connection: HubConnection) {
         var duplicateOf: HubConnection? = null
         var member: Member? = null
+        var retry: List<String> = emptyList()
         synchronized(lock) {
             member = active[connection.target]?.takeIf { it.connection === connection } ?: return
             val id = connection.hubId
             if (id != null) {
+                // A connection now answering another id (its target reached another hub) gives up the id it owned.
+                owners.entries.removeIf { (owned, c) -> c === connection && owned != id }
+                // The owner keeps the id while it is kept, even while its stream is down: that stream may just have been
+                // replaced by this one's Register (one session per instance id on the hub), so taking the id over here
+                // would make the owner's reconnect replace this one in turn, back and forth.
                 val owner = owners[id]
-                if (owner != null && owner !== connection && owner.hubId == id && active[owner.target]?.connection === owner) {
+                if (owner != null && owner !== connection && active[owner.target]?.connection === owner) {
                     duplicateOf = owner
                     active.remove(connection.target)
-                    duplicates[connection.target] = owner.target
+                    parked[connection.target] = id
                 } else {
                     owners[id] = connection
                 }
             }
-            refreshLive()
+            retry = refreshLive()
         }
         duplicateOf?.let { owner ->
             log.warn(
                 "Hub targets {} and {} answer the same hub id {}: one hub; keeping {}, closing {}",
-                owner.target, connection.target, owner.hubId, owner.target, connection.target,
+                owner.target, connection.target, connection.hubId, owner.target, connection.target,
             )
             val closing = member!!
             scope.launch {
@@ -296,15 +306,25 @@ class HubConnections(
                 closing.watcher.cancel()
             }
         }
+        if (retry.isNotEmpty()) add(retry)
         reportStatus()
     }
 
-    /** Caller holds [lock]. */
-    private fun refreshLive() {
+    /**
+     * Recomputes the live hubs. Returns the parked targets whose owner is gone (to connect again: a static target, or a
+     * DNS target still resolved). Caller holds [lock].
+     */
+    private fun refreshLive(): List<String> {
         owners.values.retainAll { c -> active[c.target]?.connection === c }
         val now = active.values.map { it.connection }.filter { c -> c.hubId?.let { owners[it] === c } == true }
         live.value = now
         anyLive.value = now.isNotEmpty()
+        val orphaned = parked.filterValues { id -> id !in owners }.keys.toList()
+        orphaned.forEach { parked.remove(it) }
+        return if (stopped) emptyList() else when (targets) {
+            is HubTargets.Static -> orphaned
+            is HubTargets.Dns -> orphaned.filter { it in resolvedTargets }
+        }
     }
 
     private fun reportStatus() {
@@ -337,8 +357,9 @@ class HubConnections(
     private fun reconcile(resolved: List<String>) {
         val gone = synchronized(lock) {
             if (stopped) return
-            // A duplicate stays closed while its own address is resolved and the target kept for it is still connected.
-            duplicates.entries.removeIf { (duplicate, kept) -> duplicate !in resolved || kept !in active }
+            resolvedTargets = resolved
+            // A parked duplicate is forgotten once its address is no longer resolved (refreshLive frees it when its owner goes).
+            parked.keys.retainAll(resolved.toSet())
             val vanished = active.keys.filter { it !in resolved }.map { active.remove(it)!! }
             draining += vanished
             refreshLive()
