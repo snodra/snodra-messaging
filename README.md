@@ -35,6 +35,7 @@ Repo conventions: `../kraken/docs/04-repositories.md`.
 - [Using the starter](#using-the-starter)
 - [Semantics worth knowing](#semantics-worth-knowing)
 - [Multiple hubs](#multiple-hubs)
+- [Scatter-gather](#scatter-gather)
 - [Test helpers (`kraken-messaging-test`)](#test-helpers-kraken-messaging-test)
 - [Examples](#examples)
 - [Known limitations](#known-limitations)
@@ -85,6 +86,15 @@ The published POM and Gradle module metadata carry resolved versions for every d
 POM also imports the Spring Boot BOM, so consumers do not need to manage them. Builder call.
 
 ## Upgrading
+
+**To scatter-gather (P4a).** Nothing breaks: existing handlers, senders and configuration behave as before. What
+changes on the wire: `Register` also declares the `scatter-gather` capability (an older hub ignores it) and lists
+`@QueryHandler(shared = true)` types in `shared_query_types`. Before marking a type shared, make sure every hub runs P4a
+(a P3 hub ignores `shared_query_types`, so the type is simply not registered there) and switch every owner at once:
+the hub refuses a mix of exclusive and shared registrants (`ALREADY_EXISTS`). `QueryBus` gained `scatterGather` and
+`scatterGatherFlow` with default bodies, so a custom `QueryBus` implementation still compiles (it throws
+`UnsupportedOperationException` until it overrides them). `RemoteHandlerException` gained a `code` property (default
+`HANDLER_ERROR`).
 
 **To the multi-hub client (P3).** The version stays `0.1.0-SNAPSHOT` (nothing has been published beyond local
 `mavenLocal()` installs yet), so re-run `./gradlew publishToMavenLocal` here and rebuild the services. Two beans changed
@@ -451,10 +461,68 @@ kraken.messaging.hub.address: static://hub-1:7000,static://hub-2:7000   # or: dn
   the report in its topology (`connectedHubIds`, `statusAgeMs`) and the dashboard flags instances missing a hub.
 - **Shutdown** announces the empty registration on every hub, waits for the handlers, then closes every stream.
 
+## Scatter-gather
+
+A query type can be **shared** by several services (ADR 0017 in the umbrella repo): any number of services may own it.
+A point query (`queryBus.send`) on a shared type goes to one instance of any owner (the hub round-robins over all of
+them); a **scatter-gather** asks every live instance of every owner and returns what they answered.
+
+```kotlin
+@Component
+class CatalogueSearch {
+    @QueryHandler(shared = true) // every service that can answer declares it shared
+    fun handle(q: SearchEverything): SearchHits = SearchHits(index.search(q.text))
+}
+
+// Every answer that arrived by the deadline, in arrival order:
+val result: ScatterResult<SearchHits> = queryBus.scatterGather(
+    SearchEverything("legs"),
+    ScatterOptions(timeout = Duration.ofSeconds(2), maxResults = 0, priority = null),
+)
+result.parts.forEach { part -> println("${part.service}/${part.instance}: ${part.result ?: part.error}") }
+println("${result.results.size} answers, ${result.failed} failed, ${result.timedOut} timed out")
+
+// The same as a Flow: each part as it arrives; completes on the end.
+queryBus.scatterGatherFlow(SearchEverything("legs")).collect { part -> render(part) }
+```
+
+- **API.** `suspend fun <R> scatterGather(query: Query<R>, options: ScatterOptions = ScatterOptions()): ScatterResult<R>`
+  and `fun <R> scatterGatherFlow(query: Query<R>, options: ScatterOptions = ScatterOptions()): Flow<ScatterPart<R>>`.
+  `ScatterOptions(timeout: Duration? = null, maxResults: Int = 0, priority: Int? = null, retry: RetryPolicy? = null)`,
+  `ScatterResult<R>(parts, failed, timedOut)` (plus `results`, the successful values), `ScatterPart<R>(service,
+  instance, result: R?, error: RemoteHandlerException?)`. The flow carries no counts: use `scatterGather` when
+  `failed` / `timedOut` matter.
+- **Targets.** Every live instance of every owner of the type; on an exclusive type, every instance of its one owner.
+  The gather always goes through the hub, also when this instance owns the type (it is one of the targets then).
+  Handlers need nothing new: each target receives an ordinary request (id `<id>#<n>`) and answers it as usual.
+- **Results.** One part per target that answered, successes and failures, in arrival order. A failed part carries a
+  `RemoteHandlerException` whose `code` is the hub's (`HANDLER_ERROR` for a handler exception, `HANDLER_DISCONNECTED`,
+  `RESOURCE_EXHAUSTED`, ...); a part whose payload does not decode into `R` is a failed part too (code
+  `ERROR_CODE_UNSPECIFIED`), never a failure of the whole call, so `failed` counts every part with an error. Targets
+  that had not answered by the deadline count in `timedOut`. Partial answers are answers: check `failed + timedOut`
+  for "all or nothing".
+- **Options.** `timeout` is the deadline of the whole gather (same rules as `SendOptions.timeout`: default
+  `request-timeout`, else the hub's default; zero is unset). `maxResults > 0` ends the gather after that many
+  successful parts. `priority` applies to every target request.
+- **Errors.** No owner: `NoHandlerException`; a command type: `InvalidMessageException`; a hub without the
+  `scatter-gather` capability (a P3 or older hub, or a legacy v1 hub): `UnsupportedByHubException`, thrown before
+  anything is sent. With several hubs a gather goes to one hub that lists the capability (round-robin); only when none
+  of the live hubs does is it `UnsupportedByHubException`. If the stream to that hub breaks before the end the call
+  fails with `HubConnectionLostException`.
+- **Retry.** The configured or per-call `RetryPolicy` applies to the whole gather with the query rules
+  (`HubConnectionLostException`, `NoHandlerException`, ... are retryable). A retried gather is a new gather: its result
+  holds only its own parts. The flow retries only until its first part; after that an error ends the flow, so no part
+  is ever emitted twice.
+- **Shared registration.** Every registrant of a type must agree: exclusive by one and shared by another (even within
+  one service) is refused by the hub with `ALREADY_EXISTS` at register time, logged and surfaced like any registration
+  conflict (`HubRegistrationRejectedException` from `awaitRegistered`). One service declaring a type both ways fails at
+  startup. Commands are never shared.
+
 ## Test helpers (`kraken-messaging-test`)
 
 - `InMemoryBuses(typePrefix, userId)`: implements `EventBus`, `CommandBus` and `QueryBus` in memory for unit tests without
   Docker. Messages still pass through the JSON codec. `register(handlerBean)` adds handlers; `published` lists events.
+  A scatter-gather returns one part from the registered handler (service and instance `in-memory`).
 - `InProcessHub`: in-JVM stand-in for the hub (`start()`, `channel()`, `dropInstance(...)`, `lastRequestHeaders()`,
   `lastRequest()`, `registrationsFrom(...)`, `lastRegisterFrom(...)`, `acksSentTo(...)`, `echoHeartbeats = false` to
   simulate a hub that stopped answering), for hub-client tests without a container. It speaks protocol v2 (a
@@ -468,14 +536,18 @@ kraken.messaging.hub.address: static://hub-1:7000,static://hub-2:7000   # or: dn
   P2 hub (no `instance-status`), `lastStatusFrom(...)`, `statusMessagesFrom(...)`, `requestsFrom(...)`, `sessionsOf(...)`,
   and `pauseReading = true` stops reading every stream. Like the real hub it keeps one session per instance id: a new
   stream registering an id replaces the older one (`sessionsReplacedOf(...)`, `streamsOpenedBy(...)`;
-  `replaceSessions = false` keeps both), and `ackDelay` delays each `RegisterAck` as network latency would.
+  `replaceSessions = false` keeps both), and `ackDelay` delays each `RegisterAck` as network latency would. Query modes
+  (P4a): shared query types, scatter-gather with parts, end, `max_results` and the deadline as the real hub;
+  `scatterGather = false` emulates the P3 hub (no capability, `shared_query_types` ignored), and `inject(instanceId,
+  message)` writes any server message to an instance's stream.
 - `KrakenContainers`: unstarted Testcontainers definitions. `kafka()`, `mongo()` (single-node replica set, needed for
   transactions), `hub()` from image `kraken-hub:dev` or the one named by `KRAKEN_HUB_IMAGE`, `hubBaseline()` from the previous hub release
   `kraken-hub:v1-baseline` or `KRAKEN_HUB_BASELINE_IMAGE` and `hubP0()` from the P0 hub `kraken-hub:p0` or
   `KRAKEN_HUB_P0_IMAGE`, `hubP2()` from `kraken-hub:p2` or `KRAKEN_HUB_P2_IMAGE` (compatibility tests), `hubP3()` from
-  `kraken-hub:p3-hub` or `KRAKEN_HUB_P3_IMAGE` with ports 7000 and 7001 (two-hub tests), `hub(env)` for the hub under test with extra `KRAKEN_HUB_*` settings, and
+  `kraken-hub:p3-hub` or `KRAKEN_HUB_P3_IMAGE` with ports 7000 and 7001 (two-hub tests), `hubP4a()` from
+  `kraken-hub:p4a-hub` or `KRAKEN_HUB_P4A_IMAGE` with ports 7000 and 7001 (scatter-gather tests), `hub(env)` for the hub under test with extra `KRAKEN_HUB_*` settings, and
   `hubImageAvailable()` / `hubBaselineImageAvailable()` / `hubP0ImageAvailable()` / `hubP2ImageAvailable()` /
-  `hubP3ImageAvailable()`.
+  `hubP3ImageAvailable()` / `hubP4aImageAvailable()`.
 - `KrakenTestKafka(bootstrap, typePrefix, topic).awaitEvent<T>()`: reads an event back from the topic.
 
 ```kotlin
@@ -503,7 +575,8 @@ Docker Compose from local builds together with the real `kraken-hub` image, Kafk
 - No dead-letter topic: poison records are logged and skipped.
 - No leader election for the outbox publisher; with several instances delivery is at-least-once and ordering is per
   publishing instance.
-- No scatter-gather (one command or query reaches one handler instance).
+- Streaming and subscription queries are not supported yet (roadmap P4b, P4c); a scatter-gather cannot be cancelled
+  once sent (targets past `maxResults` still run).
 - Library metrics are not exported yet; OpenTelemetry comes from the application.
 - Configuration metadata is hand-maintained in `META-INF/spring-configuration-metadata.json`.
 - `TraceHeaders` is only active with Micrometer Tracing on the classpath.
