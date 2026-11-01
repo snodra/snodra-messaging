@@ -435,11 +435,12 @@ kraken.messaging.hub.address: static://hub-1:7000,static://hub-2:7000   # or: dn
 - **Permits.** A stream announces `ceil(hub.max-concurrent-handlers / N)` initial permits, where N = 1 (the hub being
   registered on) + the other hubs that are live or still on their first connect attempt (a hub down after a failed
   attempt is not counted). Whenever that count changes, every live stream is topped up to its current share:
-  `Permits(max(0, ceil(max / N) - offered))`, offered = the stream's `initial_permits` plus its earlier top-ups. So
-  with two hubs the survivor of an outage (or of a hub that failed its first attempt) serves at full capacity, flaps
-  never add up, a hub that joins or returns gets `ceil(max / N)` on its new stream, and nothing is ever revoked (rule
-  shared with the Rust library; kraken-hub P3 still caps a session at its `initial_permits`, see hub.md). Locally at most `hub.max-concurrent-handlers` handlers run in total,
-  whichever hub sent the requests. Permits are paid back per stream as before.
+  `Permits{count = max(0, ceil(max / N) - offered), grant = ceil(max / N)}`, offered = the stream's `initial_permits`
+  plus its earlier top-ups; the grant raises the hub's permit cap on the session (otherwise its `initial_permits`) so
+  the hub keeps the top-up (a hub that predates `Permits.grant` ignores it and clamps the top-up). So with two hubs the
+  survivor of an outage (or of a hub that failed its first attempt) serves at full capacity, flaps never add up, a hub
+  that joins or returns gets `ceil(max / N)` on its new stream, and nothing is ever revoked (rule shared with the Rust
+  library). Locally at most `hub.max-concurrent-handlers` handlers run in total, whichever hub sent the requests. Permits are paid back per stream as before.
 - **Readiness.** `HubConnections.awaitRegistered(timeout)` is true only once **every** kept hub confirmed the latest
   registration; while one configured hub is down it returns false at the timeout, although the instance is already
   served by the others (`connected` / `liveHubIds()` tell that). The Rust library's equivalent may differ; see its
@@ -461,6 +462,8 @@ kraken.messaging.hub.address: static://hub-1:7000,static://hub-2:7000   # or: dn
   `legacy = true` emulates a v1 hub, `emitTimeouts = false` a hub that loses requests. Flow control as the real hub:
   permits, a per-instance queue by priority (`queueCapacity`), `RESOURCE_EXHAUSTED` or "handler busy" by sender capability,
   `permitsGrantedBy(...)`, `permitMessagesFrom(...)`, `permitsAvailable(...)`, `queuedFor(...)`, `forwardedOrder()`;
+  permits never exceed the session's cap (`initial_permits`, raised by `Permits.grant`); `permitCap = false` drops the
+  cap, `permitGrants = false` emulates a hub that predates the grant;
   `flowControl = false` emulates the P0 hub (v2 without flow control). Multi-hub: `instanceStatus = false` emulates the
   P2 hub (no `instance-status`), `lastStatusFrom(...)`, `statusMessagesFrom(...)`, `requestsFrom(...)`, `sessionsOf(...)`,
   and `pauseReading = true` stops reading every stream. Like the real hub it keeps one session per instance id: a new

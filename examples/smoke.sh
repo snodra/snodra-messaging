@@ -235,8 +235,14 @@ ha_loop() { # <out> <stop file> <t0>
   done
 }
 
+# permitsAvailable of <service>'s (first) instance on <hub>, empty when it is not listed.
+permits_on() { # <hub url> <service>
+  instance_fields "$(curl -fsS "$1/topology" 2>/dev/null || true)" "$2" | sed -n 's/.*"permitsAvailable":\([0-9]*\).*/\1/p'
+}
+
 ha_steps() {
   local h2=${HUB2_CONTAINER:-kraken-hub-2} secs peers p out stop t0 pid stopped_at gone_at total failed max late_failed after
+  local share permits topped_at
   command -v docker >/dev/null || fail "docker CLI needed for the two-hub steps (or set SKIP_HA=1)"
   docker inspect "$h2" >/dev/null 2>&1 || fail "container $h2 not found (set HUB2_CONTAINER, or SKIP_HA=1)"
 
@@ -252,6 +258,10 @@ ha_steps() {
   echo "   peers: $(echo "$peers" | tr '\n' ' ')"
 
   echo "17. calls through service-a keep answering while $h2 is stopped, and every instance is back on it after a start ..."
+  # service-b (Kotlin) splits its handlers over both hubs; once hub-2 is gone, hub-1 must hold (about) twice its share:
+  # the client's top-up carries Permits.grant, which raises hub-1's cap on the session.
+  share=$(permits_on "$HUB" service-b)
+  [ -n "$share" ] && [ "$share" -ge 2 ] || fail "service-b shows no usable permits on $HUB before the stop: '$share'"
   out=$(mktemp); stop=$(mktemp -u); t0=$(now_ms)
   trap 'touch '"$stop"'; docker start '"$h2"' >/dev/null 2>&1 || true' EXIT
   ha_loop "$out" "$stop" "$t0" &
@@ -261,7 +271,15 @@ ha_steps() {
   docker stop "$h2" >/dev/null
   gone_at=$(( $(now_ms) - t0 ))
   echo "   $h2 stopped (docker stop took $((gone_at - stopped_at)) ms); calls continue for 4 s ..."
-  sleep 4
+  topped_at=""
+  while [ $(( $(now_ms) - t0 - gone_at )) -lt 3000 ]; do
+    permits=$(permits_on "$HUB" service-b)
+    if [ -n "$permits" ] && [ "$permits" -ge $(( 2 * share - 2 )) ]; then topped_at=$(( $(now_ms) - t0 - gone_at )); break; fi
+    sleep 0.1
+  done
+  [ -n "$topped_at" ] || fail "service-b still shows ${permits:-no} permits on $HUB 3 s after $h2 stopped (share $share, expected about $(( 2 * share )))"
+  echo "   service-b's permits on $HUB: $share before the stop, $permits ${topped_at} ms after it (the top-up was kept)"
+  sleep $(( (4000 - topped_at) / 1000 ))
   touch "$stop"; wait "$pid" || true
   total=$(wc -l < "$out" | tr -d ' ')
   failed=$(awk '$1 != "200"' "$out" | wc -l | tr -d ' ')
