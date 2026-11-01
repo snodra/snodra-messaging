@@ -385,6 +385,20 @@ class StreamingQueryTest {
         assertEquals("cancelled", withTimeout(2_000) { state.ended.await() })
     }
 
+    @Test fun `a slow collector is no idle handler - the idle clock does not run while the credit is 0`() = runBlocking {
+        val state = StreamerState()
+        owner("svc-x", "x-1", RowsStreamer(state))
+        val seen = mutableListOf<Row>()
+        // Window 4: the handler fills it at once (credit 0), then the collector takes 500 ms to consume the 2 rows that
+        // bring the next Flow, well over the 200 ms idle timeout; the hub's clock is stopped meanwhile.
+        caller().stream(ExportRows(8), StreamOptions(timeout = Duration.ofMillis(200), initialCredit = 4)).collect { row ->
+            delay(250)
+            seen += row
+        }
+        assertEquals((1..8).map { Row(it) }, seen)
+        assertEquals("completed", state.ended.await())
+    }
+
     @Test fun `an exception in the handler's flow fails the stream after the parts it emitted`() = runBlocking {
         val state = StreamerState()
         owner("svc-x", "x-1", RowsStreamer(state))

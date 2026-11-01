@@ -90,7 +90,8 @@ import java.util.concurrent.TimeUnit
  * `seq`; each part takes one credit (initial plus every sender `Flow`, relayed as `Flow{<id>#1}`). A part beyond the
  * credit: `ReplyEnd{INVALID_REQUEST}` and `Cancel{<id>#1, "part without credit"}`; a part with `error`: `ReplyEnd{error}`;
  * `max_results` parts: `ReplyEnd{parts}` and `Cancel{"max results"}`; no part within the effective timeout (from the
- * forward, reset by every part; a queue wait counts too): `ReplyEnd{TIMEOUT}` and `Cancel{"idle timeout"}`; open
+ * forward, reset by every part, not running while the credit is 0 and started over by the `Flow` that raises it; a
+ * queue wait counts too): `ReplyEnd{TIMEOUT}` and `Cancel{"idle timeout"}`; open
  * for [maxStreamDuration]: `ReplyEnd{CANCELLED}` and a cancel; a sender `Cancel`: `Cancel{<id>#1, reason}` to the
  * handler, nothing to the sender; the handler leaving: `ReplyEnd{HANDLER_DISCONNECTED}`; the sender leaving:
  * `Cancel{"sender disconnected"}`. A unary `Reply` to the target is one part then the end. A gather ending early sends
@@ -739,6 +740,12 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
         }
     }
 
+    /** Stops [stream]'s idle timer while its credit is 0 (a `Flow` restarts it). Caller holds [lock]. */
+    private fun stopIdle(stream: Stream) {
+        stream.idle?.cancel()
+        stream.idle = null
+    }
+
     /** (Re)starts [stream]'s idle timer: no part within its timeout ends it with `TIMEOUT`. Caller holds [lock]. */
     private fun armIdle(stream: Stream) {
         stream.idle?.cancel()
@@ -787,7 +794,8 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
                     val relayed = ReplyPart.newBuilder().setRequestId(stream.id).setPayload(part.payload)
                         .setResponderService(handler.serviceName).setResponderInstance(handler.instanceId).setSeq(part.seq)
                     if (part.seq !in dropParts) stream.sender.out.trySend(ServerMessage.newBuilder().setPart(relayed).build())
-                    armIdle(stream)
+                    // Nothing can flow until the sender grants more: a slow consumer is no idle handler (the clock stops).
+                    if (stream.credit > 0) armIdle(stream) else stopIdle(stream)
                     if (stream.maxResults > 0 && stream.parts >= stream.maxResults) closeStream(stream, null, cancel = "max results")
                 }
             }
@@ -808,6 +816,7 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
         if (!sender.streaming || credits == 0L) return
         synchronized(lock) {
             val stream = streams[flow.requestId]?.takeIf { it.sender === sender } ?: return
+            if (stream.credit == 0L) armIdle(stream) // the idle clock was paused while nothing could flow: it starts over
             stream.credit += credits
             // Relayed at once, also while the target is still queued (the handler ignores a Flow for a request it has not seen).
             stream.handler.out.trySend(ServerMessage.newBuilder().setFlow(Flow.newBuilder().setRequestId(stream.targetId).setCredits(flow.credits)).build())
