@@ -5,6 +5,7 @@ import io.damoreira.kraken.messaging.HandlerDisconnectedException
 import io.damoreira.kraken.messaging.HubUnavailableException
 import io.damoreira.kraken.messaging.MessageTimeoutException
 import io.damoreira.kraken.messaging.NoHandlerException
+import io.damoreira.kraken.messaging.StreamCancelledException
 import io.damoreira.kraken.messaging.UnsupportedByHubException
 import org.springframework.http.HttpStatus
 import kotlin.test.Test
@@ -33,6 +34,12 @@ class MessagingErrorAdviceTest {
 
     @Test fun `a hub without the feature is 501`() {
         assertEquals(HttpStatus.NOT_IMPLEMENTED, advice.handle(UnsupportedByHubException("scatter-gather", "no")).statusCode)
+    }
+
+    @Test fun `a stream the hub cancelled is 502`() {
+        val response = advice.handle(StreamCancelledException("max stream duration (10m) exceeded"))
+        assertEquals(HttpStatus.BAD_GATEWAY, response.statusCode)
+        assertEquals(ErrorBody("StreamCancelledException", "max stream duration (10m) exceeded"), response.body)
     }
 
     @Test fun `any other messaging failure is 502`() {
