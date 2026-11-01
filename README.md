@@ -36,6 +36,7 @@ Repo conventions: `../kraken/docs/04-repositories.md`.
 - [Semantics worth knowing](#semantics-worth-knowing)
 - [Multiple hubs](#multiple-hubs)
 - [Scatter-gather](#scatter-gather)
+- [Streaming queries](#streaming-queries)
 - [Test helpers (`kraken-messaging-test`)](#test-helpers-kraken-messaging-test)
 - [Examples](#examples)
 - [Known limitations](#known-limitations)
@@ -47,7 +48,7 @@ Repo conventions: `../kraken/docs/04-repositories.md`.
 
 | Module | Coordinates | Purpose |
 |---|---|---|
-| `kraken-messaging-api` | `io.damoreira.kraken:kraken-messaging-api:0.1.0-SNAPSHOT` | `@MessageType`, `Event`, `Command<R>`, `Query<R>`. No Spring. Depended on by every `*-api` module. |
+| `kraken-messaging-api` | `io.damoreira.kraken:kraken-messaging-api:0.1.0-SNAPSHOT` | `@MessageType`, `Event`, `Command<R>`, `Query<R>`, `StreamingQuery<R>`. No Spring. Depended on by every `*-api` module. |
 | `kraken-messaging` | `io.damoreira.kraken:kraken-messaging:0.1.0-SNAPSHOT` | Spring Boot starter: buses, handler annotations, hub client, outbox, Kafka consumer, auto-configuration. |
 | `kraken-messaging-test` | `io.damoreira.kraken:kraken-messaging-test:0.1.0-SNAPSHOT` | `InMemoryBuses`, `InProcessHub`, `KrakenContainers`, `KrakenTestKafka`. |
 | `examples/examples-api`, `examples/service-a`, `examples/service-b` | not published | Two sample services talking through the hub; see [Examples](#examples). |
@@ -86,6 +87,16 @@ The published POM and Gradle module metadata carry resolved versions for every d
 POM also imports the Spring Boot BOM, so consumers do not need to manage them. Builder call.
 
 ## Upgrading
+
+**To streaming queries (P4b).** Nothing breaks: existing handlers, senders and configuration behave as before. On the
+wire `Register` also declares the `streaming` capability (an older hub ignores it). Two behaviours are new for
+existing code: the hub may now send `Cancel` for a unary handler whose answer is no longer wanted (a scatter-gather
+target past `maxResults` or past the deadline), which this library honours by cancelling the handler's coroutine (a
+handler that must not be interrupted mid-way wraps that part in `withContext(NonCancellable)`); and the permit of an
+incoming request goes back to the hub when its handler coroutine completes, whichever way. `QueryBus` gained `stream`
+with a default body (a custom `QueryBus` compiles and throws `UnsupportedOperationException` until it overrides it);
+`HubConnection` and `HubConnections` gained an optional last constructor parameter `inboundStream`; `HubErrors.toException`
+gained an optional `feature` parameter; `HandlerMethod` gained `streaming`.
 
 **To scatter-gather (P4a).** Nothing breaks: existing handlers, senders and configuration behave as before. What
 changes on the wire: `Register` also declares the `scatter-gather` capability (an older hub ignores it) and lists
@@ -321,7 +332,7 @@ val quick = queryBus.sendBlocking(GetWorkout(id), SendOptions(retry = RetryPolic
   through the hub. The handler runs on the caller's thread and coroutine, so it joins the caller's thread-bound
   transaction (a failure in it rolls back the caller's writes too) and sees the caller's security context. A query on a
   type this service declares `@QueryHandler(shared = true)` is the exception: it always goes through the hub (see
-  Scatter-gather below).
+  Scatter-gather below), and so is a streaming query (see Streaming queries).
 - **Incoming hub requests** run on virtual threads, at most `hub.max-concurrent-handlers` at once, never on the threads
   that read the hub stream; a handler may block (for example on a nested `sendBlocking`).
 - **Correlation id.** Every message carries a `correlationId`. Messages sent while handling a hub request or a Kafka
@@ -521,11 +532,82 @@ queryBus.scatterGatherFlow(SearchEverything("legs")).collect { part -> render(pa
   conflict (`HubRegistrationRejectedException` from `awaitRegistered`). One service declaring a type both ways fails at
   startup. Commands are never shared.
 
+## Streaming queries
+
+A **streaming query** (ADR 0017, P4b) is answered by one handler instance as a stream of parts under the collector's
+back-pressure: an export, a long listing, a search that trickles. The query implements `StreamingQuery<R>` (`R` is
+the element type), the handler returns `Flow<R>`, and the caller collects a `Flow<R>` from `queryBus.stream`.
+
+```kotlin
+@MessageType("workouts.ExportWorkouts")
+data class ExportWorkouts(val ownerId: String) : StreamingQuery<WorkoutRow>
+
+@Component
+class WorkoutExport(private val repo: WorkoutRepository) {
+    @QueryHandler // shared = true works here too: one instance of any owner answers
+    fun handle(q: ExportWorkouts): Flow<WorkoutRow> = repo.streamByOwner(q.ownerId).map { it.toRow() }
+}
+
+// Each part as the handler produces it, paced by credits; completes when the handler's flow does.
+queryBus.stream(ExportWorkouts(ownerId), StreamOptions(initialCredit = 32, timeout = Duration.ofSeconds(30)))
+    .collect { row -> writer.write(row) }
+```
+
+- **API.** `fun <R> stream(query: StreamingQuery<R>, options: StreamOptions = StreamOptions()): Flow<R>` and
+  `StreamOptions(timeout: Duration? = null, maxResults: Int = 0, priority: Int? = null, initialCredit: Int = 64,
+  retry: RetryPolicy? = null)`. The flow is cold and unbuffered: each collection sends one request, and the next part
+  is read only after the collector consumed the previous one. A controller may return the flow: the caller's bearer
+  token and trace context are read when `stream` is called, not when the flow is collected.
+- **Handler.** `@QueryHandler` (plain or `shared = true`) on a method taking the `StreamingQuery<R>` (optionally with
+  a `MessageContext`) and returning `Flow<R>`; another return type, or `@CommandHandler`, fails at startup. The library
+  collects the flow and sends one part per element, **suspending the collection inside `emit` while the hub granted no
+  credit**, then the end. An exception from the flow ends the stream with the handler's error, mapped exactly like a
+  unary failure (`HANDLER_ERROR` with `IllegalArgumentException` / validation details, `AccessDeniedException`, ...);
+  `@RequiresAuthentication` is checked before the flow starts. The handler counts against `max-concurrent-handlers`
+  for the whole stream.
+- **Routing.** Always through the hub, also when this instance owns the type: one instance of the owner (one of every
+  owner's instances on a shared type), chosen like a point query but only among the instances that negotiated
+  `streaming`. A `StreamingQuery` is not a `Query`: it cannot be sent with `send` or gathered, and a unary request
+  that reaches a streaming handler is answered `INVALID_REQUEST`.
+- **Credits.** `initialCredit` is the window: the handler may run that many parts ahead of the collector. Each time
+  the collector consumed half of the window the library grants `initialCredit / 2` more (a `Flow` message), so a
+  collector that keeps up never stalls the handler and a slow one holds it at the window. A handler sending beyond its
+  credit (never this library) ends the stream with `INVALID_REQUEST`.
+- **Options.** `timeout` is the **idle** timeout: the hub ends the stream with `TIMEOUT` when no part arrives within it
+  (reset by every part; a queue wait at the hub counts too), same defaults as `SendOptions.timeout`. `maxResults > 0`
+  ends the stream after that many parts (the hub cancels the handler). `priority` is the forwarded request's. The hub
+  also bounds a stream's whole life (`KRAKEN_HUB_MAX_STREAM_DURATION`, 10 min by default): `CANCELLED`.
+- **Errors.** Before any part, as for a unary query: no owner `NoHandlerException`, a command type
+  `InvalidMessageException`, a hub without `streaming` (a P4a or older hub, or a legacy v1 hub)
+  `UnsupportedByHubException` on collection, before anything is sent; with several hubs the stream goes to one hub that
+  lists the capability, and only when none of the live hubs does is it unsupported. Owners whose live instances all
+  lack `streaming` are `UnsupportedByHubException` too (the hub's message names them). An end with an error fails the
+  flow with a `RemoteHandlerException` whose `code` is the hub's: `HANDLER_ERROR` (the handler's flow failed),
+  `TIMEOUT` (idle), `HANDLER_DISCONNECTED` (the instance left mid-stream: a stream never moves to another instance),
+  `CANCELLED` (max duration), `INVALID_REQUEST`, `RESOURCE_EXHAUSTED` (the instance's queue was full). The parts
+  emitted before it stay emitted. A part that does not decode into `R` fails the flow with `InvalidMessageException`
+  and cancels the stream. The stream to the hub breaking mid-stream is `HubConnectionLostException`.
+- **Cancel.** Cancelling the collector (`take(n)`, a cancelled coroutine) or throwing in it sends `Cancel` to the hub,
+  which cancels the handler's coroutine (its flow sees a `CancellationException`); nothing of the stream follows. The
+  hub cancels the handler the same way at `maxResults`, at the idle timeout, at the max duration and when the
+  collector's instance disconnects; the handler's own hub stream closing cancels its streams too. A hub `Cancel` also
+  stops a unary or gather handler whose answer is no longer wanted (a gather past `maxResults` or its deadline).
+- **Retries.** The configured or per-call `RetryPolicy` applies with the query rules only until the first part: a
+  retried stream is a new request (fresh id; with several hubs, round-robin to another capable one), so no part is
+  ever emitted twice. After the first part nothing is retried: a broken hub stream is `HubConnectionLostException`, an
+  end with an error a `RemoteHandlerException`. The budget covers the attempts up to the first part; each attempt sends
+  what is left of it as its idle timeout.
+- **Compatibility.** Against a P3 or P4a hub `stream` throws `UnsupportedByHubException` while unary queries and
+  gathers keep working. Handlers must run this version: the hub streams only to instances that negotiated `streaming`,
+  so during a rolling upgrade of an owner the old instances are simply never picked (owners with instances but none
+  capable are `UnsupportedByHubException` for the caller).
+
 ## Test helpers (`kraken-messaging-test`)
 
 - `InMemoryBuses(typePrefix, userId)`: implements `EventBus`, `CommandBus` and `QueryBus` in memory for unit tests without
   Docker. Messages still pass through the JSON codec. `register(handlerBean)` adds handlers; `published` lists events.
-  A scatter-gather returns one part from the registered handler (service and instance `in-memory`).
+  A scatter-gather returns one part from the registered handler (service and instance `in-memory`); a streaming query
+  collects the registered streaming handler's flow (honouring `maxResults`).
 - `InProcessHub`: in-JVM stand-in for the hub (`start()`, `channel()`, `dropInstance(...)`, `lastRequestHeaders()`,
   `lastRequest()`, `registrationsFrom(...)`, `lastRegisterFrom(...)`, `acksSentTo(...)`, `echoHeartbeats = false` to
   simulate a hub that stopped answering), for hub-client tests without a container. It speaks protocol v2 (a
@@ -542,15 +624,20 @@ queryBus.scatterGatherFlow(SearchEverything("legs")).collect { part -> render(pa
   `replaceSessions = false` keeps both), and `ackDelay` delays each `RegisterAck` as network latency would. Query modes
   (P4a): shared query types, scatter-gather with parts, end, `max_results` and the deadline as the real hub;
   `scatterGather = false` emulates the P3 hub (no capability, `shared_query_types` ignored), and `inject(instanceId,
-  message)` writes any server message to an instance's stream.
+  message)` writes any server message to an instance's stream. Streaming queries (P4b): one capable target, credits
+  and `Flow`, parts and ends relayed, `max_results`, the idle timeout, `maxStreamDuration`, cancels both ways and the
+  gates as the real hub; `streaming = false` emulates the P4a hub, and `openStreams()`, `creditOf(requestId)`,
+  `flowsFrom(instanceId)` and `cancelsFrom(instanceId)` observe it.
 - `KrakenContainers`: unstarted Testcontainers definitions. `kafka()`, `mongo()` (single-node replica set, needed for
   transactions), `hub()` from image `kraken-hub:dev` or the one named by `KRAKEN_HUB_IMAGE`, `hubBaseline()` from the previous hub release
   `kraken-hub:v1-baseline` or `KRAKEN_HUB_BASELINE_IMAGE` and `hubP0()` from the P0 hub `kraken-hub:p0` or
   `KRAKEN_HUB_P0_IMAGE`, `hubP2()` from `kraken-hub:p2` or `KRAKEN_HUB_P2_IMAGE` (compatibility tests), `hubP3()` from
   `kraken-hub:p3-hub` or `KRAKEN_HUB_P3_IMAGE` with ports 7000 and 7001 (two-hub tests), `hubP4a()` from
-  `kraken-hub:p4a-hub` or `KRAKEN_HUB_P4A_IMAGE` with ports 7000 and 7001 (scatter-gather tests), `hub(env)` for the hub under test with extra `KRAKEN_HUB_*` settings, and
-  `hubImageAvailable()` / `hubBaselineImageAvailable()` / `hubP0ImageAvailable()` / `hubP2ImageAvailable()` /
-  `hubP3ImageAvailable()` / `hubP4aImageAvailable()`.
+  `kraken-hub:p4a-hub` or `KRAKEN_HUB_P4A_IMAGE` with ports 7000 and 7001 (scatter-gather tests), `hubP4b()` from
+  `kraken-hub:p4b-hub` or `KRAKEN_HUB_P4B_IMAGE` with ports 7000 and 7001 (streaming tests), `hub(env)` for the hub
+  under test with extra `KRAKEN_HUB_*` settings, and `hubImageAvailable()` / `hubBaselineImageAvailable()` /
+  `hubP0ImageAvailable()` / `hubP2ImageAvailable()` / `hubP3ImageAvailable()` / `hubP4aImageAvailable()` /
+  `hubP4bImageAvailable()`.
 - `KrakenTestKafka(bootstrap, typePrefix, topic).awaitEvent<T>()`: reads an event back from the topic.
 
 ```kotlin
@@ -578,8 +665,8 @@ Docker Compose from local builds together with the real `kraken-hub` image, Kafk
 - No dead-letter topic: poison records are logged and skipped.
 - No leader election for the outbox publisher; with several instances delivery is at-least-once and ordering is per
   publishing instance.
-- Streaming and subscription queries are not supported yet (roadmap P4b, P4c); a scatter-gather cannot be cancelled
-  once sent (targets past `maxResults` still run).
+- Subscription queries are not supported yet (roadmap P4c). A stream pins one handler instance for its whole life: a
+  restart of that instance fails the stream (`HANDLER_DISCONNECTED`), and the library never resumes it.
 - Library metrics are not exported yet; OpenTelemetry comes from the application.
 - Configuration metadata is hand-maintained in `META-INF/spring-configuration-metadata.json`.
 - `TraceHeaders` is only active with Micrometer Tracing on the classpath.
