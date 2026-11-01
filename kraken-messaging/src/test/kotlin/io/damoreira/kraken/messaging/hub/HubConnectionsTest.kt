@@ -281,8 +281,46 @@ class HubConnectionsTest {
         val conns = client(listOf("no-such-hub-" + UUID.randomUUID()), "a", settings = fast.copy(requestTimeout = Duration.ofMillis(300)))
         conns.start()
         val started = System.nanoTime()
-        assertFailsWith<HubUnavailableException> { withTimeout(5_000) { conns.send(request()) } }
+        // No timeout_ms of its own: request-timeout bounds the wait.
+        assertFailsWith<HubUnavailableException> { withTimeout(5_000) { conns.send(request(timeoutMs = 0)) } }
         assertTrue(Duration.ofNanos(System.nanoTime() - started) < Duration.ofSeconds(2))
+    }
+
+    @Test fun `waiting for a live hub ends at the call's own timeout, not the default request timeout`() = runBlocking {
+        val conns = client(listOf("no-such-hub-" + UUID.randomUUID()), "a") // request-timeout 2 s
+        conns.start()
+        val started = System.nanoTime()
+        assertFailsWith<HubUnavailableException> { withTimeout(5_000) { conns.send(request(timeoutMs = 500)) } }
+        val took = Duration.ofNanos(System.nanoTime() - started).toMillis()
+        assertTrue(took in 400..1_000, "failed after $took ms")
+    }
+
+    @Test fun `a request moved to another hub carries what is left of its timeout`() = runBlocking {
+        val a = hub()
+        val b = hub()
+        handler(listOf(a.name, b.name))
+        val sender = client(listOf(a.name, b.name), "a")
+        sender.start()
+        assertTrue(sender.awaitRegistered(wait))
+        eventually(5_000) { sender.liveHubIds().size == 2 }
+
+        val dropped = AtomicBoolean()
+        sender.beforeWrite = { conn ->
+            if (conn.hubId == a.hubId && dropped.compareAndSet(false, true)) {
+                delay(400)
+                a.dropInstance("a")
+                withTimeout(5_000) { conn.connected.first { !it } }
+            }
+        }
+        var resent: Request? = null
+        repeat(4) { // round-robin: hub A is picked within two calls
+            if (resent == null) {
+                val answer = sender.send(request(timeoutMs = 1_000))
+                assertTrue(answer.hasReply() && !answer.reply.hasError(), answer.toString())
+                if (dropped.get()) resent = b.lastRequest()
+            }
+        }
+        assertTrue(resent!!.timeoutMs in 1..650, "resent with timeout_ms ${resent!!.timeoutMs}")
     }
 
     // --- failover ---

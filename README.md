@@ -31,6 +31,7 @@ Repo conventions: `../kraken/docs/04-repositories.md`.
 - [Modules](#modules)
 - [Requirements](#requirements)
 - [Build, test, publish](#build-test-publish)
+- [Upgrading](#upgrading)
 - [Using the starter](#using-the-starter)
 - [Semantics worth knowing](#semantics-worth-knowing)
 - [Multiple hubs](#multiple-hubs)
@@ -82,6 +83,19 @@ Locally, set `KRAKEN_GITLAB_MAVEN_URL` and `KRAKEN_GITLAB_TOKEN` and run `./grad
 
 The published POM and Gradle module metadata carry resolved versions for every dependency (Gradle `versionMapping`), and the
 POM also imports the Spring Boot BOM, so consumers do not need to manage them. Builder call.
+
+## Upgrading
+
+**To the multi-hub client (P3).** The version stays `0.1.0-SNAPSHOT` (nothing has been published beyond local
+`mavenLocal()` installs yet), so re-run `./gradlew publishToMavenLocal` here and rebuild the services. Two beans changed
+type:
+
+- The hub transport bean is `HubConnections` (one connection per hub), no longer a single `HubConnection`. Replace
+  `context.getBean(HubConnection::class.java)` with `context.getBean(HubConnections::class.java)`; `awaitRegistered`,
+  `register`, `connected` and `instanceId` keep their meaning, and `connections()` lists the per-hub `HubConnection`s.
+- `krakenHubChannelFactory` is a `HubChannelFactory` (`target -> ManagedChannel`, called with each hub's `host:port`)
+  instead of `() -> ManagedChannel`. An override bean of that name must take the target, for example
+  `HubChannelFactory { _ -> InProcessChannelBuilder.forName(hub.name).build() }` for one in-process hub.
 
 ## Using the starter
 
@@ -387,10 +401,18 @@ kraken.messaging.hub.address: static://hub-1:7000,static://hub-2:7000   # or: dn
   reconnect). One target behaves exactly like the single-hub client.
 - **Targets.** A comma-separated list (blank entries and repeats dropped, order kept), or a single `dns:///name:port`
   (port required, not combinable with other entries) resolved at start and every 30 s: a new address gets a connection,
-  a vanished one first announces an empty registration, then is closed once idle (at most 30 s later). A failed or empty
-  resolution keeps the current connections.
+  a vanished one first announces an empty registration, then is closed once idle (at most 30 s later); an address that
+  comes back before its connection is closed revives that connection instead of dialing a second one. Only one address
+  family is used (rule shared with the Rust library): the IPv4 addresses when the answer has any, else the IPv6 ones,
+  repeats dropped; a dual-stack name lists every hub under both families, and two streams to one hub with the same
+  instance id would replace each other. A failed or empty resolution keeps the current connections.
 - **Hub identity.** A hub is its `RegisterAck.hub_id`; a legacy (v1) hub, which sends none, is its target string. When
-  two targets answer the same id, the one that acknowledged first is kept and the other closed (logged once).
+  two targets answer the same id, the one that acknowledged first owns it for as long as it is kept, live or
+  reconnecting, and the other is closed and parked (logged once). The hub keeps one session per instance id, so the
+  second target's `Register` ends the first one's stream before its own ack arrives; the owner reconnects and the
+  duplicate never takes over, so the two cannot evict each other back and forth. A parked target is retried only once
+  its owner is gone (a DNS address no longer resolved, or a target now answering another id). Each hub replica needs
+  its own `KRAKEN_HUB_ID`: replicas sharing one id are taken for one hub, and all but one are parked.
 - **Live hubs** are the kept connections whose stream completed its handshake.
 - **Routing.** A request without a routing key goes round-robin over the live hubs; a hub that is reconnecting is
   skipped. A request with a routing key (`SendOptions.routingKey`) goes to the live hub with the highest rendezvous score
@@ -403,14 +425,22 @@ kraken.messaging.hub.address: static://hub-1:7000,static://hub-2:7000   # or: dn
   k *= 0xff51afd7ed558ccd; k ^= k >>> 33; k *= 0xc4ceb9fe1a85ec53; k ^= k >>> 33`). Vectors: `score("hub-a",
   "order-1") = 0xd8d5618ff3a93f55`, `score("hub-b", "key-0") = 0xbd443f5acaf98254` (`RendezvousTest`).
 - **Failover.** A request its hub could not take before it was written (the stream had just closed, or broke while the
-  request was still queued on the client) is sent to another live hub, unchanged; with no hub left the call waits for
-  one, up to `hub.request-timeout` (5 s when unset), then fails with `HubUnavailableException`. A request already
-  written fails with `HubConnectionLostException` (or the hub's `HandlerDisconnectedException`), and the retry policy
+  request was still queued on the client) is sent to another live hub; with no hub left the call waits for one. The
+  call has one deadline: its own timeout (`SendOptions.timeout`, else `hub.request-timeout`; 5 s when neither is set);
+  waiting ends there with `HubUnavailableException`, and a request sent again carries what is left of its
+  `timeout_ms`, so failover never stretches a call beyond its timeout. A request already written fails with `HubConnectionLostException` (or the hub's `HandlerDisconnectedException`), and the retry policy
   applies as before. With no live hub at all: `HubUnavailableException`, as with one hub.
 - **Permits.** A stream announces `ceil(hub.max-concurrent-handlers / N)` initial permits, where N = 1 (the hub being
   registered on) + the other hubs that are live or still on their first connect attempt (a hub down after a failed
-  attempt is not counted); permits are never revoked when N changes. Locally at most `hub.max-concurrent-handlers` handlers run in total, whichever hub sent the
-  requests. Permits are paid back per stream as before.
+  attempt is not counted). When that count shrinks from N_old to N_new (a hub went down, was parked or drained), every
+  live hub gets a top-up `Permits(ceil(max / N_new) - ceil(max / N_old))`, so with two hubs the survivor of an outage
+  serves at full capacity; a hub that joins or returns gets `ceil(max / N_new)` initial permits; nothing is ever
+  revoked (rule shared with the Rust library). Locally at most `hub.max-concurrent-handlers` handlers run in total,
+  whichever hub sent the requests. Permits are paid back per stream as before.
+- **Readiness.** `HubConnections.awaitRegistered(timeout)` is true only once **every** kept hub confirmed the latest
+  registration; while one configured hub is down it returns false at the timeout, although the instance is already
+  served by the others (`connected` / `liveHubIds()` tell that). The Rust library's equivalent may differ; see its
+  README.
 - **Status.** Every `hub.status-interval`, and whenever the live set changes, each live hub whose ack lists the
   `instance-status` capability gets an `InstanceStatus`: `connected_hub_ids` (the ids of the live protocol v2 hubs) and
   `handlers_in_flight` (over all hubs). A hub without the capability (P2 or older, legacy) never gets one. The hub shows
@@ -430,7 +460,9 @@ kraken.messaging.hub.address: static://hub-1:7000,static://hub-2:7000   # or: dn
   `permitsGrantedBy(...)`, `permitMessagesFrom(...)`, `permitsAvailable(...)`, `queuedFor(...)`, `forwardedOrder()`;
   `flowControl = false` emulates the P0 hub (v2 without flow control). Multi-hub: `instanceStatus = false` emulates the
   P2 hub (no `instance-status`), `lastStatusFrom(...)`, `statusMessagesFrom(...)`, `requestsFrom(...)`, `sessionsOf(...)`,
-  and `pauseReading = true` stops reading every stream.
+  and `pauseReading = true` stops reading every stream. Like the real hub it keeps one session per instance id: a new
+  stream registering an id replaces the older one (`sessionsReplacedOf(...)`, `streamsOpenedBy(...)`;
+  `replaceSessions = false` keeps both), and `ackDelay` delays each `RegisterAck` as network latency would.
 - `KrakenContainers`: unstarted Testcontainers definitions. `kafka()`, `mongo()` (single-node replica set, needed for
   transactions), `hub()` from image `kraken-hub:dev` or the one named by `KRAKEN_HUB_IMAGE`, `hubBaseline()` from the previous hub release
   `kraken-hub:v1-baseline` or `KRAKEN_HUB_BASELINE_IMAGE` and `hubP0()` from the P0 hub `kraken-hub:p0` or

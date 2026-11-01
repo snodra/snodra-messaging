@@ -45,9 +45,11 @@ import java.util.concurrent.atomic.AtomicInteger
  * - **Routing**: a request with a routing key goes to the live hub chosen by [Rendezvous] over (key, hub id); any other
  *   round-robin over the live hubs. Replies to incoming requests go on the stream they arrived on ([HubConnection]).
  * - **Failover**: a request that its hub could not take before writing it (the stream closed, or broke with the
- *   request still queued) goes to another live hub; when none is left the call waits for the set of live hubs to change,
- *   up to `requestTimeout` (default 5 s) in total, then fails with [HubUnavailableException]. A request already written
- *   fails with `HubConnectionLostException` as before.
+ *   request still queued) goes to another live hub; when none is left the call waits for the set of live hubs to change.
+ *   The whole call has one deadline: the request's `timeout_ms` when set (the caller's `SendOptions.timeout` or
+ *   `request-timeout`), else `requestTimeout`, else 5 s. Waiting ends there with [HubUnavailableException], and a request
+ *   sent again carries what is left of its `timeout_ms`. A request already written fails with
+ *   `HubConnectionLostException` as before.
  * - **Permits**: a stream announces `ceil(maxConcurrentHandlers / N)` initial permits, N = 1 (itself) + the other kept
  *   hubs that are live or still on their first connect attempt. When N (the kept hubs that are live or on their first
  *   attempt) shrinks from N_old to N_new >= 1, every live hub gets a top-up `Permits(ceil(max / N_new) - ceil(max /
@@ -146,8 +148,10 @@ class HubConnections(
     }
 
     /**
-     * True once every kept hub connection confirmed the most recent [register] call, false if [timeout] passes first
-     * (for example while a configured hub is down).
+     * True once **every** kept hub connection confirmed the most recent [register] call, false if [timeout] passes first.
+     * One hub being enough to serve is not enough here: while a configured hub is down this returns false at [timeout]
+     * although the instance is already reachable through the others ([connected], [liveHubIds] tell that). Parked
+     * duplicates and drained DNS targets are not kept, so they are not waited for.
      *
      * @throws HubRegistrationRejectedException if a hub rejects the registration while waiting
      */
@@ -178,15 +182,17 @@ class HubConnections(
      * `Reply` or `Error`, with [HubConnection.send]'s exceptions.
      */
     override suspend fun send(request: Request): ServerMessage {
-        val wait = settings.chosenRequestTimeout ?: HubProtocol.DEFAULT_REQUEST_TIMEOUT
+        // One deadline for the whole call: the caller's timeout (timeout_ms), else request-timeout, else 5 s.
+        val wait = if (request.timeoutMs > 0) Duration.ofMillis(request.timeoutMs.toLong())
+        else settings.chosenRequestTimeout ?: HubProtocol.DEFAULT_REQUEST_TIMEOUT
         val deadline = System.nanoTime() + wait.toNanos()
         val tried = HashSet<HubConnection>()
         while (true) {
             val hubs = live.value
             val connection = choose(request, hubs.filter { it !in tried })
-            if (connection == null) {
-                val leftMs = (deadline - System.nanoTime()) / 1_000_000
-                val changed = leftMs > 0 && withTimeoutOrNull(leftMs) { live.first { it != hubs } } != null
+            val leftMs = (deadline - System.nanoTime()) / 1_000_000
+            if (connection == null || leftMs <= 0) {
+                val changed = connection == null && leftMs > 0 && withTimeoutOrNull(leftMs) { live.first { it != hubs } } != null
                 if (!changed) {
                     throw HubUnavailableException(
                         if (tried.isEmpty()) "no hub connected within $wait" else "no hub took the request within $wait",
@@ -196,8 +202,15 @@ class HubConnections(
                 continue
             }
             beforeWrite?.invoke(connection)
+            // A caller's timeout is what is left of it once a wait or a hub that did not take the request used some.
+            val outgoing = if (request.timeoutMs > 0 && (tried.isNotEmpty() || leftMs < request.timeoutMs)) {
+                val remaining = ((deadline - System.nanoTime()) / 1_000_000).coerceIn(1, request.timeoutMs.toLong())
+                request.toBuilder().setTimeoutMs(remaining.toInt()).build()
+            } else {
+                request
+            }
             try {
-                return connection.send(request, awaitStream = false)
+                return connection.send(outgoing, awaitStream = false)
             } catch (e: HubUnavailableException) {
                 log.debug("Request {} not taken by hub {}: {}; trying another hub", request.id, connection.target, e.message)
                 tried += connection
