@@ -41,7 +41,9 @@ import kotlin.reflect.KClass
 /**
  * [CommandBus] and [QueryBus] over the hub. A message whose handler lives in this instance is invoked directly (same
  * codec round trip and error mapping, no network); anything else becomes a hub `Request` carrying the caller's bearer
- * token (when [forwardJwt]), a correlation id and the trace context.
+ * token (when [forwardJwt]), a correlation id and the trace context. A query on a type this service registered as
+ * **shared** (`@QueryHandler(shared = true)`) is the exception: it always goes through the hub, which round-robins it
+ * over every owner's instances, this one included (ADR 0017).
  *
  * Per call [SendOptions] choose the priority (default [priorities] per type, else 0), the timeout (default
  * [requestTimeout]) and the retry policy (default [retry], null = no retry). With retry, failures that
@@ -161,7 +163,12 @@ class HubBus(
 
     private suspend fun dispatch(message: Any, kind: RequestKind, options: SendOptions): Any {
         val type = typeResolver.typeNameOf(message::class)
-        val local = if (kind == RequestKind.COMMAND) registry.commandHandler(type) else registry.queryHandler(type)
+        // A shared query type is never answered locally: the hub round-robins a point query over every owner's
+        // instances (ADR 0017), this one included, so an owner is not favoured over the others (as in the Rust library).
+        val local = when (kind) {
+            RequestKind.COMMAND -> registry.commandHandler(type)
+            else -> registry.queryHandler(type)?.takeUnless { it.shared }
+        }
         if (local != null) {
             val correlationId = CorrelationContext.resolve(currentCoroutineContext())
             val token = CallerContext.currentBearerToken()

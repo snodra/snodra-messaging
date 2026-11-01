@@ -23,6 +23,7 @@ import io.damoreira.kraken.messaging.fixtures.Count
 import io.damoreira.kraken.messaging.fixtures.GetCount
 import io.damoreira.kraken.messaging.handler.HandlerInvoker
 import io.damoreira.kraken.messaging.handler.HandlerRegistry
+import io.damoreira.kraken.messaging.handler.QueryHandler
 import io.damoreira.kraken.messaging.test.InProcessHub
 import io.damoreira.kraken.messaging.tracing.TraceHeaders
 import io.grpc.inprocess.InProcessChannelBuilder
@@ -48,6 +49,15 @@ import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+
+/** This service's own `test.GetCount` handler, shared ([shared]) or exclusive; answers [value]. */
+class OwnCountHandlers(private val value: Int) {
+    @QueryHandler(shared = true) fun handle(query: GetCount): Count = Count(value)
+}
+
+class OwnExclusiveCountHandlers(private val value: Int) {
+    @QueryHandler fun handle(query: GetCount): Count = Count(value)
+}
 
 /** Scatter-gather queries and shared query types (P4a, ADR 0017) over in-process hubs. */
 class ScatterGatherTest {
@@ -291,6 +301,33 @@ class ScatterGatherTest {
         val bus = caller()
         repeat(6) { assertEquals(Count(1), bus.send(GetCount("k"))) }
         assertEquals(mapOf("x-1" to 2, "x-2" to 2, "y-1" to 2), served.toMap())
+    }
+
+    @Test fun `an owner's own point query on a shared type goes through the hub, not to its local handler`() = runBlocking {
+        val served = ConcurrentHashMap<String, Int>()
+        registry.register(OwnCountHandlers(99)) // this service owns test.GetCount as a shared type
+        val self = owner("svc-x", "x-1") { req -> served.merge("x-1", 1, Int::plus); count(req.id, 1) }
+        owner("svc-y", "y-1") { req -> served.merge("y-1", 1, Int::plus); count(req.id, 1) }
+        val bus = bus(self)
+
+        repeat(4) { assertEquals(Count(1), bus.send(GetCount("k"))) } // never Count(99): the hub round-robins over both owners
+        assertEquals(mapOf("x-1" to 2, "y-1" to 2), served.toMap())
+
+        // A gather from the owner still asks every instance of every owner over the hub.
+        val result = bus.scatterGather(GetCount("k"))
+        assertEquals(setOf("x-1", "y-1"), result.parts.map { it.instance }.toSet())
+        assertEquals(mapOf("x-1" to 3, "y-1" to 3), served.toMap())
+    }
+
+    @Test fun `an owner's own point query on an exclusive type is answered locally`() = runBlocking {
+        val served = ConcurrentHashMap<String, Int>()
+        registry.register(OwnExclusiveCountHandlers(99))
+        val self = owner("svc-x", "x-1", shared = false) { req -> served.merge("x-1", 1, Int::plus); count(req.id, 1) }
+        val bus = bus(self)
+
+        repeat(2) { assertEquals(Count(99), bus.send(GetCount("k"))) }
+        assertTrue(served.isEmpty(), served.toString())
+        assertEquals(0, hub.requestsFrom("x-1"))
     }
 
     // --- transport ---

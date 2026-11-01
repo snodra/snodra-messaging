@@ -319,7 +319,9 @@ val quick = queryBus.sendBlocking(GetWorkout(id), SendOptions(retry = RetryPolic
   runtime. Generic responses such as `List<X>` are erased, so wrap them in a response class. Builder call.
 - **Local short-circuit.** A command or query whose handler lives in the same service is invoked locally and does not go
   through the hub. The handler runs on the caller's thread and coroutine, so it joins the caller's thread-bound
-  transaction (a failure in it rolls back the caller's writes too) and sees the caller's security context.
+  transaction (a failure in it rolls back the caller's writes too) and sees the caller's security context. A query on a
+  type this service declares `@QueryHandler(shared = true)` is the exception: it always goes through the hub (see
+  Scatter-gather below).
 - **Incoming hub requests** run on virtual threads, at most `hub.max-concurrent-handlers` at once, never on the threads
   that read the hub stream; a handler may block (for example on a nested `sendBlocking`).
 - **Correlation id.** Every message carries a `correlationId`. Messages sent while handling a hub request or a Kafka
@@ -465,7 +467,8 @@ kraken.messaging.hub.address: static://hub-1:7000,static://hub-2:7000   # or: dn
 
 A query type can be **shared** by several services (ADR 0017 in the umbrella repo): any number of services may own it.
 A point query (`queryBus.send`) on a shared type goes to one instance of any owner (the hub round-robins over all of
-them); a **scatter-gather** asks every live instance of every owner and returns what they answered.
+them, also when the sender is itself an owner: a shared type is never short-circuited to the local handler); a
+**scatter-gather** asks every live instance of every owner and returns what they answered.
 
 ```kotlin
 @Component
