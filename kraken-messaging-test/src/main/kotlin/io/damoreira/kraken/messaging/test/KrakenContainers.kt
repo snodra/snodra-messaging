@@ -32,6 +32,9 @@ object KrakenContainers {
     /** The P4a hub (scatter-gather, shared query types), for the scatter-gather tests. */
     private val hubP4aImage: String get() = System.getenv("KRAKEN_HUB_P4A_IMAGE") ?: "kraken-hub:p4a-hub"
 
+    /** The P4b hub (streaming queries), for the streaming tests. */
+    private val hubP4bImage: String get() = System.getenv("KRAKEN_HUB_P4B_IMAGE") ?: "kraken-hub:p4b-hub"
+
     fun kafka(): KafkaContainer = KafkaContainer(DockerImageName.parse(KAFKA_IMAGE)).withReuse(true)
 
     fun mongo(): MongoDBContainer = MongoDBContainer(DockerImageName.parse(MONGO_IMAGE)).withReplicaSet().withReuse(true)
@@ -54,6 +57,9 @@ object KrakenContainers {
     /** The P4a hub image: `KRAKEN_HUB_P4A_IMAGE`, default `kraken-hub:p4a-hub`; gRPC 7000 and HTTP 7001 exposed. */
     fun hubP4a(): GenericContainer<*> = hub(hubP4aImage).withExposedPorts(7000, 7001)
 
+    /** The P4b hub image: `KRAKEN_HUB_P4B_IMAGE`, default `kraken-hub:p4b-hub`; gRPC 7000 and HTTP 7001 exposed. */
+    fun hubP4b(): GenericContainer<*> = hub(hubP4bImage).withExposedPorts(7000, 7001)
+
     /**
      * The hub under test with extra `KRAKEN_HUB_*` settings (for example `KRAKEN_HUB_QUEUE_CAPACITY_PER_INSTANCE` or
      * `KRAKEN_HUB_TIMEOUT_OVERRIDES`); OTLP export is disabled.
@@ -69,6 +75,8 @@ object KrakenContainers {
     fun hubP3ImageAvailable(): Boolean = imageAvailable(hubP3Image)
 
     fun hubP4aImageAvailable(): Boolean = imageAvailable(hubP4aImage)
+
+    fun hubP4bImageAvailable(): Boolean = imageAvailable(hubP4bImage)
 
     fun hubBaselineImageAvailable(): Boolean = imageAvailable(hubBaselineImage)
 

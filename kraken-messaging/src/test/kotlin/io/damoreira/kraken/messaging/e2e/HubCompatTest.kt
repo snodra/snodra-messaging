@@ -19,6 +19,7 @@ import io.damoreira.kraken.messaging.SendOptions
 import io.damoreira.kraken.messaging.codec.JsonCodec
 import io.damoreira.kraken.messaging.codec.MessageTypeResolver
 import io.damoreira.kraken.messaging.fixtures.Count
+import io.damoreira.kraken.messaging.fixtures.ExportRows
 import io.damoreira.kraken.messaging.fixtures.GetCount
 import io.damoreira.kraken.messaging.fixtures.Ping
 import io.damoreira.kraken.messaging.UnsupportedByHubException
@@ -48,6 +49,7 @@ import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.jupiter.api.AfterEach
@@ -351,6 +353,28 @@ class HubCompatTest {
         assertTrue(sender.connected.value) // the refusal is local: the stream is untouched
     }
 
+    // --- the P4a hub: no streaming (P4b clients against it) ---
+
+    @Test fun `P4a hub - streaming is UnsupportedByHub without sending anything, unary queries and gathers still work`() = runBlocking {
+        val hub = start(p4aHub())
+        val owner = connection(hub, "b", "svc-b") { req -> payloadReply(req.id, "{\"value\":7}") }
+        owner.register(emptySet(), setOf("test.ExportRows"), setOf("test.GetCount"))
+        owner.start()
+        val sender = connection(hub, "a", "svc-a")
+        sender.start()
+        assertTrue(owner.awaitRegistered(wait) && sender.awaitRegistered(wait))
+        val ack = assertIs<HubHandshake.V2>(sender.handshake.value).ack
+        assertEquals(listOf("flow-control", "instance-status", "scatter-gather"), ack.capabilitiesList)
+        assertEquals(false, sender.supportsStreaming)
+
+        val bus = bus(sender)
+        val e = assertFailsWith<UnsupportedByHubException> { bus.stream(ExportRows(3)).toList() }
+        assertEquals("streaming", e.feature)
+        assertEquals(Count(7), bus.send(GetCount("k")))
+        assertEquals(listOf(Count(7)), bus.scatterGather(GetCount("k")).results)
+        assertTrue(sender.connected.value) // the refusal is local: the stream is untouched
+    }
+
     // --- the previous hub release (protocol v1): legacy mode ---
 
     @Test fun `baseline hub - one target through HubConnections runs in legacy mode`() = runBlocking {
@@ -455,6 +479,11 @@ class HubCompatTest {
     private fun p3Hub(): GenericContainer<*> {
         Assumptions.assumeTrue(KrakenContainers.hubP3ImageAvailable(), "P3 hub image not available")
         return KrakenContainers.hubP3().withEnv("KRAKEN_HUB_OTLP_ENDPOINT", "")
+    }
+
+    private fun p4aHub(): GenericContainer<*> {
+        Assumptions.assumeTrue(KrakenContainers.hubP4aImageAvailable(), "P4a hub image not available")
+        return KrakenContainers.hubP4a().withEnv("KRAKEN_HUB_OTLP_ENDPOINT", "")
     }
 
     private fun baselineHub(): GenericContainer<*> {
