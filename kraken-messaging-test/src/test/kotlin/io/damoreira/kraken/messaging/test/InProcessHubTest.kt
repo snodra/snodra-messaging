@@ -6,6 +6,7 @@ import io.damoreira.kraken.hub.v1.ErrorCode
 import io.damoreira.kraken.hub.v1.HubGrpcKt
 import io.damoreira.kraken.hub.v1.Register
 import io.damoreira.kraken.hub.v1.Reply
+import io.damoreira.kraken.hub.v1.ReplyPart
 import io.damoreira.kraken.hub.v1.Request
 import io.damoreira.kraken.hub.v1.RequestKind
 import io.damoreira.kraken.hub.v1.RequestMode
@@ -340,8 +341,13 @@ class InProcessHubTest {
         val targets = listOf(x1, x2, y1).map { it.next().request }
         assertEquals(listOf("g1#0", "g1#1", "g1#2"), targets.map { it.id }) // target order: service, then instance
         assertTrue(targets.all { it.mode == RequestMode.UNARY })
+        // Each reply is read by the sender before the next one is sent: the three answers travel on three streams, so
+        // the hub (like the real one) relays them in whichever order it handles them, not in the order sent here.
+        val parts = mutableListOf<ReplyPart>()
         y1.reply("g1#2", "{\"by\":\"y-1\"}")
+        parts += sender.next().part
         x1.reply("g1#0", "{\"by\":\"x-1\"}")
+        parts += sender.next().part
         x2.send(
             ClientMessage.newBuilder().setReply(
                 Reply.newBuilder().setRequestId("g1#1").setError(
@@ -349,7 +355,7 @@ class InProcessHubTest {
                 ),
             ).build(),
         )
-        val parts = (0 until 3).map { sender.next().part }
+        parts += sender.next().part
         assertEquals(listOf("y-1", "x-1", "x-2"), parts.map { it.responderInstance })
         assertEquals(listOf("svc-y", "svc-x", "svc-x"), parts.map { it.responderService })
         assertEquals(listOf(0L, 1L, 2L), parts.map { it.seq })
