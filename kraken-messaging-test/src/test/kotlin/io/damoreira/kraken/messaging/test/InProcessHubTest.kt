@@ -691,6 +691,295 @@ class InProcessHubTest {
         plain.nothingWithin(100)
     }
 
+    // --- subscription queries (P4c) ---
+
+    private fun subscribe(id: String, type: String, timeoutMs: Int = 5_000, credit: Int = 0, maxResults: Int = 0) = ClientMessage.newBuilder().setRequest(
+        Request.newBuilder().setId(id).setKind(RequestKind.QUERY).setType(type).setMode(RequestMode.SUBSCRIPTION)
+            .setTimeoutMs(timeoutMs).setInitialCredit(credit).setMaxResults(maxResults).setPayload(ByteString.copyFromUtf8("{\"account\":7}")),
+    ).build()
+
+    /** The requests [this] gets until nothing arrives for 150 ms, by id. */
+    private suspend fun RawClient.requests(): Map<String, Request> {
+        val out = mutableMapOf<String, Request>()
+        while (true) {
+            val m = withTimeoutOrNull(150) { inbox.receive() } ?: break
+            assertTrue(m.hasRequest(), m.toString())
+            out[m.request.id] = m.request
+        }
+        return out
+    }
+
+    /** Two handlers of the shared `acct.Watch` (svc-a / a-1 and svc-b / b-1, both with `subscription`) and a sender with it. */
+    private suspend fun subscriptionTrio(): Triple<RawClient, RawClient, RawClient> {
+        val a = RawClient().also { it.registerV2("svc-a", "a-1", shared = listOf("acct.Watch"), capabilities = listOf("subscription")) }.apply { next() }
+        val b = RawClient().also { it.registerV2("svc-b", "b-1", shared = listOf("acct.Watch"), capabilities = listOf("subscription")) }.apply { next() }
+        withTimeout(TIMEOUT_MS) { while (hub.connectedInstances().size < 2) kotlinx.coroutines.delay(10) }
+        val sender = RawClient().also { it.registerV2("svc-web", "s-1", capabilities = listOf("subscription", "streaming")) }
+        assertEquals(listOf("streaming", "subscription"), sender.next().registerAck.capabilitiesList)
+        return Triple(a, b, sender)
+    }
+
+    /** Opens subscription [id] on `acct.Watch`: both handlers get their update target, one of them the initial request. */
+    private suspend fun open(sender: RawClient, a: RawClient, b: RawClient, id: String, credit: Int = 0, maxResults: Int = 0, timeoutMs: Int = 5_000): Opened {
+        sender.send(subscribe(id, "acct.Watch", timeoutMs, credit, maxResults))
+        val ra = a.requests()
+        val rb = b.requests()
+        val initialOnA = "$id#0" in ra
+        assertTrue(initialOnA != ("$id#0" in rb), "exactly one initial request: a $ra, b $rb")
+        fun target(rs: Map<String, Request>): String {
+            val t = rs.values.single { it.mode == RequestMode.SUBSCRIPTION }
+            assertEquals(0 to 0, t.initialCredit to t.maxResults)
+            assertEquals("{\"account\":7}", t.payload.toStringUtf8())
+            return t.id
+        }
+        val initial = (if (initialOnA) ra else rb).getValue("$id#0")
+        assertEquals(RequestMode.UNARY, initial.mode)
+        assertEquals(timeoutMs, initial.timeoutMs)
+        return Opened(if (initialOnA) a else b, target(ra), target(rb))
+    }
+
+    private class Opened(val initial: RawClient, val ta: String, val tb: String)
+
+    @Test
+    fun `a subscription reaches every capable target, one answers the initial, updates are renumbered, the last clean end ends it`() = runBlocking {
+        val (a, b, sender) = subscriptionTrio()
+        val opened = open(sender, a, b, "sub1")
+        assertEquals("sub1#1" to "sub1#2", opened.ta to opened.tb)
+        assertEquals(1, hub.openSubscriptions())
+        assertEquals(1, hub.subscriptionTargetsOf("a-1"))
+        assertEquals(64L, hub.subscriptionCreditOf("sub1")) // credit 0 reads as 64
+        opened.initial.reply("sub1#0", "{\"balance\":10}")
+        val p1 = sender.next().part
+        assertEquals(listOf("sub1", 1L, "{\"balance\":10}"), listOf(p1.requestId, p1.seq, p1.payload.toStringUtf8()))
+        assertEquals(if (opened.initial === a) "svc-a" else "svc-b", p1.responderService)
+        assertEquals(63L, hub.subscriptionCreditOf("sub1"))
+        a.send(part(opened.ta, 1, "{\"balance\":11}"))
+        val p2 = sender.next().part
+        assertEquals(listOf(2L, "svc-a", "a-1"), listOf(p2.seq, p2.responderService, p2.responderInstance))
+        b.send(part(opened.tb, 1, "{\"balance\":12}"))
+        assertEquals(3L to "svc-b", sender.next().part.let { it.seq to it.responderService })
+        a.send(end(opened.ta))
+        sender.nothingWithin(150) // b still serves
+        assertEquals(1, hub.openSubscriptions())
+        b.send(end(opened.tb))
+        val ended = sender.next().end
+        assertEquals(listOf("sub1", 3, 0, 0), listOf(ended.requestId, ended.parts, ended.failed, ended.timedOut))
+        assertEquals(false, ended.hasError())
+        assertEquals(0, hub.openSubscriptions())
+        a.send(part(opened.ta, 2, "{}")) // late: ignored
+        sender.nothingWithin(100)
+        a.nothingWithin(50); b.nothingWithin(50) // nobody was cancelled
+    }
+
+    @Test
+    fun `updates before the initial wait behind it, a Flow drains the buffer, a Cancel reaches every target`() = runBlocking {
+        val (a, b, sender) = subscriptionTrio()
+        val opened = open(sender, a, b, "sub1", credit = 1)
+        a.send(part(opened.ta, 1, "{\"u\":1}"))
+        b.send(part(opened.tb, 1, "{\"u\":2}"))
+        sender.nothingWithin(150) // nothing before the initial
+        assertEquals(2, hub.bufferedUpdatesOf("sub1"))
+        opened.initial.reply("sub1#0", "{\"initial\":true}")
+        assertEquals(1L, sender.next().part.seq)
+        sender.nothingWithin(100) // no credit left
+        sender.send(flow("sub1", 1))
+        val p2 = sender.next().part
+        assertEquals(2L to "{\"u\":1}", p2.seq to p2.payload.toStringUtf8())
+        sender.send(flow("sub1", 10))
+        assertEquals(3L to "{\"u\":2}", sender.next().part.let { it.seq to it.payload.toStringUtf8() })
+        assertEquals(9L, hub.subscriptionCreditOf("sub1"))
+        a.nothingWithin(100); b.nothingWithin(50) // no Flow reaches a target
+        sender.send(cancel("sub1", "user left"))
+        assertEquals(opened.ta to "user left", a.next().cancel.let { it.requestId to it.reason })
+        assertEquals(opened.tb to "user left", b.next().cancel.let { it.requestId to it.reason })
+        sender.nothingWithin(150) // nothing more to the sender
+        assertEquals(0, hub.openSubscriptions())
+        assertEquals(listOf("sub1" to "user left"), hub.cancelsFrom("s-1").map { it.requestId to it.reason })
+    }
+
+    @Test
+    fun `the buffer limit and max_results end the subscription and cancel the targets`() = runBlocking {
+        hub.subscriptionBuffer = 2
+        val (a, b, sender) = subscriptionTrio()
+        val opened = open(sender, a, b, "sub1", credit = 1)
+        opened.initial.reply("sub1#0", "{}")
+        assertEquals(1L, sender.next().part.seq)
+        repeat(3) { a.send(part(opened.ta, it + 1L, "{}")) }
+        val overflow = sender.next().end
+        assertEquals(ErrorCode.RESOURCE_EXHAUSTED to 1, overflow.error.code to overflow.parts)
+        assertEquals("subscriber buffer (2) exceeded", overflow.error.message)
+        assertEquals(opened.ta to "subscriber buffer exceeded", a.next().cancel.let { it.requestId to it.reason })
+        assertEquals(opened.tb, b.next().cancel.requestId)
+        assertEquals(0, hub.openSubscriptions())
+
+        val second = open(sender, a, b, "sub2", maxResults = 1)
+        second.initial.reply("sub2#0", "{}")
+        assertEquals(1L, sender.next().part.seq) // the initial part does not count
+        b.send(part(second.tb, 1, "{}"))
+        b.send(part(second.tb, 2, "{}"))
+        assertEquals(2L, sender.next().part.seq)
+        val capped = sender.next().end
+        assertEquals(false, capped.hasError())
+        assertEquals(2, capped.parts)
+        assertEquals(second.ta to "max results", a.next().cancel.let { it.requestId to it.reason })
+        assertEquals(second.tb to "max results", b.next().cancel.let { it.requestId to it.reason })
+        sender.nothingWithin(100) // the extra update was dropped
+    }
+
+    @Test
+    fun `an error from a target or the initial request ends the whole subscription, the max duration too`() = runBlocking {
+        val (a, b, sender) = subscriptionTrio()
+        // An error end from a target: ReplyEnd{error} to the sender, Cancel to the rest (the failed one ended itself).
+        val first = open(sender, a, b, "sub1")
+        first.initial.reply("sub1#0", "{}")
+        assertEquals(1L, sender.next().part.seq)
+        a.send(end(first.ta, Error.newBuilder().setRequestId(first.ta).setCode(ErrorCode.HANDLER_ERROR).setMessage("emitter failed").build()))
+        val failed = sender.next().end
+        assertEquals(ErrorCode.HANDLER_ERROR to "emitter failed", failed.error.code to failed.error.message)
+        assertEquals(first.tb to "target a-1 failed", b.next().cancel.let { it.requestId to it.reason })
+        a.nothingWithin(100)
+        // A part carrying an error: the same, the part is not relayed.
+        val second = open(sender, a, b, "sub2")
+        second.initial.reply("sub2#0", "{}")
+        assertEquals(1L, sender.next().part.seq)
+        b.send(errorPart(second.tb, 1, "boom"))
+        assertEquals("boom", sender.next().end.error.message)
+        assertEquals(second.ta, a.next().cancel.requestId)
+        b.nothingWithin(100)
+        // The initial request failing (Reply{error}, or no reply within timeout_ms): no part, the targets are cancelled.
+        val third = open(sender, a, b, "sub3")
+        third.initial.send(ClientMessage.newBuilder().setReply(Reply.newBuilder().setRequestId("sub3#0").setError(Error.newBuilder().setRequestId("sub3#0").setCode(ErrorCode.HANDLER_ERROR).setMessage("no such account"))).build())
+        val initialFailed = sender.next().end
+        assertEquals(ErrorCode.HANDLER_ERROR to 0, initialFailed.error.code to initialFailed.parts)
+        assertEquals(third.ta to "initial result failed", a.next().cancel.let { it.requestId to it.reason })
+        assertEquals(third.tb to "initial result failed", b.next().cancel.let { it.requestId to it.reason })
+        val fourth = open(sender, a, b, "sub4", timeoutMs = 800)
+        a.send(part(fourth.ta, 1, "{}")) // buffered behind an initial that never comes
+        assertEquals(ErrorCode.TIMEOUT, sender.next().end.error.code)
+        // The targets are cancelled; the timed-out initial request is not (its entry is gone, a late reply is dropped), as on the real hub.
+        assertEquals(fourth.ta to "initial result failed", a.next().cancel.let { it.requestId to it.reason })
+        assertEquals(fourth.tb to "initial result failed", b.next().cancel.let { it.requestId to it.reason })
+        a.nothingWithin(100); b.nothingWithin(50)
+        assertEquals(0, hub.openSubscriptions())
+        // The max duration (off by default): CANCELLED and a cancel with that reason.
+        hub.maxSubscriptionDuration = java.time.Duration.ofMillis(800)
+        val fifth = open(sender, a, b, "sub5")
+        fifth.initial.reply("sub5#0", "{}")
+        assertEquals(1L, sender.next().part.seq)
+        val overdue = sender.next().end
+        assertEquals(ErrorCode.CANCELLED, overdue.error.code)
+        assertEquals("max subscription duration (800 ms) exceeded", overdue.error.message)
+        assertTrue(a.next().cancel.reason.startsWith("max subscription duration"))
+        assertTrue(b.next().cancel.reason.startsWith("max subscription duration"))
+    }
+
+    @Test
+    fun `a target leaving is silent, the last one HANDLER_DISCONNECTED, the sender leaving cancels every target`() = runBlocking {
+        val (a, b, sender) = subscriptionTrio()
+        val first = open(sender, a, b, "sub1")
+        first.initial.reply("sub1#0", "{}")
+        assertEquals(1L, sender.next().part.seq)
+        hub.dropInstance("a-1")
+        sender.nothingWithin(150) // b still serves
+        assertEquals(0, hub.subscriptionTargetsOf("a-1"))
+        b.send(part(first.tb, 1, "{}"))
+        assertEquals(2L, sender.next().part.seq)
+        hub.dropInstance("b-1")
+        val lost = sender.next().end
+        assertEquals(ErrorCode.HANDLER_DISCONNECTED to 2, lost.error.code to lost.parts)
+        assertEquals(0, hub.openSubscriptions())
+
+        val a2 = RawClient().also { it.registerV2("svc-a", "a-2", shared = listOf("acct.Watch"), capabilities = listOf("subscription")) }.apply { next() }
+        val b2 = RawClient().also { it.registerV2("svc-b", "b-2", shared = listOf("acct.Watch"), capabilities = listOf("subscription")) }.apply { next() }
+        withTimeout(TIMEOUT_MS) { while (hub.connectedInstances().size < 3) kotlinx.coroutines.delay(10) }
+        val second = open(sender, a2, b2, "sub2")
+        hub.dropInstance("s-1")
+        val cancels = listOf(a2.next().cancel, b2.next().cancel, second.initial.next().cancel).map { it.requestId to it.reason }.sortedBy { it.first }
+        assertEquals(listOf("sub2#0", second.ta, second.tb).sorted().map { it to "sender disconnected" }, cancels)
+        assertEquals(0, hub.openSubscriptions())
+    }
+
+    @Test
+    fun `subscription refusals follow the gate order, and a P4b hub answers UNSUPPORTED`() = runBlocking {
+        val v1 = RawClient().also { it.register("svc-v", "v-1") }
+        v1.send(subscribe("r1", "acct.Watch"))
+        assertEquals(ErrorCode.INVALID_REQUEST, v1.next().error.code)
+
+        val undeclared = RawClient().also { it.registerV2("svc-u", "u-1", capabilities = listOf("streaming")) }.apply { next() }
+        undeclared.send(subscribe("r2", "acct.Watch"))
+        val unsupported = undeclared.next().error
+        assertEquals(ErrorCode.UNSUPPORTED, unsupported.code)
+        assertTrue("\"subscription\"" in unsupported.message, unsupported.message)
+
+        val sender = RawClient().also { it.registerV2("svc-s", "s-1", capabilities = listOf("subscription")) }.apply { next() }
+        assertEquals(listOf("subscription"), hub.lastRegisterFrom("s-1")!!.capabilitiesList)
+        sender.send(subscribe("r3", "acct.Watch"))
+        assertEquals(ErrorCode.NO_HANDLER, sender.next().error.code)
+
+        RawClient().also { it.register("svc-c", "c-1", "test.Cmd") }
+        awaitRegistered("test.Cmd")
+        sender.send(subscribe("r4", "test.Cmd"))
+        assertEquals(ErrorCode.INVALID_REQUEST, sender.next().error.code)
+
+        // The owner has instances, none negotiated subscription: UNSUPPORTED naming the service and the capability.
+        val old = RawClient().also { it.registerV2("svc-h", "h-old", queries = listOf("acct.Watch"), capabilities = listOf("streaming")) }.apply { next() }
+        awaitRegistered("acct.Watch")
+        sender.send(subscribe("r5", "acct.Watch"))
+        val none = sender.next().error
+        assertEquals(ErrorCode.UNSUPPORTED, none.code)
+        assertTrue("svc-h" in none.message && "subscription" in none.message, none.message)
+        old.nothingWithin(50)
+
+        val handler = RawClient().also { it.registerV2("svc-h", "h-1", queries = listOf("acct.Watch"), capabilities = listOf("subscription")) }.apply { next() }
+        withTimeout(TIMEOUT_MS) { while (hub.connectedInstances().size < 5) kotlinx.coroutines.delay(10) }
+        sender.send(subscribe("r6", "acct.Watch"))
+        assertEquals(setOf("r6#1", "r6#0"), handler.requests().keys) // only the capable instance is a target
+        old.nothingWithin(50)
+        sender.send(subscribe("r6", "acct.Watch"))
+        assertEquals(ErrorCode.INVALID_REQUEST, sender.next().error.code) // duplicate id
+        sender.send(request("r6#0", "acct.Watch"))
+        assertEquals(ErrorCode.INVALID_REQUEST, sender.next().error.code) // the initial request's id is pending
+        // An update target's id is no pending id: a unary request with it is routed normally (INVALID_REQUEST for a command kind on a query type is not checked by this double: NO_HANDLER is what the handler answers).
+        sender.send(request("r6#1", "acct.Watch"))
+        assertEquals("r6#1", handler.next().request.id)
+
+        // The per-instance limit: refused before anything is sent.
+        hub.maxSubscriptionsPerInstance = 1
+        sender.send(subscribe("r7", "acct.Watch"))
+        val limited = sender.next().error
+        assertEquals(ErrorCode.RESOURCE_EXHAUSTED, limited.code)
+        assertTrue("h-1" in limited.message, limited.message)
+        handler.nothingWithin(100)
+        hub.maxSubscriptionsPerInstance = 1024
+
+        // A unary Reply to an update target is ignored; a part from a non-target is ignored.
+        handler.reply("r6#1", "{}")
+        old.send(part("r6#1", 1, "{}"))
+        sender.nothingWithin(100)
+        assertEquals(1, hub.openSubscriptions())
+
+        hub.subscription = false // a P4b hub: no capability in the ack, SUBSCRIPTION is UNSUPPORTED
+        val p4b = RawClient().also { it.registerV2("svc-p", "p-1", capabilities = listOf("subscription", "streaming")) }
+        assertEquals(listOf("streaming"), p4b.next().registerAck.capabilitiesList)
+        p4b.send(subscribe("r8", "acct.Watch"))
+        assertEquals(ErrorCode.UNSUPPORTED, p4b.next().error.code)
+    }
+
+    @Test
+    fun `a gather that ends early also cancels its forwarded targets that negotiated only subscription`() = runBlocking {
+        val capable = RawClient().also { it.registerV2("svc-x", "x-1", shared = listOf("test.Search"), capabilities = listOf("subscription", "scatter-gather")) }.apply { next() }
+        val plain = RawClient().also { it.registerV2("svc-y", "y-1", shared = listOf("test.Search"), capabilities = listOf("scatter-gather")) }.apply { next() }
+        withTimeout(TIMEOUT_MS) { while (hub.connectedInstances().size < 2) kotlinx.coroutines.delay(10) }
+        val sender = RawClient().also { it.registerV2("svc-s", "s-1", capabilities = listOf("scatter-gather")) }.apply { next() }
+        sender.send(scatter("g1", "test.Search", maxResults = 1))
+        capable.next(); plain.next()
+        plain.reply("g1#1", "{}")
+        assertTrue(sender.next().hasPart())
+        assertEquals(1, sender.next().end.parts)
+        assertEquals("g1#0" to "max results", capable.next().cancel.let { it.requestId to it.reason })
+        plain.nothingWithin(100)
+    }
+
     private companion object {
         const val TIMEOUT_MS = 5_000L
     }
