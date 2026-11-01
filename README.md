@@ -406,7 +406,9 @@ kraken.messaging.hub.address: static://hub-1:7000,static://hub-2:7000   # or: dn
   family is used (rule shared with the Rust library): the IPv4 addresses when the answer has any, else the IPv6 ones,
   repeats dropped; a dual-stack name lists every hub under both families, and two streams to one hub with the same
   instance id would replace each other. A failed or empty resolution keeps the current connections.
-- **Hub identity.** A hub is its `RegisterAck.hub_id`; a legacy (v1) hub, which sends none, is its target string. When
+- **Hub identity.** A hub is its `RegisterAck.hub_id`; a legacy (v1) hub, or an ack with an empty id, is its target
+  id: the bare `host:port` without `static://` (a resolved IPv6 address as `[ip]:port`, without zone; rule shared with
+  the Rust library). When
   two targets answer the same id, the one that acknowledged first owns it for as long as it is kept, live or
   reconnecting, and the other is closed and parked (logged once). The hub keeps one session per instance id, so the
   second target's `Register` ends the first one's stream before its own ack arrives; the owner reconnects and the
@@ -432,10 +434,11 @@ kraken.messaging.hub.address: static://hub-1:7000,static://hub-2:7000   # or: dn
   applies as before. With no live hub at all: `HubUnavailableException`, as with one hub.
 - **Permits.** A stream announces `ceil(hub.max-concurrent-handlers / N)` initial permits, where N = 1 (the hub being
   registered on) + the other hubs that are live or still on their first connect attempt (a hub down after a failed
-  attempt is not counted). When that count shrinks from N_old to N_new (a hub went down, was parked or drained), every
-  live hub gets a top-up `Permits(ceil(max / N_new) - ceil(max / N_old))`, so with two hubs the survivor of an outage
-  serves at full capacity; a hub that joins or returns gets `ceil(max / N_new)` initial permits; nothing is ever
-  revoked (rule shared with the Rust library). Locally at most `hub.max-concurrent-handlers` handlers run in total,
+  attempt is not counted). Whenever that count changes, every live stream is topped up to its current share:
+  `Permits(max(0, ceil(max / N) - offered))`, offered = the stream's `initial_permits` plus its earlier top-ups. So
+  with two hubs the survivor of an outage (or of a hub that failed its first attempt) serves at full capacity, flaps
+  never add up, a hub that joins or returns gets `ceil(max / N)` on its new stream, and nothing is ever revoked (rule
+  shared with the Rust library; kraken-hub P3 still caps a session at its `initial_permits`, see hub.md). Locally at most `hub.max-concurrent-handlers` handlers run in total,
   whichever hub sent the requests. Permits are paid back per stream as before.
 - **Readiness.** `HubConnections.awaitRegistered(timeout)` is true only once **every** kept hub confirmed the latest
   registration; while one configured hub is down it returns false at the timeout, although the instance is already

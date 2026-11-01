@@ -51,11 +51,12 @@ import java.util.concurrent.atomic.AtomicInteger
  *   sent again carries what is left of its `timeout_ms`. A request already written fails with
  *   `HubConnectionLostException` as before.
  * - **Permits**: a stream announces `ceil(maxConcurrentHandlers / N)` initial permits, N = 1 (itself) + the other kept
- *   hubs that are live or still on their first connect attempt. When N (the kept hubs that are live or on their first
- *   attempt) shrinks from N_old to N_new >= 1, every live hub gets a top-up `Permits(ceil(max / N_new) - ceil(max /
- *   N_old))`, so the survivors of an outage serve at full capacity; a hub that joins or returns gets its
- *   `ceil(max / N_new)` initial permits; nothing is ever revoked (rule shared with the Rust library). One [HandlerGate]
- *   keeps the local bound at [maxConcurrentHandlers] over all hubs.
+ *   hubs that are live or still on their first connect attempt. Whenever that set changes, every live hub's stream is
+ *   topped up to `ceil(maxConcurrentHandlers / N)` with N = the kept hubs that are live or on their first attempt:
+ *   `Permits(max(0, ceil(max / N) - offered))`, offered = what the stream announced plus its earlier top-ups. So the
+ *   survivors of an outage (or of a hub that failed its first attempt) serve at full capacity, flaps never add up, a
+ *   hub that joins or returns gets `ceil(max / N)` on its new stream, and nothing is ever revoked (rule shared with
+ *   the Rust library). One [HandlerGate] keeps the local bound at [maxConcurrentHandlers] over all hubs.
  * - **Status**: every [statusInterval], and whenever the live set changes, each live hub whose ack lists
  *   `instance-status` gets an `InstanceStatus` with the ids of the acknowledged (protocol v2) live hubs and the handlers
  *   in flight. Hubs without the capability never get one.
@@ -94,7 +95,6 @@ class HubConnections(
     private val owners = HashMap<String, HubConnection>() // hub id -> the kept connection that answered it first
     private val parked = HashMap<String, String>() // target closed as a duplicate -> the hub id it answered
     private var resolvedTargets: List<String> = emptyList() // latest DNS answer (DNS targets only)
-    private var counted = 0 // N of the permit split at the last refresh
     private var types: Pair<Set<String>, Set<String>>? = null
     private var started = false
     private var stopped = false
@@ -366,19 +366,15 @@ class HubConnections(
         }
     }
 
-    /**
-     * N of the permit split shrank (a hub went down, was parked or drained): tops up every live hub by the difference
-     * of the shares. Caller holds [lock].
-     */
+    /** Tops every live hub's stream up to its current share of the permits (see the class comment). Caller holds [lock]. */
     private fun topUp(live: List<HubConnection>) {
         val n = active.values.count { m -> m.connection in live || m.connection.onFirstAttempt }
-        val before = counted
-        counted = n
-        if (n < 1 || n >= before) return
-        val extra = HubProtocol.initialPermits(maxConcurrentHandlers, n) - HubProtocol.initialPermits(maxConcurrentHandlers, before)
-        if (extra <= 0) return
-        log.debug("Hubs counted for the permit split: {} -> {}; topping up {} live hub(s) by {}", before, n, live.size, extra)
-        live.forEach { it.topUpPermits(extra) }
+        if (n < 1) return
+        val share = HubProtocol.initialPermits(maxConcurrentHandlers, n)
+        for (connection in live) {
+            val extra = connection.topUpPermits(share)
+            if (extra > 0) log.debug("Hub {}: {} more permits (share {} of {} over {} hubs)", connection.target, extra, share, maxConcurrentHandlers, n)
+        }
     }
 
     private fun reportStatus() {

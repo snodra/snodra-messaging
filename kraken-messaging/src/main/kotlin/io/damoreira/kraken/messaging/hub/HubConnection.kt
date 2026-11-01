@@ -179,6 +179,8 @@ class HubConnection(
     private class Stream(val out: Channel<ClientMessage>, fallbackHeartbeatMs: Long, val initialPermits: Int) {
         val probes = ConcurrentSkipListMap<Long, Long>()
         val permits = PermitLedger(initialPermits)
+        /** `initial_permits` plus every top-up written on this stream (guarded by the stream itself). */
+        var offered = initialPermits
         @Volatile var registeredGeneration = -1L
         @Volatile var handshake: HubHandshake? = null
         @Volatile var heartbeatIntervalMs: Long = fallbackHeartbeatMs
@@ -455,14 +457,21 @@ class HubConnection(
     }
 
     /**
-     * Grants [count] extra permits on the live stream (multi-hub: a hub went away, [HubConnections] tops up the others).
-     * Written only when the stream's handshake shares flow control; false when nothing was written.
+     * Tops the live stream up to [share] permits offered in total (`initial_permits` plus earlier top-ups; multi-hub: a
+     * hub went away and [HubConnections] raises the others' share). Writes `Permits(share - offered)` when that is
+     * positive and the stream's handshake shares flow control; returns the count written (0 = nothing).
      */
-    internal fun topUpPermits(count: Int): Boolean {
-        val stream = current ?: return false
-        if (stream.handshake == null || !stream.permits.toppedUp(count)) return false
-        writePermits(stream, count)
-        return true
+    internal fun topUpPermits(share: Int): Int {
+        val stream = current ?: return 0
+        if (stream.handshake == null) return 0
+        val extra = synchronized(stream) {
+            val extra = share - stream.offered
+            if (!stream.permits.toppedUp(extra)) return 0
+            stream.offered = share
+            extra
+        }
+        writePermits(stream, extra)
+        return extra
     }
 
     private val statusReports = AtomicLong()

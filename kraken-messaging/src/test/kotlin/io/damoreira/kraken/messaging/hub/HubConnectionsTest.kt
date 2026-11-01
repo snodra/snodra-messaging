@@ -200,6 +200,25 @@ class HubConnectionsTest {
         assertEquals(4, a.permitsGrantedBy("x"))
         assertEquals(8, a.permitsAvailable("x"))
         assertEquals(0, back.permitsGrantedBy("x"))
+
+        // Another flap: the survivor's stream has already been offered ceil(8/1) = 8, so it gets nothing more.
+        back.close()
+        hubs.remove(back)
+        eventually(5_000) { x.liveHubIds().size == 1 }
+        delay(300)
+        assertEquals(4, a.permitsGrantedBy("x"), "top-ups never add up over flaps")
+    }
+
+    @Test fun `a hub down at start leaves its share to the others once its first attempt fails`() = runBlocking {
+        val a = hub()
+        val dead = "no-such-hub-" + UUID.randomUUID()
+        val x = client(listOf(a.name, dead), "x", maxConcurrentHandlers = 8)
+        x.start()
+        eventually(5_000) { x.liveHubIds().size == 1 }
+        // Both on their first attempt at start: 4 each. Whatever the order of the dead attempt's failure and A's
+        // handshake, A ends up offered ceil(8/1) = 8.
+        assertEquals(4, a.lastRegisterFrom("x")!!.initialPermits)
+        eventually(1_000) { a.permitsGrantedBy("x") == 4 }
     }
 
     @Test fun `the local guard stays max-concurrent-handlers in total over all hubs`() = runBlocking {
