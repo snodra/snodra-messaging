@@ -189,7 +189,7 @@ class HubConnectionsTest {
         hubs.remove(b)
         eventually(1_000) { a.permitsGrantedBy("x") == 4 }
         assertEquals(1, a.permitMessagesFrom("x"))
-        assertEquals(8, a.permitsAvailable("x")) // InProcessHub does not clamp at initial_permits (kraken-hub P3 does)
+        assertEquals(8, a.permitsAvailable("x")) // the grant raised the cap (InProcessHub caps permits like kraken-hub)
 
         // N 1 -> 2: the returning hub gets ceil(8/2) = 4 fresh; the survivor keeps its 8.
         val back = InProcessHub(b.name).start().also { hubs += it }

@@ -52,7 +52,10 @@ import java.util.concurrent.TimeUnit
  * Flow control (protocol P1, capability `flow-control`): a registrant that declares the capability gets it back in the
  * ack; with `initial_permits > 0` it is permit-managed: a request is forwarded only while it has permits (one per
  * forward), otherwise queued per instance ordered by `Request.priority` (higher first) then arrival, keeping its own
- * deadline. `Permits` messages add permits and drain the queue. A full queue ([queueCapacity]) answers
+ * deadline. `Permits` messages add permits and drain the queue; like kraken-hub, a session never holds more than its cap,
+ * which starts at `initial_permits` and is raised (never lowered) to `Permits.grant` when a grant is above it (P3
+ * multi-hub top-up). Set [permitCap] false to drop the cap (permits add up without bound) or [permitGrants] false to
+ * emulate a hub that predates `Permits.grant` (the cap stays at `initial_permits`). A full queue ([queueCapacity]) answers
  * `RESOURCE_EXHAUSTED` to senders that share `flow-control` and `HANDLER_ERROR "handler busy"` to others. Set
  * [flowControl] false to emulate the P0 hub (protocol v2 without the capability: everything unlimited).
  *
@@ -109,6 +112,17 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
     @Volatile
     var flowControl: Boolean = true
 
+    /**
+     * True (the default, as the real hub): a permit-managed session never holds more than its cap (`initial_permits`,
+     * raised by `Permits.grant`). False lets permits add up without bound.
+     */
+    @Volatile
+    var permitCap: Boolean = true
+
+    /** True (the default, as the real hub): `Permits.grant` raises the cap. False emulates a hub that predates it. */
+    @Volatile
+    var permitGrants: Boolean = true
+
     /** Set false to emulate the P2 hub: no `instance-status` capability in the ack, reports ignored. */
     @Volatile
     var instanceStatus: Boolean = true
@@ -148,6 +162,8 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
         var ack: ServerMessage? = null
         /** Remaining permits; null = unlimited (not permit-managed). Guarded by [lock]. */
         var permits: Int? = null
+        /** Most permits the session may hold: `initial_permits`, raised by `Permits.grant`. Guarded by [lock]. */
+        var cap: Int = 0
         /** Requests waiting for a permit, highest priority first, then arrival. Guarded by [lock]. */
         val queue = ArrayList<Queued>()
         lateinit var collector: Job
@@ -313,7 +329,7 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
             msg.hasRegister() -> register(session, msg.register)
             msg.hasRequest() -> forward(session, msg.request)
             msg.hasReply() -> relay(session, msg)
-            msg.hasPermits() -> grant(session, msg.permits.count)
+            msg.hasPermits() -> grant(session, msg.permits.count, msg.permits.grant)
             msg.hasStatus() -> {
                 statusMessages.merge(session.instanceId, 1, Int::plus)
                 if (session.instanceStatus) lastStatuses[session.instanceId] = msg.status
@@ -349,6 +365,7 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
             if (first) { // like the real hub: the first Register of a stream fixes flow control
                 session.flowControl = !legacy && flowControl && reg.protocolVersion >= 2 && FLOW_CONTROL in reg.capabilitiesList
                 session.permits = if (session.flowControl && reg.initialPermits > 0) reg.initialPermits else null
+                session.cap = reg.initialPermits
                 session.instanceStatus = !legacy && instanceStatus && reg.protocolVersion >= 2 && INSTANCE_STATUS in reg.capabilitiesList
             }
             session.serviceName = reg.serviceName
@@ -431,12 +448,13 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
         handler.out.trySend(ServerMessage.newBuilder().setRequest(req).build())
     }
 
-    private fun grant(session: Session, count: Int) {
+    private fun grant(session: Session, count: Int, grant: Int) {
         permitMessages.merge(session.instanceId, 1, Int::plus)
         permitsGranted.merge(session.instanceId, count, Int::plus)
         synchronized(lock) {
             val permits = session.permits ?: return // not permit-managed: ignored, like the real hub
-            session.permits = permits + count
+            if (permitGrants) session.cap = maxOf(session.cap, grant)
+            session.permits = if (permitCap) minOf(permits + count, session.cap) else permits + count
             while ((session.permits ?: 0) > 0 && session.queue.isNotEmpty()) {
                 val next = session.queue.removeAt(0)
                 if (next.request.id in pending) deliver(session, next.request) // skip entries that already timed out

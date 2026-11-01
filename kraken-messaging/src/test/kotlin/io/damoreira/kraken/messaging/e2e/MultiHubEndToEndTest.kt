@@ -184,6 +184,33 @@ class MultiHubEndToEndTest {
         assertTrue(a.send(request()).hasReply())
     }
 
+    @Test fun `a stopped hub's permits move to the other one within 2 s, and nothing is revoked when it returns`() = runBlocking {
+        val (one, two) = startHubs()
+        val b = client(listOf(one, two), "svc-b", maxConcurrentHandlers = 8) { req -> reply(req) }
+        b.register(setOf("t.Ping"), emptySet())
+        b.start()
+        // max 8 over N = 2 hubs: ceil(8 / 2) = 4 initial permits on each.
+        withTimeout(15_000) { while (listOf(one, two).any { permitsAvailable(it, "svc-b", b.instanceId) != 4 }) delay(50) }
+
+        withContext(Dispatchers.IO) {
+            DockerClientFactory.instance().client().stopContainerCmd(two.container.containerId).withTimeout(0).exec()
+        }
+        val stopped = System.nanoTime()
+        // N 2 -> 1: Permits{count = 4, grant = 8} raises hub-1's cap to 8 and fills it.
+        withTimeout(10_000) { while (permitsAvailable(one, "svc-b", b.instanceId) != 8) delay(25) }
+        val toppedUp = Duration.ofNanos(System.nanoTime() - stopped)
+        log.info("{} shows 8 permits {} ms after {} was stopped", one.id, toppedUp.toMillis(), two.id)
+        assertTrue(toppedUp <= Duration.ofMillis(2_500), "topped up only after $toppedUp")
+
+        withContext(Dispatchers.IO) { DockerClientFactory.instance().client().startContainerCmd(two.container.containerId).exec() }
+        withTimeout(30_000) { while (two.container.logs.split("hub listening").size - 1 < 2) delay(25) }
+        // N 1 -> 2: the returning hub gets ceil(8 / 2) = 4 on its new stream; hub-1 keeps its 8.
+        withTimeout(15_000) { while (permitsAvailable(two, "svc-b", b.instanceId) != 4) delay(50) }
+        delay(500)
+        assertEquals(8, permitsAvailable(one, "svc-b", b.instanceId), "nothing revoked")
+        assertEquals(listOf(one.id, two.id), b.liveHubIds())
+    }
+
     @Test fun `two targets of one hub - the instance stays registered and served without interruption`() = runBlocking {
         // The real hub keeps one session per instance id: a second stream with the same id replaces the first. Two
         // targets of one hub (an alias, or the A and AAAA records of one name) must settle on one stream and stay there.
@@ -281,7 +308,12 @@ class MultiHubEndToEndTest {
         }
     }
 
-    private fun client(hubs: List<Hub>, service: String, inbound: suspend (Request) -> Reply = { req -> errorReply(req.id) }) =
+    private fun client(
+        hubs: List<Hub>,
+        service: String,
+        maxConcurrentHandlers: Int = 256,
+        inbound: suspend (Request) -> Reply = { req -> errorReply(req.id) },
+    ) =
         HubConnections(
             targets = HubTargets.parse(hubs.joinToString(",") { it.target }),
             channelFactory = HubChannelFactory { target ->
@@ -293,6 +325,7 @@ class MultiHubEndToEndTest {
             settings = defaults,
             inbound = inbound,
             scope = scope,
+            maxConcurrentHandlers = maxConcurrentHandlers,
         ).also { clients += it }
 
     private suspend fun get(hub: Hub, path: String): JsonNode = withContext(Dispatchers.IO) {
@@ -308,6 +341,10 @@ class MultiHubEndToEndTest {
         get(hub, "/topology")["services"]
             .firstOrNull { it["serviceName"].asString() == service }
             ?.get("instances")?.firstOrNull { it["instanceId"].asString() == instanceId }
+
+    /** `permitsAvailable` of [instanceId] on [hub]; null while it is not listed (or the HTTP port is not up yet). */
+    private suspend fun permitsAvailable(hub: Hub, service: String, instanceId: String): Int? =
+        runCatching { instance(hub, service, instanceId) }.getOrNull()?.get("permitsAvailable")?.asInt()
 
     /** The ids [instanceId] last reported to [hub]; null while it is not listed (or the HTTP port is not up yet). */
     private suspend fun reportedHubIds(hub: Hub, service: String, instanceId: String): Set<String>? =

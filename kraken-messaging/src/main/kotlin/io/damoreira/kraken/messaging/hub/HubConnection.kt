@@ -458,8 +458,10 @@ class HubConnection(
 
     /**
      * Tops the live stream up to [share] permits offered in total (`initial_permits` plus earlier top-ups; multi-hub: a
-     * hub went away and [HubConnections] raises the others' share). Writes `Permits(share - offered)` when that is
-     * positive and the stream's handshake shares flow control; returns the count written (0 = nothing).
+     * hub went away and [HubConnections] raises the others' share). Writes `Permits{count = share - offered, grant =
+     * share}` when that is positive and the stream's handshake shares flow control: the grant raises the hub's cap on
+     * the session (`initial_permits` until then) to the share, so the top-up is kept rather than clamped away. A hub that
+     * predates `Permits.grant` ignores it and clamps the top-up, as before. Returns the count written (0 = nothing).
      */
     internal fun topUpPermits(share: Int): Int {
         val stream = current ?: return 0
@@ -470,7 +472,7 @@ class HubConnection(
             stream.offered = share
             extra
         }
-        writePermits(stream, extra)
+        writePermits(stream, extra, grant = share)
         return extra
     }
 
@@ -594,10 +596,10 @@ class HubConnection(
         }
     }
 
-    private fun writePermits(stream: Stream, count: Int) {
+    private fun writePermits(stream: Stream, count: Int, grant: Int = 0) {
         if (count <= 0) return
         // A closed stream drops them: the hub forgot that session's permits with it.
-        stream.out.trySend(ClientMessage.newBuilder().setPermits(Permits.newBuilder().setCount(count)).build())
+        stream.out.trySend(ClientMessage.newBuilder().setPermits(Permits.newBuilder().setCount(count).setGrant(grant)).build())
     }
 
     /** Fails, with [HubUnavailableException], the requests left in [stream]'s closed outbound queue. */

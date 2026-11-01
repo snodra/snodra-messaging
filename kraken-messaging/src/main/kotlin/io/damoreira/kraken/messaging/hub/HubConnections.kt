@@ -53,7 +53,8 @@ import java.util.concurrent.atomic.AtomicInteger
  * - **Permits**: a stream announces `ceil(maxConcurrentHandlers / N)` initial permits, N = 1 (itself) + the other kept
  *   hubs that are live or still on their first connect attempt. Whenever that set changes, every live hub's stream is
  *   topped up to `ceil(maxConcurrentHandlers / N)` with N = the kept hubs that are live or on their first attempt:
- *   `Permits(max(0, ceil(max / N) - offered))`, offered = what the stream announced plus its earlier top-ups. So the
+ *   `Permits{count = max(0, ceil(max / N) - offered), grant = ceil(max / N)}`, offered = what the stream announced plus
+ *   its earlier top-ups; the grant raises the hub's permit cap on the session (otherwise `initial_permits`). So the
  *   survivors of an outage (or of a hub that failed its first attempt) serve at full capacity, flaps never add up, a
  *   hub that joins or returns gets `ceil(max / N)` on its new stream, and nothing is ever revoked (rule shared with
  *   the Rust library). One [HandlerGate] keeps the local bound at [maxConcurrentHandlers] over all hubs.

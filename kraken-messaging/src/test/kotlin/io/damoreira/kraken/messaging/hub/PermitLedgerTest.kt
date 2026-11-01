@@ -94,7 +94,7 @@ class PermitLedgerTest {
         assertEquals(Step.Wait, PermitLedger(initial = 1).handshake(flowControl = true))
     }
 
-    @Test fun `a top-up is written only once flow control is confirmed and never delays grants`() {
+    @Test fun `a top-up counts as held by the hub and is written only once flow control is confirmed`() {
         val unconfirmed = PermitLedger(4)
         assertEquals(false, unconfirmed.toppedUp(4)) // before the handshake
         val p0 = ledger(initial = 4, flowControl = false)
@@ -102,7 +102,7 @@ class PermitLedgerTest {
 
         val ledger = ledger(initial = 4) // low-water mark min(16, 4 / 2) = 2
         ledger.receive(4) // the hub holds 0
-        assertEquals(true, ledger.toppedUp(4)) // the hub may clamp it away (P3 caps permits at initial_permits)
-        assertEquals(Step.Flush(1), ledger.handlerCompleted()) // so the hub still counts as holding 0: flushed at once
+        assertEquals(true, ledger.toppedUp(4)) // the hub holds 4 again (Permits.grant raised its cap)
+        assertEquals(Step.ArmTimer, ledger.handlerCompleted()) // above the low-water mark: batched, not flushed at once
     }
 }

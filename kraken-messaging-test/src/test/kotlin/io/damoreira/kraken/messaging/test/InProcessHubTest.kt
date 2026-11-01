@@ -81,8 +81,38 @@ class InProcessHubTest {
                 .setPayload(ByteString.copyFromUtf8("{}")).putAllHeaders(headers),
         ).build()
 
-    private fun permits(count: Int) =
-        ClientMessage.newBuilder().setPermits(io.damoreira.kraken.hub.v1.Permits.newBuilder().setCount(count)).build()
+    private fun permits(count: Int, grant: Int = 0) = ClientMessage.newBuilder()
+        .setPermits(io.damoreira.kraken.hub.v1.Permits.newBuilder().setCount(count).setGrant(grant)).build()
+
+    /** Sends [msg] and waits until the hub has handled it (counted as a `Permits` message from [instance]). */
+    private suspend fun RawClient.sendPermits(instance: String, msg: ClientMessage) {
+        val before = hub.permitMessagesFrom(instance)
+        send(msg)
+        withTimeout(TIMEOUT_MS) { while (hub.permitMessagesFrom(instance) == before) kotlinx.coroutines.delay(5) }
+    }
+
+    @Test
+    fun `permits never exceed the cap, which only a grant above it raises`() = runBlocking {
+        val handler = RawClient().also { it.registerFlowControlled("svc-a", "a-1", 2, "test.Ping") }
+        handler.next() // ack
+        awaitRegistered("test.Ping")
+        handler.sendPermits("a-1", permits(5))
+        assertEquals(2, hub.permitsAvailable("a-1"), "clamped at initial_permits")
+        handler.sendPermits("a-1", permits(2, grant = 4))
+        assertEquals(4, hub.permitsAvailable("a-1"), "the grant raised the cap first")
+        handler.sendPermits("a-1", permits(3, grant = 1))
+        assertEquals(4, hub.permitsAvailable("a-1"), "a grant never lowers the cap")
+    }
+
+    @Test
+    fun `a hub that predates the grant keeps the cap at initial_permits`() = runBlocking {
+        hub.permitGrants = false
+        val handler = RawClient().also { it.registerFlowControlled("svc-a", "a-1", 2, "test.Ping") }
+        handler.next() // ack
+        awaitRegistered("test.Ping")
+        handler.sendPermits("a-1", permits(2, grant = 4))
+        assertEquals(2, hub.permitsAvailable("a-1"))
+    }
 
     @Test
     fun `flow-controlled handler gets requests only with permits, highest priority first`() = runBlocking {
@@ -99,8 +129,9 @@ class InProcessHubTest {
         withTimeout(TIMEOUT_MS) { while (hub.queuedFor("a-1") < 2) kotlinx.coroutines.delay(10) }
         assertEquals(0, hub.permitsAvailable("a-1"))
 
-        handler.send(permits(2))
+        handler.send(permits(1)) // one permit back per finished request, never past initial_permits
         assertEquals("high", handler.next().request.id)
+        handler.send(permits(1))
         assertEquals("low", handler.next().request.id)
         assertEquals(2, hub.permitsGrantedBy("a-1"))
     }
