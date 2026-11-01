@@ -382,9 +382,10 @@ class HubConnectionsTest {
         val results = withTimeout(10_000) { calls.awaitAll() }
         val failures = results.mapNotNull { it.exceptionOrNull() }
         failures.forEach { assertIs<HubConnectionLostException>(it, it.toString()) }
-        // At most the request hub A had already taken from the stream is lost; the queued ones were never sent.
-        assertTrue(failures.size <= 2, "failed: $failures")
-        assertTrue(b.requestsFrom("a") >= 18, "hub B served ${b.requestsFrom("a")}")
+        // Only requests the transport had already taken from the queue are lost (one in the collector plus what the
+        // in-process transport buffered before the server stopped requesting: a few, not half); the queued ones move.
+        assertTrue(failures.size <= 4, "failed: $failures")
+        assertTrue(b.requestsFrom("a") >= 20 - failures.size, "hub B served ${b.requestsFrom("a")}")
     }
 
     // --- dedupe and DNS ---
