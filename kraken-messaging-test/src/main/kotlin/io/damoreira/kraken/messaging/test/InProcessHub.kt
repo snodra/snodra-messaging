@@ -5,6 +5,7 @@ import io.damoreira.kraken.hub.v1.Error
 import io.damoreira.kraken.hub.v1.ErrorCode
 import io.damoreira.kraken.hub.v1.Heartbeat
 import io.damoreira.kraken.hub.v1.HubGrpcKt
+import io.damoreira.kraken.hub.v1.InstanceStatus
 import io.damoreira.kraken.hub.v1.Register
 import io.damoreira.kraken.hub.v1.RegisterAck
 import io.damoreira.kraken.hub.v1.Request
@@ -55,6 +56,11 @@ import java.util.concurrent.TimeUnit
  * `RESOURCE_EXHAUSTED` to senders that share `flow-control` and `HANDLER_ERROR "handler busy"` to others. Set
  * [flowControl] false to emulate the P0 hub (protocol v2 without the capability: everything unlimited).
  *
+ * Multi-hub status (P3, capability `instance-status`): a registrant that declares the capability gets it back in the ack
+ * and its `InstanceStatus` reports are kept ([lastStatusFrom]); reports on a stream that did not negotiate it are counted
+ * ([statusMessagesFrom]) and ignored. Set [instanceStatus] false to emulate the P2 hub. [pauseReading] stops reading
+ * every stream (what clients write stays queued on their side), and [requestsFrom] counts requests per sender.
+ *
  * It does not implement consistent hashing on `routing_key`, metrics, or the real hub's owner grace period and
  * heartbeat expiry.
  */
@@ -99,6 +105,14 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
     @Volatile
     var flowControl: Boolean = true
 
+    /** Set false to emulate the P2 hub: no `instance-status` capability in the ack, reports ignored. */
+    @Volatile
+    var instanceStatus: Boolean = true
+
+    /** While true, no stream's next message is read (the message being handled when it is set still completes). */
+    @Volatile
+    var pauseReading: Boolean = false
+
     /** Requests queued per permit-managed instance before new ones are rejected (`KRAKEN_HUB_QUEUE_CAPACITY_PER_INSTANCE`). */
     @Volatile
     var queueCapacity: Int = 10_000
@@ -110,6 +124,8 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
         @Volatile var registered = false
         /** Shares `flow-control` with this hub (fixed by the stream's first Register). */
         @Volatile var flowControl = false
+        /** Negotiated `instance-status` (fixed by the stream's first Register). */
+        @Volatile var instanceStatus = false
         /** Remaining permits; null = unlimited (not permit-managed). Guarded by [lock]. */
         var permits: Int? = null
         /** Requests waiting for a permit, highest priority first, then arrival. Guarded by [lock]. */
@@ -133,6 +149,9 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
     private val permitsGranted = ConcurrentHashMap<String, Int>()
     private val permitMessages = ConcurrentHashMap<String, Int>()
     private val forwardedOrder = CopyOnWriteArrayList<String>()
+    private val requestsBySender = ConcurrentHashMap<String, Int>()
+    private val statusMessages = ConcurrentHashMap<String, Int>()
+    private val lastStatuses = ConcurrentHashMap<String, InstanceStatus>()
     private var seq = 0L
     @Volatile private var lastRequest: Request? = null
     private val channels = CopyOnWriteArrayList<ManagedChannel>()
@@ -159,6 +178,18 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
             it.collector.cancel()
         }
     }
+
+    /** Open streams that registered as [instanceId]. */
+    fun sessionsOf(instanceId: String): Int = sessions.count { it.registered && it.instanceId == instanceId }
+
+    /** `Request` messages received from [instanceId] over all of its streams. */
+    fun requestsFrom(instanceId: String): Int = requestsBySender[instanceId] ?: 0
+
+    /** `InstanceStatus` messages received from [instanceId], kept or ignored. */
+    fun statusMessagesFrom(instanceId: String): Int = statusMessages[instanceId] ?: 0
+
+    /** The latest `InstanceStatus` kept from [instanceId] (only on streams that negotiated `instance-status`), or null. */
+    fun lastStatusFrom(instanceId: String): InstanceStatus? = lastStatuses[instanceId]
 
     fun heartbeatsFrom(instanceId: String): Int = heartbeats[instanceId] ?: 0
 
@@ -195,7 +226,12 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
 
     /** The ack this hub sends to a v2 registrant that declared [capabilities]. */
     fun registerAck(capabilities: List<String> = emptyList()): RegisterAck = RegisterAck.newBuilder()
-        .addAllCapabilities(if (flowControl && FLOW_CONTROL in capabilities) listOf(FLOW_CONTROL) else emptyList())
+        .addAllCapabilities(
+            listOfNotNull(
+                FLOW_CONTROL.takeIf { flowControl && it in capabilities },
+                INSTANCE_STATUS.takeIf { instanceStatus && it in capabilities },
+            ),
+        )
         .setHubId(hubId)
         .setProtocolVersion(2)
         .setHeartbeatIntervalMs(heartbeatInterval.toMillis().toInt())
@@ -229,6 +265,7 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
                             throw Status.FAILED_PRECONDITION.withDescription("first message must be Register").asException()
                         }
                         first = false
+                        while (pauseReading) delay(5)
                         handle(session, msg)
                     }
                 } finally {
@@ -244,6 +281,10 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
             msg.hasRequest() -> forward(session, msg.request)
             msg.hasReply() -> relay(session, msg)
             msg.hasPermits() -> grant(session, msg.permits.count)
+            msg.hasStatus() -> {
+                statusMessages.merge(session.instanceId, 1, Int::plus)
+                if (session.instanceStatus) lastStatuses[session.instanceId] = msg.status
+            }
             msg.hasHeartbeat() -> {
                 heartbeats.merge(session.instanceId, 1, Int::plus)
                 if (echoHeartbeats) session.out.trySend(
@@ -268,6 +309,7 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
             if (!session.registered) { // like the real hub: the first Register of a stream fixes flow control
                 session.flowControl = !legacy && flowControl && reg.protocolVersion >= 2 && FLOW_CONTROL in reg.capabilitiesList
                 session.permits = if (session.flowControl && reg.initialPermits > 0) reg.initialPermits else null
+                session.instanceStatus = !legacy && instanceStatus && reg.protocolVersion >= 2 && INSTANCE_STATUS in reg.capabilitiesList
             }
             session.serviceName = reg.serviceName
             session.instanceId = reg.instanceId
@@ -285,6 +327,7 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
 
     private fun forward(sender: Session, req: Request) {
         lastRequest = req
+        requestsBySender.merge(sender.instanceId, 1, Int::plus)
         if (req.id.isEmpty() || req.type.isEmpty()) {
             sender.fail(req.id, ErrorCode.INVALID_REQUEST, "request id and type must not be empty")
             return
@@ -381,6 +424,7 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
 
     private companion object {
         const val FLOW_CONTROL = "flow-control"
+        const val INSTANCE_STATUS = "instance-status"
     }
 
     private fun Session.fail(requestId: String, code: ErrorCode, message: String) {
