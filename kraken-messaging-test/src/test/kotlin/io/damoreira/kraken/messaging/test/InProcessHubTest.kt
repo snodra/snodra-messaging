@@ -1,10 +1,14 @@
 package io.damoreira.kraken.messaging.test
 
 import com.google.protobuf.ByteString
+import io.damoreira.kraken.hub.v1.Cancel
 import io.damoreira.kraken.hub.v1.ClientMessage
+import io.damoreira.kraken.hub.v1.Error
+import io.damoreira.kraken.hub.v1.Flow
 import io.damoreira.kraken.hub.v1.ErrorCode
 import io.damoreira.kraken.hub.v1.HubGrpcKt
 import io.damoreira.kraken.hub.v1.Register
+import io.damoreira.kraken.hub.v1.ReplyEnd
 import io.damoreira.kraken.hub.v1.Reply
 import io.damoreira.kraken.hub.v1.ReplyPart
 import io.damoreira.kraken.hub.v1.Request
@@ -23,6 +27,8 @@ import kotlinx.coroutines.flow.consumeAsFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.test.assertNull
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
@@ -92,6 +98,9 @@ class InProcessHubTest {
         )
 
         suspend fun next(): ServerMessage = withTimeout(TIMEOUT_MS) { inbox.receive() }
+
+        /** Fails when anything arrives within [ms]. */
+        suspend fun nothingWithin(ms: Long) = assertNull(withTimeoutOrNull(ms) { inbox.receive() })
         suspend fun awaitEnd(): Throwable? = withTimeout(TIMEOUT_MS) { ended.await() }
     }
 
@@ -419,6 +428,267 @@ class InProcessHubTest {
         assertEquals(ErrorCode.UNSUPPORTED, p3.next().error.code)
         kotlinx.coroutines.delay(50)
         assertTrue("test.Search" !in hub.registeredTypes())
+    }
+
+    // --- streaming queries (P4b) ---
+
+    private fun stream(id: String, type: String, timeoutMs: Int = 0, credit: Int = 0, maxResults: Int = 0) = ClientMessage.newBuilder().setRequest(
+        Request.newBuilder().setId(id).setKind(RequestKind.QUERY).setType(type).setMode(RequestMode.STREAMING)
+            .setTimeoutMs(timeoutMs).setInitialCredit(credit).setMaxResults(maxResults).setPayload(ByteString.copyFromUtf8("{\"q\":1}")),
+    ).build()
+
+    private fun part(id: String, seq: Long, json: String) = ClientMessage.newBuilder()
+        .setPart(ReplyPart.newBuilder().setRequestId(id).setSeq(seq).setPayload(ByteString.copyFromUtf8(json))).build()
+
+    private fun errorPart(id: String, seq: Long, message: String) = ClientMessage.newBuilder()
+        .setPart(ReplyPart.newBuilder().setRequestId(id).setSeq(seq).setError(Error.newBuilder().setRequestId(id).setCode(ErrorCode.HANDLER_ERROR).setMessage(message))).build()
+
+    private fun end(id: String, error: Error? = null) = ClientMessage.newBuilder()
+        .setEnd(ReplyEnd.newBuilder().setRequestId(id).apply { if (error != null) setError(error) }).build()
+
+    private fun flow(id: String, credits: Int) = ClientMessage.newBuilder().setFlow(Flow.newBuilder().setRequestId(id).setCredits(credits)).build()
+
+    private fun cancel(id: String, reason: String) = ClientMessage.newBuilder().setCancel(Cancel.newBuilder().setRequestId(id).setReason(reason)).build()
+
+    private suspend fun streamingPair(handlerCapabilities: List<String> = listOf("streaming", "scatter-gather")): Pair<RawClient, RawClient> {
+        val handler = RawClient().also { it.registerV2("svc-h", "h-1", queries = listOf("test.Export"), capabilities = handlerCapabilities) }.apply { next() }
+        awaitRegistered("test.Export")
+        val sender = RawClient().also { it.registerV2("svc-s", "s-1", capabilities = listOf("streaming", "scatter-gather")) }.apply { next() }
+        return handler to sender
+    }
+
+    @Test
+    fun `a streaming request goes to one capable instance and its parts flow back under the sender's credit`() = runBlocking {
+        val (handler, sender) = streamingPair()
+        sender.send(stream("s1", "test.Export", timeoutMs = 5_000, credit = 2))
+        val forwarded = handler.next().request
+        assertEquals("s1#1", forwarded.id)
+        assertEquals(RequestMode.STREAMING, forwarded.mode)
+        assertEquals(2, forwarded.initialCredit)
+        assertEquals(0, forwarded.maxResults)
+        assertEquals("{\"q\":1}", forwarded.payload.toStringUtf8())
+        assertEquals(2, hub.creditOf("s1"))
+
+        handler.send(part("s1#1", 1, "{\"row\":1}"))
+        handler.send(part("s1#1", 2, "{\"row\":2}"))
+        val first = sender.next().part
+        assertEquals(listOf("s1", "svc-h", "h-1", 1L, "{\"row\":1}"), listOf(first.requestId, first.responderService, first.responderInstance, first.seq, first.payload.toStringUtf8()))
+        assertEquals(2L, sender.next().part.seq)
+        assertEquals(0, hub.creditOf("s1"))
+        handler.nothingWithin(100) // no credit left: nothing is relayed, the handler waits
+
+        sender.send(flow("s1", 3))
+        val relayed = handler.next().flow
+        assertEquals("s1#1" to 3, relayed.requestId to relayed.credits)
+        assertEquals(listOf(3), hub.flowsFrom("s-1"))
+        handler.send(part("s1#1", 3, "{\"row\":3}"))
+        handler.send(end("s1#1"))
+        assertEquals(3L, sender.next().part.seq)
+        val ended = sender.next().end
+        assertEquals("s1", ended.requestId)
+        assertEquals(3, ended.parts)
+        assertEquals(false, ended.hasError())
+        assertEquals(0, hub.openStreams())
+        handler.send(part("s1#1", 4, "{}")) // after the end: ignored
+        sender.nothingWithin(100)
+        handler.nothingWithin(50)
+
+        // Credit 0 reads as 64, as on the real hub.
+        sender.send(stream("s2", "test.Export"))
+        assertEquals(64, handler.next().request.initialCredit)
+    }
+
+    @Test
+    fun `a part beyond the credit, max_results, an error part and an end with error end the stream`() = runBlocking {
+        val (handler, sender) = streamingPair()
+        sender.send(stream("s1", "test.Export", credit = 1))
+        handler.next()
+        handler.send(part("s1#1", 1, "{}"))
+        handler.send(part("s1#1", 2, "{}")) // beyond the credit
+        assertTrue(sender.next().hasPart())
+        val invalid = sender.next().end
+        assertEquals(ErrorCode.INVALID_REQUEST, invalid.error.code)
+        assertEquals(1, invalid.parts)
+        val cancelled = handler.next().cancel
+        assertEquals("s1#1" to "part without credit", cancelled.requestId to cancelled.reason)
+
+        sender.send(stream("s2", "test.Export", credit = 8, maxResults = 2))
+        assertEquals(0, handler.next().request.maxResults) // the hub enforces the cap
+        handler.send(part("s2#1", 1, "{}"))
+        handler.send(part("s2#1", 2, "{}"))
+        handler.send(part("s2#1", 3, "{}"))
+        sender.next(); sender.next()
+        val capped = sender.next().end
+        assertEquals(2, capped.parts)
+        assertEquals(false, capped.hasError())
+        assertEquals("max results", handler.next().cancel.reason)
+        sender.nothingWithin(100) // the third part was dropped
+
+        sender.send(stream("s3", "test.Export", credit = 8))
+        handler.next()
+        handler.send(part("s3#1", 1, "{}"))
+        handler.send(errorPart("s3#1", 2, "boom"))
+        assertTrue(sender.next().hasPart())
+        val failed = sender.next().end
+        assertEquals(ErrorCode.HANDLER_ERROR to "boom", failed.error.code to failed.error.message)
+        assertEquals(1, failed.parts)
+        handler.nothingWithin(100) // the handler ended itself: no cancel
+
+        sender.send(stream("s4", "test.Export", credit = 8))
+        handler.next()
+        handler.send(end("s4#1", Error.newBuilder().setRequestId("s4#1").setCode(ErrorCode.HANDLER_ERROR).setMessage("late failure").build()))
+        val endError = sender.next().end
+        assertEquals("late failure", endError.error.message)
+        assertEquals(0, endError.parts)
+
+        // A unary Reply to a streaming target (not a streaming library): one part then the end; Reply{error} as the end's error.
+        sender.send(stream("s5", "test.Export", credit = 8))
+        handler.next()
+        handler.reply("s5#1", "{\"one\":true}")
+        assertEquals("{\"one\":true}", sender.next().part.payload.toStringUtf8())
+        assertEquals(1, sender.next().end.parts)
+        sender.send(stream("s6", "test.Export", credit = 8))
+        handler.next()
+        handler.send(ClientMessage.newBuilder().setReply(Reply.newBuilder().setRequestId("s6#1").setError(Error.newBuilder().setRequestId("s6#1").setCode(ErrorCode.HANDLER_ERROR).setMessage("unary boom"))).build())
+        assertEquals("unary boom", sender.next().end.error.message)
+    }
+
+    @Test
+    fun `the idle timeout and the max duration end the stream and cancel the handler, a sender's cancel is relayed silently`() = runBlocking {
+        val (handler, sender) = streamingPair()
+        sender.send(stream("s1", "test.Export", timeoutMs = 300, credit = 8))
+        handler.next()
+        handler.send(part("s1#1", 1, "{}")) // resets the idle timer
+        assertTrue(sender.next().hasPart())
+        val started = System.nanoTime()
+        val timedOut = sender.next().end
+        assertEquals(ErrorCode.TIMEOUT, timedOut.error.code)
+        assertEquals(1, timedOut.parts)
+        assertTrue(System.nanoTime() - started >= 200_000_000L)
+        assertEquals("idle timeout", handler.next().cancel.reason)
+
+        hub.maxStreamDuration = java.time.Duration.ofMillis(300)
+        sender.send(stream("s2", "test.Export", timeoutMs = 5_000, credit = 8))
+        handler.next()
+        val overdue = sender.next().end
+        assertEquals(ErrorCode.CANCELLED, overdue.error.code)
+        assertTrue(overdue.error.message.startsWith("max stream duration"), overdue.error.message)
+        assertTrue(handler.next().cancel.reason.startsWith("max stream duration"))
+        hub.maxStreamDuration = java.time.Duration.ofMinutes(10)
+
+        sender.send(stream("s3", "test.Export", timeoutMs = 5_000, credit = 8))
+        handler.next()
+        sender.send(cancel("s3", "user left"))
+        val cancelled = handler.next().cancel
+        assertEquals("s3#1" to "user left", cancelled.requestId to cancelled.reason)
+        assertEquals(listOf("s3" to "user left"), hub.cancelsFrom("s-1").map { it.requestId to it.reason })
+        sender.nothingWithin(200)
+        assertEquals(0, hub.openStreams())
+        handler.send(part("s3#1", 1, "{}")) // after the cancel: ignored
+        sender.nothingWithin(100)
+    }
+
+    @Test
+    fun `streaming refusals follow the gate order, and multi-part client messages need the capability`() = runBlocking {
+        val v1 = RawClient().also { it.register("svc-v", "v-1") }
+        v1.send(stream("r1", "test.Export"))
+        assertEquals(ErrorCode.INVALID_REQUEST, v1.next().error.code)
+
+        val undeclared = RawClient().also { it.registerV2("svc-u", "u-1", capabilities = emptyList()) }.apply { next() }
+        undeclared.send(stream("r2", "test.Export"))
+        assertEquals(ErrorCode.UNSUPPORTED, undeclared.next().error.code)
+
+        val sender = RawClient().also { it.registerV2("svc-s", "s-1", capabilities = listOf("streaming")) }.apply { next() }
+        assertEquals(listOf("streaming"), hub.lastRegisterFrom("s-1")!!.capabilitiesList)
+        sender.send(stream("r3", "test.Export"))
+        assertEquals(ErrorCode.NO_HANDLER, sender.next().error.code)
+
+        RawClient().also { it.register("svc-c", "c-1", "test.Cmd") }
+        awaitRegistered("test.Cmd")
+        sender.send(stream("r4", "test.Cmd"))
+        assertEquals(ErrorCode.INVALID_REQUEST, sender.next().error.code)
+
+        // The owner has instances, none negotiated streaming: UNSUPPORTED, naming the service and the capability.
+        val old = RawClient().also { it.registerV2("svc-h", "h-old", queries = listOf("test.Export"), capabilities = listOf("scatter-gather")) }.apply { next() }
+        awaitRegistered("test.Export")
+        sender.send(stream("r5", "test.Export"))
+        val none = sender.next().error
+        assertEquals(ErrorCode.UNSUPPORTED, none.code)
+        assertTrue("svc-h" in none.message && "streaming" in none.message, none.message)
+        old.nothingWithin(50)
+
+        val handler = RawClient().also { it.registerV2("svc-h", "h-1", queries = listOf("test.Export"), capabilities = listOf("streaming")) }.apply { next() }
+        withTimeout(TIMEOUT_MS) { while (hub.connectedInstances().size < 5) kotlinx.coroutines.delay(10) }
+        repeat(2) { sender.send(stream("r6-$it", "test.Export", timeoutMs = 5_000)) }
+        repeat(2) { handler.next() } // only the capable instance is a target
+        old.nothingWithin(50)
+        sender.send(stream("r6-0", "test.Export"))
+        assertEquals(ErrorCode.INVALID_REQUEST, sender.next().error.code) // duplicate id
+        sender.send(stream("r6-0#1", "test.Export"))
+        assertEquals(ErrorCode.INVALID_REQUEST, sender.next().error.code) // duplicate target id
+
+        // Flow and Cancel from a session that did not negotiate streaming are ignored; so are parts from a non-target.
+        undeclared.send(flow("r6-0", 5))
+        undeclared.send(cancel("r6-0", "nope"))
+        old.send(part("r6-0#1", 1, "{}"))
+        handler.nothingWithin(100)
+        sender.nothingWithin(50)
+        assertEquals(2, hub.openStreams())
+
+        hub.streaming = false // a P4a hub: no capability in the ack, STREAMING is UNSUPPORTED
+        val p4a = RawClient().also { it.registerV2("svc-p", "p-1", capabilities = listOf("streaming", "scatter-gather")) }
+        assertEquals(listOf("scatter-gather"), p4a.next().registerAck.capabilitiesList)
+        p4a.send(stream("r7", "test.Export"))
+        assertEquals(ErrorCode.UNSUPPORTED, p4a.next().error.code)
+    }
+
+    @Test
+    fun `the handler leaving ends the stream with HANDLER_DISCONNECTED and the sender leaving cancels the handler`() = runBlocking {
+        val (handler, sender) = streamingPair()
+        sender.send(stream("s1", "test.Export", timeoutMs = 5_000, credit = 8))
+        handler.next()
+        handler.send(part("s1#1", 1, "{}"))
+        assertTrue(sender.next().hasPart())
+        hub.dropInstance("h-1")
+        val lost = sender.next().end
+        assertEquals(ErrorCode.HANDLER_DISCONNECTED, lost.error.code)
+        assertEquals(1, lost.parts)
+
+        val handler2 = RawClient().also { it.registerV2("svc-h", "h-2", queries = listOf("test.Export"), capabilities = listOf("streaming")) }.apply { next() }
+        awaitRegistered("test.Export")
+        sender.send(stream("s2", "test.Export", timeoutMs = 5_000, credit = 8))
+        handler2.next()
+        hub.dropInstance("s-1")
+        val cancelled = handler2.next().cancel
+        assertEquals("s2#1" to "sender disconnected", cancelled.requestId to cancelled.reason)
+        assertEquals(0, hub.openStreams())
+    }
+
+    @Test
+    fun `a gather that ends early cancels its forwarded targets that negotiated streaming`() = runBlocking {
+        val capable = RawClient().also { it.registerV2("svc-x", "x-1", shared = listOf("test.Search"), capabilities = listOf("streaming", "scatter-gather")) }.apply { next() }
+        val plain = RawClient().also { it.registerV2("svc-y", "y-1", shared = listOf("test.Search"), capabilities = listOf("scatter-gather")) }.apply { next() }
+        withTimeout(TIMEOUT_MS) { while (hub.connectedInstances().size < 2) kotlinx.coroutines.delay(10) }
+        val sender = RawClient().also { it.registerV2("svc-s", "s-1", capabilities = listOf("streaming", "scatter-gather")) }.apply { next() }
+
+        sender.send(scatter("g1", "test.Search", maxResults = 1))
+        capable.next(); plain.next()
+        plain.reply("g1#1", "{}")
+        assertTrue(sender.next().hasPart())
+        assertEquals(1, sender.next().end.parts)
+        assertEquals("g1#0" to "max results", capable.next().cancel.let { it.requestId to it.reason })
+        plain.nothingWithin(100)
+
+        sender.send(scatter("g2", "test.Search", timeoutMs = 200))
+        capable.next(); plain.next()
+        assertEquals(2, sender.next().end.timedOut) // both missed the deadline
+        assertEquals("deadline", capable.next().cancel.reason)
+
+        sender.send(scatter("g3", "test.Search", timeoutMs = 5_000))
+        capable.next(); plain.next()
+        hub.dropInstance("s-1")
+        assertEquals("sender disconnected", capable.next().cancel.reason)
+        plain.nothingWithin(100)
     }
 
     private companion object {

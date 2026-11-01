@@ -1,8 +1,10 @@
 package io.damoreira.kraken.messaging.test
 
+import io.damoreira.kraken.hub.v1.Cancel
 import io.damoreira.kraken.hub.v1.ClientMessage
 import io.damoreira.kraken.hub.v1.Error
 import io.damoreira.kraken.hub.v1.ErrorCode
+import io.damoreira.kraken.hub.v1.Flow
 import io.damoreira.kraken.hub.v1.Heartbeat
 import io.damoreira.kraken.hub.v1.HubGrpcKt
 import io.damoreira.kraken.hub.v1.InstanceStatus
@@ -28,7 +30,6 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.SendChannel
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.launch
@@ -80,6 +81,23 @@ import java.util.concurrent.TimeUnit
  * (`HANDLER_DISCONNECTED`). No target: `NO_HANDLER`; a command: `INVALID_REQUEST`; a v2 sender without the capability
  * (or any other mode): `UNSUPPORTED`, a v1 sender `INVALID_REQUEST`. Set [scatterGather] false to emulate the P3 hub:
  * no capability in the ack and `shared_query_types` ignored. [inject] writes any message to an instance's stream.
+ *
+ * Streaming queries (P4b, capability `streaming`): a `STREAMING` request from a session that negotiated the capability
+ * goes to one live instance that lists the type **and** negotiated `streaming` (round-robin per type; owners with
+ * instances but none capable: `UNSUPPORTED`), as `Request{id = <id>#1, mode = STREAMING, initial_credit}` (0 reads as
+ * 64; `max_results` is kept by the hub) through the target's permits and queue. The handler's `ReplyPart{<id>#1}` and
+ * `ReplyEnd{<id>#1}` are relayed with the sender's id, `responder_service` / `responder_instance` and the handler's
+ * `seq`; each part takes one credit (initial plus every sender `Flow`, relayed as `Flow{<id>#1}`). A part beyond the
+ * credit: `ReplyEnd{INVALID_REQUEST}` and `Cancel{<id>#1, "part without credit"}`; a part with `error`: `ReplyEnd{error}`;
+ * `max_results` parts: `ReplyEnd{parts}` and `Cancel{"max results"}`; no part within the effective timeout (from the
+ * forward, reset by every part; a queue wait counts too): `ReplyEnd{TIMEOUT}` and `Cancel{"idle timeout"}`; open
+ * for [maxStreamDuration]: `ReplyEnd{CANCELLED}` and a cancel; a sender `Cancel`: `Cancel{<id>#1, reason}` to the
+ * handler, nothing to the sender; the handler leaving: `ReplyEnd{HANDLER_DISCONNECTED}`; the sender leaving:
+ * `Cancel{"sender disconnected"}`. A unary `Reply` to the target is one part then the end. A gather ending early sends
+ * `Cancel{<id>#<n>, reason}` to its forwarded targets whose session negotiated `streaming`. Client-sent `ReplyPart`,
+ * `ReplyEnd`, `Flow` and `Cancel` from sessions without the capability are ignored. Set [streaming] false to emulate
+ * the P4a hub (no capability in the ack, `STREAMING` is `UNSUPPORTED`). [openStreams], [creditOf], [flowsFrom] and
+ * [cancelsFrom] observe it.
  *
  * One session per instance id, like the real hub: the first `Register` of a stream whose instance id already has a
  * registered stream replaces that older stream (it ends, its in-flight requests fail with `HANDLER_DISCONNECTED`;
@@ -148,6 +166,14 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
     @Volatile
     var scatterGather: Boolean = true
 
+    /** Set false to emulate the P4a hub: no `streaming` capability in the ack, `STREAMING` requests are `UNSUPPORTED`. */
+    @Volatile
+    var streaming: Boolean = true
+
+    /** Bound on a streaming query's whole life (`KRAKEN_HUB_MAX_STREAM_DURATION`): `ReplyEnd{CANCELLED}` and a cancel. */
+    @Volatile
+    var maxStreamDuration: Duration = Duration.ofMinutes(10)
+
     /** While true, no stream's next message is read (the message being handled when it is set still completes). */
     @Volatile
     var pauseReading: Boolean = false
@@ -179,6 +205,8 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
         @Volatile var protocolVersion = 0
         /** Negotiated `scatter-gather` (fixed by the stream's first Register). */
         @Volatile var scatterGather = false
+        /** Negotiated `streaming` (fixed by the stream's first Register). */
+        @Volatile var streaming = false
         @Volatile var registered = false
         /** Shares `flow-control` with this hub (fixed by the stream's first Register). */
         @Volatile var flowControl = false
@@ -197,8 +225,18 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
 
     private class Queued(val request: Request, val seq: Long)
 
-    /** A forwarded request: a unary one with its own deadline [timer], or one target of [gather]. */
-    private class Pending(val sender: Session, val handler: Session, val timer: Job?, val gather: Gather? = null)
+    /** A forwarded request: a unary one with its own deadline [timer], one target of [gather], or the target of [stream]. */
+    private class Pending(val sender: Session, val handler: Session, val timer: Job?, val gather: Gather? = null, val stream: Stream? = null)
+
+    /** A streaming query in progress (P4b); guarded by [lock]. */
+    private class Stream(val id: String, val sender: Session, val handler: Session, var credit: Int, val maxResults: Int, val timeout: Duration) {
+        val targetId: String get() = "$id#1"
+        var parts = 0
+        /** The target left the handler's queue (a cancel goes only to a forwarded target). */
+        var forwarded = false
+        var idle: Job? = null
+        lateinit var duration: Job
+    }
 
     /** A scatter-gather in progress; guarded by [lock]. */
     private class Gather(val id: String, val sender: Session, val maxResults: Int) {
@@ -215,6 +253,9 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
     private val sessions = CopyOnWriteArrayList<Session>()
     private val pending = HashMap<String, Pending>()
     private val gathers = HashMap<String, Gather>()
+    private val streams = HashMap<String, Stream>() // by the sender's request id
+    private val flowsBySender = ConcurrentHashMap<String, MutableList<Int>>()
+    private val cancelsBySender = ConcurrentHashMap<String, MutableList<Cancel>>()
     private val rotation = HashMap<String, Int>()
     private val heartbeats = ConcurrentHashMap<String, Int>()
     private val registrations = ConcurrentHashMap<String, Int>()
@@ -311,6 +352,18 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
     /** Request ids in the order they were forwarded to handlers. */
     fun forwardedOrder(): List<String> = forwardedOrder.toList()
 
+    /** Streaming queries not yet ended. */
+    fun openStreams(): Int = synchronized(lock) { streams.size }
+
+    /** The credit the hub still holds for the stream with the sender's request id [requestId], or null when it is not open. */
+    fun creditOf(requestId: String): Int? = synchronized(lock) { streams[requestId]?.credit }
+
+    /** `Flow.credits` received from [instanceId] as a sender, in order (ignored ones included). */
+    fun flowsFrom(instanceId: String): List<Int> = flowsBySender[instanceId]?.toList().orEmpty()
+
+    /** `Cancel` messages received from [instanceId] as a sender, in order (ignored ones included). */
+    fun cancelsFrom(instanceId: String): List<Cancel> = cancelsBySender[instanceId]?.toList().orEmpty()
+
     /** The ack this hub sends to a v2 registrant that declared [capabilities]. */
     fun registerAck(capabilities: List<String> = emptyList()): RegisterAck = RegisterAck.newBuilder()
         .addAllCapabilities(
@@ -318,6 +371,7 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
                 FLOW_CONTROL.takeIf { flowControl && it in capabilities },
                 INSTANCE_STATUS.takeIf { instanceStatus && it in capabilities },
                 SCATTER_GATHER.takeIf { scatterGather && it in capabilities },
+                STREAMING.takeIf { streaming && it in capabilities },
             ),
         )
         .setHubId(hubId)
@@ -342,7 +396,7 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
     }
 
     private inner class Service : HubGrpcKt.HubCoroutineImplBase() {
-        override fun connect(requests: Flow<ClientMessage>): Flow<ServerMessage> = channelFlow {
+        override fun connect(requests: kotlinx.coroutines.flow.Flow<ClientMessage>): kotlinx.coroutines.flow.Flow<ServerMessage> = channelFlow {
             val session = Session(channel)
             sessions += session
             session.collector = launch {
@@ -374,6 +428,10 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
             msg.hasRequest() -> forward(session, msg.request)
             msg.hasReply() -> relay(session, msg)
             msg.hasPermits() -> grant(session, msg.permits.count, msg.permits.grant)
+            msg.hasPart() -> relayPart(session, msg.part)
+            msg.hasEnd() -> relayEnd(session, msg.end)
+            msg.hasFlow() -> relayFlow(session, msg.flow)
+            msg.hasCancel() -> onCancel(session, msg.cancel)
             msg.hasStatus() -> {
                 statusMessages.merge(session.instanceId, 1, Int::plus)
                 if (session.instanceStatus) lastStatuses[session.instanceId] = msg.status
@@ -428,6 +486,7 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
                 session.cap = reg.initialPermits
                 session.instanceStatus = !legacy && instanceStatus && reg.protocolVersion >= 2 && INSTANCE_STATUS in reg.capabilitiesList
                 session.scatterGather = !legacy && scatterGather && reg.protocolVersion >= 2 && SCATTER_GATHER in reg.capabilitiesList
+                session.streaming = !legacy && streaming && reg.protocolVersion >= 2 && STREAMING in reg.capabilitiesList
                 session.protocolVersion = if (legacy) 0 else reg.protocolVersion
             }
             session.serviceName = reg.serviceName
@@ -464,17 +523,19 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
         if (req.mode != RequestMode.UNARY) {
             // A v1 session cannot know UNSUPPORTED: it gets INVALID_REQUEST, like from the real hub.
             val refusal = if (sender.protocolVersion >= 2) ErrorCode.UNSUPPORTED else ErrorCode.INVALID_REQUEST
-            if (req.mode != RequestMode.SCATTER_GATHER) {
-                sender.fail(req.id, refusal, "request mode ${req.mode} is not supported")
-            } else if (!sender.scatterGather) {
-                sender.fail(req.id, refusal, "scatter-gather needs the $SCATTER_GATHER capability")
-            } else {
-                scatter(sender, req)
+            when {
+                req.mode == RequestMode.SCATTER_GATHER && !sender.scatterGather ->
+                    sender.fail(req.id, refusal, "scatter-gather needs the $SCATTER_GATHER capability")
+                req.mode == RequestMode.SCATTER_GATHER -> scatter(sender, req)
+                req.mode == RequestMode.STREAMING && !sender.streaming ->
+                    sender.fail(req.id, refusal, "request mode STREAMING needs the \"$STREAMING\" capability, not declared by this session")
+                req.mode == RequestMode.STREAMING -> startStream(sender, req)
+                else -> sender.fail(req.id, refusal, "request mode ${req.mode} is not supported")
             }
             return
         }
         synchronized(lock) {
-            if (req.id in pending || req.id in gathers) {
+            if (req.id in pending || req.id in gathers || req.id in streams) {
                 sender.fail(req.id, ErrorCode.INVALID_REQUEST, "request ${req.id} is already in flight")
                 return
             }
@@ -522,7 +583,7 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
 
     private fun scatter(sender: Session, req: Request) {
         synchronized(lock) {
-            if (req.id in pending || req.id in gathers) {
+            if (req.id in pending || req.id in gathers || req.id in streams) {
                 sender.fail(req.id, ErrorCode.INVALID_REQUEST, "request ${req.id} is already in flight")
                 return
             }
@@ -542,7 +603,7 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
             gather.timer = scope.launch {
                 delay(timeout.toMillis())
                 if (!emitTimeouts) return@launch
-                synchronized(lock) { closeGather(gather, timedOut = gather.remaining.size) }
+                synchronized(lock) { closeGather(gather, timedOut = gather.remaining.size, reason = "deadline") }
             }
             val targets = owners.sortedWith(compareBy({ it.serviceName }, { it.instanceId }))
             targets.forEachIndexed { n, target -> gather.remaining += "${req.id}#$n" }
@@ -589,20 +650,168 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
         }
         gather.parts++
         gather.sender.out.trySend(ServerMessage.newBuilder().setPart(part).build())
-        if (gather.remaining.isEmpty() || (gather.maxResults > 0 && gather.ok >= gather.maxResults)) closeGather(gather, timedOut = 0)
+        if (gather.remaining.isEmpty() || (gather.maxResults > 0 && gather.ok >= gather.maxResults)) closeGather(gather, timedOut = 0, reason = "max results")
     }
 
-    /** Ends [gather]: its unanswered targets leave their queues and the map, then its `ReplyEnd`. Caller holds [lock]. */
-    private fun closeGather(gather: Gather, timedOut: Int) {
+    /**
+     * Ends [gather]: its unanswered targets leave their queues and the map (a forwarded one whose session negotiated
+     * `streaming` gets `Cancel{<id>#<n>, reason}`, P4b), then its `ReplyEnd` (unless the sender is gone). Caller holds [lock].
+     */
+    private fun closeGather(gather: Gather, timedOut: Int, reason: String, tellSender: Boolean = true) {
         if (gathers.remove(gather.id) !== gather) return
         gather.timer.cancel()
         for (targetId in gather.remaining) {
             val entry = pending.remove(targetId) ?: continue
-            entry.handler.queue.removeIf { it.request.id == targetId }
+            val queued = entry.handler.queue.removeIf { it.request.id == targetId }
+            if (!queued && entry.handler.streaming) entry.handler.cancel(targetId, reason)
         }
         gather.remaining.clear()
+        if (!tellSender) return
         val end = ReplyEnd.newBuilder().setRequestId(gather.id).setParts(gather.parts).setFailed(gather.failed).setTimedOut(timedOut)
         gather.sender.out.trySend(ServerMessage.newBuilder().setEnd(end).build())
+    }
+
+    // --- streaming queries (P4b) ---
+
+    /** Starts the stream [req] from [sender]: the gates in the hub's order, then the target through its permits and queue. */
+    private fun startStream(sender: Session, req: Request) {
+        synchronized(lock) {
+            if (req.kind == RequestKind.COMMAND) {
+                sender.fail(req.id, ErrorCode.INVALID_REQUEST, "invalid request: ${req.type} is a command; streaming is for queries")
+                return
+            }
+            val owners = sessions.filter { it.registered && req.type in it.types }
+            if (owners.isEmpty()) {
+                sender.fail(req.id, ErrorCode.NO_HANDLER, "no handler registered for ${req.type}")
+                return
+            }
+            if (owners.any { req.type in it.commandTypes }) {
+                sender.fail(req.id, ErrorCode.INVALID_REQUEST, "invalid request: ${req.type} is a command; streaming is for queries")
+                return
+            }
+            val capable = owners.filter { it.streaming }
+            if (capable.isEmpty()) {
+                val services = owners.map { it.serviceName }.distinct().sorted().joinToString(", ")
+                sender.fail(req.id, ErrorCode.UNSUPPORTED, "no live instance of $services serving ${req.type} negotiated the \"$STREAMING\" capability")
+                return
+            }
+            val targetId = "${req.id}#1"
+            if (req.id in pending || req.id in gathers || req.id in streams || targetId in pending || targetId in streams) {
+                sender.fail(req.id, ErrorCode.INVALID_REQUEST, "request ${req.id} is already in flight")
+                return
+            }
+            val index = rotation.merge(req.type, 1, Int::plus)!! - 1
+            val handler = capable[index % capable.size]
+            val credit = if (req.initialCredit > 0) req.initialCredit else 64
+            val stream = Stream(req.id, sender, handler, credit, req.maxResults, effectiveTimeout(req))
+            streams[req.id] = stream
+            lastHeaders = req.headersMap.toMap()
+            val max = maxStreamDuration
+            stream.duration = scope.launch {
+                delay(max.toMillis())
+                val text = "max stream duration (${max.toMillis()} ms) exceeded"
+                synchronized(lock) { closeStream(stream, error(stream.id, ErrorCode.CANCELLED, text), cancel = text) }
+            }
+            armIdle(stream)
+            val target = req.toBuilder().setId(targetId).setInitialCredit(credit).setMaxResults(0).build()
+            pending[targetId] = Pending(sender, handler, timer = null, stream = stream)
+            val permits = handler.permits
+            when {
+                permits == null || permits > 0 -> deliver(handler, target)
+                handler.queue.size >= queueCapacity -> {
+                    val code = if (sender.flowControl) ErrorCode.RESOURCE_EXHAUSTED else ErrorCode.HANDLER_ERROR
+                    val text = if (sender.flowControl) "queue of ${handler.instanceId} is full" else "handler busy"
+                    closeStream(stream, error(stream.id, code, text), cancel = null)
+                }
+                else -> {
+                    handler.queue += Queued(target, seq++)
+                    handler.queue.sortWith(compareByDescending<Queued> { it.request.priority }.thenBy { it.seq })
+                }
+            }
+        }
+    }
+
+    /** (Re)starts [stream]'s idle timer: no part within its timeout ends it with `TIMEOUT`. Caller holds [lock]. */
+    private fun armIdle(stream: Stream) {
+        stream.idle?.cancel()
+        stream.idle = scope.launch {
+            delay(stream.timeout.toMillis())
+            if (!emitTimeouts) return@launch
+            synchronized(lock) {
+                closeStream(stream, error(stream.id, ErrorCode.TIMEOUT, "no part for ${stream.id} within ${stream.timeout.toMillis()} ms"), cancel = "idle timeout")
+            }
+        }
+    }
+
+    /**
+     * Ends [stream]: its timers stop, its target leaves the map and the handler's queue, the sender gets
+     * `ReplyEnd{error?, parts}` (unless [tellSender] is false: it cancelled or left) and a forwarded target gets
+     * `Cancel{<id>#1, cancel}` when [cancel] is set. Caller holds [lock].
+     */
+    private fun closeStream(stream: Stream, error: Error?, cancel: String?, tellSender: Boolean = true) {
+        if (streams.remove(stream.id) !== stream) return
+        stream.idle?.cancel()
+        stream.duration.cancel()
+        pending.remove(stream.targetId)
+        stream.handler.queue.removeIf { it.request.id == stream.targetId }
+        if (tellSender) {
+            val end = ReplyEnd.newBuilder().setRequestId(stream.id).setParts(stream.parts)
+            if (error != null) end.setError(error)
+            stream.sender.out.trySend(ServerMessage.newBuilder().setEnd(end).build())
+        }
+        if (cancel != null && stream.forwarded) stream.handler.cancel(stream.targetId, cancel)
+    }
+
+    /** The open stream whose target [targetId] is served by [handler], or null (unknown, ended, or not its target). */
+    private fun streamOfTarget(targetId: String, handler: Session): Stream? =
+        pending[targetId]?.stream?.takeIf { it.handler === handler && streams[it.id] === it }
+
+    private fun relayPart(handler: Session, part: ReplyPart) {
+        if (!handler.streaming) return
+        synchronized(lock) {
+            val stream = streamOfTarget(part.requestId, handler) ?: return
+            when {
+                part.hasError() -> closeStream(stream, part.error.toBuilder().setRequestId(stream.id).build(), cancel = null)
+                stream.credit <= 0 -> closeStream(stream, error(stream.id, ErrorCode.INVALID_REQUEST, "part without credit"), cancel = "part without credit")
+                else -> {
+                    stream.credit--
+                    stream.parts++
+                    val relayed = ReplyPart.newBuilder().setRequestId(stream.id).setPayload(part.payload)
+                        .setResponderService(handler.serviceName).setResponderInstance(handler.instanceId).setSeq(part.seq)
+                    stream.sender.out.trySend(ServerMessage.newBuilder().setPart(relayed).build())
+                    armIdle(stream)
+                    if (stream.maxResults > 0 && stream.parts >= stream.maxResults) closeStream(stream, null, cancel = "max results")
+                }
+            }
+        }
+    }
+
+    private fun relayEnd(handler: Session, end: ReplyEnd) {
+        if (!handler.streaming) return
+        synchronized(lock) {
+            val stream = streamOfTarget(end.requestId, handler) ?: return
+            closeStream(stream, if (end.hasError()) end.error.toBuilder().setRequestId(stream.id).build() else null, cancel = null)
+        }
+    }
+
+    private fun relayFlow(sender: Session, flow: Flow) {
+        flowsBySender.computeIfAbsent(sender.instanceId) { CopyOnWriteArrayList() }.add(flow.credits)
+        if (!sender.streaming || flow.credits <= 0) return
+        synchronized(lock) {
+            val stream = streams[flow.requestId]?.takeIf { it.sender === sender } ?: return
+            stream.credit += flow.credits
+            // Relayed at once, also while the target is still queued (the handler ignores a Flow for a request it has not seen).
+            stream.handler.out.trySend(ServerMessage.newBuilder().setFlow(Flow.newBuilder().setRequestId(stream.targetId).setCredits(flow.credits)).build())
+        }
+    }
+
+    private fun onCancel(sender: Session, cancel: Cancel) {
+        cancelsBySender.computeIfAbsent(sender.instanceId) { CopyOnWriteArrayList() }.add(cancel)
+        if (!sender.streaming) return
+        synchronized(lock) {
+            val stream = streams[cancel.requestId]?.takeIf { it.sender === sender } ?: return
+            closeStream(stream, null, cancel = cancel.reason, tellSender = false)
+        }
     }
 
     /** Forwards [req] to [handler], spending a permit when it is permit-managed. Caller holds [lock]. */
@@ -610,6 +819,10 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
         handler.permits = handler.permits?.minus(1)
         forwardedOrder += req.id
         handler.out.trySend(ServerMessage.newBuilder().setRequest(req).build())
+        pending[req.id]?.stream?.let { stream -> // a stream's idle timeout starts over at the forward
+            stream.forwarded = true
+            armIdle(stream)
+        }
     }
 
     private fun grant(session: Session, count: Int, grant: Int) {
@@ -629,6 +842,19 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
     private fun relay(handler: Session, msg: ClientMessage) {
         val reply = msg.reply
         val entry = synchronized(lock) {
+            // A unary Reply to a streaming target (not a streaming library): one part then the end, Reply{error} as the end's error.
+            streamOfTarget(reply.requestId, handler)?.let { stream ->
+                if (reply.hasError()) {
+                    closeStream(stream, reply.error.toBuilder().setRequestId(stream.id).build(), cancel = null)
+                } else {
+                    stream.parts++
+                    val part = ReplyPart.newBuilder().setRequestId(stream.id).setPayload(reply.payload)
+                        .setResponderService(handler.serviceName).setResponderInstance(handler.instanceId).setSeq(0)
+                    stream.sender.out.trySend(ServerMessage.newBuilder().setPart(part).build())
+                    closeStream(stream, null, cancel = null)
+                }
+                return
+            }
             val p = pending[reply.requestId]
             val taken = if (p != null && p.handler === handler) pending.remove(reply.requestId) else null
             taken?.gather?.let { gather -> answered(gather, reply.requestId, handler, reply, null) }
@@ -643,11 +869,16 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
         val failed = synchronized(lock) {
             sessions.remove(session)
             session.queue.clear() // its queued requests are pending with this handler: failed below
-            // Gathers of this sender end silently (nobody is left to tell); their targets' answers will be dropped.
-            gathers.values.filter { it.sender === session }.forEach { gather ->
-                gathers.remove(gather.id)
-                gather.timer.cancel()
-                gather.remaining.forEach { pending.remove(it) }
+            // Gathers of this sender end silently (nobody is left to tell); forwarded streaming targets are cancelled.
+            gathers.values.filter { it.sender === session }.toList().forEach { gather ->
+                closeGather(gather, timedOut = gather.remaining.size, reason = "sender disconnected", tellSender = false)
+            }
+            // Streams it served end with HANDLER_DISCONNECTED; streams it was collecting cancel their handler.
+            streams.values.filter { it.handler === session }.toList().forEach { stream ->
+                closeStream(stream, error(stream.id, ErrorCode.HANDLER_DISCONNECTED, "handler ${session.instanceId} disconnected"), cancel = null)
+            }
+            streams.values.filter { it.sender === session }.toList().forEach { stream ->
+                closeStream(stream, null, cancel = "sender disconnected", tellSender = false)
             }
             val mine = pending.filterValues { it.handler === session || it.sender === session }
             mine.keys.forEach { pending.remove(it) }
@@ -669,6 +900,14 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
         const val FLOW_CONTROL = "flow-control"
         const val INSTANCE_STATUS = "instance-status"
         const val SCATTER_GATHER = "scatter-gather"
+        const val STREAMING = "streaming"
+    }
+
+    private fun error(requestId: String, code: ErrorCode, message: String): Error =
+        Error.newBuilder().setRequestId(requestId).setCode(code).setMessage(message).build()
+
+    private fun Session.cancel(requestId: String, reason: String) {
+        out.trySend(ServerMessage.newBuilder().setCancel(Cancel.newBuilder().setRequestId(requestId).setReason(reason)).build())
     }
 
     private fun Session.fail(requestId: String, code: ErrorCode, message: String) {
