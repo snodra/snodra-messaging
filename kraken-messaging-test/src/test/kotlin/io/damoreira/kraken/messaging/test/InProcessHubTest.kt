@@ -8,6 +8,7 @@ import io.damoreira.kraken.hub.v1.Register
 import io.damoreira.kraken.hub.v1.Reply
 import io.damoreira.kraken.hub.v1.Request
 import io.damoreira.kraken.hub.v1.RequestKind
+import io.damoreira.kraken.hub.v1.RequestMode
 import io.damoreira.kraken.hub.v1.ServerMessage
 import io.grpc.Status
 import io.grpc.StatusException
@@ -69,6 +70,24 @@ class InProcessHubTest {
             ClientMessage.newBuilder().setRegister(
                 Register.newBuilder().setServiceName(service).setInstanceId(instance).addAllCommandTypes(commands.toList()),
             ).build(),
+        )
+
+        /** A protocol v2 Register declaring [capabilities], with exclusive [queries] and [shared] query types. */
+        fun registerV2(
+            service: String,
+            instance: String,
+            queries: List<String> = emptyList(),
+            shared: List<String> = emptyList(),
+            capabilities: List<String> = listOf("scatter-gather"),
+        ) = send(
+            ClientMessage.newBuilder().setRegister(
+                Register.newBuilder().setServiceName(service).setInstanceId(instance).addAllQueryTypes(queries)
+                    .addAllSharedQueryTypes(shared).setProtocolVersion(2).addAllCapabilities(capabilities),
+            ).build(),
+        )
+
+        fun reply(id: String, json: String) = send(
+            ClientMessage.newBuilder().setReply(Reply.newBuilder().setRequestId(id).setPayload(ByteString.copyFromUtf8(json))).build(),
         )
 
         suspend fun next(): ServerMessage = withTimeout(TIMEOUT_MS) { inbox.receive() }
@@ -275,6 +294,125 @@ class InProcessHubTest {
         assertIs<StatusException>(failure)
         assertEquals(Status.Code.ALREADY_EXISTS, failure.status.code)
         assertEquals("type test.Ping is owned by service svc-a", failure.status.description)
+    }
+
+    // --- shared query types and scatter-gather (P4a) ---
+
+    private fun scatter(id: String, type: String, timeoutMs: Int = 0, maxResults: Int = 0) = ClientMessage.newBuilder().setRequest(
+        Request.newBuilder().setId(id).setKind(RequestKind.QUERY).setType(type).setMode(RequestMode.SCATTER_GATHER)
+            .setTimeoutMs(timeoutMs).setMaxResults(maxResults).setPayload(ByteString.copyFromUtf8("{}")),
+    ).build()
+
+    @Test
+    fun `a shared type may have many owners, registrants must agree`() = runBlocking {
+        val x = RawClient().also { it.registerV2("svc-x", "x-1", shared = listOf("test.Search")) }
+        assertEquals(listOf("scatter-gather"), x.next().registerAck.capabilitiesList)
+        awaitRegistered("test.Search")
+        val y = RawClient().also { it.registerV2("svc-y", "y-1", shared = listOf("test.Search")) }
+        assertTrue(y.next().hasRegisterAck())
+
+        val exclusive = RawClient().also { it.registerV2("svc-z", "z-1", queries = listOf("test.Search")) }
+        val failure = assertIs<StatusException>(exclusive.awaitEnd())
+        assertEquals(Status.Code.ALREADY_EXISTS, failure.status.code)
+
+        // Even within one service: x-2 of svc-x registers the type exclusive.
+        val sameService = RawClient().also { it.registerV2("svc-x", "x-2", queries = listOf("test.Search")) }
+        assertEquals(Status.Code.ALREADY_EXISTS, assertIs<StatusException>(sameService.awaitEnd()).status.code)
+
+        RawClient().also { it.registerV2("svc-e", "e-1", queries = listOf("test.Exclusive")) }.next()
+        awaitRegistered("test.Exclusive")
+        val sharedOverExclusive = RawClient().also { it.registerV2("svc-f", "f-1", shared = listOf("test.Exclusive")) }
+        assertEquals(Status.Code.ALREADY_EXISTS, assertIs<StatusException>(sharedOverExclusive.awaitEnd()).status.code)
+
+        val both = RawClient().also { it.registerV2("svc-g", "g-1", queries = listOf("test.Both"), shared = listOf("test.Both")) }
+        assertEquals(Status.Code.INVALID_ARGUMENT, assertIs<StatusException>(both.awaitEnd()).status.code)
+    }
+
+    @Test
+    fun `scatter-gather sends each target its own unary request and relays parts then the end`() = runBlocking {
+        val x1 = RawClient().also { it.registerV2("svc-x", "x-1", shared = listOf("test.Search")) }.apply { next() }
+        val x2 = RawClient().also { it.registerV2("svc-x", "x-2", shared = listOf("test.Search")) }.apply { next() }
+        val y1 = RawClient().also { it.registerV2("svc-y", "y-1", shared = listOf("test.Search")) }.apply { next() }
+        withTimeout(TIMEOUT_MS) { while (hub.connectedInstances().size < 3) kotlinx.coroutines.delay(10) }
+        val sender = RawClient().also { it.registerV2("svc-s", "s-1") }.apply { next() }
+
+        sender.send(scatter("g1", "test.Search"))
+        val targets = listOf(x1, x2, y1).map { it.next().request }
+        assertEquals(listOf("g1#0", "g1#1", "g1#2"), targets.map { it.id }) // target order: service, then instance
+        assertTrue(targets.all { it.mode == RequestMode.UNARY })
+        y1.reply("g1#2", "{\"by\":\"y-1\"}")
+        x1.reply("g1#0", "{\"by\":\"x-1\"}")
+        x2.send(
+            ClientMessage.newBuilder().setReply(
+                Reply.newBuilder().setRequestId("g1#1").setError(
+                    io.damoreira.kraken.hub.v1.Error.newBuilder().setRequestId("g1#1").setCode(ErrorCode.HANDLER_ERROR).setMessage("boom"),
+                ),
+            ).build(),
+        )
+        val parts = (0 until 3).map { sender.next().part }
+        assertEquals(listOf("y-1", "x-1", "x-2"), parts.map { it.responderInstance })
+        assertEquals(listOf("svc-y", "svc-x", "svc-x"), parts.map { it.responderService })
+        assertEquals(listOf(0L, 1L, 2L), parts.map { it.seq })
+        assertTrue(parts.all { it.requestId == "g1" })
+        assertEquals("boom", parts[2].error.message)
+        val end = sender.next().end
+        assertEquals("g1", end.requestId)
+        assertEquals(3, end.parts)
+        assertEquals(1, end.failed)
+        assertEquals(0, end.timedOut)
+    }
+
+    @Test
+    fun `max_results ends early and the deadline counts the missing targets`() = runBlocking {
+        val x1 = RawClient().also { it.registerV2("svc-x", "x-1", shared = listOf("test.Search")) }.apply { next() }
+        val y1 = RawClient().also { it.registerV2("svc-y", "y-1", shared = listOf("test.Search")) }.apply { next() }
+        withTimeout(TIMEOUT_MS) { while (hub.connectedInstances().size < 2) kotlinx.coroutines.delay(10) }
+        val sender = RawClient().also { it.registerV2("svc-s", "s-1") }.apply { next() }
+
+        sender.send(scatter("g1", "test.Search", maxResults = 1))
+        x1.next(); y1.next()
+        x1.reply("g1#0", "{}")
+        assertTrue(sender.next().hasPart())
+        val early = sender.next().end
+        assertEquals(1, early.parts)
+        assertEquals(0, early.timedOut)
+        y1.reply("g1#1", "{}") // after the end: dropped
+
+        sender.send(scatter("g2", "test.Search", timeoutMs = 200))
+        x1.next(); y1.next()
+        x1.reply("g2#0", "{}")
+        val part = sender.next()
+        assertEquals("g2", part.part.requestId) // nothing of g1 followed its end
+        val late = sender.next().end
+        assertEquals(1, late.parts)
+        assertEquals(1, late.timedOut)
+    }
+
+    @Test
+    fun `scatter-gather refusals - no target, a command, senders without the capability, the P3 emulation`() = runBlocking {
+        val sender = RawClient().also { it.registerV2("svc-s", "s-1") }.apply { next() }
+        sender.send(scatter("g1", "test.Nobody"))
+        assertEquals(ErrorCode.NO_HANDLER, sender.next().error.code)
+
+        RawClient().also { it.register("svc-c", "c-1", "test.Cmd") }
+        awaitRegistered("test.Cmd")
+        sender.send(scatter("g2", "test.Cmd"))
+        assertEquals(ErrorCode.INVALID_REQUEST, sender.next().error.code)
+
+        val undeclared = RawClient().also { it.registerV2("svc-u", "u-1", capabilities = emptyList()) }.apply { next() }
+        undeclared.send(scatter("g3", "test.Cmd"))
+        assertEquals(ErrorCode.UNSUPPORTED, undeclared.next().error.code)
+        val v1 = RawClient().also { it.register("svc-v", "v-1") }
+        v1.send(scatter("g4", "test.Cmd"))
+        assertEquals(ErrorCode.INVALID_REQUEST, v1.next().error.code)
+
+        hub.scatterGather = false // a P3 hub: no capability, shared types ignored
+        val p3 = RawClient().also { it.registerV2("svc-p", "p-1", shared = listOf("test.Search")) }
+        assertEquals(emptyList(), p3.next().registerAck.capabilitiesList)
+        p3.send(scatter("g5", "test.Cmd"))
+        assertEquals(ErrorCode.UNSUPPORTED, p3.next().error.code)
+        kotlinx.coroutines.delay(50)
+        assertTrue("test.Search" !in hub.registeredTypes())
     }
 
     private companion object {

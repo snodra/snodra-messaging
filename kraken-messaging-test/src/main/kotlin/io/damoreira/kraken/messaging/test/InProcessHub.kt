@@ -8,7 +8,12 @@ import io.damoreira.kraken.hub.v1.HubGrpcKt
 import io.damoreira.kraken.hub.v1.InstanceStatus
 import io.damoreira.kraken.hub.v1.Register
 import io.damoreira.kraken.hub.v1.RegisterAck
+import io.damoreira.kraken.hub.v1.Reply
+import io.damoreira.kraken.hub.v1.ReplyEnd
+import io.damoreira.kraken.hub.v1.ReplyPart
 import io.damoreira.kraken.hub.v1.Request
+import io.damoreira.kraken.hub.v1.RequestKind
+import io.damoreira.kraken.hub.v1.RequestMode
 import io.damoreira.kraken.hub.v1.ServerMessage
 import io.grpc.ManagedChannel
 import io.grpc.Server
@@ -63,6 +68,18 @@ import java.util.concurrent.TimeUnit
  * and its `InstanceStatus` reports are kept ([lastStatusFrom]); reports on a stream that did not negotiate it are counted
  * ([statusMessagesFrom]) and ignored. Set [instanceStatus] false to emulate the P2 hub. [pauseReading] stops reading
  * every stream (what clients write stays queued on their side), and [requestsFrom] counts requests per sender.
+ *
+ * Query modes (P4a, ADR 0017, capability `scatter-gather`): `shared_query_types` may be owned by many services; a type
+ * registered exclusive (or as a command) by one registrant and shared by another, even of the same service, is
+ * `ALREADY_EXISTS`, and one listed both ways in a single `Register` is `INVALID_ARGUMENT`. A point query on a shared type
+ * round-robins over every owner's instances. A `SCATTER_GATHER` request from a session that negotiated the capability
+ * sends every registered instance owning the type (sorted by service, then instance id) an ordinary unary request with
+ * id `<id>#<n>`, flow control and queues applying per target; answers go back as `ReplyPart`s in arrival order (`seq`,
+ * `responder_service`, `responder_instance`), then one `ReplyEnd{parts, failed, timed_out}` once every target answered,
+ * after `max_results` successful parts, or at the deadline. A target whose handler stream ends fails as a part
+ * (`HANDLER_DISCONNECTED`). No target: `NO_HANDLER`; a command: `INVALID_REQUEST`; a v2 sender without the capability
+ * (or any other mode): `UNSUPPORTED`, a v1 sender `INVALID_REQUEST`. Set [scatterGather] false to emulate the P3 hub:
+ * no capability in the ack and `shared_query_types` ignored. [inject] writes any message to an instance's stream.
  *
  * One session per instance id, like the real hub: the first `Register` of a stream whose instance id already has a
  * registered stream replaces that older stream (it ends, its in-flight requests fail with `HANDLER_DISCONNECTED`;
@@ -127,6 +144,10 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
     @Volatile
     var instanceStatus: Boolean = true
 
+    /** Set false to emulate the P3 hub: no `scatter-gather` capability in the ack, `shared_query_types` ignored. */
+    @Volatile
+    var scatterGather: Boolean = true
+
     /** While true, no stream's next message is read (the message being handled when it is set still completes). */
     @Volatile
     var pauseReading: Boolean = false
@@ -153,6 +174,11 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
         @Volatile var serviceName: String = ""
         @Volatile var instanceId: String = ""
         @Volatile var types: Set<String> = emptySet()
+        @Volatile var commandTypes: Set<String> = emptySet()
+        @Volatile var sharedTypes: Set<String> = emptySet()
+        @Volatile var protocolVersion = 0
+        /** Negotiated `scatter-gather` (fixed by the stream's first Register). */
+        @Volatile var scatterGather = false
         @Volatile var registered = false
         /** Shares `flow-control` with this hub (fixed by the stream's first Register). */
         @Volatile var flowControl = false
@@ -171,12 +197,24 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
 
     private class Queued(val request: Request, val seq: Long)
 
-    private class Pending(val sender: Session, val handler: Session, val timer: Job)
+    /** A forwarded request: a unary one with its own deadline [timer], or one target of [gather]. */
+    private class Pending(val sender: Session, val handler: Session, val timer: Job?, val gather: Gather? = null)
+
+    /** A scatter-gather in progress; guarded by [lock]. */
+    private class Gather(val id: String, val sender: Session, val maxResults: Int) {
+        val remaining = LinkedHashSet<String>() // target ids that have not answered
+        var seq = 0L
+        var parts = 0
+        var failed = 0
+        var ok = 0
+        lateinit var timer: Job
+    }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val lock = Any() // guards sessions, pending and rotation; never held across a suspension
     private val sessions = CopyOnWriteArrayList<Session>()
     private val pending = HashMap<String, Pending>()
+    private val gathers = HashMap<String, Gather>()
     private val rotation = HashMap<String, Int>()
     private val heartbeats = ConcurrentHashMap<String, Int>()
     private val registrations = ConcurrentHashMap<String, Int>()
@@ -265,6 +303,11 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
         sessions.filter { it.registered && it.instanceId == instanceId }.sumOf { it.queue.size }
     }
 
+    /** Writes [message] to the stream of [instanceId] as if the hub had sent it (for example a part nobody waits for). */
+    fun inject(instanceId: String, message: ServerMessage) {
+        sessions.filter { it.registered && it.instanceId == instanceId }.forEach { it.out.trySend(message) }
+    }
+
     /** Request ids in the order they were forwarded to handlers. */
     fun forwardedOrder(): List<String> = forwardedOrder.toList()
 
@@ -274,6 +317,7 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
             listOfNotNull(
                 FLOW_CONTROL.takeIf { flowControl && it in capabilities },
                 INSTANCE_STATUS.takeIf { instanceStatus && it in capabilities },
+                SCATTER_GATHER.takeIf { scatterGather && it in capabilities },
             ),
         )
         .setHubId(hubId)
@@ -347,12 +391,28 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
         if (reg.serviceName.isEmpty() || reg.instanceId.isEmpty()) {
             throw Status.INVALID_ARGUMENT.withDescription("service_name and instance_id must not be empty").asException()
         }
-        val types = (reg.commandTypesList + reg.queryTypesList).toSet()
+        val exclusive = (reg.commandTypesList + reg.queryTypesList).toSet()
+        // A P3 hub predates shared_query_types: the field is ignored (the types are simply not registered).
+        val shared = if (scatterGather && !legacy) reg.sharedQueryTypesList.toSet() else emptySet()
+        shared.firstOrNull { it in exclusive }?.let { type ->
+            throw Status.INVALID_ARGUMENT.withDescription("type $type is listed as shared and as exclusive").asException()
+        }
+        val types = exclusive + shared
         val replaced = synchronized(lock) {
-            for (type in types) {
+            for (type in exclusive) {
                 val owner = sessions.firstOrNull { it !== session && type in it.types && it.serviceName != reg.serviceName }
                 if (owner != null) {
                     throw Status.ALREADY_EXISTS.withDescription("type $type is owned by service ${owner.serviceName}").asException()
+                }
+                val sharedOwner = sessions.firstOrNull { it !== session && type in it.sharedTypes }
+                if (sharedOwner != null) {
+                    throw Status.ALREADY_EXISTS.withDescription("type $type is shared by service ${sharedOwner.serviceName}").asException()
+                }
+            }
+            for (type in shared) {
+                val owner = sessions.firstOrNull { it !== session && type in it.types && type !in it.sharedTypes }
+                if (owner != null) {
+                    throw Status.ALREADY_EXISTS.withDescription("type $type is owned exclusively by service ${owner.serviceName}").asException()
                 }
             }
             val first = !session.registered
@@ -367,11 +427,15 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
                 session.permits = if (session.flowControl && reg.initialPermits > 0) reg.initialPermits else null
                 session.cap = reg.initialPermits
                 session.instanceStatus = !legacy && instanceStatus && reg.protocolVersion >= 2 && INSTANCE_STATUS in reg.capabilitiesList
+                session.scatterGather = !legacy && scatterGather && reg.protocolVersion >= 2 && SCATTER_GATHER in reg.capabilitiesList
+                session.protocolVersion = if (legacy) 0 else reg.protocolVersion
             }
             session.serviceName = reg.serviceName
             session.instanceId = reg.instanceId
             session.registered = true
             session.types = types
+            session.commandTypes = reg.commandTypesList.toSet()
+            session.sharedTypes = shared
             if (first) streamsOpened.merge(reg.instanceId, 1, Int::plus)
             older
         }
@@ -397,8 +461,20 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
             sender.fail(req.id, ErrorCode.INVALID_REQUEST, "request id and type must not be empty")
             return
         }
+        if (req.mode != RequestMode.UNARY) {
+            // A v1 session cannot know UNSUPPORTED: it gets INVALID_REQUEST, like from the real hub.
+            val refusal = if (sender.protocolVersion >= 2) ErrorCode.UNSUPPORTED else ErrorCode.INVALID_REQUEST
+            if (req.mode != RequestMode.SCATTER_GATHER) {
+                sender.fail(req.id, refusal, "request mode ${req.mode} is not supported")
+            } else if (!sender.scatterGather) {
+                sender.fail(req.id, refusal, "scatter-gather needs the $SCATTER_GATHER capability")
+            } else {
+                scatter(sender, req)
+            }
+            return
+        }
         synchronized(lock) {
-            if (req.id in pending) {
+            if (req.id in pending || req.id in gathers) {
                 sender.fail(req.id, ErrorCode.INVALID_REQUEST, "request ${req.id} is already in flight")
                 return
             }
@@ -409,9 +485,7 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
             }
             val index = rotation.merge(req.type, 1, Int::plus)!! - 1
             val handler = candidates[index % candidates.size]
-            val override = typeTimeouts[req.type]
-            val timeout = if (req.timeoutMs > 0) minOf(Duration.ofMillis(req.timeoutMs.toLong()), override ?: maxTimeout)
-            else override ?: replyTimeout
+            val timeout = effectiveTimeout(req)
             val timer = scope.launch {
                 delay(timeout.toMillis())
                 if (!emitTimeouts) return@launch
@@ -441,6 +515,96 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
         }
     }
 
+    private fun effectiveTimeout(req: Request): Duration {
+        val override = typeTimeouts[req.type]
+        return if (req.timeoutMs > 0) minOf(Duration.ofMillis(req.timeoutMs.toLong()), override ?: maxTimeout) else override ?: replyTimeout
+    }
+
+    private fun scatter(sender: Session, req: Request) {
+        synchronized(lock) {
+            if (req.id in pending || req.id in gathers) {
+                sender.fail(req.id, ErrorCode.INVALID_REQUEST, "request ${req.id} is already in flight")
+                return
+            }
+            val owners = sessions.filter { it.registered && req.type in it.types }
+            if (req.kind == RequestKind.COMMAND || owners.any { req.type in it.commandTypes }) {
+                sender.fail(req.id, ErrorCode.INVALID_REQUEST, "scatter-gather is for queries only")
+                return
+            }
+            if (owners.isEmpty()) {
+                sender.fail(req.id, ErrorCode.NO_HANDLER, "no handler registered for ${req.type}")
+                return
+            }
+            lastHeaders = req.headersMap.toMap()
+            val gather = Gather(req.id, sender, req.maxResults)
+            gathers[req.id] = gather
+            val timeout = effectiveTimeout(req)
+            gather.timer = scope.launch {
+                delay(timeout.toMillis())
+                if (!emitTimeouts) return@launch
+                synchronized(lock) { closeGather(gather, timedOut = gather.remaining.size) }
+            }
+            val targets = owners.sortedWith(compareBy({ it.serviceName }, { it.instanceId }))
+            targets.forEachIndexed { n, target -> gather.remaining += "${req.id}#$n" }
+            targets.forEachIndexed { n, target ->
+                val targetRequest = req.toBuilder().setId("${req.id}#$n").setMode(RequestMode.UNARY).setMaxResults(0).build()
+                if (gathers[req.id] !== gather) return // every target so far failed and ended the gather
+                pending[targetRequest.id] = Pending(sender, target, timer = null, gather = gather)
+                val permits = target.permits
+                when {
+                    permits == null || permits > 0 -> deliver(target, targetRequest)
+                    target.queue.size >= queueCapacity -> {
+                        pending.remove(targetRequest.id)
+                        val code = if (sender.flowControl) ErrorCode.RESOURCE_EXHAUSTED else ErrorCode.HANDLER_ERROR
+                        val text = if (sender.flowControl) "queue of ${target.instanceId} is full" else "handler busy"
+                        answered(gather, targetRequest.id, target, null, Error.newBuilder().setCode(code).setMessage(text).build())
+                    }
+                    else -> {
+                        target.queue += Queued(targetRequest, seq++)
+                        target.queue.sortWith(compareByDescending<Queued> { it.request.priority }.thenBy { it.seq })
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Target [targetId] of [gather] answered (or failed on the hub's side): one `ReplyPart` to the sender, and the
+     * `ReplyEnd` when it was the last one needed. Caller holds [lock].
+     */
+    private fun answered(gather: Gather, targetId: String, target: Session, reply: Reply?, error: Error?) {
+        if (gathers[gather.id] !== gather || !gather.remaining.remove(targetId)) return // the gather already ended
+        val part = ReplyPart.newBuilder()
+            .setRequestId(gather.id)
+            .setResponderService(target.serviceName)
+            .setResponderInstance(target.instanceId)
+            .setSeq(gather.seq++)
+        val failure = error ?: reply?.takeIf { it.hasError() }?.error
+        if (failure != null) {
+            part.setError(failure.toBuilder().setRequestId(gather.id))
+            gather.failed++
+        } else {
+            part.setPayload(reply!!.payload)
+            gather.ok++
+        }
+        gather.parts++
+        gather.sender.out.trySend(ServerMessage.newBuilder().setPart(part).build())
+        if (gather.remaining.isEmpty() || (gather.maxResults > 0 && gather.ok >= gather.maxResults)) closeGather(gather, timedOut = 0)
+    }
+
+    /** Ends [gather]: its unanswered targets leave their queues and the map, then its `ReplyEnd`. Caller holds [lock]. */
+    private fun closeGather(gather: Gather, timedOut: Int) {
+        if (gathers.remove(gather.id) !== gather) return
+        gather.timer.cancel()
+        for (targetId in gather.remaining) {
+            val entry = pending.remove(targetId) ?: continue
+            entry.handler.queue.removeIf { it.request.id == targetId }
+        }
+        gather.remaining.clear()
+        val end = ReplyEnd.newBuilder().setRequestId(gather.id).setParts(gather.parts).setFailed(gather.failed).setTimedOut(timedOut)
+        gather.sender.out.trySend(ServerMessage.newBuilder().setEnd(end).build())
+    }
+
     /** Forwards [req] to [handler], spending a permit when it is permit-managed. Caller holds [lock]. */
     private fun deliver(handler: Session, req: Request) {
         handler.permits = handler.permits?.minus(1)
@@ -466,9 +630,12 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
         val reply = msg.reply
         val entry = synchronized(lock) {
             val p = pending[reply.requestId]
-            if (p != null && p.handler === handler) pending.remove(reply.requestId) else null
-        } ?: return // late (after TIMEOUT) or unknown reply: dropped
-        entry.timer.cancel()
+            val taken = if (p != null && p.handler === handler) pending.remove(reply.requestId) else null
+            taken?.gather?.let { gather -> answered(gather, reply.requestId, handler, reply, null) }
+            taken
+        } ?: return // late (after TIMEOUT or the gather's end) or unknown reply: dropped
+        if (entry.gather != null) return
+        entry.timer?.cancel()
         entry.sender.out.trySend(ServerMessage.newBuilder().setReply(reply).build())
     }
 
@@ -476,12 +643,22 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
         val failed = synchronized(lock) {
             sessions.remove(session)
             session.queue.clear() // its queued requests are pending with this handler: failed below
+            // Gathers of this sender end silently (nobody is left to tell); their targets' answers will be dropped.
+            gathers.values.filter { it.sender === session }.forEach { gather ->
+                gathers.remove(gather.id)
+                gather.timer.cancel()
+                gather.remaining.forEach { pending.remove(it) }
+            }
             val mine = pending.filterValues { it.handler === session || it.sender === session }
             mine.keys.forEach { pending.remove(it) }
-            mine
+            // A target of another sender's gather fails as a part.
+            mine.forEach { (id, p) ->
+                p.gather?.let { answered(it, id, session, null, Error.newBuilder().setCode(ErrorCode.HANDLER_DISCONNECTED).setMessage("handler ${session.instanceId} disconnected").build()) }
+            }
+            mine.filterValues { it.gather == null }
         }
         failed.forEach { (id, p) ->
-            p.timer.cancel()
+            p.timer?.cancel()
             if (p.handler === session && p.sender !== session) {
                 p.sender.fail(id, ErrorCode.HANDLER_DISCONNECTED, "handler ${session.instanceId} disconnected")
             }
@@ -491,6 +668,7 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
     private companion object {
         const val FLOW_CONTROL = "flow-control"
         const val INSTANCE_STATUS = "instance-status"
+        const val SCATTER_GATHER = "scatter-gather"
     }
 
     private fun Session.fail(requestId: String, code: ErrorCode, message: String) {
