@@ -10,6 +10,9 @@ import io.damoreira.kraken.messaging.fixtures.Happened
 import io.damoreira.kraken.messaging.fixtures.Ping
 import io.damoreira.kraken.messaging.fixtures.Pong
 import io.damoreira.kraken.messaging.fixtures.Row
+import io.damoreira.kraken.messaging.fixtures.Balance
+import io.damoreira.kraken.messaging.fixtures.BalanceChanged
+import io.damoreira.kraken.messaging.fixtures.WatchAccount
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.toList
@@ -91,6 +94,22 @@ class StreamingAsCommand {
 
 class FlowFromPlainQuery {
     @QueryHandler fun handle(query: GetCount): Flow<Count> = flow { emit(Count(1)) }
+}
+
+class AccountWatchers {
+    @QueryHandler fun handle(query: WatchAccount): Balance = Balance(query.account * 10)
+}
+
+class SharedAccountWatchers {
+    @QueryHandler(shared = true) suspend fun handle(query: WatchAccount, ctx: MessageContext): Balance = Balance(1)
+}
+
+class SubscriptionReturningFlow {
+    @QueryHandler fun handle(query: WatchAccount): Flow<BalanceChanged> = flow { }
+}
+
+class SubscriptionAsCommand {
+    @CommandHandler fun handle(query: WatchAccount): Balance = Balance(0)
 }
 
 class HandlerRegistryTest {
@@ -236,5 +255,37 @@ class HandlerRegistryTest {
     @Test fun `a command handler cannot take a StreamingQuery`() {
         val e = assertThrows<IllegalStateException> { registry.register(StreamingAsCommand()) }
         assertEquals("Handler StreamingAsCommand.handle takes a StreamingQuery: use @QueryHandler", e.message)
+    }
+
+    // --- subscription queries (P4c) ---
+
+    @Test fun `a QueryHandler taking a SubscriptionQuery is a subscription query handler answering the initial result`() = runBlocking {
+        registry.register(AccountWatchers())
+        val handler = assertNotNull(registry.queryHandler("test.WatchAccount"))
+        assertTrue(handler.subscription)
+        assertEquals(false, handler.streaming)
+        assertEquals(false, handler.shared)
+        assertEquals(setOf("test.WatchAccount"), registry.exclusiveQueryTypes())
+        assertEquals(setOf("test.WatchAccount"), registry.queryTypes())
+        assertEquals(Balance(70), handler.invoke(WatchAccount(7), ctx))
+        assertEquals(false, assertNotNull(HandlerRegistry(MessageTypeResolver("test")).apply { register(AllKindsHandlers()) }.queryHandler("test.GetCount")).subscription)
+    }
+
+    @Test fun `a shared subscription query handler is announced as a shared query type`() {
+        registry.register(SharedAccountWatchers())
+        val handler = assertNotNull(registry.queryHandler("test.WatchAccount"))
+        assertTrue(handler.subscription && handler.shared && handler.wantsContext)
+        assertEquals(setOf("test.WatchAccount"), registry.sharedQueryTypes())
+        assertEquals(emptySet(), registry.exclusiveQueryTypes())
+    }
+
+    @Test fun `a subscription query handler must not return a Flow`() {
+        val e = assertThrows<IllegalStateException> { registry.register(SubscriptionReturningFlow()) }
+        assertEquals("Handler SubscriptionReturningFlow.handle takes a SubscriptionQuery and must return its initial result I, not a Flow (updates go through QueryUpdateEmitter)", e.message)
+    }
+
+    @Test fun `a command handler cannot take a SubscriptionQuery`() {
+        val e = assertThrows<IllegalStateException> { registry.register(SubscriptionAsCommand()) }
+        assertEquals("Handler SubscriptionAsCommand.handle takes a SubscriptionQuery: use @QueryHandler", e.message)
     }
 }

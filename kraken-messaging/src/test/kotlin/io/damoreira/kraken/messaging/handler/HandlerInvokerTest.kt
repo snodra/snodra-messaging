@@ -12,6 +12,8 @@ import io.damoreira.kraken.messaging.codec.MessageTypeResolver
 import io.damoreira.kraken.messaging.fixtures.Count
 import io.damoreira.kraken.messaging.fixtures.ExportRows
 import io.damoreira.kraken.messaging.fixtures.Row
+import io.damoreira.kraken.messaging.fixtures.Balance
+import io.damoreira.kraken.messaging.fixtures.WatchAccount
 import io.damoreira.kraken.messaging.fixtures.GetCount
 import io.damoreira.kraken.messaging.fixtures.Happened
 import io.damoreira.kraken.messaging.fixtures.Ping
@@ -95,6 +97,14 @@ class RowsHandlers {
 
 class AuthRowsHandlers {
     @QueryHandler @RequiresAuthentication("hasRole('kraken-admin')") fun handle(query: ExportRows): Flow<Row> = flow { emit(Row(1)) }
+}
+
+class WatchHandlers {
+    @QueryHandler fun handle(query: WatchAccount): Balance = if (query.account < 0) throw IllegalStateException("no such account") else Balance(query.account * 10)
+}
+
+class AuthWatchHandlers {
+    @QueryHandler @RequiresAuthentication("hasRole('kraken-admin')") fun handle(query: WatchAccount): Balance = Balance(1)
 }
 
 class HandlerInvokerTest {
@@ -283,5 +293,47 @@ class HandlerInvokerTest {
         val parts = mutableListOf<String>()
         assertNull(invoker.invokeStream("test.ExportRows", codec.encode(ExportRows(1)), ctx("test.ExportRows"), identity("kraken-admin")) { parts += String(it) })
         assertEquals(1, parts.size)
+    }
+
+    // --- subscription queries (P4c) ---
+
+    @Test fun `a unary request for a subscription query type is INVALID_REQUEST, the initial request runs the handler`() = runBlocking {
+        registry.register(WatchHandlers())
+        val unary = assertIs<InvocationResult.Failure>(invoker.invokeQuery("test.WatchAccount", codec.encode(WatchAccount(7)), ctx("test.WatchAccount"), null))
+        assertEquals(ErrorCode.INVALID_REQUEST, unary.code)
+        assertEquals("test.WatchAccount is a subscription query: send it with QueryBus.subscribe", unary.message)
+        val initial = assertIs<InvocationResult.Success>(invoker.invokeQuery("test.WatchAccount", codec.encode(WatchAccount(7)), ctx("test.WatchAccount"), null, subscriptionInitial = true))
+        assertEquals(Balance(70), codec.decode(initial.payload, Balance::class))
+        val failed = assertIs<InvocationResult.Failure>(invoker.invokeQuery("test.WatchAccount", codec.encode(WatchAccount(-1)), ctx("test.WatchAccount"), null, subscriptionInitial = true))
+        assertEquals(ErrorCode.HANDLER_ERROR to "IllegalStateException: no such account", failed.code to failed.message)
+        // The flag only lets a subscription handler answer: a plain query handler is invoked as before, a streaming one refused as before.
+        registry.register(InvokerHandlers())
+        registry.register(object { @QueryHandler fun handle(query: GetCount): Count = Count(1) })
+        assertIs<InvocationResult.Success>(invoker.invokeQuery("test.GetCount", codec.encode(GetCount("k")), ctx("test.GetCount"), null, subscriptionInitial = true))
+        registry.register(RowsHandlers())
+        assertEquals(ErrorCode.INVALID_REQUEST, assertIs<InvocationResult.Failure>(invoker.invokeQuery("test.ExportRows", codec.encode(ExportRows(1)), ctx("test.ExportRows"), null, subscriptionInitial = true)).code)
+    }
+
+    @Test fun `admitSubscription decodes the query, and refuses a missing or non-subscription handler and a bad payload`() {
+        registry.register(WatchHandlers())
+        val accepted = assertIs<SubscriptionAdmission.Accepted>(invoker.admitSubscription("test.WatchAccount", codec.encode(WatchAccount(7)), ctx("test.WatchAccount"), null))
+        assertEquals(WatchAccount(7), accepted.query)
+        val bad = assertIs<SubscriptionAdmission.Rejected>(invoker.admitSubscription("test.WatchAccount", "[1]".toByteArray(), ctx("test.WatchAccount"), null))
+        assertEquals(ErrorCode.INVALID_REQUEST, bad.failure.code)
+        val none = assertIs<SubscriptionAdmission.Rejected>(invoker.admitSubscription("test.GetCount", codec.encode(GetCount("k")), ctx("test.GetCount"), null))
+        assertEquals(ErrorCode.INVALID_REQUEST to "no subscription handler for test.GetCount on this instance", none.failure.code to none.failure.message)
+        registry.register(object { @QueryHandler fun handle(query: GetCount): Count = Count(1) })
+        val unary = assertIs<SubscriptionAdmission.Rejected>(invoker.admitSubscription("test.GetCount", codec.encode(GetCount("k")), ctx("test.GetCount"), null))
+        assertEquals(ErrorCode.INVALID_REQUEST, unary.failure.code)
+        assertTrue(unary.failure.message.contains("not a subscription query handler"), unary.failure.message)
+    }
+
+    @Test fun `admitSubscription checks RequiresAuthentication`() {
+        val (invoker, codec) = invokerFor(AuthWatchHandlers())
+        val anonymous = assertIs<SubscriptionAdmission.Rejected>(invoker.admitSubscription("test.WatchAccount", codec.encode(WatchAccount(1)), ctx("test.WatchAccount"), null))
+        assertEquals(ErrorCode.UNAUTHENTICATED, anonymous.failure.code)
+        val denied = assertIs<SubscriptionAdmission.Rejected>(invoker.admitSubscription("test.WatchAccount", codec.encode(WatchAccount(1)), ctx("test.WatchAccount"), identity("kraken-user")))
+        assertEquals(ErrorCode.PERMISSION_DENIED, denied.failure.code)
+        assertIs<SubscriptionAdmission.Accepted>(invoker.admitSubscription("test.WatchAccount", codec.encode(WatchAccount(1)), ctx("test.WatchAccount"), identity("kraken-admin")))
     }
 }

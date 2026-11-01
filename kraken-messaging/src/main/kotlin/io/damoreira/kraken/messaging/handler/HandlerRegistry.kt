@@ -3,6 +3,7 @@ package io.damoreira.kraken.messaging.handler
 import io.damoreira.kraken.messaging.DuplicateHandlerException
 import io.damoreira.kraken.messaging.MessageContext
 import io.damoreira.kraken.messaging.api.StreamingQuery
+import io.damoreira.kraken.messaging.api.SubscriptionQuery
 import io.damoreira.kraken.messaging.codec.MessageTypeResolver
 import kotlinx.coroutines.flow.Flow
 import org.slf4j.LoggerFactory
@@ -47,6 +48,9 @@ class HandlerRegistry(private val typeResolver: MessageTypeResolver) {
 
     /** Query types of exclusive `@QueryHandler`s (announced as `query_types`). */
     fun exclusiveQueryTypes(): Set<String> = queries.filterValues { !it.shared }.keys.toSet()
+
+    /** Query types served by a subscription query handler (`SubscriptionQuery<I, U>`, P4c), shared or exclusive. */
+    fun subscriptionQueryTypes(): Set<String> = queries.filterValues { it.subscription }.keys.toSet()
     fun eventTypes(): Set<String> = events.keys.toSet()
 
     /** Registers a listener called after each [register] that added handlers. */
@@ -117,11 +121,23 @@ class HandlerRegistry(private val typeResolver: MessageTypeResolver) {
         if (streaming && fn.returnType.classifier != Flow::class) {
             throw IllegalStateException("Handler ${labelOf(klass, fn)} takes a StreamingQuery and must return kotlinx.coroutines.flow.Flow<R>")
         }
+        // A SubscriptionQuery<I, U> (P4c) is served by a @QueryHandler returning I (the initial result); the updates go
+        // through the QueryUpdateEmitter, so a Flow would be a streaming handler's shape, never a subscription's.
+        val subscription = messageClass.isSubclassOf(SubscriptionQuery::class)
+        if (subscription && streaming) {
+            throw IllegalStateException("Handler ${labelOf(klass, fn)} takes a message that is both a StreamingQuery and a SubscriptionQuery: implement one of them")
+        }
+        if (subscription && kind != HandlerKind.QUERY) {
+            throw IllegalStateException("Handler ${labelOf(klass, fn)} takes a SubscriptionQuery: use @QueryHandler")
+        }
+        if (subscription && fn.returnType.classifier == Flow::class) {
+            throw IllegalStateException("Handler ${labelOf(klass, fn)} takes a SubscriptionQuery and must return its initial result I, not a Flow (updates go through QueryUpdateEmitter)")
+        }
         if (!streaming && kind == HandlerKind.QUERY && fn.returnType.classifier == Flow::class) {
             // A Flow is no reply: it would be JSON-encoded as an empty object. Only a streaming query is served part by part.
             throw IllegalStateException("Handler ${labelOf(klass, fn)} returns a Flow: its query must implement StreamingQuery<R>")
         }
-        return HandlerMethod(bean, fn, kind, messageClass, typeResolver.typeNameOf(messageClass), wantsContext, authorization, shared, streaming)
+        return HandlerMethod(bean, fn, kind, messageClass, typeResolver.typeNameOf(messageClass), wantsContext, authorization, shared, streaming, subscription)
     }
 
     private fun add(handler: HandlerMethod) {

@@ -23,6 +23,11 @@ class HandlerMethod(
     val shared: Boolean = false,
     /** The message is a `StreamingQuery<R>` and the function returns `Flow<R>` (P4b): served part by part under credit. */
     val streaming: Boolean = false,
+    /**
+     * The message is a `SubscriptionQuery<I, U>` (P4c): the function answers the initial result `I` of a subscription
+     * (the hub's `<id>#0` request); the updates come from the `QueryUpdateEmitter`.
+     */
+    val subscription: Boolean = false,
 ) {
     init {
         function.isAccessible = true

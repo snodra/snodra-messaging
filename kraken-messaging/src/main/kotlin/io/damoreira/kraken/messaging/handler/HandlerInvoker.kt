@@ -17,6 +17,15 @@ sealed interface InvocationResult {
     data class Failure(val code: ErrorCode, val message: String, val details: ByteArray = ByteArray(0)) : InvocationResult
 }
 
+/** The outcome of admitting a subscription (`mode = SUBSCRIPTION`, P4c) on this instance: the decoded query, or why not. */
+sealed interface SubscriptionAdmission {
+    /** The query decoded as the handler's message class; the subscription may be registered. */
+    class Accepted(val query: Any) : SubscriptionAdmission
+
+    /** Refused before anything is registered: the `ReplyEnd{error}` to send. */
+    class Rejected(val failure: InvocationResult.Failure) : SubscriptionAdmission
+}
+
 /**
  * Decodes a payload, calls the registered handler and maps the outcome (or exception) to an [InvocationResult].
  *
@@ -31,6 +40,12 @@ sealed interface InvocationResult {
  * and handed to the caller as it is emitted (the caller suspends the collection while the hub granted no credit), and an
  * exception from the flow maps exactly like a unary handler's. The same handler reached by a unary request (mode
  * `UNARY`, [invokeQuery]) is `INVALID_REQUEST`: its flow cannot be a single reply.
+ *
+ * A subscription query handler (`SubscriptionQuery<I, U>` -> `I`, P4c) answers only the initial request of a
+ * subscription ([invokeQuery] with `subscriptionInitial`, the hub's `<id>#0`); a plain unary request for its type is
+ * `INVALID_REQUEST` ("send it with QueryBus.subscribe"). [admitSubscription] runs the same pre-checks for the
+ * subscription request itself (`mode = SUBSCRIPTION`) and hands back the decoded query, which the connection keeps to
+ * match the emitter's updates against.
  */
 class HandlerInvoker(private val registry: HandlerRegistry, private val codec: JsonCodec) {
     private val log = LoggerFactory.getLogger(HandlerInvoker::class.java)
@@ -39,8 +54,34 @@ class HandlerInvoker(private val registry: HandlerRegistry, private val codec: J
     suspend fun invokeCommand(type: String, payload: ByteArray, ctx: MessageContext, identity: Identity?): InvocationResult =
         invoke(type, registry.commandHandler(type), payload, ctx, identity)
 
-    suspend fun invokeQuery(type: String, payload: ByteArray, ctx: MessageContext, identity: Identity?): InvocationResult =
-        invoke(type, registry.queryHandler(type), payload, ctx, identity)
+    /**
+     * [subscriptionInitial] (P4c): the request is the initial request of a subscription (`<id>#0`), so a subscription
+     * query handler answers it; without it such a handler is `INVALID_REQUEST`. Other handlers are invoked either way.
+     */
+    suspend fun invokeQuery(
+        type: String,
+        payload: ByteArray,
+        ctx: MessageContext,
+        identity: Identity?,
+        subscriptionInitial: Boolean = false,
+    ): InvocationResult = invoke(type, registry.queryHandler(type), payload, ctx, identity, subscriptionInitial)
+
+    /**
+     * Admits a subscription request (`mode = SUBSCRIPTION`, P4c) for [type]: the handler must be a subscription query
+     * handler (else `INVALID_REQUEST`), `@RequiresAuthentication` is checked as for a unary handler, and [payload] is
+     * decoded as the handler's message class (`INVALID_REQUEST` when it does not). Nothing is invoked.
+     */
+    fun admitSubscription(type: String, payload: ByteArray, ctx: MessageContext, identity: Identity?): SubscriptionAdmission {
+        val handler = registry.queryHandler(type)
+            ?: return SubscriptionAdmission.Rejected(InvocationResult.Failure(ErrorCode.INVALID_REQUEST, "no subscription handler for $type on this instance"))
+        if (!handler.subscription) {
+            return SubscriptionAdmission.Rejected(InvocationResult.Failure(ErrorCode.INVALID_REQUEST, "handler ${handler.label} for $type is not a subscription query handler (it answers mode UNARY)"))
+        }
+        return when (val prepared = prepare(type, handler, payload, ctx, identity)) {
+            is Prepared.Rejected -> SubscriptionAdmission.Rejected(prepared.failure)
+            is Prepared.Ready -> SubscriptionAdmission.Accepted(prepared.message)
+        }
+    }
 
     /** Calls every handler of [type] in order; a failing handler does not stop the others, the first failure is rethrown. */
     suspend fun invokeEvent(type: String, payload: ByteArray, ctx: MessageContext) {
@@ -121,9 +162,13 @@ class HandlerInvoker(private val registry: HandlerRegistry, private val codec: J
         payload: ByteArray,
         ctx: MessageContext,
         identity: Identity?,
+        subscriptionInitial: Boolean = false,
     ): InvocationResult {
         if (handler != null && handler.streaming) {
             return InvocationResult.Failure(ErrorCode.INVALID_REQUEST, "$type is a streaming query: send it with QueryBus.stream (mode STREAMING)")
+        }
+        if (handler != null && handler.subscription && !subscriptionInitial) {
+            return InvocationResult.Failure(ErrorCode.INVALID_REQUEST, "$type is a subscription query: send it with QueryBus.subscribe")
         }
         val message = when (val prepared = prepare(type, handler, payload, ctx, identity)) {
             is Prepared.Rejected -> return prepared.failure

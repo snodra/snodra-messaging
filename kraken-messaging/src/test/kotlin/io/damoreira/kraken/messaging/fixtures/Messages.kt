@@ -5,6 +5,7 @@ import io.damoreira.kraken.messaging.api.Event
 import io.damoreira.kraken.messaging.api.MessageType
 import io.damoreira.kraken.messaging.api.Query
 import io.damoreira.kraken.messaging.api.StreamingQuery
+import io.damoreira.kraken.messaging.api.SubscriptionQuery
 import java.time.Instant
 
 @MessageType("test.Ping")
@@ -27,3 +28,11 @@ data class Happened(val id: String, val at: Instant) : Event
 data class ExportRows(val count: Int, val failAt: Int = -1) : StreamingQuery<Row>
 
 data class Row(val n: Int)
+
+/** A subscription query (P4c): the balance of [account] now, then every change to it. */
+@MessageType("test.WatchAccount")
+data class WatchAccount(val account: Int) : SubscriptionQuery<Balance, BalanceChanged>
+
+data class Balance(val value: Int)
+
+data class BalanceChanged(val account: Int, val value: Int)
