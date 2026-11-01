@@ -21,6 +21,7 @@ import io.damoreira.kraken.hub.v1.ServerMessage
 import io.damoreira.kraken.messaging.HubConnectionLostException
 import io.damoreira.kraken.messaging.HubRegistrationRejectedException
 import io.damoreira.kraken.messaging.HubUnavailableException
+import io.damoreira.kraken.messaging.InvalidMessageException
 import io.damoreira.kraken.messaging.MessageTimeoutException
 import io.damoreira.kraken.messaging.MessagingException
 import io.damoreira.kraken.messaging.UnsupportedByHubException
@@ -150,9 +151,10 @@ internal object ReconnectBackoff {
  * local guard for the whole gather. Parts and ends for ids nobody waits for are ignored.
  *
  * Streaming (P4b, ADR 0017): `Register` declares `streaming`. As a sender, [stream] sends a `STREAMING` request only to a
- * hub whose ack lists it ([supportsStreaming]), hands each `ReplyPart` to the caller, writes `Flow{initial_credit / 2}`
- * each time that many parts were consumed (the caller's callback returned) and `Cancel` when the caller gives up
- * before the end (cancellation, an exception, the local idle guard). As a handler, a `STREAMING` request runs
+ * hub whose ack lists it ([supportsStreaming]), hands each `ReplyPart` to the caller (checking `seq` runs 1, 2, 3, ...
+ * and, at the end, that `ReplyEnd.parts` is what arrived: a part the hub dropped fails the stream as lost), writes
+ * `Flow{initial_credit / 2}` each time that many parts were consumed (the caller's callback returned) and `Cancel`
+ * when the caller gives up before the end (cancellation, an exception, the local idle guard, a lost part). As a handler, a `STREAMING` request runs
  * [inboundStream] under the handler permit for the whole stream: each part waits for credit ([StreamCredit]: the
  * request's `initial_credit` plus every `Flow` for its id) and goes out with `seq` 1, 2, ..., then `ReplyEnd` (with the
  * error the handler returned, or `HANDLER_ERROR` for an exception that leaked). A `Cancel` from the hub cancels the
@@ -431,6 +433,9 @@ class HubConnection(
      * @throws UnsupportedByHubException if the stream's ack does not list `streaming` (a legacy hub never does); nothing is sent
      * @throws HubUnavailableException, HubConnectionLostException as [send]; parts already handed to [onPart] stay
      * @throws MessageTimeoutException if no part or end arrives within the local guard (a `Cancel` is written)
+     * @throws InvalidMessageException `stream <type> lost N part(s)` when a part's `seq` jumps (the hub drops a part it
+     *   could not deliver within 5 s; `Cancel` is written, the stream is still open) or the `ReplyEnd.parts` count
+     *   exceeds the parts received (the stream has ended; nothing is written); also for a `seq` out of order
      * @throws StreamCollectorException wrapping what [onPart] threw (other than a `CancellationException`): whatever it
      *   was, also a `HubUnavailableException` of a nested send, it is the collector's failure, not this request's
      *   transport failing; `Cancel` is written
@@ -455,12 +460,26 @@ class HubConnection(
             write(stream, outgoing)
             var guardMs = 2 * bound + margin
             var consumed = 0
+            var received = 0L
             while (true) {
                 // The guard covers the wait for the next message only, never the caller's handling of a part.
                 val message = withTimeoutOrNull(guardMs) { entry.messages.receive() } ?: throw MessageTimeoutException(request.type)
                 if (!message.hasPart()) {
                     terminal = message
+                    // The hub drops a part it could not deliver within 5 s (full buffer) and counts it anyway: the end's
+                    // count against the parts received tells a loss the seq check could not (the last part).
+                    if (message.hasEnd()) {
+                        val counted = Integer.toUnsignedLong(message.end.parts)
+                        if (counted > received) throw InvalidMessageException("stream ${request.type} lost ${counted - received} part(s)")
+                    }
                     break
+                }
+                // Parts arrive with seq 1, 2, 3, ... (the handler's): a jump is a part the hub dropped.
+                val seq = message.part.seq
+                when {
+                    seq == received + 1 -> received++
+                    seq > received + 1 -> throw InvalidMessageException("stream ${request.type} lost ${seq - received - 1} part(s)")
+                    else -> throw InvalidMessageException("stream ${request.type} part seq $seq out of order (expected ${received + 1})")
                 }
                 try {
                     onPart(message.part)
@@ -486,6 +505,7 @@ class HubConnection(
                 val reason = when (failure) {
                     null, is CancellationException -> "collector cancelled"
                     is MessageTimeoutException -> "no part within the local guard"
+                    is InvalidMessageException -> failure.message // a lost or out-of-order part
                     is StreamCollectorException -> failure.cause!!.let { "collector failed: ${it::class.simpleName}: ${it.message}" }
                     else -> "collector failed: ${failure::class.simpleName}: ${failure.message}"
                 }

@@ -96,8 +96,8 @@ import java.util.concurrent.TimeUnit
  * `Cancel{"sender disconnected"}`. A unary `Reply` to the target is one part then the end. A gather ending early sends
  * `Cancel{<id>#<n>, reason}` to its forwarded targets whose session negotiated `streaming`. Client-sent `ReplyPart`,
  * `ReplyEnd`, `Flow` and `Cancel` from sessions without the capability are ignored. Set [streaming] false to emulate
- * the P4a hub (no capability in the ack, `STREAMING` is `UNSUPPORTED`). [openStreams], [creditOf], [flowsFrom] and
- * [cancelsFrom] observe it.
+ * the P4a hub (no capability in the ack, `STREAMING` is `UNSUPPORTED`); [dropParts] drops relayed parts by `seq` (the
+ * real hub's full-buffer drop). [openStreams], [creditOf], [flowsFrom] and [cancelsFrom] observe it.
  *
  * One session per instance id, like the real hub: the first `Register` of a stream whose instance id already has a
  * registered stream replaces that older stream (it ends, its in-flight requests fail with `HANDLER_DISCONNECTED`;
@@ -191,6 +191,13 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
      */
     @Volatile
     var ackDelay: Duration = Duration.ZERO
+
+    /**
+     * Relayed stream parts with these `seq` values are dropped on the way to the sender (still counted in `ReplyEnd.parts`
+     * and still taking credit), as the real hub drops a part it could not deliver within 5 s on a full sender buffer.
+     */
+    @Volatile
+    var dropParts: Set<Long> = emptySet()
 
     /** Requests queued per permit-managed instance before new ones are rejected (`KRAKEN_HUB_QUEUE_CAPACITY_PER_INSTANCE`). */
     @Volatile
@@ -778,7 +785,7 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
                     stream.parts++
                     val relayed = ReplyPart.newBuilder().setRequestId(stream.id).setPayload(part.payload)
                         .setResponderService(handler.serviceName).setResponderInstance(handler.instanceId).setSeq(part.seq)
-                    stream.sender.out.trySend(ServerMessage.newBuilder().setPart(relayed).build())
+                    if (part.seq !in dropParts) stream.sender.out.trySend(ServerMessage.newBuilder().setPart(relayed).build())
                     armIdle(stream)
                     if (stream.maxResults > 0 && stream.parts >= stream.maxResults) closeStream(stream, null, cancel = "max results")
                 }

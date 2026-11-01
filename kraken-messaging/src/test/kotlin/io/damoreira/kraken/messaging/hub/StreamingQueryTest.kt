@@ -631,6 +631,32 @@ class StreamingQueryTest {
         assertEquals(0, hub.openStreams())
     }
 
+    @Test fun `a gap in the parts' seq fails the stream as lost parts and cancels it`() = runBlocking {
+        hub.dropParts = setOf(2L) // the hub dropped part 2 (a full sender buffer): part 3 follows part 1
+        val state = StreamerState()
+        owner("svc-x", "x-1", HangingRowsStreamer(state))
+        val seen = mutableListOf<Row>()
+        val e = assertFailsWith<InvalidMessageException> { caller().stream(ExportRows(5)).collect { seen += it } }
+        assertEquals("stream test.ExportRows lost 1 part(s)", e.message)
+        assertEquals(listOf(Row(1)), seen)
+        assertEquals("cancelled", withTimeout(2_000) { state.ended.await() })
+        awaitUntil { hub.cancelsFrom(callerId()).size == 1 }
+        assertTrue(hub.cancelsFrom(callerId()).single().reason.contains("lost"), hub.cancelsFrom(callerId()).toString())
+        assertEquals(0, hub.openStreams())
+    }
+
+    @Test fun `an end whose parts count exceeds the parts received fails the stream as lost parts`() = runBlocking {
+        hub.dropParts = setOf(5L) // the last part was dropped: only the end's count can tell
+        owner("svc-x", "x-1", RowsStreamer())
+        val seen = mutableListOf<Row>()
+        val e = assertFailsWith<InvalidMessageException> { caller().stream(ExportRows(5)).collect { seen += it } }
+        assertEquals("stream test.ExportRows lost 1 part(s)", e.message)
+        assertEquals((1..4).map { Row(it) }, seen)
+        assertEquals(0, hub.openStreams())
+        delay(200)
+        assertEquals(emptyList(), hub.cancelsFrom(callerId())) // the stream had ended: nothing to cancel
+    }
+
     @Test fun `the handler losing its hub stream cancels its running flows instead of leaving them waiting for credit`() = runBlocking {
         val state = StreamerState()
         owner("svc-x", "x-1", RowsStreamer(state), maxConcurrentHandlers = 2)
