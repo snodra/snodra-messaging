@@ -3,7 +3,8 @@
 # Usage: bash examples/smoke.sh      (A=http://localhost:8091 HUB=http://localhost:7001 HUB2=http://localhost:7011 to
 #        override; SKIP_PAUSE=1 skips the docker-pause step, ONLY_PAUSE=1 runs only it, B_CONTAINER names service-b;
 #        SKIP_FLOW=1 skips the flow-control steps, ONLY_FLOW=1 runs only them; INFRA_DIR names kraken/infra;
-#        SKIP_HA=1 skips the two-hub steps, ONLY_HA=1 runs only them, HUB2_CONTAINER names the second hub)
+#        SKIP_HA=1 skips the two-hub steps, ONLY_HA=1 runs only them, HUB2_CONTAINER names the second hub;
+#        SKIP_SCATTER=1 skips the scatter-gather steps, ONLY_SCATTER=1 runs only them)
 set -euo pipefail
 
 A=${A:-http://localhost:8091}
@@ -169,6 +170,15 @@ if command -v jq >/dev/null; then
            | "\($s) \(.instanceId) \((.connectedHubIds // []) | join(","))"' 2>/dev/null || true
   }
   peers_of() { jq -r '(.peers // [])[]' 2>/dev/null || true; }
+  # /api/v1/types -> "<shared> <owners, comma-separated>" of examples.Inventory; empty while it is not listed.
+  inventory_type() {
+    jq -r '.types[] | select(.type == "examples.Inventory") | "\(.shared) \(.owners | join(","))"' 2>/dev/null || true
+  }
+  # /scatter/inventory -> "<parts> <failed> <timedOut> <answering services, sorted, comma-separated>".
+  scatter_summary() {
+    jq -r '"\(.parts | length) \(.failed) \(.timedOut) \([.parts[].service] | unique | join(","))"' 2>/dev/null || true
+  }
+  service_of() { jq -r '.service // empty' 2>/dev/null || true; }
 elif command -v python3 >/dev/null; then
   hub_id_of() { python3 -I -c 'import json,sys
 try: print(json.load(sys.stdin).get("hubId") or "")
@@ -183,10 +193,27 @@ for s in t.get("services", []):
   peers_of() { python3 -I -c 'import json,sys
 try: print("\n".join(json.load(sys.stdin).get("peers") or []))
 except Exception: pass' || true; }
+  inventory_type() { python3 -I -c 'import json,sys
+try:
+    for t in json.load(sys.stdin).get("types", []):
+        if t.get("type") == "examples.Inventory":
+            print(str(bool(t.get("shared"))).lower(), ",".join(t.get("owners") or []))
+except Exception: pass' || true; }
+  scatter_summary() { python3 -I -c 'import json,sys
+try:
+    g = json.load(sys.stdin); parts = g.get("parts") or []
+    print(len(parts), g.get("failed"), g.get("timedOut"), ",".join(sorted({p.get("service", "") for p in parts})))
+except Exception: pass' || true; }
+  service_of() { python3 -I -c 'import json,sys
+try: print(json.load(sys.stdin).get("service") or "")
+except Exception: pass' || true; }
 else
   hub_id_of() { fail "jq or python3 needed for the two-hub steps (or set SKIP_HA=1)"; }
   example_instances() { hub_id_of; }
   peers_of() { hub_id_of; }
+  inventory_type() { fail "jq or python3 needed for the scatter-gather steps (or set SKIP_SCATTER=1)"; }
+  scatter_summary() { inventory_type; }
+  service_of() { inventory_type; }
 fi
 
 # Succeeds (prints nothing) when both hubs list the same instances of service-a, service-b and service-c, each of
@@ -261,6 +288,19 @@ ha_steps() {
   # service-b (Kotlin) splits its handlers over both hubs; once hub-2 is gone, hub-1 must hold (about) twice its share:
   # the client's top-up carries Permits.grant, which raises hub-1's cap on the session.
   share=$(permits_on "$HUB" service-b)
+  # Permits are never revoked: after an earlier failover (a previous run of this step) $HUB still holds service-b's
+  # whole count, more than its share on $HUB2, and there is nothing left to top up. Recreate service-b so the step
+  # starts from the split again.
+  p=$(permits_on "$HUB2" service-b)
+  if [ -n "$share" ] && [ -n "$p" ] && [ "$share" -gt $(( p + 2 )) ]; then
+    echo "   service-b holds $share permits on $HUB but $p on $HUB2 (topped up by an earlier failover); recreating it ..."
+    [ -n "$INFRA" ] && [ -f "$INFRA/compose.local.yaml" ] || fail "kraken/infra not found (set INFRA_DIR)"
+    (cd "$INFRA" && docker compose -f compose.yaml -f compose.local.yaml --profile examples \
+      up -d --no-deps --no-build --force-recreate service-b) >/dev/null 2>&1 || fail "docker compose could not recreate service-b"
+    secs=$(await_both_hubs 90)
+    share=$(permits_on "$HUB" service-b)
+    echo "   service-b back on both hubs after ${secs}s with $share permits on $HUB, $(permits_on "$HUB2" service-b) on $HUB2"
+  fi
   [ -n "$share" ] && [ "$share" -ge 2 ] || fail "service-b shows no usable permits on $HUB before the stop: '$share'"
   out=$(mktemp); stop=$(mktemp -u); t0=$(now_ms)
   trap 'touch '"$stop"'; docker start '"$h2"' >/dev/null 2>&1 || true' EXIT
@@ -300,6 +340,47 @@ ha_steps() {
   echo "   every example instance is back on $h2 (and reports it) $(( $(now_ms) - t0 )) ms after docker start"
 }
 
+# P4a (ADR 0017): examples.Inventory is a shared query type owned by service-b (Kotlin) and service-c (Rust). A
+# scatter-gather from service-a asks both; a point query goes to one instance of either. Needs jq or python3;
+# SKIP_SCATTER=1 skips these steps, ONLY_SCATTER=1 runs only them.
+scatter_steps() {
+  local hubs=("$HUB") h i types t body summary parts failed timed_out services svc seen=""
+  [ "${SKIP_HA:-0}" = "1" ] || hubs+=("$HUB2")
+  echo "18. /api/v1/types on ${hubs[*]}: examples.Inventory is shared, owned by service-b and service-c ..."
+  for h in "${hubs[@]}"; do
+    for i in $(seq 1 60); do
+      t=$(curl -fsS "$h/api/v1/types" 2>/dev/null | inventory_type)
+      [ "$t" = "true service-b,service-c" ] && break
+      [ "$i" -eq 60 ] && fail "examples.Inventory on $h/api/v1/types is '$t', expected 'true service-b,service-c' (shared, two owners)"
+      sleep 1
+    done
+    echo "   $h: shared=${t%% *} owners=${t#* }"
+  done
+
+  echo "18b. GET /scatter/inventory: one gather answered by service-b and service-c, none failed or timed out ..."
+  body=$(curl -fsS --max-time 10 "$A/scatter/inventory?item=smoke") || fail "GET /scatter/inventory failed: $(curl -s "$A/scatter/inventory?item=smoke")"
+  summary=$(printf '%s' "$body" | scatter_summary)
+  read -r parts failed timed_out services <<< "$summary"
+  echo "   $body"
+  echo "   $parts parts from [$services], failed $failed, timedOut $timed_out"
+  for svc in service-b service-c; do
+    case ",$services," in *",$svc,"*) ;; *) fail "no part from $svc in the gather: $body" ;; esac
+  done
+  [ "$failed" = "0" ] && [ "$timed_out" = "0" ] || fail "expected failed 0 and timedOut 0: $body"
+
+  echo "18c. GET /inventory six times: the point query on the shared type reaches both owners ..."
+  for i in $(seq 1 6); do
+    body=$(curl -fsS --max-time 10 "$A/inventory?item=smoke") || fail "GET /inventory failed (call $i)"
+    svc=$(printf '%s' "$body" | service_of)
+    [ -n "$svc" ] || fail "no service in the reply: $body"
+    seen="$seen $svc"
+  done
+  echo "   answered by:$seen"
+  for svc in service-b service-c; do
+    case " $seen " in *" $svc "*) ;; *) fail "six point queries never reached $svc (answered by:$seen)" ;; esac
+  done
+}
+
 echo "1. waiting for service-a at $A ..."
 for i in $(seq 1 90); do
   if curl -fsS "$A/actuator/health" 2>/dev/null | grep -q '"UP"'; then break; fi
@@ -324,6 +405,12 @@ fi
 if [ "${ONLY_HA:-0}" = "1" ]; then
   ha_steps
   echo "SMOKE OK (two-hub steps only)"
+  exit 0
+fi
+
+if [ "${ONLY_SCATTER:-0}" = "1" ]; then
+  scatter_steps
+  echo "SMOKE OK (scatter-gather steps only)"
   exit 0
 fi
 
@@ -408,5 +495,6 @@ echo "   delivered: $TEXTS"
 [ "${SKIP_PAUSE:-0}" = "1" ] || pause_step
 [ "${SKIP_FLOW:-0}" = "1" ] || flow_steps
 [ "${SKIP_HA:-0}" = "1" ] || ha_steps
+[ "${SKIP_SCATTER:-0}" = "1" ] || scatter_steps
 
 echo "SMOKE OK"
