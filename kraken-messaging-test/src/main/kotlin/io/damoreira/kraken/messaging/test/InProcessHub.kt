@@ -84,8 +84,8 @@ import java.util.concurrent.TimeUnit
  *
  * Streaming queries (P4b, capability `streaming`): a `STREAMING` request from a session that negotiated the capability
  * goes to one live instance that lists the type **and** negotiated `streaming` (round-robin per type; owners with
- * instances but none capable: `UNSUPPORTED`), as `Request{id = <id>#1, mode = STREAMING, initial_credit}` (0 reads as
- * 64; `max_results` is kept by the hub) through the target's permits and queue. The handler's `ReplyPart{<id>#1}` and
+ * instances but none capable: `UNSUPPORTED`), as `Request{id = <id>#1, mode = STREAMING, initial_credit}` (a uint32; 0 reads
+ * as 64; `max_results` is kept by the hub) through the target's permits and queue. The handler's `ReplyPart{<id>#1}` and
  * `ReplyEnd{<id>#1}` are relayed with the sender's id, `responder_service` / `responder_instance` and the handler's
  * `seq`; each part takes one credit (initial plus every sender `Flow`, relayed as `Flow{<id>#1}`). A part beyond the
  * credit: `ReplyEnd{INVALID_REQUEST}` and `Cancel{<id>#1, "part without credit"}`; a part with `error`: `ReplyEnd{error}`;
@@ -236,7 +236,7 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
     private class Pending(val sender: Session, val handler: Session, val timer: Job?, val gather: Gather? = null, val stream: Stream? = null)
 
     /** A streaming query in progress (P4b); guarded by [lock]. */
-    private class Stream(val id: String, val sender: Session, val handler: Session, var credit: Int, val maxResults: Int, val timeout: Duration) {
+    private class Stream(val id: String, val sender: Session, val handler: Session, var credit: Long, val maxResults: Int, val timeout: Duration) {
         val targetId: String get() = "$id#1"
         var parts = 0
         /** The target left the handler's queue (a cancel goes only to a forwarded target). */
@@ -363,7 +363,7 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
     fun openStreams(): Int = synchronized(lock) { streams.size }
 
     /** The credit the hub still holds for the stream with the sender's request id [requestId], or null when it is not open. */
-    fun creditOf(requestId: String): Int? = synchronized(lock) { streams[requestId]?.credit }
+    fun creditOf(requestId: String): Long? = synchronized(lock) { streams[requestId]?.credit }
 
     /** `Flow.credits` received from [instanceId] as a sender, in order (ignored ones included). */
     fun flowsFrom(instanceId: String): List<Int> = flowsBySender[instanceId]?.toList().orEmpty()
@@ -709,7 +709,8 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
             }
             val index = rotation.merge(req.type, 1, Int::plus)!! - 1
             val handler = capable[index % capable.size]
-            val credit = if (req.initialCredit > 0) req.initialCredit else 64
+            // initial_credit is a uint32 (0xFFFFFFFF is a window of 4 billion parts, not -1); 0 reads as 64.
+            val credit = Integer.toUnsignedLong(req.initialCredit).takeIf { it > 0 } ?: 64L
             val stream = Stream(req.id, sender, handler, credit, req.maxResults, effectiveTimeout(req))
             streams[req.id] = stream
             lastHeaders = req.headersMap.toMap()
@@ -720,7 +721,7 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
                 synchronized(lock) { closeStream(stream, error(stream.id, ErrorCode.CANCELLED, text), cancel = text) }
             }
             armIdle(stream)
-            val target = req.toBuilder().setId(targetId).setInitialCredit(credit).setMaxResults(0).build()
+            val target = req.toBuilder().setId(targetId).setInitialCredit(credit.toInt()).setMaxResults(0).build()
             pending[targetId] = Pending(sender, handler, timer = null, stream = stream)
             val permits = handler.permits
             when {
@@ -803,10 +804,11 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
 
     private fun relayFlow(sender: Session, flow: Flow) {
         flowsBySender.computeIfAbsent(sender.instanceId) { CopyOnWriteArrayList() }.add(flow.credits)
-        if (!sender.streaming || flow.credits <= 0) return
+        val credits = Integer.toUnsignedLong(flow.credits) // uint32, as initial_credit
+        if (!sender.streaming || credits == 0L) return
         synchronized(lock) {
             val stream = streams[flow.requestId]?.takeIf { it.sender === sender } ?: return
-            stream.credit += flow.credits
+            stream.credit += credits
             // Relayed at once, also while the target is still queued (the handler ignores a Flow for a request it has not seen).
             stream.handler.out.trySend(ServerMessage.newBuilder().setFlow(Flow.newBuilder().setRequestId(stream.targetId).setCredits(flow.credits)).build())
         }

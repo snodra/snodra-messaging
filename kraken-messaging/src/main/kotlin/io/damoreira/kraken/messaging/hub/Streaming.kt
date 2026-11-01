@@ -32,16 +32,23 @@ internal val NO_STREAMING_HANDLERS: StreamingInbound = { request, _ ->
 /**
  * The credit the hub granted for one outbound stream: `initial_credit` plus every `Flow`. [take] spends one and
  * suspends while none is left, which is how a handler's flow is held back by the sender's back-pressure.
+ *
+ * `initial_credit` and `Flow.credits` are `uint32` on the wire: a Rust caller may send `u32::MAX`, which protobuf's
+ * Java binding hands over as -1. Both are read unsigned ([of]) and the window is clamped to [Int.MAX_VALUE].
  */
 internal class StreamCredit(initial: Int) {
-    private val credit = MutableStateFlow(initial.toLong())
+    private val credit = MutableStateFlow(of(initial))
 
     /** Parts the hub will still relay. */
     val available: Long get() = credit.value
 
     fun add(credits: Int) {
-        if (credits > 0) credit.update { it + credits }
+        val granted = of(credits)
+        if (granted > 0) credit.update { (it + granted).coerceAtMost(Int.MAX_VALUE.toLong()) }
     }
+
+    /** A wire `uint32` credit value as the window it means: unsigned, at most [Int.MAX_VALUE]. */
+    private fun of(wire: Int): Long = Integer.toUnsignedLong(wire).coerceAtMost(Int.MAX_VALUE.toLong())
 
     /** Spends one credit, suspending until one is available. */
     suspend fun take() {

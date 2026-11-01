@@ -272,6 +272,20 @@ class StreamingQueryTest {
         assertEquals(0, hub.openStreams())
     }
 
+    @Test fun `an initial_credit of 0xFFFFFFFF is a window of four billion parts, not a stalled handler`() = runBlocking {
+        val state = StreamerState()
+        owner("svc-x", "x-1", RowsStreamer(state))
+        val sender = RawSender("s-1")
+        sender.next() // ack
+        sender.send(streamRequest("s1", initialCredit = 0xFFFFFFFFL.toInt())) // u32::MAX, as a Rust caller may send
+        val parts = (1..5).map { sender.next().part }
+        assertEquals((1L..5L).toList(), parts.map { it.seq })
+        val end = sender.next().end
+        assertEquals(5, end.parts)
+        assertEquals(false, end.hasError())
+        assertEquals("completed", state.ended.await())
+    }
+
     @Test fun `register declares streaming and the connection reports the capability`() = runBlocking {
         val conn = connection("a")
         conn.register(emptySet(), setOf("test.ExportRows"))

@@ -467,14 +467,14 @@ class InProcessHubTest {
         assertEquals(2, forwarded.initialCredit)
         assertEquals(0, forwarded.maxResults)
         assertEquals("{\"q\":1}", forwarded.payload.toStringUtf8())
-        assertEquals(2, hub.creditOf("s1"))
+        assertEquals(2L, hub.creditOf("s1"))
 
         handler.send(part("s1#1", 1, "{\"row\":1}"))
         handler.send(part("s1#1", 2, "{\"row\":2}"))
         val first = sender.next().part
         assertEquals(listOf("s1", "svc-h", "h-1", 1L, "{\"row\":1}"), listOf(first.requestId, first.responderService, first.responderInstance, first.seq, first.payload.toStringUtf8()))
         assertEquals(2L, sender.next().part.seq)
-        assertEquals(0, hub.creditOf("s1"))
+        assertEquals(0L, hub.creditOf("s1"))
         handler.nothingWithin(100) // no credit left: nothing is relayed, the handler waits
 
         sender.send(flow("s1", 3))
