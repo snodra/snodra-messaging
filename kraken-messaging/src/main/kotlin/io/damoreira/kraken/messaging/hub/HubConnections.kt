@@ -30,9 +30,10 @@ import java.util.concurrent.atomic.AtomicInteger
  * registration. With a single target it behaves like that one connection.
  *
  * - **Targets**: [HubTargets.Static] connects to each listed target; [HubTargets.Dns] resolves the name every
- *   [dnsRefresh], connects to new addresses, and closes a vanished one once idle (it first announces an empty
- *   registration, then waits up to [dnsRefresh] for its requests and handlers). A failed or empty resolution keeps the
- *   current connections.
+ *   [dnsRefresh] (one address family, [HubTargets.pickAddresses]), connects to new addresses, and closes a vanished one
+ *   once idle (it first announces an empty registration, then waits up to [dnsRefresh] for its requests and handlers).
+ *   An address resolved again while its connection is still draining revives that connection (its registration is
+ *   announced again) instead of opening a second stream. A failed or empty resolution keeps the current connections.
  * - **Dedupe**: a hub is its `RegisterAck.hub_id` (a legacy hub: its target). The first target to acknowledge an id
  *   owns it for as long as that target is kept, live or reconnecting: the hub keeps one session per instance id, so a
  *   second target of the same hub (an alias) replaces the owner's session with its `Register`, and the owner's stream
@@ -227,8 +228,17 @@ class HubConnections(
     }
 
     private fun add(newTargets: List<String>) {
+        var revived: List<HubConnection> = emptyList()
         val added = synchronized(lock) {
             if (stopped) return
+            // A target still draining is revived, never dialed again: a second stream with this instance id would make
+            // the hub end the draining one, failing the requests it still serves.
+            revived = newTargets.filter { it !in active && it !in parked }.mapNotNull { target ->
+                draining.firstOrNull { it.connection.target == target }?.also { member ->
+                    draining.remove(member)
+                    active[target] = member
+                }?.connection
+            }
             newTargets.filter { it !in active && it !in parked }.map { target ->
                 lateinit var self: HubConnection
                 val connection = HubConnection(
@@ -252,6 +262,12 @@ class HubConnections(
                 active[target] = Member(connection, watcher)
                 connection to watcher
             }
+        }
+        for (connection in revived) {
+            log.info("Hub target {} is resolved again; keeping its connection", connection.target)
+            val (commands, queries) = synchronized(lock) { types } ?: (emptySet<String>() to emptySet())
+            connection.register(commands, queries) // replaces the empty registration it announced while draining
+            onHandshake(connection) // dedupe and the live hubs, as for a fresh handshake
         }
         // Every new target is counted before any of them opens a stream, so each gets its share of the permits.
         for ((connection, watcher) in added) {
@@ -375,9 +391,12 @@ class HubConnections(
     private suspend fun drain(member: Member) {
         val connection = member.connection
         connection.register(emptySet(), emptySet()) // the hub stops routing to this instance
-        withTimeoutOrNull(dnsRefresh.toMillis()) { while (!connection.idle) delay(50) }
+        withTimeoutOrNull(dnsRefresh.toMillis()) {
+            while (!connection.idle && synchronized(lock) { member in draining }) delay(50)
+        }
+        // Resolved again meanwhile: add() revived it, it stays open.
+        if (!synchronized(lock) { draining.remove(member) }) return
         member.watcher.cancel()
         connection.stop()
-        synchronized(lock) { draining.remove(member) }
     }
 }

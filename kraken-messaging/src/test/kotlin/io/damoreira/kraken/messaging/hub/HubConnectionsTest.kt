@@ -390,6 +390,45 @@ class HubConnectionsTest {
         assertEquals(listOf("10.0.0.2:7000"), conns.connections().map { it.target })
     }
 
+    @Test fun `a dns target that comes back while draining is revived, never dialed a second time`() = runBlocking {
+        // The hub keeps one session per instance id: a second stream to a hub whose draining stream still serves a
+        // request would end that stream and fail the request.
+        val a = hub()
+        val b = hub()
+        routes["10.0.0.1:7000"] = a.name
+        routes["10.0.0.2:7000"] = b.name
+        val answer = AtomicReference(listOf("10.0.0.1", "10.0.0.2"))
+        val release = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val x = client(
+            emptyList(), "x",
+            dnsTarget = HubTargets.Dns("kraken-hub", 7000),
+            resolver = { answer.get().map(InetAddress::getByName) },
+        ) { req -> release.await(); payloadReply(req.id, "{}") }
+        x.register(setOf("test.Ping"), emptySet())
+        x.start()
+        eventually(5_000) { x.liveHubIds().toSet() == setOf(a.hubId, b.hubId) }
+        assertTrue(x.awaitRegistered(wait))
+        val viaA = x.connections().single { it.target == "10.0.0.1:7000" }
+        val sender = client(listOf(a.name), "s").apply { start(); assertTrue(awaitRegistered(wait)) }
+        val call = async { sender.send(request(timeoutMs = 5_000)) }
+        eventually(2_000) { x.inFlightHandlers.value == 1 }
+
+        answer.set(listOf("10.0.0.2")) // the busy stream to hub A drains
+        eventually(2_000) { x.connections().map { it.target } == listOf("10.0.0.2:7000") }
+        answer.set(listOf("10.0.0.1", "10.0.0.2")) // and comes back within the drain window
+        eventually(2_000) { x.connections().size == 2 }
+        assertTrue(x.connections().any { it === viaA }, "the draining connection is revived")
+        assertEquals(1, a.streamsOpenedBy("x"))
+        assertEquals(0, a.sessionsReplacedOf("x"))
+
+        release.complete(Unit)
+        val reply = call.await()
+        assertTrue(reply.hasReply() && !reply.reply.hasError(), reply.toString())
+        assertTrue(x.awaitRegistered(wait))
+        eventually(2_000) { "test.Ping" in a.registeredTypes() }
+        assertEquals(setOf(a.hubId, b.hubId), x.liveHubIds().toSet())
+    }
+
     // --- helpers ---
 
     /** Suspends (never blocks: the calls started with `async` in the test must keep running) until [condition] holds. */
