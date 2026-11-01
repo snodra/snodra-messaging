@@ -56,6 +56,8 @@ import java.util.concurrent.atomic.AtomicInteger
  *   ack lists `scatter-gather` (during a rolling hub upgrade the others are skipped); with live hubs and none of them
  *   capable it fails at once with [UnsupportedByHubException]. A gather not yet written fails over like a request; once
  *   written, a broken stream fails it with `HubConnectionLostException` (the parts already received are not asked again).
+ * - **Streaming** (P4b): a streaming query goes to one live hub whose ack lists `streaming`, chosen and failed over
+ *   exactly like a gather; with live hubs and none capable it fails at once with [UnsupportedByHubException].
  * - **Permits**: a stream announces `ceil(maxConcurrentHandlers / N)` initial permits, N = 1 (itself) + the other kept
  *   hubs that are live or still on their first connect attempt. Whenever that set changes, every live hub's stream is
  *   topped up to `ceil(maxConcurrentHandlers / N)` with N = the kept hubs that are live or on their first attempt:
@@ -85,6 +87,8 @@ class HubConnections(
     private val resolver: suspend (String) -> List<InetAddress> = { host ->
         withContext(Dispatchers.IO) { InetAddress.getAllByName(host).toList() }
     },
+    /** Serves `mode = STREAMING` requests (P4b); see [HubConnection]. */
+    private val inboundStream: StreamingInbound = NO_STREAMING_HANDLERS,
 ) : HubTransport {
     private val log = LoggerFactory.getLogger(HubConnections::class.java)
 
@@ -202,14 +206,26 @@ class HubConnections(
      * @throws UnsupportedByHubException when hubs are live but none lists `scatter-gather`
      */
     override suspend fun gather(request: Request, onPart: suspend (ReplyPart) -> Unit): ServerMessage =
-        route(request, eligible = { it.supportsScatterGather }) { connection, outgoing ->
+        route(request, eligible = { it.supportsScatterGather }, feature = HubProtocol.SCATTER_GATHER) { connection, outgoing ->
             connection.gather(outgoing, awaitStream = false, onPart)
         }
 
-    /** The hub choice and failover of [send] and [gather], restricted to the hubs that are [eligible]. */
+    /**
+     * Sends [request] as a streaming query through one live hub that supports it (see the class comment), with
+     * [HubConnection.stream]'s parts, result and exceptions.
+     *
+     * @throws UnsupportedByHubException when hubs are live but none lists `streaming`
+     */
+    override suspend fun stream(request: Request, onPart: suspend (ReplyPart) -> Unit): ServerMessage =
+        route(request, eligible = { it.supportsStreaming }, feature = HubProtocol.STREAMING) { connection, outgoing ->
+            connection.stream(outgoing, awaitStream = false, onPart)
+        }
+
+    /** The hub choice and failover of [send], [gather] and [stream], restricted to the hubs that are [eligible] for [feature]. */
     private suspend fun <T> route(
         request: Request,
         eligible: (HubConnection) -> Boolean,
+        feature: String = HubProtocol.SCATTER_GATHER,
         call: suspend (HubConnection, Request) -> T,
     ): T {
         // One deadline for the whole call: the caller's timeout (timeout_ms), else request-timeout, else 5 s.
@@ -223,8 +239,8 @@ class HubConnections(
             val capable = hubs.filter(eligible)
             if (hubs.isNotEmpty() && capable.isEmpty()) {
                 throw UnsupportedByHubException(
-                    HubProtocol.SCATTER_GATHER,
-                    "no connected hub supports ${HubProtocol.SCATTER_GATHER} (hubs: ${hubs.joinToString { it.hubId ?: it.target }})",
+                    feature,
+                    "no connected hub supports $feature (hubs: ${hubs.joinToString { it.hubId ?: it.target }})",
                 )
             }
             val connection = choose(request, capable.filter { it !in tried })
@@ -312,6 +328,7 @@ class HubConnections(
                     target = target,
                     gate = gate,
                     initialPermits = { HubProtocol.initialPermits(maxConcurrentHandlers, hubsFor(self)) },
+                    inboundStream = inboundStream,
                 )
                 self = connection
                 types?.let { connection.register(it.commands, it.queries, it.shared) }

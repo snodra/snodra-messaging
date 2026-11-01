@@ -1,6 +1,13 @@
 package io.damoreira.kraken.messaging.test
 
 import io.damoreira.kraken.messaging.NoHandlerException
+import io.damoreira.kraken.messaging.RemoteHandlerException
+import io.damoreira.kraken.messaging.StreamOptions
+import io.damoreira.kraken.messaging.api.StreamingQuery
+import io.damoreira.kraken.messaging.handler.QueryHandler
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.toList
 import io.damoreira.kraken.messaging.api.Command
 import io.damoreira.kraken.messaging.api.Event
 import io.damoreira.kraken.messaging.api.MessageType
@@ -19,8 +26,14 @@ data class Pong(val echoed: String, val at: Instant)
 @MessageType("test.Happened")
 data class Happened(val id: String) : Event
 
+@MessageType("test.Rows")
+data class Rows(val count: Int, val failAt: Int = -1) : StreamingQuery<Int>
+
 class Handlers {
     val events = mutableListOf<Happened>()
+    @QueryHandler fun rows(query: Rows): Flow<Int> = flow {
+        repeat(query.count) { if (it == query.failAt) throw IllegalStateException("boom") else emit(it + 1) }
+    }
     @CommandHandler fun handle(command: Ping): Pong = Pong(command.text, Instant.EPOCH)
     @EventHandler fun on(event: Happened) { events += event }
 }
@@ -52,6 +65,18 @@ class InMemoryBusesTest {
 
         val anonymous = InMemoryBuses(userId = null).register(AdminOnly())
         assertFailsWith<io.damoreira.kraken.messaging.UnauthenticatedException> { anonymous.send(Ping("x")) }
+        Unit
+    }
+
+    @Test fun `stream collects the streaming handler's flow, capped by maxResults, failing as a remote handler`() = runBlocking {
+        val buses = InMemoryBuses().register(Handlers())
+        assertEquals(listOf(1, 2, 3), buses.stream(Rows(3)).toList())
+        assertEquals(listOf(1, 2), buses.stream(Rows(3), StreamOptions(maxResults = 2)).toList())
+        val seen = mutableListOf<Int>()
+        val e = assertFailsWith<RemoteHandlerException> { buses.stream(Rows(3, failAt = 1)).collect { seen += it } }
+        assertEquals("IllegalStateException: boom", e.message)
+        assertEquals(listOf(1), seen)
+        assertFailsWith<NoHandlerException> { InMemoryBuses().stream(Rows(1)).toList() }
         Unit
     }
 }

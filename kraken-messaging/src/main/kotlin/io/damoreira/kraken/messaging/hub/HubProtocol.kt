@@ -21,8 +21,18 @@ object HubProtocol {
     /** Capability name of scatter-gather queries (P4a, ADR 0017): `Request.mode = SCATTER_GATHER`, `ReplyPart`, `ReplyEnd`. */
     const val SCATTER_GATHER = "scatter-gather"
 
+    /**
+     * Capability name of streaming queries (P4b, ADR 0017): `Request.mode = STREAMING`, client-sent `ReplyPart` and
+     * `ReplyEnd`, `Flow` and `Cancel` both ways. Declared by senders and handlers alike: the hub streams only to
+     * instances that negotiated it.
+     */
+    const val STREAMING = "streaming"
+
     /** `Register.capabilities`: optional protocol features this client supports. */
-    val CAPABILITIES: List<String> = listOf(FLOW_CONTROL, INSTANCE_STATUS, SCATTER_GATHER)
+    val CAPABILITIES: List<String> = listOf(FLOW_CONTROL, INSTANCE_STATUS, SCATTER_GATHER, STREAMING)
+
+    /** `Request.initial_credit` the hub assumes when a sender sends 0; the library always sends at least 1. */
+    const val DEFAULT_INITIAL_CREDIT = 64
 
     /** Default period of `InstanceStatus` reports (`kraken.messaging.hub.status-interval`). */
     val STATUS_INTERVAL: Duration = Duration.ofSeconds(5)

@@ -1,6 +1,7 @@
 package io.damoreira.kraken.messaging
 
 import io.damoreira.kraken.messaging.api.Query
+import io.damoreira.kraken.messaging.api.StreamingQuery
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.runBlocking
@@ -39,4 +40,21 @@ interface QueryBus {
      */
     fun <R> scatterGatherFlow(query: Query<R>, options: ScatterOptions = ScatterOptions()): Flow<ScatterPart<R>> =
         flow { scatterGather(query, options).parts.forEach { emit(it) } }
+
+    /**
+     * Streaming query (P4b, ADR 0017): one instance of the type's owner (one of every owner's instances on a shared
+     * type) streams its answer part by part under this collector's back-pressure. The flow is cold: each collection
+     * sends one request through the hub; parts are emitted as they arrive and the flow completes when the handler's
+     * flow does. The handler is paced by credits ([StreamOptions.initialCredit]); cancelling the collector (or an
+     * exception in it) cancels the handler. Always goes through the hub, also when this instance owns the type.
+     *
+     * @throws UnsupportedByHubException when no live hub offers `streaming` (nothing is sent)
+     * @throws NoHandlerException when nobody owns the type
+     * @throws RemoteHandlerException when the stream ends with an error: the handler's failure (`HANDLER_ERROR`), the
+     *   idle timeout (`TIMEOUT`), the handler leaving (`HANDLER_DISCONNECTED`), the hub's maximum stream duration
+     *   (`CANCELLED`), ...; the parts emitted before it stay emitted
+     * @throws HubConnectionLostException when the stream to the hub breaks before the end (outcome unknown)
+     */
+    fun <R> stream(query: StreamingQuery<R>, options: StreamOptions = StreamOptions()): Flow<R> =
+        throw UnsupportedOperationException("${this::class.simpleName} does not support streaming queries")
 }

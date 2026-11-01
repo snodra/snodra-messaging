@@ -12,9 +12,18 @@ import io.damoreira.kraken.messaging.RemoteHandlerException
 import io.damoreira.kraken.messaging.UnauthenticatedException
 import io.damoreira.kraken.messaging.UnsupportedByHubException
 
-/** Maps hub [ErrorCode]s to the exceptions thrown to callers of the buses. */
+/**
+ * Maps hub [ErrorCode]s to the exceptions thrown to callers of the buses. [feature] names the capability an
+ * `UNSUPPORTED` answer is about (`scatter-gather`, `streaming`).
+ */
 object HubErrors {
-    fun toException(type: String, code: ErrorCode, message: String, details: ByteArray): MessagingException = when (code) {
+    fun toException(
+        type: String,
+        code: ErrorCode,
+        message: String,
+        details: ByteArray,
+        feature: String = HubProtocol.SCATTER_GATHER,
+    ): MessagingException = when (code) {
         ErrorCode.NO_HANDLER -> NoHandlerException(type)
         ErrorCode.TIMEOUT -> MessageTimeoutException(type)
         ErrorCode.HANDLER_DISCONNECTED -> HandlerDisconnectedException(type)
@@ -24,7 +33,7 @@ object HubErrors {
         ErrorCode.PERMISSION_DENIED -> AccessDeniedException(message)
         ErrorCode.RESOURCE_EXHAUSTED -> HandlerBusyException(type)
         // A request mode the hub does not implement, or one this session did not declare (ADR 0017).
-        ErrorCode.UNSUPPORTED -> UnsupportedByHubException(HubProtocol.SCATTER_GATHER, message.ifEmpty { "unsupported by the hub" })
+        ErrorCode.UNSUPPORTED -> UnsupportedByHubException(feature, message.ifEmpty { "unsupported by the hub" })
         else -> RemoteHandlerException(type, message, details, code.name)
     }
 }

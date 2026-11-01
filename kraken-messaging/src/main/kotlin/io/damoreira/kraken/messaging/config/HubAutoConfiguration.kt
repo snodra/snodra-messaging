@@ -89,6 +89,7 @@ class HubAutoConfiguration {
             loadFactor = hub.loadFactor,
             tags = hub.tags,
             statusInterval = hub.statusInterval,
+            inboundStream = dispatcher::dispatchStream,
         )
         return HubLifecycle(connections, registry, scope, handlerDispatcher)
     }

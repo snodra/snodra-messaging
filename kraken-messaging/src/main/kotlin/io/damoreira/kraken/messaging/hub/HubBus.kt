@@ -17,8 +17,10 @@ import io.damoreira.kraken.messaging.ScatterOptions
 import io.damoreira.kraken.messaging.ScatterPart
 import io.damoreira.kraken.messaging.ScatterResult
 import io.damoreira.kraken.messaging.SendOptions
+import io.damoreira.kraken.messaging.StreamOptions
 import io.damoreira.kraken.messaging.api.Command
 import io.damoreira.kraken.messaging.api.Query
+import io.damoreira.kraken.messaging.api.StreamingQuery
 import io.damoreira.kraken.messaging.codec.JsonCodec
 import io.damoreira.kraken.messaging.codec.MessageTypeResolver
 import io.damoreira.kraken.messaging.codec.ResponseTypes
@@ -33,6 +35,7 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.channelFlow
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.withContext
 import java.time.Duration
 import java.util.UUID
@@ -62,6 +65,16 @@ import kotlin.reflect.KClass
  * the query rules: a retried gather is a new gather (fresh id) and its result holds only its own parts. A flow is
  * retried only while it has not emitted a part. [scatterGatherFlow] reads the caller's bearer token and trace context
  * when it is called, not when the flow is collected: a flow returned from a controller is collected on another thread.
+ *
+ * Streaming queries ([stream], P4b, ADR 0017) always go through the hub too. The flow is cold and unbuffered: each
+ * collection sends one `STREAMING` request to a hub that lists `streaming`, and each part is decoded (the query's
+ * element type) and emitted before the next one is read, so the transport's credit refills ([HubTransport.stream])
+ * follow what the collector consumed. A `ReplyEnd` with an error fails the flow with a [RemoteHandlerException] of
+ * that code (`HANDLER_ERROR`, `TIMEOUT`, `HANDLER_DISCONNECTED`, `CANCELLED`, `INVALID_REQUEST`, ...); an `Error`
+ * before any part maps as for a unary request; a part that does not decode fails the flow with
+ * [InvalidMessageException] (the transport cancels the stream). Retry applies with the query rules only until the first
+ * part; after it a broken hub stream is [io.damoreira.kraken.messaging.HubConnectionLostException]. The caller's bearer
+ * token and trace context are read when [stream] is called, as for [scatterGatherFlow].
  */
 class HubBus(
     private val connection: HubTransport,
@@ -121,6 +134,56 @@ class HubBus(
                 emitted = true
                 send(part)
             }
+        }
+    }
+
+    override fun <R> stream(query: StreamingQuery<R>, options: StreamOptions): Flow<R> {
+        val caller = callerHeaders() // on the caller's thread, see scatterGatherFlow
+        return stream(query, options, caller)
+    }
+
+    private fun <R> stream(query: StreamingQuery<R>, options: StreamOptions, caller: Map<String, String>): Flow<R> = flow {
+        val template = template(query, RequestKind.QUERY, routingKey = null, options.priority, caller).toBuilder()
+            .setMaxResults(options.maxResults)
+            .setInitialCredit(options.initialCredit)
+            .build()
+        var emitted = false
+        // Parts already emitted cannot be taken back: once one is out, a failure ends the flow.
+        withRetry(template.type, MessageKind.QUERY, options.timeout, options.retry, retryIf = { !emitted }) { timeout ->
+            streamOnce<R>(template, query::class, timeout) { part ->
+                emitted = true
+                emit(part)
+            }
+        }
+    }
+
+    /**
+     * One streaming query built from [template] with a fresh id and [timeout] as `timeout_ms` (the idle timeout); hands
+     * each decoded part to [onPart] and returns when the `ReplyEnd` arrived without an error.
+     */
+    private suspend fun <R> streamOnce(
+        template: Request,
+        messageClass: KClass<*>,
+        timeout: Duration?,
+        onPart: suspend (R) -> Unit,
+    ) {
+        val type = template.type
+        val request = withFreshId(template, timeout)
+        @Suppress("UNCHECKED_CAST")
+        val terminal = connection.stream(request) { part ->
+            // The hub ends a stream instead of relaying an error part; one would be a hub that does it differently.
+            if (part.hasError()) throw RemoteHandlerException(type, part.error.message, part.error.details.toByteArray(), part.error.code.name)
+            onPart(decodeReply(type, messageClass, part.payload.toByteArray()) as R)
+        }
+        when {
+            terminal.hasEnd() && terminal.end.hasError() -> throw terminal.end.error.let {
+                RemoteHandlerException(type, it.message, it.details.toByteArray(), it.code.name)
+            }
+            terminal.hasEnd() -> return
+            terminal.hasError() -> throw terminal.error.let {
+                HubErrors.toException(type, it.code, it.message, it.details.toByteArray(), HubProtocol.STREAMING)
+            }
+            else -> throw InvalidMessageException("Unexpected answer to streaming query $type")
         }
     }
 

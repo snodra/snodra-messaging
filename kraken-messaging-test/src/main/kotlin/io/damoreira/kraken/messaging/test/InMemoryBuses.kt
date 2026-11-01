@@ -8,9 +8,11 @@ import io.damoreira.kraken.messaging.RemoteHandlerException
 import io.damoreira.kraken.messaging.ScatterOptions
 import io.damoreira.kraken.messaging.ScatterPart
 import io.damoreira.kraken.messaging.ScatterResult
+import io.damoreira.kraken.messaging.StreamOptions
 import io.damoreira.kraken.messaging.api.Command
 import io.damoreira.kraken.messaging.api.Event
 import io.damoreira.kraken.messaging.api.Query
+import io.damoreira.kraken.messaging.api.StreamingQuery
 import io.damoreira.kraken.messaging.codec.JsonCodec
 import io.damoreira.kraken.messaging.codec.MessageTypeResolver
 import io.damoreira.kraken.messaging.codec.ResponseTypes
@@ -22,13 +24,19 @@ import io.damoreira.kraken.messaging.security.MessagePrincipal
 import io.damoreira.kraken.messaging.handler.HandlerRegistry
 import io.damoreira.kraken.messaging.handler.InvocationResult
 import io.damoreira.kraken.messaging.hub.HubErrors
+import io.damoreira.kraken.messaging.hub.HubProtocol
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.take
 import java.util.UUID
 import java.util.concurrent.CopyOnWriteArrayList
 
 /**
  * Local, synchronous implementation of all three buses for unit tests. Messages still go through the JSON codec
  * so serialization problems show up in tests. A scatter-gather asks the one registered query handler: one part from
- * service and instance [IN_MEMORY] (a handler error is a failed part), `NoHandlerException` without a handler.
+ * service and instance [IN_MEMORY] (a handler error is a failed part), `NoHandlerException` without a handler. A
+ * streaming query collects the registered streaming handler's flow (no credits: nothing to pace in memory), honouring
+ * `maxResults`; its failure maps as a unary one.
  */
 class InMemoryBuses(
     typePrefix: String = "test",
@@ -76,6 +84,19 @@ class InMemoryBuses(
             ScatterPart<R>(IN_MEMORY, IN_MEMORY, null, e)
         }
         return ScatterResult(listOf(result), failed = if (result.error != null) 1 else 0, timedOut = 0)
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    override fun <R> stream(query: StreamingQuery<R>, options: StreamOptions): Flow<R> {
+        val type = resolver.typeNameOf(query::class)
+        val elementType = ResponseTypes.responseTypeOf(query::class)
+        val parts = flow {
+            val failure = invoker.invokeStream(type, codec.encode(query), context(type), identity()) { payload ->
+                emit(codec.decode(payload, elementType) as R)
+            }
+            if (failure != null) throw HubErrors.toException(type, failure.code, failure.message, failure.details, HubProtocol.STREAMING)
+        }
+        return if (options.maxResults > 0) parts.take(options.maxResults) else parts
     }
 
     private fun unwrap(type: String, messageClass: kotlin.reflect.KClass<*>, result: InvocationResult): Any = when (result) {

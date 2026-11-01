@@ -100,7 +100,7 @@ class HubConnectionsTest {
 
         val onA = a.lastRegisterFrom("x")!!
         assertEquals(onA, b.lastRegisterFrom("x"))
-        assertEquals(listOf("flow-control", "instance-status", "scatter-gather"), onA.capabilitiesList)
+        assertEquals(listOf("flow-control", "instance-status", "scatter-gather", "streaming"), onA.capabilitiesList)
         assertEquals(setOf(a.hubId, b.hubId), conns.liveHubIds().toSet())
         for (hub in listOf(a, b)) {
             eventually(2_000) { hub.lastStatusFrom("x")?.connectedHubIdsList?.toSet() == setOf(a.hubId, b.hubId) }

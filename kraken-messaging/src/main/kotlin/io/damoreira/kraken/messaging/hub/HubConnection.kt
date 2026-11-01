@@ -1,7 +1,10 @@
 package io.damoreira.kraken.messaging.hub
 
+import com.google.protobuf.ByteString
+import io.damoreira.kraken.hub.v1.Cancel
 import io.damoreira.kraken.hub.v1.ClientMessage
 import io.damoreira.kraken.hub.v1.Error
+import io.damoreira.kraken.hub.v1.Flow
 import io.damoreira.kraken.hub.v1.ErrorCode
 import io.damoreira.kraken.hub.v1.Heartbeat
 import io.damoreira.kraken.hub.v1.HubGrpcKt
@@ -10,6 +13,7 @@ import io.damoreira.kraken.hub.v1.Permits
 import io.damoreira.kraken.hub.v1.Register
 import io.damoreira.kraken.hub.v1.RegisterAck
 import io.damoreira.kraken.hub.v1.Reply
+import io.damoreira.kraken.hub.v1.ReplyEnd
 import io.damoreira.kraken.hub.v1.ReplyPart
 import io.damoreira.kraken.hub.v1.Request
 import io.damoreira.kraken.hub.v1.RequestMode
@@ -26,6 +30,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.Channel
@@ -137,6 +142,17 @@ internal object ReconnectBackoff {
  * `shared_query_types`. [gather] sends a `SCATTER_GATHER` request only to a hub whose ack lists the capability
  * ([supportsScatterGather]); its pending entry collects the `ReplyPart`s until the `ReplyEnd` (or an `Error`), under one
  * local guard for the whole gather. Parts and ends for ids nobody waits for are ignored.
+ *
+ * Streaming (P4b, ADR 0017): `Register` declares `streaming`. As a sender, [stream] sends a `STREAMING` request only to a
+ * hub whose ack lists it ([supportsStreaming]), hands each `ReplyPart` to the caller, writes `Flow{initial_credit / 2}`
+ * each time that many parts were consumed (the caller's callback returned) and `Cancel` when the caller gives up
+ * before the end (cancellation, an exception, the local idle guard). As a handler, a `STREAMING` request runs
+ * [inboundStream] under the handler permit for the whole stream: each part waits for credit ([StreamCredit]: the
+ * request's `initial_credit` plus every `Flow` for its id) and goes out with `seq` 1, 2, ..., then `ReplyEnd` (with the
+ * error the handler returned, or `HANDLER_ERROR` for an exception that leaked). A `Cancel` from the hub cancels the
+ * handler's coroutine, for a stream (no end follows) as for a unary or gather request (no reply follows); the stream
+ * closing cancels every streaming handler it carried, which would otherwise wait for credit forever. The permit of
+ * every inbound request goes back to the hub when its coroutine completes, whichever way.
  */
 class HubConnection(
     private val channelFactory: () -> ManagedChannel,
@@ -154,6 +170,8 @@ class HubConnection(
     private val gate: HandlerGate = HandlerGate(maxConcurrentHandlers),
     /** `Register.initial_permits` of a new stream (P3 splits `maxConcurrentHandlers` over the hubs). */
     private val initialPermits: () -> Int = { maxConcurrentHandlers },
+    /** Serves `mode = STREAMING` requests (P4b); without streaming handlers every stream ends with `INVALID_REQUEST`. */
+    private val inboundStream: StreamingInbound = NO_STREAMING_HANDLERS,
 ) : HubTransport {
     private val log = LoggerFactory.getLogger(HubConnection::class.java)
 
@@ -187,8 +205,8 @@ class HubConnection(
             }
         }
 
-        /** A scatter-gather: its `ReplyPart`s in arrival order, then its `ReplyEnd` (or an `Error`), then closed. */
-        class Scatter(stream: Stream) : Pending(stream) {
+        /** A scatter-gather or a stream: its `ReplyPart`s in arrival order, then its `ReplyEnd` (or an `Error`), then closed. */
+        class Multi(stream: Stream) : Pending(stream) {
             val messages = Channel<ServerMessage>(Channel.UNLIMITED)
             override fun fail(cause: Throwable) {
                 messages.close(cause)
@@ -200,6 +218,12 @@ class HubConnection(
         }
     }
     private val pending = ConcurrentHashMap<String, Pending>()
+
+    /** An inbound request being handled: its coroutine (cancelled by a hub `Cancel`) and, for a stream, its credit. */
+    private class Running(val stream: Stream, val credit: StreamCredit?) {
+        lateinit var job: Job
+    }
+    private val running = ConcurrentHashMap<String, Running>()
 
     init {
         require(loadFactor >= 0) { "loadFactor must not be negative, was $loadFactor" } // uint32 on the wire, 0 reads as 100
@@ -294,7 +318,10 @@ class HubConnection(
         withTimeoutOrNull(timeout.toMillis()) { inFlight.first { it == 0 } } != null
 
     /** True while the current stream's ack lists `scatter-gather` (never for a legacy hub). */
-    val supportsScatterGather: Boolean get() = current?.handshake.supportsScatterGather()
+    val supportsScatterGather: Boolean get() = current?.handshake.supports(HubProtocol.SCATTER_GATHER)
+
+    /** True while the current stream's ack lists `streaming` (never for a legacy hub). */
+    val supportsStreaming: Boolean get() = current?.handshake.supports(HubProtocol.STREAMING)
 
     /**
      * Replaces the announced handler types ([sharedQueryTypes]: `@QueryHandler(shared = true)`, sent as
@@ -356,16 +383,10 @@ class HubConnection(
     /** [gather]; [awaitStream] as for [send]. */
     internal suspend fun gather(request: Request, awaitStream: Boolean, onPart: suspend (ReplyPart) -> Unit): ServerMessage {
         val stream = liveStream(awaitStream)
-        val ack = (stream.handshake as? HubHandshake.V2)?.ack
-        if (!stream.handshake.supportsScatterGather() || ack == null) {
-            throw UnsupportedByHubException(
-                HubProtocol.SCATTER_GATHER,
-                "hub ${hubId ?: target} does not support ${HubProtocol.SCATTER_GATHER} (its RegisterAck does not list it)",
-            )
-        }
+        val ack = capableAck(stream, HubProtocol.SCATTER_GATHER)
         val outgoing = request.toBuilder().setMode(RequestMode.SCATTER_GATHER).build()
         val guardMs = HubProtocol.localGuardMs(outgoing.timeoutMs, outgoing.type, ack)
-        val entry = Pending.Scatter(stream)
+        val entry = Pending.Multi(stream)
         require(pending.putIfAbsent(request.id, entry) == null) { "request id ${request.id} is already in flight" }
         try {
             write(stream, outgoing)
@@ -384,6 +405,83 @@ class HubConnection(
         } finally {
             pending.remove(request.id, entry)
         }
+    }
+
+    /**
+     * Sends [request] as a streaming query (`mode = STREAMING` is set here; `initial_credit` is the caller's window,
+     * at least 1), hands every `ReplyPart` to [onPart] in order and returns the terminal message: the `ReplyEnd` (with
+     * the handler's or the hub's error when the stream failed), or the hub's `Error` for the request itself (no owner,
+     * a command, no capable instance, ...). [Request.getId] must be fresh for every call.
+     *
+     * Credits: after every `initial_credit / 2` (at least 1) parts [onPart] consumed, `Flow` grants that many more.
+     * Giving up: when [onPart] throws or the caller is cancelled before the end, `Cancel{id, reason}` is written and
+     * the exception rethrown; nothing of the stream follows. The local guard is per part: the hub's deadline bound for
+     * `timeout_ms` (the idle timeout) plus [HubProtocol.LOCAL_GUARD_MARGIN], twice the bound for the first part (the
+     * hub bounds a queue wait by the timeout, then starts the idle timeout over at the forward).
+     *
+     * @throws UnsupportedByHubException if the stream's ack does not list `streaming` (a legacy hub never does); nothing is sent
+     * @throws HubUnavailableException, HubConnectionLostException as [send]; parts already handed to [onPart] stay
+     * @throws MessageTimeoutException if no part or end arrives within the local guard (a `Cancel` is written)
+     */
+    override suspend fun stream(request: Request, onPart: suspend (ReplyPart) -> Unit): ServerMessage =
+        stream(request, awaitStream = true, onPart)
+
+    /** [stream]; [awaitStream] as for [send]. */
+    internal suspend fun stream(request: Request, awaitStream: Boolean, onPart: suspend (ReplyPart) -> Unit): ServerMessage {
+        val stream = liveStream(awaitStream)
+        val ack = capableAck(stream, HubProtocol.STREAMING)
+        val window = request.initialCredit.takeIf { it > 0 } ?: HubProtocol.DEFAULT_INITIAL_CREDIT
+        val outgoing = request.toBuilder().setMode(RequestMode.STREAMING).setInitialCredit(window).build()
+        val bound = HubProtocol.hubDeadlineBoundMs(outgoing.timeoutMs, outgoing.type, ack)
+        val margin = HubProtocol.LOCAL_GUARD_MARGIN.toMillis()
+        val refill = maxOf(1, window / 2)
+        val entry = Pending.Multi(stream)
+        require(pending.putIfAbsent(request.id, entry) == null) { "request id ${request.id} is already in flight" }
+        var terminal: ServerMessage? = null
+        var failure: Throwable? = null
+        try {
+            write(stream, outgoing)
+            var guardMs = 2 * bound + margin
+            var consumed = 0
+            while (true) {
+                // The guard covers the wait for the next message only, never the caller's handling of a part.
+                val message = withTimeoutOrNull(guardMs) { entry.messages.receive() } ?: throw MessageTimeoutException(request.type)
+                if (!message.hasPart()) {
+                    terminal = message
+                    break
+                }
+                onPart(message.part)
+                if (++consumed >= refill) {
+                    consumed = 0
+                    stream.out.trySend(ClientMessage.newBuilder().setFlow(Flow.newBuilder().setRequestId(request.id).setCredits(refill)).build())
+                }
+                guardMs = bound + margin
+            }
+            return terminal!!
+        } catch (e: Throwable) {
+            failure = e
+            throw e
+        } finally {
+            pending.remove(request.id, entry)
+            // The stream is still open on the hub when it was not the stream to the hub that failed: tell it to stop.
+            if (terminal == null && failure !is HubConnectionLostException && failure !is HubUnavailableException) {
+                val reason = when (failure) {
+                    null, is CancellationException -> "collector cancelled"
+                    is MessageTimeoutException -> "no part within the local guard"
+                    else -> "collector failed: ${failure::class.simpleName}: ${failure.message}"
+                }
+                stream.out.trySend(ClientMessage.newBuilder().setCancel(Cancel.newBuilder().setRequestId(request.id).setReason(reason)).build())
+            }
+        }
+    }
+
+    /** The ack of [stream] when it lists [capability]; [UnsupportedByHubException] otherwise (nothing is sent). */
+    private fun capableAck(stream: Stream, capability: String): RegisterAck {
+        val ack = (stream.handshake as? HubHandshake.V2)?.ack
+        if (!stream.handshake.supports(capability) || ack == null) {
+            throw UnsupportedByHubException(capability, "hub ${hubId ?: target} does not support $capability (its RegisterAck does not list it)")
+        }
+        return ack
     }
 
     /** The live stream (waiting up to `requestTimeout` for one when [awaitStream]), its handshake completed. */
@@ -407,8 +505,8 @@ class HubConnection(
         }
     }
 
-    private fun HubHandshake?.supportsScatterGather(): Boolean =
-        this is HubHandshake.V2 && HubProtocol.SCATTER_GATHER in ack.capabilitiesList
+    private fun HubHandshake?.supports(capability: String): Boolean =
+        this is HubHandshake.V2 && capability in ack.capabilitiesList
 
     /** The request as written to [handshake]'s stream, and the local guard in milliseconds. */
     private fun prepare(request: Request, handshake: HubHandshake): Pair<Request, Long> = when (handshake) {
@@ -476,6 +574,9 @@ class HubConnection(
                 // Requests still in the closed outbound queue were never handed to gRPC: never sent, so retryable elsewhere.
                 failUnsent(stream, "hub stream to $target closed before the request was written: ${describe(status)}")
                 failPending(stream, HubConnectionLostException("hub stream closed: ${describe(status)}"))
+                // The hub forgot this stream's streaming targets (their senders got HANDLER_DISCONNECTED): a handler's
+                // flow waiting for credit would otherwise never move again, holding its permit.
+                cancelStreamingHandlers(stream, "hub stream closed: ${describe(status)}")
             }
             // A stream the hub answered (ack or echo) proves the hub is back: start again from the floor.
             if (reachedHandshake) {
@@ -599,11 +700,18 @@ class HubConnection(
             message.hasRequest() -> dispatch(stream, message.request)
             message.hasReply() -> pending.remove(message.reply.requestId)?.finish(message)
             message.hasError() -> pending.remove(message.error.requestId)?.finish(message)
-            // Parts and ends of a gather nobody waits for (it timed out locally, or never was ours) are dropped.
-            message.hasPart() -> (pending[message.part.requestId] as? Pending.Scatter)?.messages?.trySend(message)
+            // Parts and ends of a gather or stream nobody waits for (it ended locally, or never was ours) are dropped.
+            message.hasPart() -> (pending[message.part.requestId] as? Pending.Multi)?.messages?.trySend(message)
             message.hasEnd() -> {
                 val id = message.end.requestId
-                (pending[id] as? Pending.Scatter)?.let { if (pending.remove(id, it)) it.finish(message) }
+                (pending[id] as? Pending.Multi)?.let { if (pending.remove(id, it)) it.finish(message) }
+            }
+            // Credit for a stream this instance serves; a Flow for an unknown id (ended, or never forwarded here) is dropped.
+            message.hasFlow() -> running[message.flow.requestId]?.credit?.add(message.flow.credits)
+            // The hub gave up on a request this instance is handling (a stream, or a gather target past its end): stop it.
+            message.hasCancel() -> running[message.cancel.requestId]?.let { entry ->
+                log.debug("Hub cancelled request {}: {}", message.cancel.requestId, message.cancel.reason)
+                entry.job.cancel(CancellationException("cancelled by the hub: ${message.cancel.reason}"))
             }
             message.hasRegisterAck() -> onAck(stream, message.registerAck)
             message.hasHeartbeat() -> {
@@ -656,39 +764,95 @@ class HubConnection(
     }
 
     /**
-     * Runs the inbound handler on [handlerDispatcher] (bounded by [handlerPermits]) so neither a slow nor a blocking
-     * handler holds up the stream; always answers the request, on the stream it arrived on.
+     * Runs the inbound handler on [handlerDispatcher] (bounded by the [gate]'s permits) so neither a slow nor a
+     * blocking handler holds up the stream; always answers the request, on the stream it arrived on: a `Reply`, or
+     * for a `STREAMING` request the parts and the `ReplyEnd` ([serveStream]). Unless the hub cancelled it: then nothing
+     * goes back. The hub's permit for the request is paid back when the coroutine completes, whichever way.
      */
     private fun dispatch(stream: Stream, request: Request) {
         stream.permits.requestReceived()
         inFlight.update { it + 1 }
         gate.entered()
-        val job = scope.launch(handlerDispatcher) {
-            val reply = try {
-                gate.permits.withPermit { inbound(request) }
-            } catch (e: Throwable) {
-                // Only this coroutine's own cancellation propagates; a CancellationException leaking out of the handler
-                // (e.g. a TimeoutCancellationException from its own withTimeout) is a handler failure like any other.
-                if (e is CancellationException && !currentCoroutineContext().isActive) throw e
-                log.warn("Dispatch of {} request {} failed", request.type, request.id, e)
-                Reply.newBuilder()
-                    .setRequestId(request.id)
-                    .setError(
-                        Error.newBuilder().setRequestId(request.id).setCode(ErrorCode.HANDLER_ERROR)
-                            .setMessage("${e::class.simpleName}: ${e.message}"),
-                    )
-                    .build()
-            }
-            try {
-                stream.out.send(ClientMessage.newBuilder().setReply(reply).build())
-            } catch (_: ClosedSendChannelException) {
-                log.debug("Reply to {} request {} dropped: the stream it arrived on is closed", request.type, request.id)
-            }
-            grantPermit(stream)
+        val streaming = request.mode == RequestMode.STREAMING
+        val entry = Running(stream, if (streaming) StreamCredit(request.initialCredit) else null)
+        // Lazy, so a Flow or Cancel arriving right after the request finds the entry.
+        val job = scope.launch(handlerDispatcher, start = CoroutineStart.LAZY) {
+            if (streaming) serveStream(stream, request, entry) else serveUnary(stream, request)
         }
+        entry.job = job
+        running[request.id] = entry
         job.invokeOnCompletion {
+            running.remove(request.id, entry)
             inFlight.update { it - 1 }
             gate.left()
+            grantPermit(stream)
+        }
+        job.start()
+    }
+
+    private suspend fun serveUnary(stream: Stream, request: Request) {
+        val reply = try {
+            gate.permits.withPermit { inbound(request) }
+        } catch (e: Throwable) {
+            // Only this coroutine's own cancellation (a hub Cancel) propagates; a CancellationException leaking out of the
+            // handler (e.g. a TimeoutCancellationException from its own withTimeout) is a handler failure like any other.
+            if (e is CancellationException && !currentCoroutineContext().isActive) throw e
+            log.warn("Dispatch of {} request {} failed", request.type, request.id, e)
+            Reply.newBuilder()
+                .setRequestId(request.id)
+                .setError(
+                    Error.newBuilder().setRequestId(request.id).setCode(ErrorCode.HANDLER_ERROR)
+                        .setMessage("${e::class.simpleName}: ${e.message}"),
+                )
+                .build()
+        }
+        try {
+            stream.out.send(ClientMessage.newBuilder().setReply(reply).build())
+        } catch (_: ClosedSendChannelException) {
+            log.debug("Reply to {} request {} dropped: the stream it arrived on is closed", request.type, request.id)
+        }
+    }
+
+    /**
+     * Serves a `STREAMING` request: [inboundStream] runs under the handler permit; each part it emits waits for credit
+     * and goes out with the next `seq`; then the `ReplyEnd` (with the error it returned, or `HANDLER_ERROR` for an
+     * exception that leaked). Cancelled by the hub's `Cancel` or the stream closing: nothing goes back then.
+     */
+    private suspend fun serveStream(stream: Stream, request: Request, entry: Running) {
+        val credit = entry.credit!!
+        var seq = 0L
+        val error: Error? = try {
+            gate.permits.withPermit {
+                inboundStream(request) { payload ->
+                    credit.take()
+                    val part = ReplyPart.newBuilder().setRequestId(request.id).setPayload(ByteString.copyFrom(payload)).setSeq(++seq)
+                    try {
+                        stream.out.send(ClientMessage.newBuilder().setPart(part).build())
+                    } catch (_: ClosedSendChannelException) {
+                        // The stream it arrived on is gone, the hub with its credits: stop the handler's flow.
+                        entry.job.cancel(CancellationException("hub stream closed while streaming ${request.type} ${request.id}"))
+                        throw CancellationException("hub stream closed")
+                    }
+                }
+            }
+        } catch (e: Throwable) {
+            if (e is CancellationException && !currentCoroutineContext().isActive) throw e // a hub Cancel: no end follows
+            log.warn("Streaming {} request {} failed", request.type, request.id, e)
+            Error.newBuilder().setRequestId(request.id).setCode(ErrorCode.HANDLER_ERROR).setMessage("${e::class.simpleName}: ${e.message}").build()
+        }
+        val end = ReplyEnd.newBuilder().setRequestId(request.id).setParts(seq.coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
+        if (error != null) end.setError(error)
+        try {
+            stream.out.send(ClientMessage.newBuilder().setEnd(end).build())
+        } catch (_: ClosedSendChannelException) {
+            log.debug("End of {} stream {} dropped: the stream it arrived on is closed", request.type, request.id)
+        }
+    }
+
+    /** Cancels the streaming handlers of requests that arrived on [stream] (the hub has forgotten them). */
+    private fun cancelStreamingHandlers(stream: Stream, reason: String) {
+        for (entry in running.values) {
+            if (entry.stream === stream && entry.credit != null) entry.job.cancel(CancellationException(reason))
         }
     }
 

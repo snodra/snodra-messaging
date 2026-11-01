@@ -43,4 +43,13 @@ interface HubTransport {
         HubProtocol.SCATTER_GATHER,
         "${this::class.simpleName} does not support ${HubProtocol.SCATTER_GATHER}",
     )
+
+    /** See [HubConnection.stream]. A transport without streaming fails with `UnsupportedByHubException`. */
+    suspend fun stream(
+        request: io.damoreira.kraken.hub.v1.Request,
+        onPart: suspend (io.damoreira.kraken.hub.v1.ReplyPart) -> Unit,
+    ): io.damoreira.kraken.hub.v1.ServerMessage = throw io.damoreira.kraken.messaging.UnsupportedByHubException(
+        HubProtocol.STREAMING,
+        "${this::class.simpleName} does not support ${HubProtocol.STREAMING}",
+    )
 }
