@@ -197,6 +197,36 @@ class InProcessHubTest {
     }
 
     @Test
+    fun `a second stream of one instance id replaces the first, like the real hub`() = runBlocking {
+        val first = RawClient().also { it.register("svc-a", "a-1", "test.Ping") }
+        awaitRegistered("test.Ping")
+        val sender = RawClient().also { it.register("svc-b", "b-1") }
+        sender.send(request("r1", "test.Ping"))
+        first.next()
+
+        val second = RawClient().also { it.register("svc-a", "a-1", "test.Ping") }
+        // The older stream ends and its in-flight request fails; the newer one is the instance's only session.
+        assertEquals(null, first.awaitEnd())
+        val err = sender.next()
+        assertEquals(ErrorCode.HANDLER_DISCONNECTED, err.error.code)
+        assertEquals(1, hub.sessionsOf("a-1"))
+        assertEquals(1, hub.sessionsReplacedOf("a-1"))
+        assertEquals(2, hub.streamsOpenedBy("a-1"))
+        sender.send(request("r2", "test.Ping"))
+        assertEquals("r2", second.next().request.id)
+    }
+
+    @Test
+    fun `with replaceSessions off both streams of one instance id stay`() = runBlocking {
+        hub.replaceSessions = false
+        RawClient().also { it.register("svc-a", "a-1", "test.Ping") }
+        awaitRegistered("test.Ping")
+        RawClient().also { it.register("svc-a", "a-1", "test.Ping") }
+        withTimeout(TIMEOUT_MS) { while (hub.sessionsOf("a-1") < 2) kotlinx.coroutines.delay(10) }
+        assertEquals(0, hub.sessionsReplacedOf("a-1"))
+    }
+
+    @Test
     fun `request before register is FAILED_PRECONDITION`() = runBlocking {
         val client = RawClient()
         client.send(request("r1", "test.Ping"))

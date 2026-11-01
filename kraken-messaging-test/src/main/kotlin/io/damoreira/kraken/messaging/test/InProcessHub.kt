@@ -61,6 +61,10 @@ import java.util.concurrent.TimeUnit
  * ([statusMessagesFrom]) and ignored. Set [instanceStatus] false to emulate the P2 hub. [pauseReading] stops reading
  * every stream (what clients write stays queued on their side), and [requestsFrom] counts requests per sender.
  *
+ * One session per instance id, like the real hub: the first `Register` of a stream whose instance id already has a
+ * registered stream replaces that older stream (it ends, its in-flight requests fail with `HANDLER_DISCONNECTED`;
+ * [sessionsReplacedOf] counts it). Set [replaceSessions] false to accept parallel streams of one instance id.
+ *
  * It does not implement consistent hashing on `routing_key`, metrics, or the real hub's owner grace period and
  * heartbeat expiry.
  */
@@ -113,6 +117,20 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
     @Volatile
     var pauseReading: Boolean = false
 
+    /**
+     * True (the default, as the real hub): a new stream registering an instance id that already has a stream replaces
+     * the older one. False keeps both.
+     */
+    @Volatile
+    var replaceSessions: Boolean = true
+
+    /**
+     * Delays each `RegisterAck` (and the stream's later messages, read in order) by this much, as network latency would;
+     * a replaced older stream still ends at once. Zero by default.
+     */
+    @Volatile
+    var ackDelay: Duration = Duration.ZERO
+
     /** Requests queued per permit-managed instance before new ones are rejected (`KRAKEN_HUB_QUEUE_CAPACITY_PER_INSTANCE`). */
     @Volatile
     var queueCapacity: Int = 10_000
@@ -126,6 +144,8 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
         @Volatile var flowControl = false
         /** Negotiated `instance-status` (fixed by the stream's first Register). */
         @Volatile var instanceStatus = false
+        /** The ack of the Register just handled, written by the stream's collector (after [ackDelay]). */
+        var ack: ServerMessage? = null
         /** Remaining permits; null = unlimited (not permit-managed). Guarded by [lock]. */
         var permits: Int? = null
         /** Requests waiting for a permit, highest priority first, then arrival. Guarded by [lock]. */
@@ -152,6 +172,8 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
     private val requestsBySender = ConcurrentHashMap<String, Int>()
     private val statusMessages = ConcurrentHashMap<String, Int>()
     private val lastStatuses = ConcurrentHashMap<String, InstanceStatus>()
+    private val streamsOpened = ConcurrentHashMap<String, Int>()
+    private val streamsReplaced = ConcurrentHashMap<String, Int>()
     private var seq = 0L
     @Volatile private var lastRequest: Request? = null
     private val channels = CopyOnWriteArrayList<ManagedChannel>()
@@ -181,6 +203,12 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
 
     /** Open streams that registered as [instanceId]. */
     fun sessionsOf(instanceId: String): Int = sessions.count { it.registered && it.instanceId == instanceId }
+
+    /** Streams whose first `Register` named [instanceId]. */
+    fun streamsOpenedBy(instanceId: String): Int = streamsOpened[instanceId] ?: 0
+
+    /** Streams of [instanceId] ended because a newer stream registered the same instance id ([replaceSessions]). */
+    fun sessionsReplacedOf(instanceId: String): Int = streamsReplaced[instanceId] ?: 0
 
     /** `Request` messages received from [instanceId] over all of its streams. */
     fun requestsFrom(instanceId: String): Int = requestsBySender[instanceId] ?: 0
@@ -267,6 +295,11 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
                         first = false
                         while (pauseReading) delay(5)
                         handle(session, msg)
+                        session.ack?.let { ack ->
+                            session.ack = null
+                            if (!ackDelay.isZero) delay(ackDelay.toMillis())
+                            session.out.trySend(ack)
+                        }
                     }
                 } finally {
                     cleanup(session)
@@ -299,14 +332,21 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
             throw Status.INVALID_ARGUMENT.withDescription("service_name and instance_id must not be empty").asException()
         }
         val types = (reg.commandTypesList + reg.queryTypesList).toSet()
-        synchronized(lock) {
+        val replaced = synchronized(lock) {
             for (type in types) {
                 val owner = sessions.firstOrNull { it !== session && type in it.types && it.serviceName != reg.serviceName }
                 if (owner != null) {
                     throw Status.ALREADY_EXISTS.withDescription("type $type is owned by service ${owner.serviceName}").asException()
                 }
             }
-            if (!session.registered) { // like the real hub: the first Register of a stream fixes flow control
+            val first = !session.registered
+            // Like the real hub: one session per instance id, the newer stream wins and the older one stops being routed to.
+            val older = if (first && replaceSessions) {
+                sessions.filter { it !== session && it.registered && it.instanceId == reg.instanceId }.onEach { it.registered = false }
+            } else {
+                emptyList()
+            }
+            if (first) { // like the real hub: the first Register of a stream fixes flow control
                 session.flowControl = !legacy && flowControl && reg.protocolVersion >= 2 && FLOW_CONTROL in reg.capabilitiesList
                 session.permits = if (session.flowControl && reg.initialPermits > 0) reg.initialPermits else null
                 session.instanceStatus = !legacy && instanceStatus && reg.protocolVersion >= 2 && INSTANCE_STATUS in reg.capabilitiesList
@@ -315,12 +355,20 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
             session.instanceId = reg.instanceId
             session.registered = true
             session.types = types
+            if (first) streamsOpened.merge(reg.instanceId, 1, Int::plus)
+            older
+        }
+        // The older stream ends (its in-flight requests fail in its cleanup) before this one is acknowledged.
+        for (old in replaced) {
+            streamsReplaced.merge(reg.instanceId, 1, Int::plus)
+            old.out.close()
+            old.collector.cancel()
         }
         registrations.merge(reg.instanceId, 1, Int::plus)
         lastRegisters[reg.instanceId] = reg
         if (!legacy && reg.protocolVersion >= 2) {
-            // Enqueued before this stream's next message is handled, so it precedes the echo of the following heartbeat.
-            session.out.trySend(ServerMessage.newBuilder().setRegisterAck(registerAck(reg.capabilitiesList)).build())
+            // Written before this stream's next message is handled, so it precedes the echo of the following heartbeat.
+            session.ack = ServerMessage.newBuilder().setRegisterAck(registerAck(reg.capabilitiesList)).build()
             acks.merge(reg.instanceId, 1, Int::plus)
         }
     }
