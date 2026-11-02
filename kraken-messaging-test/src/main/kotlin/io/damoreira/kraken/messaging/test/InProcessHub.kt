@@ -136,7 +136,9 @@ import java.util.concurrent.TimeUnit
  * whose type is outside the entry's `send` gets an immediate `Error{PERMISSION_DENIED}` in every request mode (unary,
  * scatter-gather, streaming, subscription) before anything is routed, or `UNAUTHENTICATED` when the token left [auth]
  * meanwhile (the ACL is read per request). In `permissive` every violation is recorded and allowed; a session without
- * a valid token is not judged per request. [authViolations] lists them all and [tokensSeenFrom] the token of every
+ * a valid token is not judged per request. Like the real hub, a `Register` naming the instance id of a live session of another
+ * service is refused with `PERMISSION_DENIED` "instance id <first 8 characters> belongs to another service" in `enforce` and
+ * `permissive` (the owner is untouched; with [auth] off the older stream is replaced as usual). [authViolations] lists them all and [tokensSeenFrom] the token of every
  * `Register` received, rejected ones included.
  *
  * It does not implement consistent hashing on `routing_key`, metrics, or the real hub's owner grace period and
@@ -605,6 +607,15 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
         }
         val types = exclusive + shared
         val replaced = synchronized(lock) {
+            // The real hub refuses (in `enforce` and `permissive`, not in `off`) a stream that names the instance id of a
+            // live session of another service: the owner is untouched, nothing is replaced.
+            if (!session.registered && auth.mode != AuthMode.OFF &&
+                sessions.any { it !== session && it.registered && it.instanceId == reg.instanceId && it.serviceName != reg.serviceName }
+            ) {
+                val message = "instance id ${reg.instanceId.take(8)} belongs to another service"
+                violations += AuthViolation(reg.instanceId, Status.Code.PERMISSION_DENIED, message, true, System.nanoTime())
+                throw Status.PERMISSION_DENIED.withDescription(message).asException()
+            }
             for (type in exclusive) {
                 val owner = sessions.firstOrNull { it !== session && type in it.types && it.serviceName != reg.serviceName }
                 if (owner != null) {

@@ -269,6 +269,23 @@ class HubAccessControlTest {
         assertEquals(Status.Code.PERMISSION_DENIED, wrongType.lastRejection.value!!.code)
     }
 
+    @Test fun `taking over the instance id of another service is a registration rejection PERMISSION_DENIED`() = runBlocking {
+        val other = "other-" + UUID.randomUUID()
+        hub.auth = HubAuth.enforce(acl + (other to AclEntry("svc-b", handle = listOf("b.*"))))
+        val owner = connection("shared-instance")
+        owner.start()
+        assertTrue(owner.awaitRegistered(wait))
+
+        val intruder = connection("shared-instance", service = "svc-b", settings = settings(HubToken.of(other, null)))
+        intruder.start()
+        val e = assertFailsWith<HubRegistrationRejectedException> { intruder.awaitRegistered(wait) }
+        assertTrue("PERMISSION_DENIED" in e.message!! && "belongs to another service" in e.message!!, e.message)
+        assertEquals(Status.Code.PERMISSION_DENIED, intruder.lastRejection.value!!.code)
+        assertTrue(owner.connected.value, "the owner is untouched")
+        assertNull(owner.lastRejection.value)
+        assertEquals(1, hub.sessionsOf("shared-instance"))
+    }
+
     @Test fun `HubConnections awaitRegistered throws for a rejected token too`() = runBlocking {
         hub.auth = HubAuth.enforce(acl)
         val connections = HubConnections(

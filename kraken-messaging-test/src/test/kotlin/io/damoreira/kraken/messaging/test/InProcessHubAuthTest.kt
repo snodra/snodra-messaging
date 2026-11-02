@@ -278,4 +278,42 @@ class InProcessHubAuthTest {
         assertEquals(id, error.requestId)
         assertEquals(ErrorCode.HANDLER_DISCONNECTED, error.code)
     }
+
+    // --- instance takeover (the real hub refuses a Register of another service's instance id) ---
+
+    @Test fun `a Register of another service's instance id is PERMISSION_DENIED in enforce and permissive and leaves the owner untouched`() = runBlocking {
+        for (mode in listOf(HubAuth.enforce(acl), HubAuth.permissive(acl))) {
+            val instance = "victim-" + UUID.randomUUID()
+            hub.auth = mode
+            val victim = Raw().also { it.register("orders-service", instance, token = orders, commands = listOf("orders.Place")) }
+            assertTrue(victim.next().hasRegisterAck())
+            val attacker = Raw().also { it.register("billing-service", instance, token = billing, commands = listOf("billing.Charge")) }
+            val status = attacker.status()
+            assertEquals(Status.Code.PERMISSION_DENIED, status.code, mode.mode.name)
+            assertEquals("instance id ${instance.take(8)} belongs to another service", status.description, mode.mode.name)
+            assertEquals(1, hub.sessionsOf(instance), mode.mode.name)
+            assertEquals(0, hub.sessionsReplacedOf(instance), mode.mode.name)
+            assertEquals(setOf("orders.Place"), hub.registeredTypes(), mode.mode.name)
+            assertNull(withTimeoutOrNull(100) { victim.ended.await() }, "the owner's stream stays up")
+            victim.out.close()
+            withTimeout(5_000) { while (hub.sessionsOf(instance) > 0) kotlinx.coroutines.delay(5) }
+        }
+    }
+
+    @Test fun `with auth off an instance id is still replaced whatever its service, and a same-service reconnect takes over in enforce`() = runBlocking {
+        val shared = "shared-" + UUID.randomUUID()
+        val first = Raw().also { it.register("orders-service", shared) }
+        assertTrue(first.next().hasRegisterAck())
+        val second = Raw().also { it.register("billing-service", shared) }
+        assertTrue(second.next().hasRegisterAck())
+        assertEquals(1, hub.sessionsReplacedOf(shared))
+
+        hub.auth = HubAuth.enforce(acl)
+        val own = "own-" + UUID.randomUUID()
+        val old = Raw().also { it.register("orders-service", own, token = orders) }
+        assertTrue(old.next().hasRegisterAck())
+        val reconnect = Raw().also { it.register("orders-service", own, token = orders) }
+        assertTrue(reconnect.next().hasRegisterAck())
+        assertEquals(1, hub.sessionsReplacedOf(own))
+    }
 }

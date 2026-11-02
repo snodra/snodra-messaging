@@ -358,10 +358,11 @@ and logs one warning.
 |---|---|---|
 | no token, an empty token, an unknown token (or a JWT, until P5b) | the hub closes the stream with `UNAUTHENTICATED` | registration rejection |
 | `service-name` the token does not grant, or a handled type outside its `handle` | the hub closes the stream with `PERMISSION_DENIED` (naming the type) | registration rejection |
+| a `Register` naming the instance id of a live session of **another service** (`enforce` and `permissive`; `off` keeps replacing it) | the hub closes the stream with `PERMISSION_DENIED` (`instance id … belongs to another service`); the owner's session is untouched | registration rejection |
 | a request whose type is outside `send` (unary, scatter-gather, streaming, subscription) | an immediate `Error{PERMISSION_DENIED}`, nothing routed | `AccessDeniedException`, **never retried** |
 | a request after the token left the ACL | an immediate `Error{UNAUTHENTICATED}` | `UnauthenticatedException`, never retried |
 
-A **registration rejection** (`ALREADY_EXISTS`, `INVALID_ARGUMENT`, `UNAUTHENTICATED`, `PERMISSION_DENIED`): the status is
+A **registration rejection** (`ALREADY_EXISTS`, `INVALID_ARGUMENT`, `UNAUTHENTICATED`, `PERMISSION_DENIED`, the last also for an instance id that belongs to another service): the status is
 in `HubConnection.lastRejection`, `awaitRegistered` throws `HubRegistrationRejectedException` naming the code and the hub's
 message, the connection reconnects at the backoff cap (80-100 % of `hub.reconnect-backoff.max`, no tight loop), logs at
 `ERROR` once per distinct message and then at `DEBUG`, and keeps retrying (a fixed ACL or token file heals it without a
@@ -891,7 +892,7 @@ result.updates.collect { change -> render(change) }   // completes when the hand
   match `prefix.` itself). `auth` may be replaced at runtime and, like the real hub on an ACL reload, replacing it in `enforce`
   closes the live sessions the new ACL no longer allows (`UNAUTHENTICATED` for a token that left, `PERMISSION_DENIED` for a
   service name or handled type it no longer grants; their in-flight requests fail as on any disconnect); set
-  `closeSessionsOnAuthChange = false` to keep them and test the per-request refusal instead. `permissive` allows and records. `authViolations()` lists every violation (code, message, enforced, a monotonic timestamp, so tests can assert
+  `closeSessionsOnAuthChange = false` to keep them and test the per-request refusal instead. Like the real hub (unless `auth` is `OFF`), a `Register` naming the instance id of a live session of another service is closed with `PERMISSION_DENIED` (`instance id … belongs to another service`) and the owner is left alone. `permissive` allows and records. `authViolations()` lists every violation (code, message, enforced, a monotonic timestamp, so tests can assert
   the spacing of reconnects) and `tokensSeenFrom(instanceId)` the token of every `Register` received, refused ones included.
 - `TestCertificates.generate(dir, names)`: a throwaway self-signed certificate made at test time with the JDK's `keytool`
   (PEM certificate, also the CA a client trusts, and PKCS#8 key; valid for `localhost` and `127.0.0.1` by default).
