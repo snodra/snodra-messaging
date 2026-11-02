@@ -4,6 +4,12 @@ import io.damoreira.kraken.messaging.NoHandlerException
 import io.damoreira.kraken.messaging.RemoteHandlerException
 import io.damoreira.kraken.messaging.StreamOptions
 import io.damoreira.kraken.messaging.api.StreamingQuery
+import io.damoreira.kraken.messaging.api.SubscriptionQuery
+import io.damoreira.kraken.messaging.SubscriptionOptions
+import io.damoreira.kraken.messaging.complete
+import io.damoreira.kraken.messaging.completeExceptionally
+import io.damoreira.kraken.messaging.emit
+import kotlinx.coroutines.flow.take
 import io.damoreira.kraken.messaging.handler.QueryHandler
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
@@ -28,6 +34,18 @@ data class Happened(val id: String) : Event
 
 @MessageType("test.Rows")
 data class Rows(val count: Int, val failAt: Int = -1) : StreamingQuery<Int>
+
+@MessageType("test.Watch")
+data class Watch(val name: String) : SubscriptionQuery<Level, Changed>
+data class Level(val name: String, val value: Int)
+data class Changed(val name: String, val value: Int)
+
+class WatchHandler(val failInitial: Boolean = false) {
+    @QueryHandler fun handle(q: Watch): Level {
+        if (failInitial) throw IllegalStateException("no level")
+        return Level(q.name, 0)
+    }
+}
 
 class Handlers {
     val events = mutableListOf<Happened>()
@@ -78,6 +96,79 @@ class InMemoryBusesTest {
         assertEquals(listOf(1), seen)
         assertFailsWith<NoHandlerException> { InMemoryBuses().stream(Rows(1)).toList() }
         Unit
+    }
+
+    @Test fun `subscribe answers the initial result from the handler and then the emitted updates in order`() = runBlocking {
+        val buses = InMemoryBuses().register(WatchHandler())
+        val result = buses.subscribe(Watch("a"))
+        assertEquals(Level("a", 0), result.initial)
+        assertEquals(1, buses.openSubscriptions)
+
+        buses.emitter.emit<Watch, Changed>({ it.name == "a" }, Changed("a", 1))
+        buses.emitter.emit<Watch, Changed>({ it.name == "a" }, Changed("a", 2))
+        buses.emitter.complete<Watch> { it.name == "a" }
+
+        assertEquals(listOf(Changed("a", 1), Changed("a", 2)), result.updates.toList())
+        assertEquals(0, buses.openSubscriptions, "a completed subscription is removed")
+    }
+
+    @Test fun `an update goes only to the subscriptions whose query passes the filter, and with none it is a no-op`() = runBlocking {
+        val buses = InMemoryBuses().register(WatchHandler())
+        buses.emitter.emit<Watch, Changed>({ true }, Changed("x", 9)) // nobody subscribed yet: nothing happens
+        val a = buses.subscribe(Watch("a"))
+        val b = buses.subscribe(Watch("b"))
+
+        buses.emitter.emit<Watch, Changed>({ it.name == "b" }, Changed("b", 1))
+        buses.emitter.emit<Watch, Changed>({ error("a broken filter skips its subscription") }, Changed("?", 0))
+        buses.emitter.complete<Watch> { true }
+
+        assertEquals(emptyList(), a.updates.toList())
+        assertEquals(listOf(Changed("b", 1)), b.updates.toList())
+    }
+
+    @Test fun `completeExceptionally fails the updates as a remote handler error, after the updates before it`() = runBlocking {
+        val buses = InMemoryBuses().register(WatchHandler())
+        val result = buses.subscribe(Watch("a"))
+        buses.emitter.emit<Watch, Changed>({ true }, Changed("a", 1))
+        buses.emitter.completeExceptionally<Watch>({ true }, IllegalStateException("feed down"))
+
+        val seen = mutableListOf<Changed>()
+        val e = assertFailsWith<RemoteHandlerException> { result.updates.collect { seen += it } }
+        assertEquals("IllegalStateException: feed down", e.message)
+        assertEquals(listOf(Changed("a", 1)), seen)
+        assertEquals(0, buses.openSubscriptions)
+    }
+
+    @Test fun `maxResults ends the subscription after that many updates`() = runBlocking {
+        val buses = InMemoryBuses().register(WatchHandler())
+        val result = buses.subscribe(Watch("a"), SubscriptionOptions(maxResults = 2))
+        for (n in 1..5) buses.emitter.emit<Watch, Changed>({ true }, Changed("a", n))
+
+        assertEquals(listOf(Changed("a", 1), Changed("a", 2)), result.updates.toList())
+        assertEquals(0, buses.openSubscriptions)
+    }
+
+    @Test fun `cancel removes the subscription and completes the updates, and so does take(n)`() = runBlocking {
+        val buses = InMemoryBuses().register(WatchHandler())
+        val cancelled = buses.subscribe(Watch("a"))
+        cancelled.cancel()
+        buses.emitter.emit<Watch, Changed>({ true }, Changed("a", 2))
+        assertEquals(0, buses.openSubscriptions)
+        assertEquals(emptyList(), cancelled.updates.toList())
+
+        val taken = buses.subscribe(Watch("a"))
+        for (n in 1..3) buses.emitter.emit<Watch, Changed>({ true }, Changed("a", n))
+        assertEquals(listOf(Changed("a", 1)), taken.updates.take(1).toList())
+        assertEquals(0, buses.openSubscriptions, "the collector stopped: the subscription is cancelled")
+    }
+
+    @Test fun `subscribe fails like a unary query, with nothing left open`() = runBlocking {
+        assertFailsWith<NoHandlerException> { InMemoryBuses().subscribe(Watch("a")) }
+
+        val failing = InMemoryBuses().register(WatchHandler(failInitial = true))
+        val e = assertFailsWith<RemoteHandlerException> { failing.subscribe(Watch("a")) }
+        assertEquals("IllegalStateException: no level", e.message)
+        assertEquals(0, failing.openSubscriptions, "a failed open leaves nothing behind")
     }
 }
 

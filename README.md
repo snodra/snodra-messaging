@@ -759,7 +759,11 @@ result.updates.collect { change -> render(change) }   // completes when the hand
 - `InMemoryBuses(typePrefix, userId)`: implements `EventBus`, `CommandBus` and `QueryBus` in memory for unit tests without
   Docker. Messages still pass through the JSON codec. `register(handlerBean)` adds handlers; `published` lists events.
   A scatter-gather returns one part from the registered handler (service and instance `in-memory`); a streaming query
-  collects the registered streaming handler's flow (honouring `maxResults`).
+  collects the registered streaming handler's flow (honouring `maxResults`). A subscription query (`subscribe`) answers
+  its initial result from the registered handler and takes its updates from `buses.emitter`, a local `QueryUpdateEmitter`
+  (`emit`, `complete`, `completeExceptionally`, filtered like the real one; `buses.openSubscriptions` counts the open
+  ones): no credits, and an emit is delivered at once, not after the commit of a surrounding transaction. `maxResults`,
+  `cancel()` and `take(n)` end it as against a hub.
 - `InProcessHub`: in-JVM stand-in for the hub (`start()`, `channel()`, `dropInstance(...)`, `lastRequestHeaders()`,
   `lastRequest()`, `registrationsFrom(...)`, `lastRegisterFrom(...)`, `acksSentTo(...)`, `echoHeartbeats = false` to
   simulate a hub that stopped answering), for hub-client tests without a container. It speaks protocol v2 (a
