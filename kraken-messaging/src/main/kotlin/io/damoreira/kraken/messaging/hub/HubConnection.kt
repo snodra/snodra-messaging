@@ -2,6 +2,7 @@ package io.damoreira.kraken.messaging.hub
 
 import com.google.protobuf.ByteString
 import io.damoreira.kraken.hub.v1.Cancel
+import io.damoreira.kraken.hub.v1.Credentials
 import io.damoreira.kraken.hub.v1.ClientMessage
 import io.damoreira.kraken.hub.v1.Error
 import io.damoreira.kraken.hub.v1.Flow
@@ -76,9 +77,25 @@ data class HubSettings(
      * stream (a race, a lost `Flow` or `Cancel`) would otherwise leave the handler's coroutine and permit held forever.
      */
     val streamCreditTimeout: Duration = HubProtocol.DEFAULT_STREAM_CREDIT_TIMEOUT,
+    /**
+     * The static token sent in `Register.credentials.token` (P5a, ADR 0018), asked for once per stream. Its `toString`
+     * is redacted, so printing the settings never prints the token.
+     */
+    val token: HubToken = HubToken.NONE,
 ) {
     /** [requestTimeout] when the caller chose one; zero (or negative) counts as unset, never as an instant deadline. */
     val chosenRequestTimeout: Duration? get() = requestTimeout?.takeIf { !it.isZero && !it.isNegative }
+}
+
+/**
+ * True when the hub closed the stream because it refuses this registration: a service name or handled type another
+ * service owns (`ALREADY_EXISTS`), an invalid registration (`INVALID_ARGUMENT`), no or an unknown token
+ * (`UNAUTHENTICATED`), or a service name or type the token's ACL entry does not grant (`PERMISSION_DENIED`, P5a). Trying
+ * again at once cannot succeed, so these are retried at the backoff cap and exposed in [HubConnection.lastRejection].
+ */
+internal fun isRegistrationRejection(status: Status): Boolean = when (status.code) {
+    Status.Code.ALREADY_EXISTS, Status.Code.INVALID_ARGUMENT, Status.Code.UNAUTHENTICATED, Status.Code.PERMISSION_DENIED -> true
+    else -> false
 }
 
 /** What the hub answered on the current stream: a v2 `RegisterAck`, or only the heartbeat echo of a legacy (v1) hub. */
@@ -120,8 +137,11 @@ internal object ReconnectBackoff {
  *
  * When the stream fails, every request written to it fails with [HubConnectionLostException] (outcome unknown) and the
  * loop reconnects with jittered exponential backoff ([ReconnectBackoff]); a stream that reached the handshake resets
- * the backoff to `backoffMin`. An `ALREADY_EXISTS` or `INVALID_ARGUMENT` rejection is exposed in [lastRejection] and
- * retried at `backoffMax`. A request that could not be written to a live stream fails with [HubUnavailableException].
+ * the backoff to `backoffMin`. A stream the hub closed with `ALREADY_EXISTS`, `INVALID_ARGUMENT`, `UNAUTHENTICATED` or
+ * `PERMISSION_DENIED` is a registration rejection ([isRegistrationRejection]): exposed in [lastRejection], retried at
+ * `backoffMax` and logged at `error` once per distinct message (then at `debug`). The static token
+ * ([HubSettings.token]) goes in `Register.credentials` of every stream, read when the stream opens (a token file is re-read
+ * on every reconnect) and never logged. A request that could not be written to a live stream fails with [HubUnavailableException].
  *
  * Each stream gets its own outbound channel, so nothing queued for a broken stream (stale replies, requests whose
  * senders were already failed) leaks into the next one ahead of its `Register`.
@@ -266,7 +286,7 @@ class HubConnection(
      * One open stream: its outbound queue, handshake, the heartbeats awaiting an echo (`sentAtMs` -> generation) and the
      * permit accounting against its `initial_permits`.
      */
-    private class Stream(val out: Channel<ClientMessage>, fallbackHeartbeatMs: Long, val initialPermits: Int) {
+    private class Stream(val out: Channel<ClientMessage>, fallbackHeartbeatMs: Long, val initialPermits: Int, val token: String? = null) {
         val probes = ConcurrentSkipListMap<Long, Long>()
         val permits = PermitLedger(initialPermits)
         /** `initial_permits` plus every top-up written on this stream (guarded by the stream itself). */
@@ -738,12 +758,15 @@ class HubConnection(
         failPending(null, HubConnectionLostException("hub connection stopped"))
     }
 
+    /** The rejection message last logged at `error`; touched only by the connect loop. */
+    private var lastLoggedRejection: String? = null
+
     private suspend fun connectLoop() {
         var backoff = settings.backoffMin
         var failures = 0
         while (currentCoroutineContext().isActive) {
             var channel: ManagedChannel? = null
-            val stream = Stream(Channel(Channel.UNLIMITED), settings.heartbeatInterval.toMillis(), initialPermits().coerceAtLeast(1))
+            val stream = Stream(Channel(Channel.UNLIMITED), settings.heartbeatInterval.toMillis(), initialPermits().coerceAtLeast(1), settings.token.current())
             var status: Status = Status.CANCELLED
             var reachedHandshake = false
             try {
@@ -782,12 +805,22 @@ class HubConnection(
             if (reachedHandshake) {
                 backoff = settings.backoffMin
                 failures = 0
+                rejection.value = null // a rejection no longer describes a hub that has answered since
+                lastLoggedRejection = null
             }
             failures++
-            val wait = if (status.code == Status.Code.ALREADY_EXISTS || status.code == Status.Code.INVALID_ARGUMENT) {
+            val wait = if (isRegistrationRejection(status)) {
                 rejection.value = status
                 val retry = ReconnectBackoff.jittered(settings.backoffMax, settings.backoffMax)
-                log.error("Hub rejected the registration of {} ({}): {}; retrying in {}", serviceName, instanceId, status.description, retry)
+                // The same message repeats at every attempt: one error line, then debug (a refused service retries for as long as it runs).
+                val text = "Hub rejected the registration of {} ({}): {} {}; retrying in {}"
+                val message = describe(status)
+                if (message != lastLoggedRejection) {
+                    lastLoggedRejection = message
+                    log.error(text, serviceName, instanceId, status.code.name, status.description, retry)
+                } else {
+                    log.debug(text, serviceName, instanceId, status.code.name, status.description, retry)
+                }
                 retry
             } else {
                 val retry = ReconnectBackoff.jittered(backoff, settings.backoffMax)
@@ -840,7 +873,10 @@ class HubConnection(
 
     /** Writes the current registration followed by a heartbeat whose echo confirms it. Caller holds [lock]. */
     private fun announce(stream: Stream) {
-        val register = registration.toBuilder().setInitialPermits(stream.initialPermits).build()
+        val register = registration.toBuilder().setInitialPermits(stream.initialPermits)
+            // Every Register of the stream carries the stream's token (the hub reads it from the first one only).
+            .apply { stream.token?.let { credentials = Credentials.newBuilder().setToken(it).build() } }
+            .build()
         stream.out.trySend(ClientMessage.newBuilder().setRegister(register).build())
         stream.registeredGeneration = generation.value
         heartbeat(stream)
