@@ -7,12 +7,22 @@
 #        SKIP_SCATTER=1 skips the scatter-gather steps, ONLY_SCATTER=1 runs only them;
 #        SKIP_STREAM=1 skips the streaming-query steps, ONLY_STREAM=1 runs only them;
 #        SKIP_SUBSCRIBE=1 skips the subscription-query steps, ONLY_SUBSCRIBE=1 runs only them, B=http://localhost:8092 is
-#        service-b's HTTP address)
+#        service-b's HTTP address;
+#        SECURE=1 runs against the secure sandbox (kraken/infra/compose.secure.yaml, secrets from
+#        kraken/infra/scripts/dev-hub-pki.sh): the hub calls are https with the dev CA and carry the dashboard token, every
+#        other step runs unchanged, and the security steps 21 and 21b are added; SKIP_SECURE=1 skips those two, ONLY_SECURE=1
+#        runs only them; SECRETS_DIR names the secrets directory, default KRAKEN_SECRETS_DIR or INFRA_DIR/.secrets)
 set -euo pipefail
 
+SECURE=${SECURE:-0}
 A=${A:-http://localhost:8091}
-HUB=${HUB:-http://localhost:7001}
-HUB2=${HUB2:-http://localhost:7011}
+if [ "$SECURE" = "1" ]; then
+  HUB=${HUB:-https://localhost:7001}
+  HUB2=${HUB2:-https://localhost:7011}
+else
+  HUB=${HUB:-http://localhost:7001}
+  HUB2=${HUB2:-http://localhost:7011}
+fi
 B=${B:-http://localhost:8092}
 
 fail() { echo "SMOKE FAILED: $*" >&2; exit 1; }
@@ -22,13 +32,38 @@ fail() { echo "SMOKE FAILED: $*" >&2; exit 1; }
 # or 503s, and revert them to the default concurrency afterwards (also when a step fails). Needs the docker CLI.
 # SKIP_FLOW=1 skips these steps; ONLY_FLOW=1 runs only them. Timings in ms need perl (Time::HiRes).
 INFRA=${INFRA_DIR:-$(cd "$(dirname "$0")/../../kraken/infra" 2>/dev/null && pwd || true)}
+COMPOSE_FILES=(-f compose.yaml -f compose.local.yaml)
+
+# SECURE=1: the hubs speak TLS with the dev CA and want the dashboard token on /topology and /api/v1/*, and the
+# sandbox is the compose.secure.yaml overlay. Every step below keeps calling plain `curl "$HUB/..."`: this wrapper adds the
+# CA and the token (through a curl config on a pipe, so the token never shows in a process list) to calls aimed at a hub
+# and leaves every other call (service-a, service-b) alone.
+if [ "$SECURE" = "1" ]; then
+  COMPOSE_FILES+=(-f compose.secure.yaml)
+  SECRETS=${SECRETS_DIR:-${KRAKEN_SECRETS_DIR:-$INFRA/.secrets}}
+  [ -f "$SECRETS/ca.pem" ] && [ -f "$SECRETS/dashboard.token" ] \
+    || fail "SECURE=1 needs the dev secrets in '$SECRETS' (run kraken/infra/scripts/dev-hub-pki.sh, or set SECRETS_DIR)"
+  SECRETS=$(cd "$SECRETS" && pwd)
+  DASHBOARD_TOKEN=$(cat "$SECRETS/dashboard.token")
+  curl() {
+    local a to_hub=0
+    for a in "$@"; do
+      case "$a" in "$HUB"*|"$HUB2"*) to_hub=1 ;; esac
+    done
+    if [ "$to_hub" = "1" ]; then
+      command curl --cacert "$SECRETS/ca.pem" -K <(printf 'header = "Authorization: Bearer %s"\n' "$DASHBOARD_TOKEN") "$@"
+    else
+      command curl "$@"
+    fi
+  }
+fi
 
 # Recreates service-b and service-c from the sandbox compose files plus the given extra files, without touching
 # their dependencies, and waits until both are registered with permits matching <pattern>.
 recreate_b_and_c() { # <permits pattern> [extra compose file ...]
   local pattern=$1 i topo b c
   shift
-  local files=(-f compose.yaml -f compose.local.yaml)
+  local files=("${COMPOSE_FILES[@]}")
   for f in "$@"; do files+=(-f "$f"); done
   (cd "$INFRA" && docker compose "${files[@]}" --profile examples up -d --no-deps --no-build service-b service-c) \
     >/dev/null 2>&1 || fail "docker compose could not recreate service-b and service-c in $INFRA"
@@ -354,7 +389,7 @@ ha_steps() {
   if [ -n "$share" ] && [ -n "$p" ] && [ "$share" -gt $(( p + 2 )) ]; then
     echo "   service-b holds $share permits on $HUB but $p on $HUB2 (topped up by an earlier failover); recreating it ..."
     [ -n "$INFRA" ] && [ -f "$INFRA/compose.local.yaml" ] || fail "kraken/infra not found (set INFRA_DIR)"
-    (cd "$INFRA" && docker compose -f compose.yaml -f compose.local.yaml --profile examples \
+    (cd "$INFRA" && docker compose "${COMPOSE_FILES[@]}" --profile examples \
       up -d --no-deps --no-build --force-recreate service-b) >/dev/null 2>&1 || fail "docker compose could not recreate service-b"
     secs=$(await_both_hubs 90)
     share=$(permits_on "$HUB" service-b)
@@ -609,6 +644,125 @@ subscribe_steps() {
   echo "   $body"
 }
 
+# P5a (ADR 0018), only with SECURE=1 against the secure sandbox (kraken/infra/compose.secure.yaml). Step 21: a service
+# with a token the ACL does not know, and one with a valid token that grants only another service name, are refused by
+# both hubs and logged by the client as a registration rejection (ERROR once per hub), and never listed on /topology; a
+# request outside service-a's `send` patterns answers 403 AccessDeniedException. Step 21b: the dashboard API wants the
+# dashboard token. SKIP_SECURE=1 skips them, ONLY_SECURE=1 runs only them.
+INTRUDER=kraken-smoke-intruder
+
+remove_intruder() { docker rm -f "$INTRUDER" >/dev/null 2>&1 || true; }
+
+# How many lines of <hub container>'s log say it refused a register and match <pattern> (a run compares before and after,
+# so it counts only its own).
+refusals() { # <container> <pattern>
+  { docker logs "$1" 2>&1 | grep 'register refused' | grep -c -- "$2"; } || true
+}
+
+# Starts the throwaway intruder (service-a's image, so the same library and defaults) claiming <service name> with
+# <token> and TLS to both hubs; the Kafka consumer and the outbox are off so it touches neither Kafka nor MongoDB.
+start_intruder() { # <service name> <token>
+  local image
+  image=$(docker inspect --format '{{.Config.Image}}' "${A_CONTAINER:-kraken-example-a}" 2>/dev/null) \
+    || fail "container ${A_CONTAINER:-kraken-example-a} not found (set A_CONTAINER)"
+  remove_intruder
+  docker run -d --name "$INTRUDER" --network kraken \
+    -e KRAKEN_SERVICE_NAME="$1" \
+    -e KRAKEN_HUB_ADDRESS=static://hub:7000,hub-2:7000 \
+    -e KRAKEN_KAFKA_BOOTSTRAP=kafka:19092 \
+    -e KRAKEN_MONGODB_URI="mongodb://mongodb:27017/smoke-intruder?replicaSet=rs0" \
+    -e SERVER_PORT=8080 \
+    -e KRAKEN_MESSAGING_KAFKA_CONSUMER_ENABLED=false -e KRAKEN_MESSAGING_OUTBOX_ENABLED=false \
+    -e KRAKEN_MESSAGING_HUB_TOKEN="$2" \
+    -e KRAKEN_MESSAGING_HUB_TLS_ENABLED=true -e KRAKEN_MESSAGING_HUB_TLS_CA_FILE=/etc/kraken/hub-ca.pem \
+    -v "$SECRETS/ca.pem:/etc/kraken/hub-ca.pem:ro" \
+    "$image" >/dev/null || fail "could not start the intruder container from $image"
+}
+
+# Waits until both hubs' logs grew by at least <attempts> refusals matching <pattern> since <before hub> / <before hub-2>.
+await_refusals() { # <pattern> <before hub> <before hub-2> <attempts>
+  local i n1=0 n2=0
+  for i in $(seq 1 120); do
+    n1=$(refusals "${HUB_CONTAINER:-kraken-hub}" "$1"); n2=$(refusals "${HUB2_CONTAINER:-kraken-hub-2}" "$1")
+    if [ "$n1" -ge $(( $2 + $4 )) ] && [ "$n2" -ge $(( $3 + $4 )) ]; then return 0; fi
+    sleep 1
+  done
+  fail "the hubs did not both refuse the intruder ($1) $4 time(s) in 120s (hub: $n1, was $2; hub-2: $n2, was $3); intruder log: $(docker logs --tail 15 "$INTRUDER" 2>&1)"
+}
+
+not_on_topology() { # <service name>
+  local h
+  for h in "$HUB" "$HUB2"; do
+    if curl -fsS "$h/topology" | grep -q "\"serviceName\":\"$1\""; then fail "$1 is listed on $h/topology although it was refused"; fi
+  done
+}
+
+secure_steps() {
+  local h1=${HUB_CONTAINER:-kraken-hub} h2=${HUB2_CONTAINER:-kraken-hub-2} b1 b2 wrong log errors code body h path
+  command -v docker >/dev/null || fail "docker CLI needed for the security steps (or set SKIP_SECURE=1)"
+  docker inspect "$h1" >/dev/null 2>&1 || fail "container $h1 not found (set HUB_CONTAINER, or SKIP_SECURE=1)"
+  docker inspect "$h2" >/dev/null 2>&1 || fail "container $h2 not found (set HUB2_CONTAINER, or SKIP_SECURE=1)"
+  trap remove_intruder EXIT
+
+  echo "21. an unknown token is refused by both hubs: UNAUTHENTICATED, ERROR once per hub in the client's log, never on /topology ..."
+  wrong="smoke-wrong-token-$(date +%s)-$RANDOM"
+  b1=$(refusals "$h1" smoke-intruder); b2=$(refusals "$h2" smoke-intruder)
+  start_intruder smoke-intruder "$wrong"
+  await_refusals smoke-intruder "$b1" "$b2" 2
+  log=$(docker logs "$INTRUDER" 2>&1)
+  errors=$(printf '%s\n' "$log" | grep -c 'Hub rejected the registration of smoke-intruder' || true)
+  printf '%s\n' "$log" | grep 'Hub rejected the registration of smoke-intruder' | grep -q 'UNAUTHENTICATED' \
+    || fail "the intruder did not log an UNAUTHENTICATED registration rejection: $(printf '%s\n' "$log" | tail -n 15)"
+  [ "$errors" -ge 1 ] && [ "$errors" -le 2 ] \
+    || fail "expected the rejection logged once per hub (1 or 2 lines) after several attempts, got $errors: $(printf '%s\n' "$log" | grep 'Hub rejected')"
+  printf '%s\n' "$log" | grep 'Hub rejected the registration of smoke-intruder' | head -n 1 | sed 's/^/   client: /'
+  docker logs "$h1" 2>&1 | grep 'register refused' | grep smoke-intruder | tail -n 1 | sed 's/^/   hub:    /'
+  docker logs "$h2" 2>&1 | grep 'register refused' | grep smoke-intruder | tail -n 1 | sed 's/^/   hub-2:  /'
+  echo "   both hubs refused it at least twice; the client logged the rejection $errors time(s) (ERROR once per hub, DEBUG after)"
+  not_on_topology smoke-intruder
+  echo "   smoke-intruder is absent from $HUB/topology and $HUB2/topology"
+
+  echo "21. a valid token that grants another service name is refused: PERMISSION_DENIED when claiming service-a ..."
+  b1=$(refusals "$h1" 'is not allowed to register as service service-a'); b2=$(refusals "$h2" 'is not allowed to register as service service-a')
+  start_intruder service-a "$(cat "$SECRETS/smoke-intruder.token")"
+  await_refusals 'is not allowed to register as service service-a' "$b1" "$b2" 1
+  log=$(docker logs "$INTRUDER" 2>&1)
+  printf '%s\n' "$log" | grep 'Hub rejected the registration of service-a' | grep -q 'PERMISSION_DENIED' \
+    || fail "the intruder did not log a PERMISSION_DENIED registration rejection: $(printf '%s\n' "$log" | tail -n 15)"
+  printf '%s\n' "$log" | grep 'Hub rejected the registration of service-a' | head -n 1 | sed 's/^/   client: /'
+  docker logs "$h1" 2>&1 | grep 'register refused' | grep 'is not allowed to register as service service-a' | tail -n 1 | sed 's/^/   hub:    /'
+  remove_intruder
+  # The real service-a is untouched: the intruder claimed its name, the hubs registered nothing under it.
+  curl -fsS "$A/greetings/Ada/count" >/dev/null || fail "service-a stopped answering while the intruder claimed its name"
+  echo "   the real service-a still answers; $INTRUDER removed"
+
+  echo "21. GET /forbidden-send: a type outside service-a's send patterns is answered 403 AccessDeniedException ..."
+  body=$(mktemp)
+  code=$(curl -s -o "$body" -w '%{http_code}' --max-time 15 "$A/forbidden-send" || true)
+  echo "   HTTP $code: $(cat "$body")"
+  [ "$code" = "403" ] || fail "expected 403 for a send outside the ACL, got $code: $(cat "$body")"
+  grep -q 'AccessDeniedException' "$body" || fail "expected AccessDeniedException in the body, got: $(cat "$body")"
+  rm -f "$body"
+
+  echo "21b. the dashboard API wants the dashboard token: 401 without it (or with a wrong one), 200 with it, on both hubs ..."
+  for h in "$HUB" "$HUB2"; do
+    for path in /topology /api/v1/types; do
+      code=$(command curl -s -o /dev/null -w '%{http_code}' --cacert "$SECRETS/ca.pem" "$h$path" || true)
+      [ "$code" = "401" ] || fail "GET $h$path without the token: expected 401, got $code"
+      code=$(command curl -s -o /dev/null -w '%{http_code}' --cacert "$SECRETS/ca.pem" -H 'Authorization: Bearer wrong-dashboard-token' "$h$path" || true)
+      [ "$code" = "401" ] || fail "GET $h$path with a wrong token: expected 401, got $code"
+      code=$(curl -s -o /dev/null -w '%{http_code}' "$h$path" || true)
+      [ "$code" = "200" ] || fail "GET $h$path with the token: expected 200, got $code"
+      echo "   $h$path: 401 without, 401 with a wrong token, 200 with the token"
+    done
+  done
+  # Plain text to the TLS port never gets an answer.
+  code=$(command curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://${HUB#https://}/topology" || true)
+  [ "$code" = "000" ] || fail "plain-text HTTP to the TLS port ${HUB#https://} answered $code, expected the connection to fail"
+  echo "   plain-text HTTP to the TLS port gets no answer"
+  trap - EXIT
+}
+
 echo "1. waiting for service-a at $A ..."
 for i in $(seq 1 90); do
   if curl -fsS "$A/actuator/health" 2>/dev/null | grep -q '"UP"'; then break; fi
@@ -651,6 +805,13 @@ fi
 if [ "${ONLY_SUBSCRIBE:-0}" = "1" ]; then
   subscribe_steps
   echo "SMOKE OK (subscription-query steps only)"
+  exit 0
+fi
+
+if [ "${ONLY_SECURE:-0}" = "1" ]; then
+  [ "$SECURE" = "1" ] || fail "ONLY_SECURE=1 needs SECURE=1"
+  secure_steps
+  echo "SMOKE OK (security steps only)"
   exit 0
 fi
 
@@ -738,5 +899,6 @@ echo "   delivered: $TEXTS"
 [ "${SKIP_SCATTER:-0}" = "1" ] || scatter_steps
 [ "${SKIP_STREAM:-0}" = "1" ] || stream_steps
 [ "${SKIP_SUBSCRIBE:-0}" = "1" ] || subscribe_steps
+if [ "$SECURE" = "1" ] && [ "${SKIP_SECURE:-0}" != "1" ]; then secure_steps; fi
 
 echo "SMOKE OK"
