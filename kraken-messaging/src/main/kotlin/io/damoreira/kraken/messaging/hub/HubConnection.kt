@@ -166,6 +166,16 @@ internal object ReconnectBackoff {
  * `Cancel`) ends its stream with `ReplyEnd{TIMEOUT, "no credit within ..."}` (its flow sees a `CancellationException`,
  * as at a hub `Cancel`) and releases its handler slot and hub permit. The permit of every inbound request goes back
  * to the hub when its coroutine completes, whichever way.
+ *
+ * Subscriptions (P4c, ADR 0017): `Register` declares `subscription`. As a sender, [subscribe] sends a `SUBSCRIPTION`
+ * request only to a hub whose ack lists it ([supportsSubscription]), waits for the initial part and returns the open
+ * [HubSubscription]: its [HubSubscription.next] hands out the updates in order (checking `seq` runs 1, 2, 3, ... and the end's
+ * `parts` count, refilling `Flow{initial_credit / 2}` per that many parts consumed, the initial part included) and
+ * [HubSubscription.cancel] writes `Cancel` once. As a handler, a `SUBSCRIPTION` request is an update target the hub wrote
+ * outside flow control: it takes no handler permit and no [gate] slot, and no permit is paid back for it ([PermitLedger]
+ * never sees it). It is admitted by [inboundSubscription] and registered in [subscriptions]; a hub `Cancel` removes it, the
+ * stream closing removes every subscription the stream carried, and the update emitter writes its parts and its end on the
+ * stream it arrived on. The initial result is an ordinary unary request (id `<id>#0`).
  */
 class HubConnection(
     private val channelFactory: () -> ManagedChannel,

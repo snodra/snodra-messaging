@@ -18,6 +18,10 @@ annotation class CommandHandler
  * service, and the hub refuses a second one. Every registrant of Q, in every service, must declare it the same way:
  * the hub refuses a mix (`ALREADY_EXISTS` at register time, logged and surfaced as a registration failure like any
  * conflict), and one service declaring Q both ways fails at startup.
+ *
+ * Two query shapes are served by a method with a different contract: a `StreamingQuery<R>` (P4b) by one returning
+ * `Flow<R>`, a `SubscriptionQuery<I, U>` (P4c) by one returning the initial result `I`; the updates `U` of a subscription
+ * are pushed with `QueryUpdateEmitter`.
  */
 @Target(AnnotationTarget.FUNCTION)
 @Retention(AnnotationRetention.RUNTIME)

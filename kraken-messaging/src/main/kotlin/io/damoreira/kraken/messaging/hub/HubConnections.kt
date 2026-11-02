@@ -60,6 +60,10 @@ import java.util.concurrent.atomic.AtomicInteger
  *   exactly like a gather; with live hubs and none capable it fails at once with [UnsupportedByHubException]. Its
  *   `timeout_ms` is the idle timeout and is sent whole, never reduced by a hub wait or a failover (the deadline of the
  *   call bounds only those); a collector exception (`StreamCollectorException`) is never a reason to fail over.
+ * - **Subscriptions** (P4c): a subscription goes to one live hub whose ack lists `subscription`, chosen and failed over
+ *   like a gather; with live hubs and none capable it fails at once with [UnsupportedByHubException]. `timeout_ms` bounds
+ *   the initial request (as for a unary request: what is left of the call's deadline after a hub wait is sent). Instances
+ *   serve subscriptions from every hub they are connected to through one shared [SubscriptionRegistry].
  * - **Permits**: a stream announces `ceil(maxConcurrentHandlers / N)` initial permits, N = 1 (itself) + the other kept
  *   hubs that are live or still on their first connect attempt. Whenever that set changes, every live hub's stream is
  *   topped up to `ceil(maxConcurrentHandlers / N)` with N = the kept hubs that are live or on their first attempt:

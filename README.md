@@ -37,6 +37,7 @@ Repo conventions: `../kraken/docs/04-repositories.md`.
 - [Multiple hubs](#multiple-hubs)
 - [Scatter-gather](#scatter-gather)
 - [Streaming queries](#streaming-queries)
+- [Subscription queries](#subscription-queries)
 - [Test helpers (`kraken-messaging-test`)](#test-helpers-kraken-messaging-test)
 - [Examples](#examples)
 - [Known limitations](#known-limitations)
@@ -87,6 +88,18 @@ The published POM and Gradle module metadata carry resolved versions for every d
 POM also imports the Spring Boot BOM, so consumers do not need to manage them. Builder call.
 
 ## Upgrading
+
+**To subscription queries (P4c).** Nothing breaks: existing handlers, senders and configuration behave as before. On the
+wire `Register` also declares the `subscription` capability (an older hub ignores it), so a P4b hub or older makes
+`QueryBus.subscribe` throw `UnsupportedByHubException("subscription")` while everything else keeps working. New setting
+`hub.max-subscriptions` (1024). Two beans are new and need no configuration: `SubscriptionRegistry` and the
+`QueryUpdateEmitter` that services inject to push updates (both exist even with `hub.enabled=false`; emitting without
+subscribers is a no-op). `QueryBus` gained `subscribe` with a default body (a custom `QueryBus` compiles and throws
+`UnsupportedOperationException` until it overrides it); `HubTransport` gained `subscribe` the same way;
+`HubConnection` and `HubConnections` gained two optional last constructor parameters (`subscriptions`,
+`inboundSubscription`); `HandlerMethod` gained `subscription`; `HandlerBusyException` gained an optional `detail`;
+`InProcessHub` serves subscriptions too (see [Test helpers](#test-helpers-kraken-messaging-test)). A subscription holds no
+handler permit and does not count against `max-concurrent-handlers`.
 
 **To streaming queries (P4b).** Nothing breaks: existing handlers, senders and configuration behave as before. On the
 wire `Register` also declares the `streaming` capability (an older hub ignores it). Two behaviours are new for
@@ -186,6 +199,7 @@ All keys (`kraken.messaging.*`; durations accept `200ms`, `5s`, `7d`; relaxed bi
 | `hub.heartbeat-interval` | `10s` | Fallback heartbeat period, used only when the hub does not announce one (legacy hubs); a v2 hub announces 3 s in its `RegisterAck`. |
 | `hub.reconnect-backoff.min` | `500ms` | Initial reconnect delay when the stream drops; doubles per failed attempt. |
 | `hub.reconnect-backoff.max` | `5s` | Maximum reconnect delay. Every wait is jittered by ±20 % and capped at this value (at the cap: 80-100 % of it); the delay resets to `min` once an attempt reached the hub's handshake. |
+| `hub.max-subscriptions` | `1024` | Subscription queries this instance serves at once, over every hub (at least 1). The next one is refused with `RESOURCE_EXHAUSTED` ("subscription limit (N) reached"), which the subscriber sees as a `HandlerBusyException`. A subscription holds no handler permit, so `max-concurrent-handlers` does not bound it; the default equals the hub's own `KRAKEN_HUB_MAX_SUBSCRIPTIONS_PER_INSTANCE`. |
 | `hub.stream-credit-timeout` | `10m` | The longest a streaming handler of this instance waits for credit from the collector before it ends the stream with `TIMEOUT` ("no credit within ...") and frees its handler slot and hub permit (a hub that forgot the stream would otherwise leave them held forever). Must be positive; the default is the hub's default maximum stream duration (`KRAKEN_HUB_MAX_STREAM_DURATION`). |
 | `hub.max-concurrent-handlers` | `256` | Incoming hub requests handled concurrently by this instance, over all hubs (at least 1, else the startup fails); further requests wait for a free slot. Also announced as `initial_permits` to a hub with flow control (split over N hubs: `ceil(max / N)` each), which then queues the excess on its side. |
 | `hub.load-factor` | `100` | Relative capacity of this instance (`Register.load_factor`); weights its share of the hub's routing (keyed ring and load score). A negative value fails the startup; 0 is allowed (the hub reads it as 100). |
@@ -628,6 +642,118 @@ queryBus.stream(ExportWorkouts(ownerId), StreamOptions(initialCredit = 32, timeo
   so during a rolling upgrade of an owner the old instances are simply never picked (owners with instances but none
   capable are `UnsupportedByHubException` for the caller).
 
+## Subscription queries
+
+A **subscription query** (ADR 0017, P4c) is an initial result followed by the updates the handlers push, until the
+subscriber cancels or the handlers complete: a screen that shows an account and refreshes when it changes, a status page.
+The query implements `SubscriptionQuery<I, U>` (`I` the initial result, `U` an update), the handler returns the initial
+result `I`, every handler instance pushes updates through the `QueryUpdateEmitter`, and the caller gets a
+`SubscriptionResult<I, U>` from `queryBus.subscribe`.
+
+```kotlin
+@MessageType("accounts.WatchAccount")
+data class WatchAccount(val accountId: String) : SubscriptionQuery<AccountView, AccountChanged>
+
+@Component
+class AccountWatch(private val repo: AccountRepository) {
+    @QueryHandler // shared = true works here too
+    fun handle(q: WatchAccount): AccountView = repo.view(q.accountId) // the initial result
+}
+
+@Service
+class Accounts(private val repo: AccountRepository, private val emitter: QueryUpdateEmitter) {
+    @Transactional
+    fun deposit(accountId: String, amount: Money) {
+        val account = repo.deposit(accountId, amount)
+        // Inside the transaction: delivered after the commit, dropped on a rollback.
+        emitter.emit<WatchAccount, AccountChanged>({ it.accountId == accountId }, AccountChanged(accountId, account.balance))
+    }
+}
+
+// Returns once the initial result arrived; the updates follow as a flow.
+val result = queryBus.subscribe(WatchAccount("acc-1"), SubscriptionOptions(initialCredit = 32))
+render(result.initial)
+result.updates.collect { change -> render(change) }   // completes when the handlers do; cancel() or take(n) cancel it
+```
+
+- **API.** `suspend fun <I, U> subscribe(query: SubscriptionQuery<I, U>, options: SubscriptionOptions =
+  SubscriptionOptions()): SubscriptionResult<I, U>` and `SubscriptionOptions(timeout: Duration? = null, maxResults: Int =
+  0, priority: Int? = null, initialCredit: Int = 64, retry: RetryPolicy? = null)` (`maxResults >= 0`, `initialCredit >= 1`).
+  `SubscriptionResult(val initial: I, val updates: Flow<U>)` has `fun cancel()`; `initial` is a value, `subscribe` having
+  returned only once the initial part arrived. A controller may return `updates` (an SSE endpoint): the caller's bearer
+  token and trace context are read when `subscribe` is called, not when the flow is collected.
+- **Handler.** `@QueryHandler` (plain or `shared = true`) on `fun handle(q: SubscriptionQuery<I, U>[, ctx: MessageContext]): I`
+  answers the **initial result**; a handler returning a `Flow`, or `@CommandHandler` on a subscription query, fails at
+  startup. The hub sends every capable instance of the type a `SUBSCRIPTION` request, and the library registers the
+  subscription (the decoded query, its request id and the hub stream it came from); the initial result is a separate
+  ordinary request answered by the same method, which the library recognises by the hub's request id (`<id>#0`). A unary
+  request for the type is answered `INVALID_REQUEST` ("is a subscription query: send it with QueryBus.subscribe"), a
+  `SUBSCRIPTION` request for a type without a subscription handler ends with `INVALID_REQUEST`, and
+  `@RequiresAuthentication` is checked when the subscription is registered and again on the initial request.
+- **`QueryUpdateEmitter`.** An auto-configured bean: `emit(queryType, filter, update)`, `complete(queryType, filter)` and
+  `completeExceptionally(queryType, filter, cause)`, plus reified overloads (`emitter.emit<WatchAccount, AccountChanged>(
+  { it.accountId == id }, update)`, `emitter.complete<WatchAccount> { it.accountId == id }`). They deliver to every open
+  subscription of that type **on this instance** whose decoded query passes `filter`, in call order: an update is one
+  part (encoded with the library codec), `complete` ends the subscription cleanly, `completeExceptionally` ends it with
+  `HANDLER_ERROR` and `"<SimpleName>: <message>"` (the subscriber's flow fails with a `RemoteHandlerException`), and both
+  remove it. With no matching subscription the call does nothing, so a service may emit unconditionally. A filter that
+  throws skips its subscription (logged), never the others.
+- **Transactions.** Inside an active Spring transaction (`TransactionSynchronizationManager.isActualTransactionActive()`:
+  `@Transactional`, `TransactionTemplate`) every emit and complete is deferred to `afterCommit` and dropped on rollback,
+  so a subscriber never sees an update of data that was never committed; the open subscriptions and the filter are
+  evaluated at delivery, after the commit, and a failure there is logged, never thrown at the committer. Outside a
+  transaction delivery is immediate, and a reactive (Reactor-context) transaction is not seen.
+- **Targets, and the at-most-once caveat.** Every live instance of every owner that negotiated `subscription`, **as they are
+  when the subscription opens**: an instance that registers later is never added (an update emitted on a new instance is
+  lost to that subscriber), a target that leaves is not replaced, and the hub never resubscribes. After a rolling
+  restart a subscription listens to fewer instances than serve the type, silently until the last one leaves
+  (`HandlerDisconnectedException`); a subscriber that needs every instance resubscribes. One of the capable instances,
+  chosen like a point query, answers the initial result. A subscription is passive: it holds no handler permit, waits in
+  no hub queue and is not counted as an in-flight request after the initial result.
+- **Credits and the hub's buffer.** `initialCredit` is the window: the hub relays that many parts (the initial result
+  included) before the collector consumed any, and holds further updates for the subscriber, at most 256
+  (`KRAKEN_HUB_SUBSCRIPTION_BUFFER`). One more ends the subscription with `RESOURCE_EXHAUSTED`, which the flow throws as a
+  `HandlerBusyException` carrying the hub's reason; what the hub buffered is dropped. The library grants `initialCredit /
+  2` more each time that many parts were consumed, the initial result counting as consumed once `subscribe` returned
+  it (so a window of 1 cannot stall). No credit goes to the handlers: updates are pushed, an emitter is shared by every
+  subscriber of its instance, and a slow subscriber is the hub's problem, not theirs. A result that is **dropped without
+  being collected** leaves the hub buffering until it reaches that limit and ends the subscription; collect it or
+  `cancel()` it.
+- **Options.** `timeout` bounds the **initial result** only (the hub queue wait plus the handler), sent as `timeout_ms`
+  with the same defaults as `SendOptions.timeout`; there is no idle timeout, a quiet subscription is not a broken one.
+  `maxResults > 0` ends the subscription after that many **updates** (the initial result does not count) with a clean end
+  and cancels the handlers' side. `priority` is the initial request's. The hub may bound a subscription's whole life
+  (`KRAKEN_HUB_MAX_SUBSCRIPTION_DURATION`, off by default): `StreamCancelledException`.
+- **Errors.** `subscribe` fails before the initial result as a unary query does: no owner `NoHandlerException`, a command type
+  `InvalidMessageException`, no live hub (or owner instance) with `subscription` `UnsupportedByHubException("subscription")`
+  before anything is sent, the initial request failing `RemoteHandlerException` / `MessageTimeoutException` /
+  `HandlerDisconnectedException`, an instance already serving its limit (the hub's, or this library's
+  `hub.max-subscriptions`) `HandlerBusyException`. After it, `updates` completes on a clean end and throws what a unary
+  error with the same code throws: `HANDLER_ERROR` (`completeExceptionally`, or a failing target) `RemoteHandlerException`,
+  `HANDLER_DISCONNECTED` (the last handler instance left) `HandlerDisconnectedException`, `RESOURCE_EXHAUSTED`
+  `HandlerBusyException`, `CANCELLED` `StreamCancelledException`; the stream to the hub breaking is
+  `HubConnectionLostException`. An update that does not decode into `U` fails the flow with `InvalidMessageException` and
+  cancels the subscription; an initial result that does not decode fails `subscribe` the same way and cancels it. The
+  library checks the parts' `seq` (the hub numbers them 1, 2, 3, ...) and the end's `parts` count: a gap fails the flow with
+  `InvalidMessageException("subscription <type> lost N part(s)")`.
+- **Cancel.** Cancelling the collector (`take(n)`, a cancelled coroutine), throwing in it, or `SubscriptionResult.cancel()`
+  sends `Cancel` to the hub once, which cancels every target: the handlers' subscriptions are removed. `cancel()` also
+  completes `updates`; `updates` can be collected **once**. On the handler side a hub `Cancel` removes the subscription, a lost
+  hub stream removes every subscription it carried (the hub forgot them, and they are not restored on reconnect), and
+  shutting the application down ends them with a clean `ReplyEnd` (best effort: the subscriber's flow completes once every
+  other target has too, or fails with `HandlerDisconnectedException` if the stream closed first).
+- **Retries.** The configured or per-call `RetryPolicy` applies with the query rules only until the initial result, to an
+  end with an error and to a gate `Error` as to an error before any part (`NoHandlerException`, `HandlerBusyException`,
+  `HandlerDisconnectedException`, `MessageTimeoutException`, ... are retried; handler errors and the rest are not): a retried
+  subscription is a new request with a fresh id (with several hubs, round-robin to another capable one), so no update is
+  delivered twice. After the initial result nothing is retried; resubscribing is the caller's call (it gets a fresh
+  initial result).
+- **Compatibility.** Against a P4b hub or older `subscribe` throws `UnsupportedByHubException("subscription")` while
+  unary queries, gathers and streams keep working. With several hubs a subscription goes to one hub that lists the
+  capability. Handlers must run this version: the hub subscribes only instances that negotiated `subscription`, so during
+  a rolling upgrade of an owner the old instances are simply never targets (owners with instances but none capable are
+  `UnsupportedByHubException` for the caller).
+
 ## Test helpers (`kraken-messaging-test`)
 
 - `InMemoryBuses(typePrefix, userId)`: implements `EventBus`, `CommandBus` and `QueryBus` in memory for unit tests without
@@ -654,17 +780,25 @@ queryBus.stream(ExportWorkouts(ownerId), StreamOptions(initialCredit = 32, timeo
   (`uint32`) and `Flow`, parts and ends relayed, `max_results`, the idle timeout (paused while the credit is 0),
   `maxStreamDuration`, cancels both ways and the gates as the real hub; `streaming = false` emulates the P4a hub,
   `dropParts` drops relayed parts by `seq` (the real hub's full-buffer drop), and `openStreams()`,
-  `creditOf(requestId)`, `flowsFrom(instanceId)` and `cancelsFrom(instanceId)` observe it.
+  `creditOf(requestId)`, `flowsFrom(instanceId)` and `cancelsFrom(instanceId)` observe it. Subscription queries (P4c):
+  every capable instance is a target as they are at the open, the initial request goes out as `<id>#0` through a
+  permit and the queue, updates are renumbered behind the initial part under the sender's credit and the buffer
+  (`subscriptionBuffer`, 256: one more ends it), `max_results` counts updates, cancels fan out both ways, a target leaving is
+  silent unless it was the last (`HANDLER_DISCONNECTED`), `maxSubscriptionsPerInstance` (1024) refuses with
+  `RESOURCE_EXHAUSTED`, `maxSubscriptionDuration` (off) ends with `CANCELLED`, and the gates are the real hub's;
+  `subscription = false` emulates the P4b hub, and `openSubscriptions()`, `subscriptionTargetsOf(instanceId)`,
+  `subscriptionCreditOf(requestId)` and `bufferedUpdatesOf(requestId)` observe it.
 - `KrakenContainers`: unstarted Testcontainers definitions. `kafka()`, `mongo()` (single-node replica set, needed for
   transactions), `hub()` from image `kraken-hub:dev` or the one named by `KRAKEN_HUB_IMAGE`, `hubBaseline()` from the previous hub release
   `kraken-hub:v1-baseline` or `KRAKEN_HUB_BASELINE_IMAGE` and `hubP0()` from the P0 hub `kraken-hub:p0` or
   `KRAKEN_HUB_P0_IMAGE`, `hubP2()` from `kraken-hub:p2` or `KRAKEN_HUB_P2_IMAGE` (compatibility tests), `hubP3()` from
   `kraken-hub:p3-hub` or `KRAKEN_HUB_P3_IMAGE` with ports 7000 and 7001 (two-hub tests), `hubP4a()` from
   `kraken-hub:p4a-hub` or `KRAKEN_HUB_P4A_IMAGE` with ports 7000 and 7001 (scatter-gather tests), `hubP4b()` from
-  `kraken-hub:p4b-hub` or `KRAKEN_HUB_P4B_IMAGE` with ports 7000 and 7001 (streaming tests), `hub(env)` for the hub
+  `kraken-hub:p4b-hub` or `KRAKEN_HUB_P4B_IMAGE` with ports 7000 and 7001 (streaming tests), `hubP4c()` from
+  `kraken-hub:p4c-hub` or `KRAKEN_HUB_P4C_IMAGE` with ports 7000 and 7001 (subscription tests), `hub(env)` for the hub
   under test with extra `KRAKEN_HUB_*` settings, and `hubImageAvailable()` / `hubBaselineImageAvailable()` /
   `hubP0ImageAvailable()` / `hubP2ImageAvailable()` / `hubP3ImageAvailable()` / `hubP4aImageAvailable()` /
-  `hubP4bImageAvailable()`.
+  `hubP4bImageAvailable()` / `hubP4cImageAvailable()`.
 - `KrakenTestKafka(bootstrap, typePrefix, topic).awaitEvent<T>()`: reads an event back from the topic.
 
 ```kotlin
@@ -692,8 +826,10 @@ Docker Compose from local builds together with the real `kraken-hub` image, Kafk
 - No dead-letter topic: poison records are logged and skipped.
 - No leader election for the outbox publisher; with several instances delivery is at-least-once and ordering is per
   publishing instance.
-- Subscription queries are not supported yet (roadmap P4c). A stream pins one handler instance for its whole life: a
-  restart of that instance fails the stream (`HANDLER_DISCONNECTED`), and the library never resumes it.
+- A stream pins one handler instance for its whole life: a restart of that instance fails the stream
+  (`HANDLER_DISCONNECTED`), and the library never resumes it. A subscription's update targets are fixed when it opens
+  (at-most-once updates): an instance that starts later is never added and the library never resubscribes, so a
+  subscriber that must hear every instance resubscribes itself (opt-in auto-resubscribe is future work).
 - Library metrics are not exported yet; OpenTelemetry comes from the application.
 - Configuration metadata is hand-maintained in `META-INF/spring-configuration-metadata.json`.
 - `TraceHeaders` is only active with Micrometer Tracing on the classpath.
