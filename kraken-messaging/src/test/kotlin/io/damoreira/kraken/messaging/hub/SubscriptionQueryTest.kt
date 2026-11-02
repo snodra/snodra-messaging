@@ -607,6 +607,24 @@ class SubscriptionQueryTest {
         assertTrue(hub.flowsFrom(callerId()).size in 4..5, hub.flowsFrom(callerId()).toString())
     }
 
+    @Test fun `the initial part counts as consumed when subscribe returns it, a caller that collects late has its first Flow out already`() = runBlocking {
+        val x = owner("svc-x", "x-1", AccountWatcher())
+        val result = caller().subscribe(WatchAccount(7), SubscriptionOptions(initialCredit = 2)) // refill: 1 part
+        awaitUntil { x.subscriptions.size == 1 }
+        // Nobody collects yet: the initial part was handed over by subscribe, which is one part consumed.
+        awaitUntil { hub.flowsFrom(callerId()) == listOf(1) }
+        repeat(3) { n -> x.emitter.emit(WatchAccount::class, { true }, BalanceChanged(7, n + 1)) }
+        awaitUntil { hub.bufferedUpdatesOf(hub.lastRequest()!!.id) == 1 } // credit 2 + 1 granted = 3 parts relayed: the initial and two updates
+        delay(150)
+        assertEquals(listOf(1), hub.flowsFrom(callerId())) // the updates relayed are not consumed yet
+        val seen = CopyOnWriteArrayList<Int>()
+        val collecting = async { result.updates.take(3).collect { seen += it.value } }
+        withTimeout(5_000) { collecting.await() }
+        assertEquals(listOf(1, 2, 3), seen.toList())
+        // The first update consumed released the next Flow.
+        assertEquals(listOf(1, 1, 1), hub.flowsFrom(callerId()).take(3))
+    }
+
     @Test fun `a window of 1 does not deadlock, the initial part is returned at once`() = runBlocking {
         val x = owner("svc-x", "x-1", AccountWatcher())
         val result = caller().subscribe(WatchAccount(7), SubscriptionOptions(initialCredit = 1))
@@ -621,14 +639,15 @@ class SubscriptionQueryTest {
         val x = owner("svc-x", "x-1", AccountWatcher())
         val result = caller().subscribe(WatchAccount(7), SubscriptionOptions(initialCredit = 2))
         awaitUntil { x.subscriptions.size == 1 }
-        // Nobody collects: credit 2, the initial part took one, one update is relayed, two are buffered, the next ends it.
+        awaitUntil { hub.flowsFrom(callerId()) == listOf(1) } // the initial part is consumed once subscribe returned it
+        // Nobody collects: credit 2 + 1, the initial part took one, two updates are relayed, two are buffered, the next ends it.
         repeat(6) { n -> x.emitter.emit(WatchAccount::class, { true }, BalanceChanged(7, n + 1)) }
         awaitUntil { hub.openSubscriptions() == 0 }
         val seen = mutableListOf<Int>()
         val e = assertFailsWith<HandlerBusyException> { result.updates.collect { seen += it.value } }
         assertEquals("test.WatchAccount", e.type)
         assertTrue(e.message!!.contains("subscriber buffer (2) exceeded"), e.message)
-        assertEquals(listOf(1), seen) // what was relayed before stays delivered, the buffered updates were dropped
+        assertEquals(listOf(1, 2), seen) // what was relayed before stays delivered, the buffered updates were dropped
         awaitUntil { x.subscriptions.size == 0 } // the hub cancelled the target
     }
 

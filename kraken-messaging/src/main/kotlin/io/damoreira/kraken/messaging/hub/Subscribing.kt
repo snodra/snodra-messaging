@@ -17,7 +17,7 @@ interface HubSubscription {
      * Null once [cancel] was called (locally cancelled). There is no local deadline: a subscription may stay quiet.
      *
      * Consuming a part counts towards the credit refill: the previous part returned counts as consumed when this is
-     * called again, and the initial part when it is called for the first time.
+     * called again; the initial part counts as consumed as soon as [HubTransport.subscribe] returned it.
      *
      * @throws io.damoreira.kraken.messaging.HubConnectionLostException when the stream to the hub broke
      * @throws io.damoreira.kraken.messaging.InvalidMessageException `subscription <type> lost N part(s)` (the subscription is

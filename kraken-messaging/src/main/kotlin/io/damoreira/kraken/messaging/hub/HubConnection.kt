@@ -611,16 +611,26 @@ class HubConnection(
         private val refill = maxOf(1, window / 2)
         private var received = 1L // the initial part
         private var consumed = 0
-        private var handedOver = true // the initial part went to the caller with subscribe(): consumed at the first next()
+        private var handedOver = false // the part returned by the last next(): consumed when next() is called again
         private val cancelled = AtomicBoolean(false)
+
+        init {
+            // The initial part went to the caller with subscribe(): it counts as consumed now, not at the first next(), so a
+            // caller that starts collecting late does not hold the hub's credit back (as the Rust library does).
+            consumedOne()
+        }
+
+        private fun consumedOne() {
+            if (++consumed >= refill) {
+                consumed = 0
+                stream.out.trySend(ClientMessage.newBuilder().setFlow(Flow.newBuilder().setRequestId(request.id).setCredits(refill)).build())
+            }
+        }
 
         override suspend fun next(): ServerMessage? {
             if (handedOver) { // the part returned last time is consumed now
                 handedOver = false
-                if (++consumed >= refill) {
-                    consumed = 0
-                    stream.out.trySend(ClientMessage.newBuilder().setFlow(Flow.newBuilder().setRequestId(request.id).setCredits(refill)).build())
-                }
+                consumedOne()
             }
             val result = entry.messages.receiveCatching()
             val message = result.getOrNull()
