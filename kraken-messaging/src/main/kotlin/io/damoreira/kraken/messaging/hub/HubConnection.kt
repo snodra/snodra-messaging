@@ -824,9 +824,10 @@ class HubConnection(
                 retry
             } else {
                 val retry = ReconnectBackoff.jittered(backoff, settings.backoffMax)
-                val text = "Hub stream of {} ({}) closed: {}; reconnecting in {}"
-                if (failures == 1) log.warn(text, serviceName, instanceId, describe(status), retry)
-                else log.debug(text, serviceName, instanceId, describe(status), retry)
+                val text = "Hub stream of {} ({}) closed: {}{}; reconnecting in {}"
+                val hint = if (reachedHandshake) "" else transportHint(status)
+                if (failures == 1) log.warn(text, serviceName, instanceId, describe(status), hint, retry)
+                else log.debug(text, serviceName, instanceId, describe(status), hint, retry)
                 backoff = ReconnectBackoff.next(backoff, settings.backoffMax)
                 retry
             }
@@ -1217,6 +1218,25 @@ class HubConnection(
                 if (pending.remove(id, entry)) entry.fail(cause)
             }
         }
+    }
+
+    /**
+     * What to check when a stream died before any handshake in the way a TLS mismatch dies (gRPC reports plain text to a
+     * TLS listener as an `http2 exception` or a bare `io exception`, and TLS to a plain-text one as an `ssl exception`, never
+     * as a refusal).
+     */
+    private fun transportHint(status: Status): String {
+        // The rustls hub answers plain text with a TLS alert, which an HTTP/2 client reads as a protocol error (INTERNAL).
+        if (status.code != Status.Code.UNAVAILABLE && status.code != Status.Code.INTERNAL) return ""
+        val text = status.description?.lowercase() ?: return ""
+        if (listOf("io exception", "http2 exception", "ssl", "tls", "handshake", "network closed for unknown reason").none { it in text }) return ""
+        // A hub that cannot be reached at all (nothing listens, no route, no such host) has nothing to do with TLS.
+        val unreachable = generateSequence(status.cause) { it.cause }.any {
+            it is java.net.ConnectException || it is java.net.UnknownHostException || it is java.net.NoRouteToHostException || it is java.net.SocketTimeoutException
+        }
+        if (unreachable) return ""
+        return " (the transport failed before the hub answered: if the hub serves TLS set kraken.messaging.hub.tls.enabled=true" +
+            " and kraken.messaging.hub.tls.ca-file, if it serves plain text leave kraken.messaging.hub.tls.enabled off)"
     }
 
     private fun describe(status: Status) = status.code.name + (status.description?.let { " ($it)" } ?: "")

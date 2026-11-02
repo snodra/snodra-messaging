@@ -41,6 +41,7 @@ import io.damoreira.kraken.messaging.hub.HubConnections
 import io.damoreira.kraken.messaging.hub.HubTargets
 import io.damoreira.kraken.messaging.hub.HubHandshake
 import io.damoreira.kraken.messaging.hub.HubSettings
+import io.damoreira.kraken.messaging.hub.HubToken
 import io.damoreira.kraken.messaging.test.KrakenContainers
 import io.grpc.ManagedChannel
 import io.grpc.ManagedChannelBuilder
@@ -67,6 +68,7 @@ import java.time.Duration
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
@@ -415,6 +417,26 @@ class HubCompatTest {
         assertEquals(listOf(Row(1), Row(2)), bus.stream(ExportRows(2)).toList())
     }
 
+    // --- the P4c hub: it predates access control and ignores Register.credentials (P5a clients against it) ---
+
+    @Test fun `P4c hub - a configured token is harmless, the hub ignores it and everything works`() = runBlocking {
+        val hub = start(p4cHub())
+        val token = "tok-" + UUID.randomUUID()
+        val withToken = defaults.copy(token = HubToken.of(token, null))
+        val owner = connection(hub, "b", "svc-b", settings = withToken, inbound = { req -> payloadReply(req.id, "{\"value\":7}") })
+        owner.register(emptySet(), setOf("test.GetCount"))
+        owner.start()
+        val sender = connection(hub, "a", "svc-a", settings = withToken)
+        sender.start()
+        assertTrue(owner.awaitRegistered(wait) && sender.awaitRegistered(wait))
+        assertEquals(null, sender.lastRejection.value)
+        assertEquals(Count(7), bus(sender).send(GetCount("k")))
+        // The topology shows no trace of the credential: it is not stored, and the hub of this release never read it.
+        val topology = HubGrpcKt.HubCoroutineStub(channel(hub)).topology(TopologyRequest.getDefaultInstance())
+        assertFalse(token in topology.toString())
+        assertFalse(token in hub.logs)
+    }
+
     // --- the previous hub release (protocol v1): legacy mode ---
 
     @Test fun `baseline hub - one target through HubConnections runs in legacy mode`() = runBlocking {
@@ -529,6 +551,11 @@ class HubCompatTest {
     private fun p4bHub(): GenericContainer<*> {
         Assumptions.assumeTrue(KrakenContainers.hubP4bImageAvailable(), "P4b hub image not available")
         return KrakenContainers.hubP4b().withEnv("KRAKEN_HUB_OTLP_ENDPOINT", "")
+    }
+
+    private fun p4cHub(): GenericContainer<*> {
+        Assumptions.assumeTrue(KrakenContainers.hubP4cImageAvailable(), "P4c hub image not available")
+        return KrakenContainers.hubP4c().withEnv("KRAKEN_HUB_OTLP_ENDPOINT", "")
     }
 
     private fun baselineHub(): GenericContainer<*> {

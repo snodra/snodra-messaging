@@ -10,6 +10,7 @@ import io.grpc.Server
 import io.grpc.Status
 import io.grpc.StatusException
 import io.grpc.TlsServerCredentials
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.jupiter.api.AfterEach
@@ -116,5 +117,47 @@ class HubTlsChannelTest {
         }.channel("localhost:${plainServer.port}").also { channels += it }
         assertEquals(1, calls)
         assertIs<DefaultHubChannelFactory>(factory)
+    }
+
+    // --- the log line of a mismatch (HubConnection over the same servers) ---
+
+    private val connectionLog = org.slf4j.LoggerFactory.getLogger(HubConnection::class.java) as ch.qos.logback.classic.Logger
+
+    private fun failingConnection(tls: HubTls, port: Int): List<String> = runBlocking {
+        val appender = ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>().also { it.start() }
+        connectionLog.addAppender(appender)
+        val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.Default)
+        val factory = DefaultHubChannelFactory(tls)
+        val connection = HubConnection(
+            { factory.channel("localhost:$port") }, "svc", "i-1",
+            HubSettings(null, java.time.Duration.ofSeconds(10), java.time.Duration.ofMillis(50), java.time.Duration.ofMillis(200)),
+            { io.damoreira.kraken.hub.v1.Reply.getDefaultInstance() }, scope,
+        )
+        try {
+            connection.start()
+            withTimeout(20_000) { while (appender.list.none { it.level == ch.qos.logback.classic.Level.WARN }) kotlinx.coroutines.delay(20) }
+            appender.list.filter { it.level == ch.qos.logback.classic.Level.WARN }.map { it.formattedMessage }
+        } finally {
+            connection.stop()
+            scope.cancel()
+            connectionLog.detachAppender(appender)
+        }
+    }
+
+    // gRPC reports both mismatches as a bare "io exception", so the one hint names both directions.
+    @Test fun `a stream that fails because the hub serves TLS says to enable it`() {
+        val warn = failingConnection(HubTls(), tlsPort).first()
+        assertTrue("UNAVAILABLE" in warn && "set kraken.messaging.hub.tls.enabled=true" in warn, warn)
+    }
+
+    @Test fun `a stream that fails because the hub is plain text says to leave TLS off`() {
+        val warn = failingConnection(ca(), plainServer.port).first()
+        assertTrue("leave kraken.messaging.hub.tls.enabled off" in warn, warn)
+    }
+
+    @Test fun `an unreachable hub gets no TLS hint`() {
+        val closed = java.net.ServerSocket(0).use { it.localPort } // nothing listens there any more
+        val warn = failingConnection(HubTls(), closed).first()
+        assertTrue("tls" !in warn.lowercase(), warn)
     }
 }
