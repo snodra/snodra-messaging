@@ -497,7 +497,10 @@ stream_steps() {
 # (service-a subscribes, collects the initial result and four updates, cancels), waits until both owners hold the
 # subscription, then increments the counter twice through service-b (`POST $B/counters/<name>/increment`) and twice
 # through service-c (the command examples.IncrementCounter, sent by `POST $A/counters/<name>/increment`), and expects
-# the initial result and four updates, two from each service, increasing in value per service. Step 20b checks that no
+# the initial result and four updates, two from each service, increasing in value per service. The initial value is
+# whatever the answering service's counter was when it read it: 0, or higher when an increment slipped in between the
+# registration of the subscription and that read (the increment is then in the initial value *and* delivered as an
+# update, never lost), so step 20 accepts 0..2 for it and still demands the updates 1,2 from each service. Step 20b checks that no
 # subscription is left behind once the request returned. The proof is the owners' open counts (black-box: the hubs have
 # no metrics endpoint, so it asks the owners through the shared query examples.OpenSubscriptions,
 # `GET $A/subscribe/open`, which counts every subscription an instance serves) returning to what they were before step
@@ -552,13 +555,18 @@ subscribe_steps() {
   summary=$(printf '%s' "$body" | counter_summary)
   read -r initial_service initial_value n b_values c_values <<< "$summary"
   [ -n "$summary" ] || fail "no initial result and updates in: $body"
-  [ "$initial_value" = "0" ] || fail "expected the initial value 0 (nobody incremented $name), got '$initial_value': $body"
   case "$initial_service" in service-b|service-c) ;; *) fail "the initial result came from '$initial_service': $body" ;; esac
+  # The initial value is the answering service's counter when it read it: the increments start once both owners hold the
+  # subscription, so one may land before that read (0 up to the 2 sent to that service). The subscription is registered
+  # before the initial is read, so such an increment is also delivered as an update: it is never lost, only seen twice.
+  case "$initial_value" in 0|1|2) ;; *) fail "expected an initial value from 0 to 2 (the increments sent to $initial_service so far), got '$initial_value': $body" ;; esac
   [ "$n" = "4" ] || fail "expected 4 updates, got $n: $body"
-  # Each service's counter counts 1, 2: strictly increasing per service (the order between the two services is not defined).
+  # Each service's counter counts 1, 2: strictly increasing per service (the order between the two services is not defined),
+  # and every increment is an update, whether or not the initial value already included it. That is what a lost update
+  # (the race of the registration against the initial read) would break.
   [ "$b_values" = "1,2" ] || fail "expected service-b's updates 1,2 in order, got '$b_values': $body"
   [ "$c_values" = "1,2" ] || fail "expected service-c's updates 1,2 in order, got '$c_values': $body"
-  echo "   initial from $initial_service (value $initial_value); 4 updates: service-b $b_values, service-c $c_values"
+  echo "   initial from $initial_service (value $initial_value, 0 to 2 accepted); 4 updates: service-b $b_values, service-c $c_values"
 
   echo "20b. nothing is left subscribed: the owners' open counts are back to $base_open, proving the hub's Cancel reached every target ..."
   for i in $(seq 1 50); do

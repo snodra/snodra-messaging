@@ -200,7 +200,7 @@ The subscription-query steps (P4c, ADR 0017) come last: step 20a waits until bot
 serves (`GET /subscribe/open`, which scatter-gathers `examples.OpenSubscriptions`); step 20 opens
 `GET /subscribe/counter?name=<unique>&updates=4&timeoutMs=10000` in the background, waits until both owners hold the
 subscription, bumps the counter twice through service-b (`POST $B/counters/<name>/increment`, `B` = `http://localhost:8092`) and
-twice through service-c (`POST /counters/<name>/increment` on service-a) and expects the initial result (value 0) and four
+twice through service-c (`POST /counters/<name>/increment` on service-a) and expects the initial result (value 0 to 2: an increment may land on the answering service before it reads its counter, and is then also delivered as an update) and four
 updates, `1,2` from each service in order; step 20b checks that no subscription is left behind once the request returned,
 **black-box** (the hub has no metrics endpoint): both owners' open-subscription counts are back to what they were before
 step 20 (the proof that the hub's `Cancel` reached every target; the hubs' `/topology` in-flight counts, 0, are only a
