@@ -109,6 +109,17 @@ data class KrakenMessagingProperties(
                 "kraken.messaging.hub.stream-credit-timeout must be positive, was $streamCreditTimeout"
             }
             require(maxSubscriptions >= 1) { "kraken.messaging.hub.max-subscriptions must be >= 1, was $maxSubscriptions" }
+            // A zero back-off would make a refused service hot-loop handshakes.
+            require(!reconnectBackoff.max.isZero && !reconnectBackoff.max.isNegative) {
+                "kraken.messaging.hub.reconnect-backoff.max must be positive, was ${reconnectBackoff.max}"
+            }
+            require(!reconnectBackoff.min.isZero && !reconnectBackoff.min.isNegative) {
+                "kraken.messaging.hub.reconnect-backoff.min must be positive, was ${reconnectBackoff.min}"
+            }
+            require(reconnectBackoff.min <= reconnectBackoff.max) {
+                "kraken.messaging.hub.reconnect-backoff.min (${reconnectBackoff.min}) must not be above " +
+                    "kraken.messaging.hub.reconnect-backoff.max (${reconnectBackoff.max})"
+            }
         }
     }
 

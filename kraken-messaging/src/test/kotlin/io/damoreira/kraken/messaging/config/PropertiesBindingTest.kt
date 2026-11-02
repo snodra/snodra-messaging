@@ -131,6 +131,24 @@ class PropertiesBindingTest {
         }
     }
 
+    @Test fun `reconnect-backoff binds and max must be positive with min not above it`() {
+        runner.withPropertyValues(*required, "kraken.messaging.hub.reconnect-backoff.min=100ms", "kraken.messaging.hub.reconnect-backoff.max=2s").run { context ->
+            val backoff = context.getBean(KrakenMessagingProperties::class.java).hub.reconnectBackoff
+            assertEquals(Duration.ofMillis(100), backoff.min)
+            assertEquals(Duration.ofSeconds(2), backoff.max)
+        }
+        for (value in listOf("0s", "-1s")) {
+            val messages = startupFailure("kraken.messaging.hub.reconnect-backoff.max=$value")
+            assertTrue("kraken.messaging.hub.reconnect-backoff.max must be positive" in messages, messages)
+        }
+        val above = startupFailure("kraken.messaging.hub.reconnect-backoff.min=10s", "kraken.messaging.hub.reconnect-backoff.max=2s")
+        assertTrue("kraken.messaging.hub.reconnect-backoff.min" in above && "must not be above" in above && "reconnect-backoff.max" in above, above)
+        for (value in listOf("0s", "-1s")) {
+            val messages = startupFailure("kraken.messaging.hub.reconnect-backoff.min=$value")
+            assertTrue("kraken.messaging.hub.reconnect-backoff.min must be positive" in messages, messages)
+        }
+    }
+
     /** The messages of the startup failure (and its causes) with [properties] set; fails if the context started. */
     private fun startupFailure(vararg properties: String): String {
         var messages = ""
