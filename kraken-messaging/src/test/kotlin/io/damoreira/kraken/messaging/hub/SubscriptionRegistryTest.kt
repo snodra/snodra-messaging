@@ -6,6 +6,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -88,5 +89,76 @@ class SubscriptionRegistryTest {
         assertEquals(listOf<Pair<Int, Error?>>(1 to null), a.ends)
         assertEquals(listOf<Pair<Int, Error?>>(0 to null), b.ends)
         assertEquals(0, registry.size)
+    }
+
+    // --- pending: registered when the request is read, before the admission ---
+
+    private fun pending(id: String, sink: SubscriptionSink, type: String = "t.Watch") =
+        (registry.openPending(stream, id, type, "{}".toByteArray(), sink) as Opening.Pending).subscription
+
+    @Test fun `a pending subscription holds updates and the end in order, activate writes them before any later update`() {
+        val sink = Recording()
+        val subscription = pending("w#1", sink)
+        assertEquals(1, registry.size) // counted from the moment it is read
+        assertNull(subscription.query)
+        assertTrue(subscription.update("a".toByteArray()) && subscription.update("b".toByteArray()))
+        assertEquals(emptyList(), sink.parts) // held
+        assertTrue(registry.activate(subscription, "q"))
+        assertTrue(subscription.update("c".toByteArray()))
+        assertEquals(listOf(1L to "a", 2L to "b", 3L to "c"), sink.parts)
+        assertEquals("q", subscription.query)
+    }
+
+    @Test fun `an end during admission is held and written after the updates before it`() {
+        val sink = Recording()
+        val subscription = pending("w#1", sink)
+        subscription.update("a".toByteArray())
+        assertTrue(subscription.end(null))
+        assertFalse(subscription.update("late".toByteArray())) // nothing after the end
+        registry.activate(subscription, "q")
+        assertEquals(listOf(1L to "a"), sink.parts)
+        assertEquals(listOf<Pair<Int, Error?>>(1 to null), sink.ends)
+    }
+
+    @Test fun `a refused admission drops what was held and writes only the refusal, nothing stays open`() {
+        val sink = Recording()
+        val subscription = pending("w#1", sink)
+        subscription.update("a".toByteArray())
+        val refusal = Error.newBuilder().setRequestId("w#1").setCode(ErrorCode.PERMISSION_DENIED).setMessage("no").build()
+        assertTrue(registry.refuse(subscription, refusal))
+        assertEquals(emptyList(), sink.parts)
+        assertEquals(listOf<Pair<Int, Error?>>(0 to refusal), sink.ends)
+        assertEquals(0, registry.size)
+        assertFalse(registry.activate(subscription, "q")) // too late
+        assertFalse(subscription.update("b".toByteArray()))
+    }
+
+    @Test fun `a hub Cancel or a lost stream during admission drops the pending subscription and nothing is ever written`() {
+        val cancelled = Recording()
+        val lost = Recording()
+        val a = pending("a", cancelled)
+        val b = pending("b", lost)
+        a.update("held".toByteArray())
+        b.update("held".toByteArray())
+        assertTrue(registry.cancel(stream, "a"))
+        assertEquals(1, registry.closeOwner(stream))
+        assertEquals(0, registry.size)
+        // The admissions end later: both are no-ops, nothing is written for either.
+        assertFalse(registry.activate(a, "q"))
+        assertFalse(registry.refuse(b, Error.newBuilder().setCode(ErrorCode.HANDLER_ERROR).build()))
+        for (sink in listOf(cancelled, lost)) {
+            assertEquals(emptyList(), sink.parts)
+            assertEquals(emptyList(), sink.ends)
+        }
+    }
+
+    @Test fun `a pending subscription counts against the limit and a duplicate id is refused`() {
+        pending("a", Recording())
+        pending("b", Recording())
+        val full = registry.openPending(stream, "c", "t.Watch", "{}".toByteArray(), Recording())
+        assertEquals(ErrorCode.RESOURCE_EXHAUSTED, assertIs<Opening.Refused>(full).error.code)
+        val duplicate = registry.openPending(stream, "a", "t.Watch", "{}".toByteArray(), Recording())
+        assertEquals(ErrorCode.INVALID_REQUEST, assertIs<Opening.Refused>(duplicate).error.code)
+        assertEquals(2, registry.size)
     }
 }

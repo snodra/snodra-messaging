@@ -173,7 +173,9 @@ internal object ReconnectBackoff {
  * `parts` count, refilling `Flow{initial_credit / 2}` per that many parts consumed, the initial part included) and
  * [HubSubscription.cancel] writes `Cancel` once. As a handler, a `SUBSCRIPTION` request is an update target the hub wrote
  * outside flow control: it takes no handler permit and no [gate] slot, and no permit is paid back for it ([PermitLedger]
- * never sees it). It is admitted by [inboundSubscription] and registered in [subscriptions]; a hub `Cancel` removes it, the
+ * never sees it). It is registered in [subscriptions] when the request is read (pending: the hub writes `<id>#n` before the
+ * initial request `<id>#0` to the same instance, so an update may be emitted before the admission ends; such updates are held
+ * in order) and then admitted by [inboundSubscription], which makes it live or refuses it; a hub `Cancel` removes it, the
  * stream closing removes every subscription the stream carried, and the update emitter writes its parts and its end on the
  * stream it arrived on. The initial result is an ordinary unary request (id `<id>#0`).
  */
@@ -991,49 +993,70 @@ class HubConnection(
 
     /**
      * A `SUBSCRIPTION` request (an update target, P4c): the hub wrote it outside flow control, so it takes no handler
-     * permit, no [gate] slot and is no in-flight handler, and none is paid back ([PermitLedger] never sees it). Admission
-     * runs on [handlerDispatcher] (it validates the forwarded token) and ends in the [subscriptions] registry.
+     * permit, no [gate] slot and is no in-flight handler, and none is paid back ([PermitLedger] never sees it). It is
+     * registered in [subscriptions] right here, when the request is read, as pending: the admission then runs on
+     * [handlerDispatcher] (it validates the forwarded token), and in the meantime the emitter's updates for it are held in
+     * order (written once it is admitted, dropped when it is refused or the hub cancels it or its stream is lost).
      */
     private fun dispatchSubscription(stream: Stream, request: Request) {
+        val sink = subscriptionSink(stream)
+        // Registered here, in the reader, before the admission runs (pending): the hub writes `<id>#n` before the initial
+        // request `<id>#0` to this instance, and an update emitted after #0 was read must not slip past the registration.
+        val subscription = when (val opening = subscriptions.openPending(stream, request.id, request.type, request.payload.toByteArray(), sink)) {
+            is Opening.Refused -> {
+                sink.end(request.id, 0, opening.error) // the limit, or a duplicate id: nothing was registered
+                return
+            }
+            is Opening.Pending -> opening.subscription
+        }
         val entry = Running(stream, null)
         // Lazy, so a Cancel arriving right after the request finds the entry.
-        val job = scope.launch(handlerDispatcher, start = CoroutineStart.LAZY) { serveSubscription(stream, request) }
+        val job = scope.launch(handlerDispatcher, start = CoroutineStart.LAZY) { serveSubscription(stream, request, subscription) }
         entry.job = job
         running[request.id] = entry
-        job.invokeOnCompletion { running.remove(request.id, entry) }
+        job.invokeOnCompletion { cause ->
+            running.remove(request.id, entry)
+            if (cause != null) { // cancelled before it was admitted or refused: nothing of it stays
+                subscriptions.remove(subscription)
+                subscription.close()
+            }
+        }
         job.start()
     }
 
-    private suspend fun serveSubscription(stream: Stream, request: Request) {
-        val sink = object : SubscriptionSink {
-            override fun part(requestId: String, seq: Long, payload: ByteArray): Boolean =
-                stream.out.trySend(
-                    ClientMessage.newBuilder().setPart(
-                        ReplyPart.newBuilder().setRequestId(requestId).setPayload(ByteString.copyFrom(payload)).setSeq(seq),
-                    ).build(),
-                ).isSuccess
+    private fun subscriptionSink(stream: Stream) = object : SubscriptionSink {
+        override fun part(requestId: String, seq: Long, payload: ByteArray): Boolean =
+            stream.out.trySend(
+                ClientMessage.newBuilder().setPart(
+                    ReplyPart.newBuilder().setRequestId(requestId).setPayload(ByteString.copyFrom(payload)).setSeq(seq),
+                ).build(),
+            ).isSuccess
 
-            override fun end(requestId: String, parts: Int, error: Error?): Boolean {
-                val end = ReplyEnd.newBuilder().setRequestId(requestId).setParts(parts)
-                if (error != null) end.setError(error)
-                return stream.out.trySend(ClientMessage.newBuilder().setEnd(end).build()).isSuccess
-            }
+        override fun end(requestId: String, parts: Int, error: Error?): Boolean {
+            val end = ReplyEnd.newBuilder().setRequestId(requestId).setParts(parts)
+            if (error != null) end.setError(error)
+            return stream.out.trySend(ClientMessage.newBuilder().setEnd(end).build()).isSuccess
         }
+    }
+
+    /** Admits the pending [subscription]: it goes live (what was held is written) or is refused with the admission's error. */
+    private suspend fun serveSubscription(stream: Stream, request: Request, subscription: ServedSubscription) {
         val error: Error? = try {
-            inboundSubscription(request) { query -> subscriptions.open(stream, request.id, request.type, query, sink) }
+            inboundSubscription(request) { query -> subscriptions.activate(subscription, query); null }
         } catch (e: Throwable) {
-            if (e is CancellationException && !currentCoroutineContext().isActive) throw e // a hub Cancel before the registration
+            if (e is CancellationException && !currentCoroutineContext().isActive) throw e // a hub Cancel during the admission
             log.warn("Subscription {} request {} failed", request.type, request.id, e)
             Error.newBuilder().setRequestId(request.id).setCode(ErrorCode.HANDLER_ERROR).setMessage("${e::class.simpleName}: ${e.message}").build()
         }
         if (error == null) {
-            // Registered. A hub Cancel that arrived meanwhile cancelled this job first and then looked in the registry, which
-            // may have been before the registration: the subscription would live on, so it is dropped here (see handle()).
+            // Admitted. A hub Cancel that arrived meanwhile cancelled this job and removed the entry (dropped: nothing was
+            // written); one that raced the activation is caught here (see handle()).
             if (!currentCoroutineContext().isActive) subscriptions.cancel(stream, request.id)
             return
         }
-        // Refused: the target ends with the error and the hub ends the whole subscription with it.
-        sink.end(request.id, 0, error)
+        // Refused: the target ends with the error and the hub ends the whole subscription with it. Nothing is written when
+        // the subscription was cancelled or its stream lost meanwhile.
+        subscriptions.refuse(subscription, error)
     }
 
     private suspend fun serveUnary(stream: Stream, request: Request) {

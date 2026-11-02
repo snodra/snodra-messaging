@@ -171,6 +171,8 @@ class SubscriptionQueryTest {
         hubName: String = hub.name,
         maxConcurrentHandlers: Int = 256,
         maxSubscriptions: Int = 1024,
+        /** Runs before the real admission of a `SUBSCRIPTION` request (a slow identity check, in a test). */
+        beforeAdmission: (suspend () -> Unit)? = null,
     ): Owner {
         val ownerRegistry = HandlerRegistry(resolver)
         beans.forEach { ownerRegistry.register(it) }
@@ -186,7 +188,10 @@ class SubscriptionQueryTest {
             maxConcurrentHandlers = maxConcurrentHandlers,
             inboundStream = dispatcher::dispatchStream,
             subscriptions = subscriptions,
-            inboundSubscription = dispatcher::dispatchSubscription,
+            inboundSubscription = { req, register ->
+                beforeAdmission?.invoke()
+                dispatcher.dispatchSubscription(req, register)
+            },
         ).also { connections += it }
         conn.register(emptySet(), ownerRegistry.exclusiveQueryTypes(), ownerRegistry.sharedQueryTypes())
         conn.start()
@@ -419,6 +424,64 @@ class SubscriptionQueryTest {
         }
         awaitUntil { hub.openSubscriptions() == 0 }
         delay(300)
+        assertEquals(0, x.subscriptions.size)
+    }
+
+
+    // --- registered when the request is read: an emit during a slow admission is neither lost nor reordered ---
+
+    @Test fun `an update emitted after the initial result was answered but before admission completes is delivered after it, in order`() = runBlocking {
+        val admit = CompletableDeferred<Unit>()
+        val x = owner("svc-x", "x-1", AccountWatcher(), beforeAdmission = { admit.await() })
+        val sender = RawSender("s-1").also { it.next() }
+        sender.send(subscribeRequest("w1", account = 7)) // the hub writes w1#1 (admission, held) and then w1#0 (answered at once)
+        val initial = sender.next().part
+        assertEquals(1L, initial.seq)
+        assertEquals(Balance(107), codec.decode(initial.payload.toByteArray(), Balance::class))
+
+        repeat(3) { n -> x.emitter.emit(WatchAccount::class, { it.account == 7 }, BalanceChanged(7, n + 1)) } // admission still running
+        x.emitter.emit(WatchAccount::class, { it.account == 99 }, BalanceChanged(99, 0)) // not this subscription's
+        assertEquals(1, x.subscriptions.size) // registered when the request was read
+        sender.nothingWithin(200) // held back until admitted
+        admit.complete(Unit)
+        x.emitter.emit(WatchAccount::class, { it.account == 7 }, BalanceChanged(7, 4)) // a later emit goes after the buffered ones
+        val parts = (1..4).map { sender.next().part }
+        assertEquals(listOf(2L, 3L, 4L, 5L), parts.map { it.seq })
+        assertEquals(listOf(1, 2, 3, 4), parts.map { codec.decode(it.payload.toByteArray(), BalanceChanged::class).value })
+        sender.nothingWithin(100)
+    }
+
+    @Test fun `a hub Cancel during admission removes the pending subscription and nothing is delivered after the admission ends`() = runBlocking {
+        val admit = CompletableDeferred<Unit>()
+        val x = owner("svc-x", "x-1", AccountWatcher(), beforeAdmission = { admit.await() })
+        val sender = RawSender("s-1").also { it.next() }
+        sender.send(subscribeRequest("w1", account = 7))
+        sender.next() // the initial part
+        assertEquals(1, x.subscriptions.size)
+        x.emitter.emit(WatchAccount::class, { true }, BalanceChanged(7, 1)) // buffered
+        sender.send(ClientMessage.newBuilder().setCancel(io.damoreira.kraken.hub.v1.Cancel.newBuilder().setRequestId("w1").setReason("user left")).build())
+        awaitUntil { x.subscriptions.size == 0 }
+        admit.complete(Unit)
+        delay(300)
+        assertEquals(0, x.subscriptions.size)
+        sender.nothingWithin(200)
+        assertEquals(0, hub.openSubscriptions())
+    }
+
+    @Test fun `a lost hub stream during admission leaves nothing open when the admission ends`() = runBlocking {
+        val admit = CompletableDeferred<Unit>()
+        val x = owner("svc-x", "x-1", AccountWatcher(), beforeAdmission = { admit.await() })
+        val sender = RawSender("s-1").also { it.next() }
+        sender.send(subscribeRequest("w1", account = 7))
+        sender.next()
+        assertEquals(1, x.subscriptions.size)
+        hub.dropInstance("x-1")
+        awaitUntil { x.subscriptions.size == 0 }
+        awaitUntil { x.connection.connected.value } // reconnected on a new stream
+        admit.complete(Unit)
+        delay(300) // the admission of the old stream's request ends now
+        assertEquals(0, x.subscriptions.size)
+        x.emitter.emit(WatchAccount::class, { true }, BalanceChanged(7, 1))
         assertEquals(0, x.subscriptions.size)
     }
 

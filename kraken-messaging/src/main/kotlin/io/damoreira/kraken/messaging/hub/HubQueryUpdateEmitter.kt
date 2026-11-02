@@ -18,6 +18,9 @@ import kotlin.reflect.full.safeCast
  * match, the encoding, the writes) runs in `afterCommit`; a failure there is logged, never thrown at the committer. Outside
  * a transaction it is immediate and an encoding failure reaches the caller. A filter that throws skips its subscription
  * (logged), never the others.
+ *
+ * A subscription whose admission is still running (it is registered when its request is read) matches too: its updates are
+ * held in order and written once it is admitted, or dropped when it is refused or cancelled.
  */
 class HubQueryUpdateEmitter(
     private val registry: SubscriptionRegistry,
@@ -53,12 +56,25 @@ class HubQueryUpdateEmitter(
 
     private fun <Q : Any> matching(queryType: KClass<Q>, filter: (Q) -> Boolean): List<ServedSubscription> =
         registry.of(typeResolver.typeNameOf(queryType)).filter { subscription ->
-            val query = queryType.safeCast(subscription.query) ?: return@filter false
+            val query = queryType.safeCast(queryOf(subscription, queryType)) ?: return@filter false
             try {
                 filter(query)
             } catch (e: Exception) {
                 log.warn("The filter of an update for {} threw {}; subscription {} skipped", subscription.type, e.toString(), subscription.requestId)
                 false
+            }
+        }
+
+    /**
+     * The query [subscription] watches: decoded when it is admitted, else (admission still running, the subscription is
+     * registered pending) decoded here from its request's payload; null when that does not decode (admission will refuse it).
+     */
+    private fun <Q : Any> queryOf(subscription: ServedSubscription, queryType: KClass<Q>): Any? =
+        subscription.query ?: subscription.payload?.let { payload ->
+            try {
+                codec.decode(payload, queryType)
+            } catch (e: Exception) {
+                null
             }
         }
 
