@@ -274,6 +274,12 @@ class AutoConfigurationTest {
             await atMost Duration.ofSeconds(5) until { connections.connected.value && "test.WatchAccount" in connection.registeredTypes() }
             assertEquals(listOf("flow-control", "instance-status", "scatter-gather", "streaming", "subscription"), connection.lastRegisterFrom(connections.instanceId)!!.capabilitiesList)
 
+            // The QueryBus bean applications inject is a facade over HubBus: it forwards subscribe.
+            val facade = runBlocking { context.getBean(QueryBus::class.java).subscribe(WatchAccount(8), SubscriptionOptions(timeout = Duration.ofSeconds(5))) }
+            assertEquals(Balance(108), facade.initial)
+            facade.cancel()
+            await atMost Duration.ofSeconds(5) until { context.getBean(SubscriptionRegistry::class.java).size == 0 }
+
             val subscriber = HubConnectionsClient(connection)
             val result = runBlocking { subscriber.bus.subscribe(WatchAccount(7), SubscriptionOptions(timeout = Duration.ofSeconds(5))) }
             assertEquals(Balance(107), result.initial)

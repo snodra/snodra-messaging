@@ -25,6 +25,7 @@ import io.damoreira.kraken.messaging.fixtures.WatchAccount
 import io.damoreira.kraken.messaging.handler.HandlerInvoker
 import io.damoreira.kraken.messaging.handler.HandlerRegistry
 import io.damoreira.kraken.messaging.handler.QueryHandler
+import io.damoreira.kraken.messaging.handler.RequiresAuthentication
 import io.damoreira.kraken.messaging.security.ForwardedIdentityResolver
 import io.damoreira.kraken.messaging.test.InProcessHub
 import io.grpc.inprocess.InProcessChannelBuilder
@@ -100,6 +101,11 @@ class SharedAccountWatcher(private val base: Int = 100) {
 /** A plain (unary) query handler, for the mode mismatch. */
 class PlainCountOwner {
     @QueryHandler fun handle(query: GetCount): Count = Count(1)
+}
+
+/** A subscription query handler only an administrator may use. */
+class ProtectedAccountWatcher {
+    @QueryHandler @RequiresAuthentication("hasRole('kraken-admin')") fun handle(query: WatchAccount): Balance = Balance(1)
 }
 
 /** Never answers the initial request. */
@@ -392,6 +398,15 @@ class SubscriptionQueryTest {
         x.subscriptions.endAll()
         val end = sender.next().end
         assertEquals(listOf("w1", 1, false), listOf(end.requestId, end.parts, end.hasError()))
+        assertEquals(0, x.subscriptions.size)
+    }
+
+    @Test fun `RequiresAuthentication is checked when the subscription is admitted`() = runBlocking {
+        val x = owner("svc-x", "x-1", ProtectedAccountWatcher())
+        val sender = RawSender("s-1").also { it.next() }
+        sender.send(subscribeRequest("w1", account = 7)) // no forwarded token: anonymous
+        assertEquals(ErrorCode.UNAUTHENTICATED, sender.nextEnd().error.code) // the target's refusal or the initial request's
+        awaitUntil { hub.openSubscriptions() == 0 }
         assertEquals(0, x.subscriptions.size)
     }
 
@@ -818,6 +833,40 @@ class SubscriptionQueryTest {
         assertEquals(0, hub.openSubscriptions())
         delay(200)
         assertEquals(emptyList(), hub.cancelsFrom(callerId())) // the subscription had ended: nothing to cancel
+    }
+
+    @Test fun `an owner on two hubs loses only the subscriptions of the hub whose stream broke`() = runBlocking {
+        val other = hub()
+        val ownerRegistry = HandlerRegistry(resolver).apply { register(SharedAccountWatcher()) }
+        val dispatcher = InboundRequestDispatcher(HandlerInvoker(ownerRegistry, codec), ForwardedIdentityResolver(null), codec)
+        val subscriptions = SubscriptionRegistry()
+        val conns = HubConnections(
+            targets = HubTargets.Static(listOf(hub.name, other.name)),
+            channelFactory = { target -> InProcessChannelBuilder.forName(target).build() },
+            serviceName = "svc-x",
+            instanceId = "x-1",
+            settings = settings,
+            inbound = dispatcher::dispatch,
+            scope = scope,
+            inboundStream = dispatcher::dispatchStream,
+            subscriptions = subscriptions,
+            inboundSubscription = dispatcher::dispatchSubscription,
+        ).also { multi += it }
+        conns.register(emptySet(), emptySet(), ownerRegistry.sharedQueryTypes())
+        conns.start()
+        assertTrue(conns.awaitRegistered(wait))
+        val emitter = HubQueryUpdateEmitter(subscriptions, codec, resolver)
+        val viaA = caller(hub.name).subscribe(WatchAccount(1))
+        val viaB = caller(other.name).subscribe(WatchAccount(2))
+        awaitUntil { subscriptions.size == 2 } // one shared registry over both hubs' streams
+
+        other.dropInstance("x-1")
+        awaitUntil { subscriptions.size == 1 }
+        // The subscription on the hub that is still up keeps receiving; the other subscriber was told its last target left.
+        val update = async { viaA.updates.take(1).toList() }
+        emitter.emit(WatchAccount::class, { true }, BalanceChanged(1, 1))
+        assertEquals(1, withTimeout(5_000) { update.await() }.single().value)
+        assertIs<HandlerDisconnectedException>(runCatching { withTimeout(5_000) { viaB.updates.toList() } }.exceptionOrNull())
     }
 
     @Test fun `the bearer token is read when subscribe is called, not when the updates are collected`() = runBlocking {
