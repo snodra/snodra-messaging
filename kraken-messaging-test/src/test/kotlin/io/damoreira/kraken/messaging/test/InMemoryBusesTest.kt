@@ -40,8 +40,9 @@ data class Watch(val name: String) : SubscriptionQuery<Level, Changed>
 data class Level(val name: String, val value: Int)
 data class Changed(val name: String, val value: Int)
 
-class WatchHandler(val failInitial: Boolean = false) {
+class WatchHandler(val failInitial: Boolean = false, val duringInitial: () -> Unit = {}) {
     @QueryHandler fun handle(q: Watch): Level {
+        duringInitial()
         if (failInitial) throw IllegalStateException("no level")
         return Level(q.name, 0)
     }
@@ -110,6 +111,27 @@ class InMemoryBusesTest {
 
         assertEquals(listOf(Changed("a", 1), Changed("a", 2)), result.updates.toList())
         assertEquals(0, buses.openSubscriptions, "a completed subscription is removed")
+    }
+
+    @Test fun `a subscription is registered before its initial result is read, as in the library, so an emit meanwhile is delivered after it`() = runBlocking {
+        lateinit var buses: InMemoryBuses
+        buses = InMemoryBuses().register(WatchHandler(duringInitial = {
+            buses.emitter.emit<Watch, Changed>({ it.name == "a" }, Changed("a", 1)) // between the registration and the end of the initial
+        }))
+        val result = buses.subscribe(Watch("a"))
+        assertEquals(Level("a", 0), result.initial)
+        buses.emitter.emit<Watch, Changed>({ it.name == "a" }, Changed("a", 2))
+        buses.emitter.complete<Watch> { it.name == "a" }
+        assertEquals(listOf(Changed("a", 1), Changed("a", 2)), result.updates.toList())
+
+        // An initial that fails drops what was emitted meanwhile and leaves nothing open.
+        lateinit var failing: InMemoryBuses
+        failing = InMemoryBuses().register(WatchHandler(failInitial = true, duringInitial = {
+            failing.emitter.emit<Watch, Changed>({ true }, Changed("a", 1))
+        }))
+        assertFailsWith<RemoteHandlerException> { failing.subscribe(Watch("a")) }
+        assertEquals(0, failing.openSubscriptions)
+        Unit
     }
 
     @Test fun `an update goes only to the subscriptions whose query passes the filter, and with none it is a no-op`() = runBlocking {

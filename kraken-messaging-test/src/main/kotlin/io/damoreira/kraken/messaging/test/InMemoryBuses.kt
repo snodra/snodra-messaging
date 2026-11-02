@@ -50,7 +50,9 @@ import java.util.concurrent.CopyOnWriteArrayList
  * `maxResults`; its failure maps as a unary one. A subscription query ([subscribe]) answers its initial result from the
  * registered handler and takes its updates from [emitter], the in-memory [QueryUpdateEmitter]: no hub, no credits, no
  * transactions (an emit is delivered at once, where the real emitter defers it to after the commit), `maxResults` and
- * `cancel()` honoured.
+ * `cancel()` honoured. Like the library, a subscription is **registered before its initial result is read**: an update
+ * emitted while the initial handler runs is neither lost nor reordered, it is delivered after the initial (and dropped
+ * with the subscription when the initial fails).
  */
 class InMemoryBuses(
     typePrefix: String = "test",
@@ -135,7 +137,7 @@ class InMemoryBuses(
         val updateType = ResponseTypes.updateTypeOf(query::class)
         val channel = Channel<ByteArray>(Channel.UNLIMITED)
         val subscription = LocalSubscription(type, decoded, channel, options.maxResults)
-        subscriptions += subscription // registered before the initial request: an update emitted meanwhile is not lost
+        subscriptions += subscription // registered before the initial request, the library's rule (see the class comment): an update emitted meanwhile is not lost
         val initial = try {
             unwrap(type, query::class, invoker.invokeQuery(type, payload, context(type), identity(), subscriptionInitial = true)) as I
         } catch (e: Throwable) {
