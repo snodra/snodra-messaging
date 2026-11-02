@@ -5,12 +5,15 @@
 #        SKIP_FLOW=1 skips the flow-control steps, ONLY_FLOW=1 runs only them; INFRA_DIR names kraken/infra;
 #        SKIP_HA=1 skips the two-hub steps, ONLY_HA=1 runs only them, HUB2_CONTAINER names the second hub;
 #        SKIP_SCATTER=1 skips the scatter-gather steps, ONLY_SCATTER=1 runs only them;
-#        SKIP_STREAM=1 skips the streaming-query steps, ONLY_STREAM=1 runs only them)
+#        SKIP_STREAM=1 skips the streaming-query steps, ONLY_STREAM=1 runs only them;
+#        SKIP_SUBSCRIBE=1 skips the subscription-query steps, ONLY_SUBSCRIBE=1 runs only them, B=http://localhost:8092 is
+#        service-b's HTTP address)
 set -euo pipefail
 
 A=${A:-http://localhost:8091}
 HUB=${HUB:-http://localhost:7001}
 HUB2=${HUB2:-http://localhost:7011}
+B=${B:-http://localhost:8092}
 
 fail() { echo "SMOKE FAILED: $*" >&2; exit 1; }
 
@@ -184,6 +187,19 @@ if command -v jq >/dev/null; then
   rows_summary() {
     jq -r '"\(.count) \(.service // "-") \((.rows | map(.n)) == [range(1; (.rows | length) + 1)]) \([.rows[] | "\(.service)/\(.instance)"] | unique | length)"' 2>/dev/null || true
   }
+  # /api/v1/types -> "<shared> <owners, comma-separated>" of the type named by $1; empty while it is not listed.
+  type_owners() {
+    jq -r --arg t "$1" '.types[] | select(.type == $t) | "\(.shared) \(.owners | join(","))"' 2>/dev/null || true
+  }
+  # /subscribe/counter -> "<initial service> <initial value> <updates> <values of service-b's updates> <values of service-c's>"
+  # (values comma-separated in arrival order, "-" for none).
+  counter_summary() {
+    jq -r '"\(.initial.service) \(.initial.value) \(.updates | length) \([.updates[] | select(.service == "service-b") | .value | tostring] | join(",") | if . == "" then "-" else . end) \([.updates[] | select(.service == "service-c") | .value | tostring] | join(",") | if . == "" then "-" else . end)"' 2>/dev/null || true
+  }
+  # /subscribe/open -> "<instances> <sum of open> <service=open, comma-separated>".
+  open_summary() {
+    jq -r '"\(.instances | length) \([.instances[].open] | add // 0) \([.instances[] | "\(.service)=\(.open)"] | sort | join(","))"' 2>/dev/null || true
+  }
   # /topology -> "<totals.inFlight> <sum over every instance of inFlightAsHandler + inFlightAsSender>".
   in_flight() {
     jq -r '"\(.totals.inFlight // 0) \([.services[].instances[] | (.inFlightAsHandler // 0) + (.inFlightAsSender // 0)] | add // 0)"' 2>/dev/null || true
@@ -222,6 +238,23 @@ try:
     ordered = [x.get("n") for x in rows] == list(range(1, len(rows) + 1))
     print(r.get("count"), r.get("service") or "-", str(ordered).lower(), len({(x.get("service"), x.get("instance")) for x in rows}))
 except Exception: pass' || true; }
+  type_owners() { python3 -I -c 'import json,sys
+try:
+    for t in json.load(sys.stdin).get("types", []):
+        if t.get("type") == sys.argv[1]:
+            print(str(bool(t.get("shared"))).lower(), ",".join(t.get("owners") or []))
+except Exception: pass' "$1" || true; }
+  counter_summary() { python3 -I -c 'import json,sys
+try:
+    r = json.load(sys.stdin); i = r["initial"]; u = r.get("updates") or []
+    vals = lambda svc: ",".join(str(x["value"]) for x in u if x.get("service") == svc) or "-"
+    print(i["service"], i["value"], len(u), vals("service-b"), vals("service-c"))
+except Exception: pass' || true; }
+  open_summary() { python3 -I -c 'import json,sys
+try:
+    r = json.load(sys.stdin); ins = r.get("instances") or []
+    print(len(ins), sum(x.get("open") or 0 for x in ins), ",".join(sorted("%s=%s" % (x["service"], x.get("open")) for x in ins)))
+except Exception: pass' || true; }
   in_flight() { python3 -I -c 'import json,sys
 try:
     t = json.load(sys.stdin)
@@ -236,6 +269,9 @@ else
   scatter_summary() { inventory_type; }
   service_of() { inventory_type; }
   rows_summary() { fail "jq or python3 needed for the streaming-query steps (or set SKIP_STREAM=1)"; }
+  type_owners() { fail "jq or python3 needed for the subscription-query steps (or set SKIP_SUBSCRIBE=1)"; }
+  counter_summary() { type_owners; }
+  open_summary() { type_owners; }
   in_flight() { rows_summary; }
 fi
 
@@ -456,6 +492,111 @@ stream_steps() {
   echo "   $code $body"
 }
 
+# P4c (ADR 0017): examples.WatchCounter is a shared subscription query type served by service-b (Kotlin) and service-c
+# (Rust), each with an in-memory counter per name. Step 20 opens `GET /subscribe/counter?updates=4` in the background
+# (service-a subscribes, collects the initial result and four updates, cancels), waits until both owners hold the
+# subscription, then increments the counter twice through service-b (`POST $B/counters/<name>/increment`) and twice
+# through service-c (the command examples.IncrementCounter, sent by `POST $A/counters/<name>/increment`), and expects
+# the initial result and four updates, two from each service, increasing in value per service. Step 20b checks that no
+# subscription is left behind once the request returned (black-box: the hubs have no metrics endpoint, so it asks the
+# owners through the shared query examples.OpenSubscriptions, `GET $A/subscribe/open`, which counts every subscription
+# an instance serves: they must be back at what they were before step 20, and both hubs' in-flight counts at 0), and
+# that a follow-up subscription still gets the counters' current value; step 20c subscribes to a name nobody
+# incremented and expects the initial result with the value 0. Needs jq or python3; SKIP_SUBSCRIBE=1 skips these steps,
+# ONLY_SUBSCRIBE=1 runs only them.
+subscribe_steps() {
+  local hubs=("$HUB") h i t body out pid summary base base_open open_now instances sum detail
+  local name="smoke$(date +%s)" unknown="unknown$(date +%s)"
+  local initial_service initial_value n b_values c_values
+  [ "${SKIP_HA:-0}" = "1" ] || hubs+=("$HUB2")
+  echo "20a. /api/v1/types on ${hubs[*]}: examples.WatchCounter is shared, served by service-b and service-c ..."
+  for h in "${hubs[@]}"; do
+    for i in $(seq 1 60); do
+      t=$(curl -fsS "$h/api/v1/types" 2>/dev/null | type_owners examples.WatchCounter)
+      [ "$t" = "true service-b,service-c" ] && break
+      [ "$i" -eq 60 ] && fail "examples.WatchCounter on $h/api/v1/types is '$t', expected 'true service-b,service-c' (shared, two owners)"
+      sleep 1
+    done
+    echo "   $h: shared=${t%% *} owners=${t#* }"
+  done
+
+  base=$(curl -fsS --max-time 10 "$A/subscribe/open" | open_summary)
+  read -r instances sum base_open <<< "$base"
+  [ "$instances" = "2" ] || fail "expected the open-subscription counts of two owner instances before step 20, got '$base'"
+  echo "   open subscriptions before: $base_open (sum $sum)"
+
+  echo "20. GET /subscribe/counter?name=$name&updates=4 in the background; 2 increments through service-b and 2 through service-c ..."
+  out=$(mktemp)
+  curl -sS --max-time 30 "$A/subscribe/counter?name=$name&updates=4&timeoutMs=10000" > "$out" 2>&1 &
+  pid=$!
+  # The request returns only after the updates, so its subscription is seen from outside: both owners hold one more.
+  for i in $(seq 1 100); do
+    summary=$(curl -fsS --max-time 5 "$A/subscribe/open" 2>/dev/null | open_summary)
+    read -r instances n detail <<< "${summary:-0 0 -}"
+    [ "$instances" = "2" ] && [ "$n" -ge $((sum + 2)) ] && break
+    kill -0 "$pid" 2>/dev/null || break
+    [ "$i" -eq 100 ] && { kill "$pid" 2>/dev/null || true; fail "the subscription never showed on both owners (open: ${summary:-none}, before: $base_open)"; }
+    sleep 0.1
+  done
+  for i in 1 2; do
+    curl -fsS -X POST "$B/counters/$name/increment" >/dev/null || fail "POST $B/counters/$name/increment failed (service-b)"
+  done
+  for i in 1 2; do
+    curl -fsS -X POST "$A/counters/$name/increment" >/dev/null || fail "POST $A/counters/$name/increment failed (service-c through the hub)"
+  done
+  wait "$pid" || fail "GET /subscribe/counter failed: $(cat "$out")"
+  body=$(cat "$out"); rm -f "$out"
+  echo "   $body"
+  summary=$(printf '%s' "$body" | counter_summary)
+  read -r initial_service initial_value n b_values c_values <<< "$summary"
+  [ -n "$summary" ] || fail "no initial result and updates in: $body"
+  [ "$initial_value" = "0" ] || fail "expected the initial value 0 (nobody incremented $name), got '$initial_value': $body"
+  case "$initial_service" in service-b|service-c) ;; *) fail "the initial result came from '$initial_service': $body" ;; esac
+  [ "$n" = "4" ] || fail "expected 4 updates, got $n: $body"
+  # Each service's counter counts 1, 2: strictly increasing per service (the order between the two services is not defined).
+  [ "$b_values" = "1,2" ] || fail "expected service-b's updates 1,2 in order, got '$b_values': $body"
+  [ "$c_values" = "1,2" ] || fail "expected service-c's updates 1,2 in order, got '$c_values': $body"
+  echo "   initial from $initial_service (value $initial_value); 4 updates: service-b $b_values, service-c $c_values"
+
+  echo "20b. nothing is left subscribed: the owners' open counts are back to $base_open and the hubs have nothing in flight ..."
+  for i in $(seq 1 50); do
+    summary=$(curl -fsS --max-time 5 "$A/subscribe/open" 2>/dev/null | open_summary)
+    read -r instances n detail <<< "${summary:-0 0 -}"
+    [ "$detail" = "$base_open" ] && break
+    [ "$i" -eq 50 ] && fail "after the request the owners still hold subscriptions: '${summary:-none}', before step 20: '$base_open'"
+    sleep 0.2
+  done
+  echo "   open subscriptions after: $detail"
+  for h in "${hubs[@]}"; do
+    for i in $(seq 1 20); do
+      t=$(curl -fsS "$h/topology" 2>/dev/null | in_flight)
+      [ "$t" = "0 0" ] && break
+      [ "$i" -eq 20 ] && fail "$h still has requests in flight after the subscription was cancelled (totals.inFlight, per-instance sum: '$t')"
+      sleep 0.5
+    done
+    echo "   $h: totals.inFlight ${t%% *}, per-instance in-flight sum ${t#* }"
+  done
+  body=$(curl -fsS --max-time 15 "$A/subscribe/counter?name=$name&updates=0&timeoutMs=10000") || fail "the follow-up GET /subscribe/counter failed"
+  summary=$(printf '%s' "$body" | counter_summary)
+  read -r initial_service initial_value n b_values c_values <<< "$summary"
+  [ "$initial_value" = "2" ] && [ "$n" = "0" ] || fail "the follow-up subscription should see the counter at 2 and no update, got '$summary': $body"
+  echo "   a follow-up subscription and cancel still work: initial $initial_service value $initial_value"
+  for i in $(seq 1 50); do
+    summary=$(curl -fsS --max-time 5 "$A/subscribe/open" 2>/dev/null | open_summary)
+    read -r instances n detail <<< "${summary:-0 0 -}"
+    [ "$detail" = "$base_open" ] && break
+    [ "$i" -eq 50 ] && fail "the follow-up subscription was not cancelled: '${summary:-none}', expected '$base_open'"
+    sleep 0.2
+  done
+
+  echo "20c. GET /subscribe/counter?name=$unknown: a name nobody incremented still gets its initial result, value 0 ..."
+  body=$(curl -fsS --max-time 15 "$A/subscribe/counter?name=$unknown&updates=0&timeoutMs=10000") || fail "GET /subscribe/counter for an unknown name failed"
+  summary=$(printf '%s' "$body" | counter_summary)
+  read -r initial_service initial_value n b_values c_values <<< "$summary"
+  [ "$initial_value" = "0" ] && [ "$n" = "0" ] || fail "expected the initial value 0 and no update for an unknown name, got '$summary': $body"
+  echo "   $body"
+}
+
 echo "1. waiting for service-a at $A ..."
 for i in $(seq 1 90); do
   if curl -fsS "$A/actuator/health" 2>/dev/null | grep -q '"UP"'; then break; fi
@@ -492,6 +633,12 @@ fi
 if [ "${ONLY_STREAM:-0}" = "1" ]; then
   stream_steps
   echo "SMOKE OK (streaming-query steps only)"
+  exit 0
+fi
+
+if [ "${ONLY_SUBSCRIBE:-0}" = "1" ]; then
+  subscribe_steps
+  echo "SMOKE OK (subscription-query steps only)"
   exit 0
 fi
 
@@ -578,5 +725,6 @@ echo "   delivered: $TEXTS"
 [ "${SKIP_HA:-0}" = "1" ] || ha_steps
 [ "${SKIP_SCATTER:-0}" = "1" ] || scatter_steps
 [ "${SKIP_STREAM:-0}" = "1" ] || stream_steps
+[ "${SKIP_SUBSCRIBE:-0}" = "1" ] || subscribe_steps
 
 echo "SMOKE OK"

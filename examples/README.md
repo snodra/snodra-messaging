@@ -13,7 +13,12 @@ A disposable sandbox that shows cross-service messaging on the real `kraken-hub`
 6. **service-b** and **service-c** both own the shared query `examples.Inventory` (ADR 0017): **service-a** sends it as
    a point query (one of them answers) and as a scatter-gather (both answer);
 7. **service-b** and **service-c** both own the shared streaming query `examples.Rows` (ADR 0017, P4b): **service-a**
-   opens a stream (one instance of either streams the rows under A's credits), collects it and returns the rows.
+   opens a stream (one instance of either streams the rows under A's credits), collects it and returns the rows;
+8. **service-b** and **service-c** both serve the shared subscription query `examples.WatchCounter` (ADR 0017, P4c) with an
+   in-memory counter per name: **service-a** subscribes (the initial result is one counter's current value, the updates
+   are the changes of both), collects the initial result and N updates, cancels and returns them. The updates come from
+   `POST /counters/{name}/increment` on service-b and from the command `examples.IncrementCounter` that service-a sends
+   to service-c (which has no HTTP); both push through a `QueryUpdateEmitter`.
 
 Everything is anonymous, nothing is persisted by the apps (MongoDB is only there because the starter's outbox and
 idempotent consumer need it), and the modules are never published. They build against the starter as a project
@@ -21,10 +26,10 @@ dependency, so they always exercise the current library. Wire classes live in `e
 
 | Module | Role | Host port |
 |---|---|---|
-| `examples/examples-api` | `SendGreeting`, `GreetingAccepted`, `GreetingDelivered`, `CountGreetings`, `GreetingCount`; the texts types; the shared `Inventory` / `InventoryLevel`; the streaming `Rows` / `Row` | – |
+| `examples/examples-api` | `SendGreeting`, `GreetingAccepted`, `GreetingDelivered`, `CountGreetings`, `GreetingCount`; the texts types; the shared `Inventory` / `InventoryLevel`; the streaming `Rows` / `Row`; the subscription `WatchCounter` / `Counter` / `CounterChanged`, the command `IncrementCounter` and the shared query `OpenSubscriptions` / `SubscriptionCount` | – |
 | `examples/service-a` | REST caller + event listener | 8091 |
-| `examples/service-b` | owner of the greetings command and query, co-owner of the shared `Inventory` and the streaming `Rows`; logs the text events | 8092 (actuator only) |
-| `kraken-messaging-rs/examples/service-c` | Rust: owner of `Shout` and `Reverse`, co-owner of the shared `Inventory` and the streaming `Rows`, publishes the text events, logs `GreetingDelivered` | – (no HTTP) |
+| `examples/service-b` | owner of the greetings command and query, co-owner of the shared `Inventory`, the streaming `Rows`, the subscription `WatchCounter` and `OpenSubscriptions`; logs the text events | 8092 (`POST /counters/{name}/increment` and actuator) |
+| `kraken-messaging-rs/examples/service-c` | Rust: owner of `Shout`, `Reverse` and `IncrementCounter`, co-owner of the shared `Inventory`, `Rows`, `WatchCounter` and `OpenSubscriptions`, publishes the text events, logs `GreetingDelivered` | – (no HTTP) |
 
 ## Prerequisites
 
@@ -90,9 +95,20 @@ curl -s 'localhost:8091/stream/rows?count=5&credit=2'
 curl -s 'localhost:8091/stream/rows?count=1000&take=50'      # 50 rows, the handler is cancelled
 curl -s 'localhost:8091/stream/rows?count=10&failAt=3'       # {"error":"RemoteHandlerException","message":"...Rows failed at row 3"}
 
+# 8: the shared subscription query examples.WatchCounter: A subscribes (the initial result is the current value of one
+# owner's counter, 0 for a new name), collects the initial result and `updates` changes of either owner, or what arrived
+# within `timeoutMs`, and cancels. Run it, then within the timeout bump the counters: service-b through its own endpoint,
+# service-c through a command that A sends it (`service` is the addressee; only service-c owns IncrementCounter)
+curl -s 'localhost:8091/subscribe/counter?name=x&updates=2&timeoutMs=20000' &
+curl -s -X POST localhost:8092/counters/x/increment      # {"service":"service-b","instance":"<container id>","name":"x","value":1}
+curl -s -X POST localhost:8091/counters/x/increment      # {"service":"service-c",...,"value":1}
+# {"initial":{"service":"service-c",...,"name":"x","value":0},"updates":[{"service":"service-b",...,"value":1},{"service":"service-c",...,"value":1}]}
+curl -s localhost:8091/subscribe/open                    # how many subscriptions each owner instance serves now (a scatter-gather of examples.OpenSubscriptions)
+# {"instances":[{"service":"service-b","instance":"<container id>","open":0},{"service":"service-c",...,"open":0}],"failed":0}
+
 # who is registered for what (service-c owns examples.Shout and examples.Reverse; examples.Inventory and examples.Rows are shared)
 curl -s localhost:7001/topology
-curl -s localhost:7001/api/v1/types   # examples.Inventory and examples.Rows: "shared":true, "owners":["service-b","service-c"]
+curl -s localhost:7001/api/v1/types   # examples.Inventory, examples.Rows, examples.WatchCounter: "shared":true, "owners":["service-b","service-c"]
 ```
 
 The logs tell the same story, one `INFO` line per step:
@@ -124,9 +140,13 @@ service-b | B: streamed Rows count=5
 service-a | A: streamed Rows count=5 credit=2 maxResults=0 take=0 -> 5 rows from service-b (<container id>)
 service-c | C: streaming Rows count=5 failAt=0
 service-a | A: streamed Rows count=5 credit=2 maxResults=0 take=0 -> 5 rows from service-c (<container id>)
+service-c | C: subscribed WatchCounter name=x value=0
+service-b | B: incremented counter name=x -> 1
+service-c | C: incremented counter name=x -> 1
+service-a | A: subscribed WatchCounter name=x -> initial service-c=0 (<container id>), 2 of 2 updates [service-b=1, service-c=1]
 ```
 
-Add `service-c` to the `logs -f` command to see the `C:` lines.
+Add `service-c` to the `logs -f` command to see the `C:` lines. (`subscribed WatchCounter` is logged only by the instance that answered the initial result; the other owner just registers the subscription.)
 
 `examples/smoke.sh` runs the whole sequence and checks every step (it waits for service-a and for service-b to own its types on the hub, posts two greetings,
 waits for both events, asserts the count grew by two, asserts both services are on the topology, then waits for
@@ -175,6 +195,18 @@ instance's `inFlightAsHandler` + `inFlightAsSender`) back at 0 within 10 s; step
 row 3"}` (the two rows streamed before the failure are not reported: the endpoint returns the error only).
 `SKIP_STREAM=1` skips them, `ONLY_STREAM=1` runs only them.
 
+The subscription-query steps (P4c, ADR 0017) come last: step 20a waits until both hubs' `/api/v1/types` list
+`examples.WatchCounter` as `shared` with the owners `service-b` and `service-c` and records how many subscriptions each owner
+serves (`GET /subscribe/open`, which scatter-gathers `examples.OpenSubscriptions`); step 20 opens
+`GET /subscribe/counter?name=<unique>&updates=4&timeoutMs=10000` in the background, waits until both owners hold the
+subscription, bumps the counter twice through service-b (`POST $B/counters/<name>/increment`, `B` = `http://localhost:8092`) and
+twice through service-c (`POST /counters/<name>/increment` on service-a) and expects the initial result (value 0) and four
+updates, `1,2` from each service in order; step 20b checks that no subscription is left behind once the request returned,
+**black-box** (the hub has no metrics endpoint): both owners' open-subscription counts are back to what they were before
+step 20, both hubs' `/topology` in-flight counts are 0, and a follow-up subscription (initial value 2 from either owner)
+is cancelled and leaves the counts at the baseline again; step 20c subscribes to a name nobody incremented and expects the
+initial result with value 0. `SKIP_SUBSCRIBE=1` skips them, `ONLY_SUBSCRIBE=1` runs only them.
+
 To keep the flow-control demo running by hand:
 
 ```bash
@@ -194,6 +226,8 @@ SKIP_SCATTER=1 bash examples/smoke.sh # without the scatter-gather steps
 ONLY_SCATTER=1 bash examples/smoke.sh # only the scatter-gather steps (needs jq or python3)
 SKIP_STREAM=1 bash examples/smoke.sh  # without the streaming-query steps
 ONLY_STREAM=1 bash examples/smoke.sh  # only the streaming-query steps (needs jq or python3)
+SKIP_SUBSCRIBE=1 bash examples/smoke.sh # without the subscription-query steps
+ONLY_SUBSCRIBE=1 bash examples/smoke.sh # only the subscription-query steps (needs jq or python3)
 ```
 
 ## Experiments
@@ -206,7 +240,7 @@ ONLY_STREAM=1 bash examples/smoke.sh  # only the streaming-query steps (needs jq
 - **Hub restart.** `docker compose ... restart hub`; the apps reconnect and re-register on their own, and meanwhile
   every call goes through `hub-2`. Only a call in flight on the stopped hub can fail (502,
   `HubConnectionLostException`). Stop both hubs to see the single-hub behaviour: 502 until a hub is back.
-- **Counts are in memory.** Restarting service-b resets `count` to 0; the events service-a already received stay in
+- **Counts are in memory.** Restarting service-b resets `count` to 0 (and its `WatchCounter` counters); the events service-a already received stay in
   its own memory until it restarts.
 - **Run one side from the IDE.** `./gradlew :examples:service-a:bootRun` (or `service-b`) works against the compose
   infrastructure: the defaults in `application.yaml` point at the published host ports (hub `localhost:7002`,
@@ -221,9 +255,10 @@ ONLY_STREAM=1 bash examples/smoke.sh  # only the streaming-query steps (needs jq
 | no handler registered for the type | 503 | `{"error":"NoHandlerException","message":"..."}` |
 | owner disconnected mid-request | 503 | `{"error":"HandlerDisconnectedException", ...}` |
 | no reply within the request timeout | 504 | `{"error":"MessageTimeoutException", ...}` |
-| the hub does not offer scatter-gather or streaming (a P3 / P4a or older hub) | 501 | `{"error":"UnsupportedByHubException", ...}` |
+| the hub does not offer scatter-gather, streaming or subscriptions (a P3 / P4a / P4b or older hub) | 501 | `{"error":"UnsupportedByHubException", ...}` |
 | the handler's flow failed (`/stream/rows?failAt=n`) | 502 | `{"error":"RemoteHandlerException","message":"...Rows failed at row n"}` (the rows before it are not reported) |
-| the hub ended a stream for outliving `KRAKEN_HUB_MAX_STREAM_DURATION` | 502 | `{"error":"StreamCancelledException", ...}` |
+| the hub ended a stream or a subscription for outliving its maximum duration | 502 | `{"error":"StreamCancelledException", ...}` |
+| an owner at its subscription limit, or the subscriber's buffer overflowed | 503 | `{"error":"HandlerBusyException", ...}` |
 | any other messaging failure | 502 | `{"error":"<exception>", ...}` |
 | blank `name` | 400 | RFC 9457 problem detail: `{"type":"about:blank","title":"Bad Request","status":400,"detail":"name must not be blank",...}` |
 
