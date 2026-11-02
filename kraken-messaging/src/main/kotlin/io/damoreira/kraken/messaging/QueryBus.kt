@@ -2,6 +2,7 @@ package io.damoreira.kraken.messaging
 
 import io.damoreira.kraken.messaging.api.Query
 import io.damoreira.kraken.messaging.api.StreamingQuery
+import io.damoreira.kraken.messaging.api.SubscriptionQuery
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.runBlocking
@@ -63,4 +64,26 @@ interface QueryBus {
      */
     fun <R> stream(query: StreamingQuery<R>, options: StreamOptions = StreamOptions()): Flow<R> =
         throw UnsupportedOperationException("${this::class.simpleName} does not support streaming queries")
+
+    /**
+     * Subscription query (P4c, ADR 0017): returns once the initial result [I] arrived, with the [U] updates the handlers
+     * push afterwards as [SubscriptionResult.updates]. One handler instance answers the initial result (a point query's
+     * choice among the instances that negotiated `subscription`); **every** such instance of every owner is a target for
+     * updates, as they are when the subscription opens: an instance that registers later is never added and a target that
+     * leaves is not replaced (updates are delivered at most once; resubscribe to hear every instance again). Always goes
+     * through the hub, also when this instance owns the type.
+     *
+     * Retry (the configured policy or [SubscriptionOptions.retry]) applies with the query rules only until the initial
+     * result; the caller's bearer token and trace context are read when this is called.
+     *
+     * @throws UnsupportedByHubException when no live hub offers `subscription` (nothing is sent)
+     * @throws NoHandlerException when nobody owns the type
+     * @throws RemoteHandlerException when the initial request failed (`HANDLER_ERROR`) or a handler's emitter did
+     * @throws MessageTimeoutException when the initial result did not arrive within [SubscriptionOptions.timeout]
+     * @throws HandlerDisconnectedException when the handler instances left (`HANDLER_DISCONNECTED`)
+     * @throws HandlerBusyException when an instance's subscription limit or the hub queue is full (`RESOURCE_EXHAUSTED`)
+     * @throws HubConnectionLostException when the stream to the hub breaks before the initial result (outcome unknown)
+     */
+    suspend fun <I, U> subscribe(query: SubscriptionQuery<I, U>, options: SubscriptionOptions = SubscriptionOptions()): SubscriptionResult<I, U> =
+        throw UnsupportedOperationException("${this::class.simpleName} does not support subscription queries")
 }

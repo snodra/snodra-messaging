@@ -59,6 +59,7 @@ import io.damoreira.kraken.messaging.RetryPolicy
 import io.damoreira.kraken.messaging.ScatterOptions
 import io.damoreira.kraken.messaging.StreamCancelledException
 import io.damoreira.kraken.messaging.StreamOptions
+import io.damoreira.kraken.messaging.SubscriptionOptions
 import io.damoreira.kraken.messaging.UnauthenticatedException
 import io.damoreira.kraken.messaging.UnsupportedByHubException
 import io.damoreira.kraken.messaging.fixtures.ExportRows
@@ -69,6 +70,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.flow.toList
@@ -403,6 +405,433 @@ class SubscriptionQueryTest {
         awaitUntil { hub.openSubscriptions() == 0 }
         delay(300)
         assertEquals(0, x.subscriptions.size)
+    }
+
+    // --- the sender side ---
+
+    private fun bus(transport: HubTransport, retry: RetryPolicy? = null, requestTimeout: Duration? = null) =
+        HubBus(transport, registry, invoker, codec, resolver, true, TraceHeaders(null, null), requestTimeout, emptyMap(), retry)
+
+    private suspend fun caller(hubName: String = hub.name, retry: RetryPolicy? = null): HubBus {
+        val conn = HubConnection(
+            channelFactory = { InProcessChannelBuilder.forName(hubName).build() },
+            serviceName = "svc-caller",
+            instanceId = "caller-" + UUID.randomUUID().toString().take(6),
+            settings = settings,
+            inbound = { req -> error(req.id, ErrorCode.HANDLER_ERROR, "unexpected") },
+            scope = scope,
+        ).also { connections += it }
+        conn.start()
+        assertTrue(conn.awaitRegistered(wait))
+        return bus(conn, retry)
+    }
+
+    private fun callerId() = connections.first { it.instanceId.startsWith("caller-") }.instanceId
+
+    private suspend fun multiCaller(vararg hubNames: String): HubConnections {
+        val conns = HubConnections(
+            targets = HubTargets.Static(hubNames.toList()),
+            channelFactory = { target -> InProcessChannelBuilder.forName(target).build() },
+            serviceName = "svc-caller",
+            instanceId = "caller",
+            settings = settings,
+            inbound = { req -> error(req.id, ErrorCode.HANDLER_ERROR, "unexpected") },
+            scope = scope,
+        ).also { multi += it }
+        conns.start()
+        assertTrue(conns.awaitRegistered(wait))
+        awaitUntil { conns.liveHubIds().size == hubNames.size }
+        return conns
+    }
+
+    private fun changed(update: BalanceChanged) = update.value
+
+    @Test fun `subscribe returns the initial result, then the updates of both owners in order, and completes when both complete`() = runBlocking {
+        val x = owner("svc-x", "x-1", SharedAccountWatcher(base = 100))
+        val y = owner("svc-y", "y-1", SharedAccountWatcher(base = 200))
+        val result = withTimeout(5_000) { caller().subscribe(WatchAccount(7)) }
+        assertTrue(result.initial == Balance(107) || result.initial == Balance(207), result.initial.toString()) // one of the owners answered
+        awaitUntil { x.subscriptions.size == 1 && y.subscriptions.size == 1 } // every capable instance is a target
+        val seen = CopyOnWriteArrayList<Int>()
+        val collecting = async { result.updates.collect { seen += it.value } }
+        x.emitter.emit(WatchAccount::class, { true }, BalanceChanged(7, 1))
+        awaitUntil { seen.size == 1 }
+        y.emitter.emit(WatchAccount::class, { true }, BalanceChanged(7, 2))
+        awaitUntil { seen.size == 2 }
+        x.emitter.emit(WatchAccount::class, { true }, BalanceChanged(7, 3))
+        awaitUntil { seen.size == 3 }
+        assertEquals(listOf(1, 2, 3), seen.toList())
+        x.emitter.complete(WatchAccount::class) { true }
+        delay(150)
+        assertFalse(collecting.isCompleted) // y still serves
+        y.emitter.complete(WatchAccount::class) { true }
+        withTimeout(5_000) { collecting.await() }
+        assertEquals(0, hub.openSubscriptions())
+    }
+
+    @Test fun `every instance of an exclusive owner is a target`() = runBlocking {
+        val x1 = owner("svc-x", "x-1", AccountWatcher())
+        val x2 = owner("svc-x", "x-2", AccountWatcher())
+        val result = caller().subscribe(WatchAccount(7))
+        assertEquals(Balance(107), result.initial)
+        awaitUntil { x1.subscriptions.size == 1 && x2.subscriptions.size == 1 }
+        val update = async { result.updates.take(1).toList() }
+        x2.emitter.emit(WatchAccount::class, { true }, BalanceChanged(7, 5)) // only the second instance learns of the change
+        assertEquals(listOf(BalanceChanged(7, 5)), withTimeout(5_000) { update.await() })
+    }
+
+    @Test fun `SubscriptionOptions become the request fields`() = runBlocking {
+        owner("svc-x", "x-1", AccountWatcher())
+        val bus = caller()
+        bus.subscribe(WatchAccount(7), SubscriptionOptions(timeout = Duration.ofMillis(1_234), maxResults = 5, priority = 7, initialCredit = 3)).cancel()
+        val sent = hub.lastRequest()!!
+        assertEquals(RequestMode.SUBSCRIPTION, sent.mode)
+        assertEquals(RequestKind.QUERY, sent.kind)
+        assertEquals("test.WatchAccount", sent.type)
+        assertEquals(1_234, sent.timeoutMs)
+        assertEquals(5, sent.maxResults)
+        assertEquals(7, sent.priority)
+        assertEquals(3, sent.initialCredit)
+        assertEquals("", sent.routingKey)
+        assertEquals("{\"account\":7}", sent.payload.toStringUtf8())
+
+        bus.subscribe(WatchAccount(7)).cancel()
+        val defaults = hub.lastRequest()!!
+        assertEquals(listOf(0, 0, 0, 64), listOf(defaults.timeoutMs, defaults.maxResults, defaults.priority, defaults.initialCredit))
+        assertFailsWith<IllegalArgumentException> { SubscriptionOptions(initialCredit = 0) }
+        assertFailsWith<IllegalArgumentException> { SubscriptionOptions(maxResults = -1) }
+        Unit
+    }
+
+    @Test fun `a slow collector holds the hub's updates at the window and the refill, counting the initial part, lets them go on`() = runBlocking {
+        val x = owner("svc-x", "x-1", AccountWatcher())
+        val result = caller().subscribe(WatchAccount(7), SubscriptionOptions(initialCredit = 4))
+        awaitUntil { x.subscriptions.size == 1 }
+        val gate = CompletableDeferred<Unit>()
+        val seen = CopyOnWriteArrayList<Int>()
+        val collecting = async {
+            result.updates.take(10).collect { update ->
+                if (update.value == 1) gate.await() // the first update is held: only the initial part was consumed
+                seen += update.value
+            }
+        }
+        repeat(10) { n -> x.emitter.emit(WatchAccount::class, { true }, BalanceChanged(7, n + 1)) }
+        // Window 4: the initial part took one credit, three updates were relayed, the other seven wait at the hub.
+        awaitUntil { hub.bufferedUpdatesOf(hub.lastRequest()!!.id) == 7 }
+        delay(200)
+        assertEquals(emptyList(), seen.toList())
+        assertEquals(emptyList(), hub.flowsFrom(callerId()))
+        gate.complete(Unit)
+        withTimeout(5_000) { collecting.await() }
+        assertEquals((1..10).toList(), seen.toList())
+        // One Flow{2} per two parts consumed (the initial part counts: it took a credit), none for a part never consumed.
+        assertTrue(hub.flowsFrom(callerId()).all { it == 2 }, hub.flowsFrom(callerId()).toString())
+        assertTrue(hub.flowsFrom(callerId()).size in 4..5, hub.flowsFrom(callerId()).toString())
+    }
+
+    @Test fun `a window of 1 does not deadlock, the initial part is returned at once`() = runBlocking {
+        val x = owner("svc-x", "x-1", AccountWatcher())
+        val result = caller().subscribe(WatchAccount(7), SubscriptionOptions(initialCredit = 1))
+        awaitUntil { x.subscriptions.size == 1 }
+        val update = async { result.updates.take(3).toList() }
+        repeat(3) { n -> x.emitter.emit(WatchAccount::class, { true }, BalanceChanged(7, n + 1)) }
+        assertEquals(listOf(1, 2, 3), withTimeout(5_000) { update.await() }.map { it.value })
+    }
+
+    @Test fun `a subscriber that falls more than the hub's buffer behind loses the subscription with HandlerBusyException`() = runBlocking {
+        hub.subscriptionBuffer = 2
+        val x = owner("svc-x", "x-1", AccountWatcher())
+        val result = caller().subscribe(WatchAccount(7), SubscriptionOptions(initialCredit = 2))
+        awaitUntil { x.subscriptions.size == 1 }
+        // Nobody collects: credit 2, the initial part took one, one update is relayed, two are buffered, the next ends it.
+        repeat(6) { n -> x.emitter.emit(WatchAccount::class, { true }, BalanceChanged(7, n + 1)) }
+        awaitUntil { hub.openSubscriptions() == 0 }
+        val seen = mutableListOf<Int>()
+        val e = assertFailsWith<HandlerBusyException> { result.updates.collect { seen += it.value } }
+        assertEquals("test.WatchAccount", e.type)
+        assertTrue(e.message!!.contains("subscriber buffer (2) exceeded"), e.message)
+        assertEquals(listOf(1), seen) // what was relayed before stays delivered, the buffered updates were dropped
+        awaitUntil { x.subscriptions.size == 0 } // the hub cancelled the target
+    }
+
+    @Test fun `maxResults counts updates, ends the subscription cleanly and cancels the targets`() = runBlocking {
+        val x = owner("svc-x", "x-1", AccountWatcher())
+        val result = caller().subscribe(WatchAccount(7), SubscriptionOptions(maxResults = 3))
+        awaitUntil { x.subscriptions.size == 1 }
+        val updates = async { result.updates.toList() }
+        repeat(10) { n -> x.emitter.emit(WatchAccount::class, { true }, BalanceChanged(7, n + 1)) }
+        assertEquals(listOf(1, 2, 3), withTimeout(5_000) { updates.await() }.map { it.value })
+        awaitUntil { x.subscriptions.size == 0 }
+        assertEquals(0, hub.openSubscriptions())
+    }
+
+    @Test fun `cancelling the collector sends Cancel once and the owner drops the subscription`() = runBlocking {
+        val x = owner("svc-x", "x-1", AccountWatcher())
+        val result = caller().subscribe(WatchAccount(7))
+        awaitUntil { x.subscriptions.size == 1 }
+        val update = async { result.updates.take(1).toList() }
+        x.emitter.emit(WatchAccount::class, { true }, BalanceChanged(7, 1))
+        assertEquals(1, withTimeout(5_000) { update.await() }.single().value)
+        awaitUntil { hub.cancelsFrom(callerId()).size == 1 }
+        assertEquals("collector cancelled", hub.cancelsFrom(callerId()).single().reason)
+        awaitUntil { x.subscriptions.size == 0 }
+        assertEquals(0, hub.openSubscriptions())
+        delay(200)
+        assertEquals(1, hub.cancelsFrom(callerId()).size)
+    }
+
+    @Test fun `an exception in the collector sends Cancel and reaches the caller unchanged`() = runBlocking {
+        val x = owner("svc-x", "x-1", AccountWatcher())
+        val result = caller().subscribe(WatchAccount(7))
+        awaitUntil { x.subscriptions.size == 1 }
+        val failing = async { runCatching { result.updates.collect { throw IllegalStateException("stop") } } }
+        x.emitter.emit(WatchAccount::class, { true }, BalanceChanged(7, 1))
+        assertEquals("stop", assertIs<IllegalStateException>(withTimeout(5_000) { failing.await() }.exceptionOrNull()).message)
+        awaitUntil { hub.cancelsFrom(callerId()).size == 1 }
+        assertTrue(hub.cancelsFrom(callerId()).single().reason.contains("stop"), hub.cancelsFrom(callerId()).toString())
+        awaitUntil { x.subscriptions.size == 0 }
+    }
+
+    @Test fun `cancel completes the updates, sends Cancel once and the owner drops the subscription`() = runBlocking {
+        val x = owner("svc-x", "x-1", AccountWatcher())
+        val result = caller().subscribe(WatchAccount(7))
+        awaitUntil { x.subscriptions.size == 1 }
+        val seen = CopyOnWriteArrayList<Int>()
+        val collecting = async { result.updates.collect { seen += it.value } }
+        x.emitter.emit(WatchAccount::class, { true }, BalanceChanged(7, 1))
+        awaitUntil { seen.size == 1 }
+        result.cancel()
+        result.cancel() // idempotent
+        withTimeout(5_000) { collecting.await() } // completes normally
+        awaitUntil { x.subscriptions.size == 0 }
+        assertEquals(listOf("subscriber cancelled"), hub.cancelsFrom(callerId()).map { it.reason })
+        // Cancelled before any collection: the flow is empty.
+        val second = caller().subscribe(WatchAccount(8))
+        second.cancel()
+        assertEquals(emptyList(), second.updates.toList())
+    }
+
+    @Test fun `the owner losing its hub stream is HandlerDisconnectedException, the subscriber losing it HubConnectionLostException`() = runBlocking {
+        val x = owner("svc-x", "x-1", AccountWatcher())
+        val first = caller().subscribe(WatchAccount(7))
+        awaitUntil { x.subscriptions.size == 1 }
+        val owned = async { runCatching { first.updates.toList() } }
+        hub.dropInstance("x-1")
+        val e = assertIs<HandlerDisconnectedException>(withTimeout(5_000) { owned.await() }.exceptionOrNull())
+        assertEquals("test.WatchAccount", e.type)
+
+        // A new stream (connected may still be the stale true of the old one), acknowledged, before the next subscribe.
+        awaitUntil { hub.streamsOpenedBy("x-1") >= 2 }
+        assertTrue(x.connection.awaitRegistered(wait))
+        awaitUntil { x.subscriptions.size == 0 && hub.openSubscriptions() == 0 }
+        val bus = caller()
+        val second = bus.subscribe(WatchAccount(7))
+        awaitUntil { x.subscriptions.size == 1 }
+        val lost = async { runCatching { second.updates.toList() } }
+        hub.dropInstance(connections.last { it.instanceId.startsWith("caller-") }.instanceId)
+        assertIs<HubConnectionLostException>(withTimeout(5_000) { lost.await() }.exceptionOrNull())
+        awaitUntil { x.subscriptions.size == 0 } // the hub cancelled the target: "sender disconnected"
+    }
+
+    @Test fun `the owner's subscription limit ends the subscription with HandlerBusyException`() = runBlocking {
+        val x = owner("svc-x", "x-1", AccountWatcher(), maxSubscriptions = 1)
+        val bus = caller()
+        val first = bus.subscribe(WatchAccount(1))
+        awaitUntil { x.subscriptions.size == 1 }
+        // The refusal is the target's ReplyEnd; the hub relays it, before or after the initial part.
+        val outcome = runCatching { bus.subscribe(WatchAccount(2)).updates.first() }
+        val e = assertIs<HandlerBusyException>(outcome.exceptionOrNull(), outcome.toString())
+        assertTrue(e.message!!.contains("subscription limit (1) reached"), e.message)
+        assertEquals(1, x.subscriptions.size)
+        val update = async { first.updates.take(1).toList() }
+        x.emitter.emit(WatchAccount::class, { true }, BalanceChanged(1, 1))
+        assertEquals(1, withTimeout(5_000) { update.await() }.single().value)
+    }
+
+    @Test fun `a hub without subscription is UnsupportedByHub and nothing is sent, unary, gathers and streams keep working`() = runBlocking {
+        hub.subscription = false
+        owner("svc-x", "x-1", AccountWatcher(), OwnCountHandlers(7), RowsStreamerForSubscriptions())
+        val bus = caller()
+        val e = assertFailsWith<UnsupportedByHubException> { bus.subscribe(WatchAccount(7)) }
+        assertEquals("subscription", e.feature)
+        assertEquals(0, hub.requestsFrom(callerId()))
+        assertEquals(Count(7), bus.send(GetCount("k")))
+        assertEquals(listOf(Count(7)), bus.scatterGather(GetCount("k")).results)
+        assertEquals(listOf(Row(1), Row(2)), bus.stream(ExportRows(2)).toList())
+
+        hub.legacy = true
+        val legacyConn = HubConnection({ InProcessChannelBuilder.forName(hub.name).build() }, "svc-l", "legacy", settings, { req -> error(req.id, ErrorCode.HANDLER_ERROR, "x") }, scope)
+            .also { connections += it }
+        legacyConn.start()
+        assertTrue(legacyConn.awaitRegistered(wait))
+        assertFailsWith<UnsupportedByHubException> { bus(legacyConn).subscribe(WatchAccount(7)) }
+        assertEquals(0, hub.requestsFrom("legacy"))
+    }
+
+    @Test fun `a subscription goes to one hub, and only to hubs with the capability`() = runBlocking {
+        val old = hub { subscription = false }
+        owner("svc-x", "x-new", AccountWatcher(), hubName = hub.name)
+        owner("svc-x", "x-old", AccountWatcher(), hubName = old.name)
+        val bus = bus(multiCaller(hub.name, old.name))
+        repeat(4) { assertEquals(Balance(107), bus.subscribe(WatchAccount(7)).also { it.cancel() }.initial) }
+        assertEquals(4, hub.requestsFrom("caller"))
+        assertEquals(0, old.requestsFrom("caller"))
+
+        hub.close() // only the hub without the capability is left
+        awaitUntil { multi.single().liveHubIds() == listOf(old.hubId) }
+        val e = assertFailsWith<UnsupportedByHubException> { bus.subscribe(WatchAccount(7)) }
+        assertEquals("subscription", e.feature)
+        assertEquals(0, old.requestsFrom("caller"))
+    }
+
+    @Test fun `errors before the initial result map as for a unary query`() = runBlocking {
+        val bus = caller()
+        assertEquals("test.WatchAccount", assertFailsWith<NoHandlerException> { bus.subscribe(WatchAccount(1)) }.type)
+        // The initial request never answering: TIMEOUT from the hub, the targets cancelled.
+        val x = owner("svc-x", "x-1", HangingWatcher())
+        assertEquals("test.WatchAccount", assertFailsWith<MessageTimeoutException> { bus.subscribe(WatchAccount(1), SubscriptionOptions(timeout = Duration.ofMillis(400))) }.type)
+        awaitUntil { x.subscriptions.size == 0 }
+        assertEquals(0, hub.openSubscriptions())
+    }
+
+    @Test fun `a ReplyEnd with an error maps like a unary Error with the same code`() = runBlocking {
+        val x = owner("svc-x", "x-1", AccountWatcher())
+        val bus = caller()
+        val expectations = listOf<Pair<ErrorCode, (Throwable) -> Unit>>(
+            ErrorCode.NO_HANDLER to { assertEquals("test.WatchAccount", assertIs<NoHandlerException>(it).type) },
+            ErrorCode.TIMEOUT to { assertEquals("test.WatchAccount", assertIs<MessageTimeoutException>(it).type) },
+            ErrorCode.HANDLER_DISCONNECTED to { assertEquals("test.WatchAccount", assertIs<HandlerDisconnectedException>(it).type) },
+            ErrorCode.HANDLER_ERROR to { assertEquals("HANDLER_ERROR" to "HANDLER_ERROR says", assertIs<RemoteHandlerException>(it).let { e -> e.code to e.message }) },
+            ErrorCode.UNAUTHENTICATED to { assertEquals("UNAUTHENTICATED says", assertIs<UnauthenticatedException>(it).message) },
+            ErrorCode.INVALID_REQUEST to { assertEquals("INVALID_REQUEST says", assertIs<InvalidMessageException>(it).message) },
+            ErrorCode.PERMISSION_DENIED to { assertEquals("PERMISSION_DENIED says", assertIs<AccessDeniedException>(it).message) },
+            ErrorCode.RESOURCE_EXHAUSTED to { assertTrue(assertIs<HandlerBusyException>(it).message!!.contains("RESOURCE_EXHAUSTED says"), it.message) },
+            ErrorCode.CANCELLED to { assertEquals("CANCELLED says", assertIs<StreamCancelledException>(it).message) },
+            ErrorCode.UNSUPPORTED to { assertEquals("subscription", assertIs<UnsupportedByHubException>(it).feature) },
+        )
+        for ((code, check) in expectations) {
+            val result = bus.subscribe(WatchAccount(1))
+            awaitUntil { x.subscriptions.size == 1 }
+            val id = hub.lastRequest()!!.id
+            val collecting = async { runCatching { result.updates.toList() } }
+            val error = Error.newBuilder().setRequestId(id).setCode(code).setMessage("$code says")
+            hub.inject(callerId(), ServerMessage.newBuilder().setEnd(ReplyEnd.newBuilder().setRequestId(id).setParts(1).setError(error)).build())
+            check(assertNotNull(withTimeout(5_000) { collecting.await() }.exceptionOrNull(), "$code should fail the updates"))
+            // The end was injected: the hub still has the subscription open, and the library rightly sends no Cancel after a terminal message.
+            x.emitter.complete(WatchAccount::class) { true }
+            awaitUntil { x.subscriptions.size == 0 && hub.openSubscriptions() == 0 }
+        }
+    }
+
+    @Test fun `the max subscription duration is a StreamCancelledException`() = runBlocking {
+        hub.maxSubscriptionDuration = Duration.ofMillis(500)
+        val x = owner("svc-x", "x-1", AccountWatcher())
+        val result = caller().subscribe(WatchAccount(7))
+        val e = assertFailsWith<StreamCancelledException> { result.updates.toList() }
+        assertTrue(e.message!!.startsWith("max subscription duration"), e.message)
+        awaitUntil { x.subscriptions.size == 0 }
+    }
+
+    @Test fun `the subscription is retried before its initial result, never after`() = runBlocking {
+        val retry = RetryPolicy(maxAttempts = 3, initialBackoff = Duration.ofMillis(300), maxBackoff = Duration.ofMillis(300))
+        val bus = caller(retry = retry)
+        // NO_HANDLER is retried, and the owner that appeared during the backoff answers the second attempt.
+        val early = async { bus.subscribe(WatchAccount(7), SubscriptionOptions(timeout = Duration.ofSeconds(4))) }
+        delay(100)
+        val x = owner("svc-x", "x-1", AccountWatcher())
+        val result = withTimeout(5_000) { early.await() }
+        assertEquals(Balance(107), result.initial)
+        assertEquals(2, hub.requestsFrom(callerId()))
+
+        // After the initial part nothing is retried: the lost hub stream ends the updates.
+        awaitUntil { x.subscriptions.size == 1 }
+        val late = async { runCatching { result.updates.toList() } }
+        hub.dropInstance(callerId())
+        assertIs<HubConnectionLostException>(withTimeout(3_000) { late.await() }.exceptionOrNull())
+        delay(700) // longer than the backoff: a retry would have sent another request
+        assertEquals(2, hub.requestsFrom(callerId()))
+    }
+
+    @Test fun `a retryable ReplyEnd error before the initial result is retried with a fresh id`() = runBlocking {
+        val retry = RetryPolicy(maxAttempts = 3, initialBackoff = Duration.ofMillis(200), maxBackoff = Duration.ofMillis(200))
+        val bus = caller(retry = retry)
+        val hanging = owner("svc-x", "x-1", HangingWatcher())
+        val subscribing = async { bus.subscribe(WatchAccount(7), SubscriptionOptions(timeout = Duration.ofSeconds(4))) }
+        awaitUntil { hub.openSubscriptions() == 1 } // pinned to x-1, whose initial request never answers
+        val first = hub.lastRequest()!!
+        owner("svc-y", "y-1", SharedAccountWatcher()) // not a target of the first subscription: it registered after the open
+        hanging.connection.stop() // the last target left: HANDLER_DISCONNECTED before any part
+        connections.remove(hanging.connection)
+        val result = withTimeout(6_000) { subscribing.await() }
+        assertEquals(Balance(107), result.initial)
+        assertEquals(2, hub.requestsFrom(callerId())) // one retry, a new request
+        assertTrue(hub.lastRequest()!!.id != first.id)
+        result.cancel()
+    }
+
+    @Test fun `an update that does not decode fails the updates and cancels, an initial that does not decode is InvalidMessageException`() = runBlocking {
+        // An owner whose initial answer has the wrong shape: raw handler on the wire.
+        val raw = HubConnection(
+            channelFactory = { InProcessChannelBuilder.forName(hub.name).build() },
+            serviceName = "svc-raw", instanceId = "raw-1", settings = settings,
+            inbound = { req -> Reply.newBuilder().setRequestId(req.id).setPayload(json("{\"value\":\"not a number\"}")).build() },
+            scope = scope,
+            subscriptions = SubscriptionRegistry(),
+            inboundSubscription = { _, register -> register(Any()) },
+        ).also { connections += it }
+        raw.register(emptySet(), setOf("test.WatchAccount"))
+        raw.start()
+        assertTrue(raw.awaitRegistered(wait))
+        val bus = caller()
+        val e = assertFailsWith<InvalidMessageException> { bus.subscribe(WatchAccount(1)) }
+        assertTrue(e.message!!.contains("test.WatchAccount"), e.message)
+        awaitUntil { hub.openSubscriptions() == 0 } // the half-open subscription was cancelled
+        assertEquals(1, hub.cancelsFrom(callerId()).size)
+    }
+
+    @Test fun `a gap in the parts' seq fails the updates as lost parts and cancels the subscription`() = runBlocking {
+        hub.dropParts = setOf(3L) // the hub dropped update 2 (a full sender buffer): part 4 follows part 2
+        val x = owner("svc-x", "x-1", AccountWatcher())
+        val result = caller().subscribe(WatchAccount(7))
+        awaitUntil { x.subscriptions.size == 1 }
+        repeat(3) { n -> x.emitter.emit(WatchAccount::class, { true }, BalanceChanged(7, n + 1)) }
+        val seen = mutableListOf<Int>()
+        val e = assertFailsWith<InvalidMessageException> { result.updates.collect { seen += it.value } }
+        assertEquals("subscription test.WatchAccount lost 1 part(s)", e.message)
+        assertEquals(listOf(1), seen)
+        awaitUntil { hub.cancelsFrom(callerId()).size == 1 }
+        assertTrue(hub.cancelsFrom(callerId()).single().reason.contains("lost"), hub.cancelsFrom(callerId()).toString())
+        awaitUntil { x.subscriptions.size == 0 }
+    }
+
+    @Test fun `an end whose parts count exceeds the parts received fails the updates as lost parts`() = runBlocking {
+        hub.dropParts = setOf(3L) // the last part was dropped: only the end's count can tell
+        val x = owner("svc-x", "x-1", AccountWatcher())
+        val result = caller().subscribe(WatchAccount(7))
+        awaitUntil { x.subscriptions.size == 1 }
+        repeat(2) { n -> x.emitter.emit(WatchAccount::class, { true }, BalanceChanged(7, n + 1)) }
+        x.emitter.complete(WatchAccount::class) { true }
+        val seen = mutableListOf<Int>()
+        val e = assertFailsWith<InvalidMessageException> { result.updates.collect { seen += it.value } }
+        assertEquals("subscription test.WatchAccount lost 1 part(s)", e.message)
+        assertEquals(listOf(1), seen)
+        assertEquals(0, hub.openSubscriptions())
+        delay(200)
+        assertEquals(emptyList(), hub.cancelsFrom(callerId())) // the subscription had ended: nothing to cancel
+    }
+
+    @Test fun `the bearer token is read when subscribe is called, not when the updates are collected`() = runBlocking {
+        val x = owner("svc-x", "x-1", AccountWatcher())
+        val bus = caller()
+        val token = TestJwt.token("user-42", listOf("member"))
+        SecurityContextHolder.getContext().authentication = JwtAuthenticationToken(TestJwt.decoder().decode(token))
+        val result = bus.subscribe(WatchAccount(7))
+        SecurityContextHolder.clearContext()
+        assertEquals("Bearer $token", assertNotNull(hub.lastRequestHeaders())["authorization"])
+        awaitUntil { x.subscriptions.size == 1 }
+        val update = async(Dispatchers.IO) { result.updates.take(1).toList() }
+        x.emitter.emit(WatchAccount::class, { true }, BalanceChanged(7, 1))
+        assertEquals(1, withTimeout(5_000) { update.await() }.single().value)
     }
 
     // --- helpers ---

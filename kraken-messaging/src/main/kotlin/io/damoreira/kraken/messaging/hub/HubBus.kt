@@ -18,9 +18,12 @@ import io.damoreira.kraken.messaging.ScatterPart
 import io.damoreira.kraken.messaging.ScatterResult
 import io.damoreira.kraken.messaging.SendOptions
 import io.damoreira.kraken.messaging.StreamOptions
+import io.damoreira.kraken.messaging.SubscriptionOptions
+import io.damoreira.kraken.messaging.SubscriptionResult
 import io.damoreira.kraken.messaging.api.Command
 import io.damoreira.kraken.messaging.api.Query
 import io.damoreira.kraken.messaging.api.StreamingQuery
+import io.damoreira.kraken.messaging.api.SubscriptionQuery
 import io.damoreira.kraken.messaging.codec.JsonCodec
 import io.damoreira.kraken.messaging.codec.MessageTypeResolver
 import io.damoreira.kraken.messaging.codec.ResponseTypes
@@ -31,6 +34,7 @@ import io.damoreira.kraken.messaging.security.CallerContext
 import io.damoreira.kraken.messaging.security.LocalIdentity
 import io.damoreira.kraken.messaging.tracing.TraceHeaders
 import io.damoreira.kraken.messaging.tracing.CorrelationContext
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -39,6 +43,7 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.withContext
 import java.time.Duration
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.reflect.KClass
 
 /**
@@ -83,6 +88,18 @@ import kotlin.reflect.KClass
  * errors (a retried stream is a new request); after the first part nothing is retried: the flow throws, a broken hub
  * stream as [io.damoreira.kraken.messaging.HubConnectionLostException]. The caller's bearer token and trace context
  * are read when [stream] is called, as for [scatterGatherFlow].
+ *
+ * Subscription queries ([subscribe], P4c, ADR 0017) always go through the hub, to one live hub that lists `subscription`.
+ * [subscribe] returns once the initial result arrived (decoded as the query's `I`); `timeout_ms` bounds only that
+ * request, so the call retries like a unary query (the retry budget, the remaining time per attempt) and never after the
+ * initial result. A `ReplyEnd` with an error, or an `Error`, before the initial result fails the call exactly like a unary
+ * `Error` with the same code (`HubErrors` with feature `subscription`: `RESOURCE_EXHAUSTED` keeps the hub's own message as
+ * [io.damoreira.kraken.messaging.HandlerBusyException]'s detail). The updates are a hot, collect-once flow over the
+ * transport's [HubSubscription]: each is decoded as `U`, the credit refills as the collector consumes ([HubSubscription.next]),
+ * `Cancel` goes to the hub when the collector is cancelled or throws (or [SubscriptionResult.cancel] is called), a clean
+ * `ReplyEnd` completes the flow, an `ReplyEnd` with an error (or a broken hub stream) fails it with the unary mapping, and a
+ * part the hub dropped fails it as `InvalidMessageException("subscription <type> lost N part(s)")`. The caller's bearer token
+ * and trace context are read when [subscribe] is called.
  */
 class HubBus(
     private val connection: HubTransport,
@@ -165,6 +182,89 @@ class HubBus(
                 emitted = true
                 emit(part)
             }
+        }
+    }
+
+    override suspend fun <I, U> subscribe(query: SubscriptionQuery<I, U>, options: SubscriptionOptions): SubscriptionResult<I, U> {
+        val caller = callerHeaders() // first, on the caller's thread: nothing has suspended yet
+        val initialType = ResponseTypes.responseTypeOf(query::class)
+        val updateType = ResponseTypes.updateTypeOf(query::class)
+        val template = template(query, RequestKind.QUERY, routingKey = null, options.priority, caller).toBuilder()
+            .setMaxResults(options.maxResults)
+            .setInitialCredit(options.initialCredit)
+            .build()
+        val type = template.type
+        // timeout_ms bounds the initial request only: attempts before the initial result are retried like a unary query.
+        val subscription = withRetry(type, MessageKind.QUERY, options.timeout, options.retry, retryIf = { true }) { timeout ->
+            subscribeOnce(template, timeout)
+        }
+        val initial = try {
+            val part = subscription.initial
+            if (part.hasError()) throw RemoteHandlerException(type, part.error.message, part.error.details.toByteArray(), part.error.code.name)
+            decodeReply(type, query::class, part.payload.toByteArray())
+        } catch (e: Throwable) {
+            subscription.cancel("initial result unusable: ${e::class.simpleName}") // never leave a half-open subscription behind
+            throw e
+        }
+        val collected = AtomicBoolean(false)
+        val updates: Flow<Any> = flow {
+            check(!collected.getAndSet(true)) { "the updates of a subscription to $type can be collected once" }
+            var reason = "collector cancelled"
+            try {
+                while (true) {
+                    val message = subscription.next() ?: return@flow // cancelled by SubscriptionResult.cancel()
+                    when {
+                        message.hasPart() -> emit(decodeUpdate(type, updateType, message.part))
+                        message.hasEnd() && message.end.hasError() -> throw message.end.error.let {
+                            HubErrors.toException(type, it.code, it.message, it.details.toByteArray(), HubProtocol.SUBSCRIPTION)
+                        }
+                        message.hasEnd() -> return@flow
+                        message.hasError() -> throw message.error.let {
+                            HubErrors.toException(type, it.code, it.message, it.details.toByteArray(), HubProtocol.SUBSCRIPTION)
+                        }
+                        else -> throw InvalidMessageException("Unexpected message in subscription $type")
+                    }
+                }
+            } catch (e: Throwable) {
+                // An exception of the collector (or of decoding) ends the subscription; the transport tells the hub.
+                if (e !is CancellationException) reason = "collector failed: ${e::class.simpleName}: ${e.message}"
+                throw e
+            } finally {
+                subscription.cancel(reason) // a no-op when the subscription has ended or was cancelled
+            }
+        }
+        @Suppress("UNCHECKED_CAST")
+        return SubscriptionResult(initial as I, updates as Flow<U>) { subscription.cancel("subscriber cancelled") }
+    }
+
+    /** One subscription built from [template] with a fresh id and [timeout] as `timeout_ms` (the initial request's); returns it open. */
+    private suspend fun subscribeOnce(template: Request, timeout: Duration?): HubSubscription {
+        val type = template.type
+        return when (val opened = connection.subscribe(withFreshId(template, timeout))) {
+            is SubscribeResult.Open -> opened.subscription
+            is SubscribeResult.Closed -> {
+                val terminal = opened.terminal
+                when {
+                    // The failed initial result (or a refused target) ends the subscription: the same failure a unary Error with that code is.
+                    terminal.hasEnd() && terminal.end.hasError() -> throw terminal.end.error.let {
+                        HubErrors.toException(type, it.code, it.message, it.details.toByteArray(), HubProtocol.SUBSCRIPTION)
+                    }
+                    terminal.hasError() -> throw terminal.error.let {
+                        HubErrors.toException(type, it.code, it.message, it.details.toByteArray(), HubProtocol.SUBSCRIPTION)
+                    }
+                    else -> throw InvalidMessageException("Unexpected answer to subscription query $type")
+                }
+            }
+        }
+    }
+
+    private fun decodeUpdate(type: String, updateType: KClass<*>, part: ReplyPart): Any {
+        // The hub relays an error as the end of the subscription, never as a part; one would be a hub that does it differently.
+        if (part.hasError()) throw RemoteHandlerException(type, part.error.message, part.error.details.toByteArray(), part.error.code.name)
+        return try {
+            codec.decode(part.payload.toByteArray(), updateType)
+        } catch (e: InvalidMessageException) {
+            throw InvalidMessageException("Update of $type did not match ${updateType.qualifiedName}", e)
         }
     }
 

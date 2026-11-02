@@ -47,10 +47,12 @@ class HubConnectionLostException(message: String) : MessagingException(message)
 
 /**
  * The handling instance's hub queue or its session buffer is full (hub error code RESOURCE_EXHAUSTED, flow control):
- * the request was rejected before any handler ran. Retrying later is safe.
+ * the request was rejected before any handler ran. Retrying later is safe. For a subscription query [detail] is the hub's
+ * (or the handler instance's) own reason: the subscriber's buffer overflowed, or an instance's subscription limit was
+ * reached.
  */
-class HandlerBusyException(val type: String) :
-    MessagingException("Handler for '$type' is busy: its hub queue or session buffer is full")
+class HandlerBusyException(val type: String, detail: String? = null) :
+    MessagingException("Handler for '$type' is busy: ${detail ?: "its hub queue or session buffer is full"}")
 
 /** Two handlers (`Bean.method` strings) claim the same single-handler message type. */
 class DuplicateHandlerException(val type: String, val existing: String, val duplicate: String) :

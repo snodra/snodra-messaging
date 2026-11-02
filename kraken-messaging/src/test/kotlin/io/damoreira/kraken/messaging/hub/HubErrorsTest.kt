@@ -39,6 +39,16 @@ class HubErrorsTest {
     }
 
     @Test
+    fun `a subscription's resource exhausted keeps the hub's reason, the feature names subscription`() {
+        val e = HubErrors.toException("c.R", ErrorCode.RESOURCE_EXHAUSTED, "subscriber buffer (256) exceeded", ByteArray(0), HubProtocol.SUBSCRIPTION)
+        assertIs<HandlerBusyException>(e)
+        assertEquals("c.R", e.type)
+        assertEquals("Handler for 'c.R' is busy: subscriber buffer (256) exceeded", e.message)
+        val unsupported = HubErrors.toException("c.R", ErrorCode.UNSUPPORTED, "no capable instance", ByteArray(0), HubProtocol.SUBSCRIPTION)
+        assertEquals("subscription", assertIs<UnsupportedByHubException>(unsupported).feature)
+    }
+
+    @Test
     fun `unsupported maps to UnsupportedByHubException, an unmapped code keeps its name`() {
         val e = HubErrors.toException("c.R", ErrorCode.UNSUPPORTED, "mode STREAMING is not supported", ByteArray(0))
         assertIs<UnsupportedByHubException>(e)

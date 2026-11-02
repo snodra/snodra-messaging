@@ -55,6 +55,7 @@ import org.slf4j.LoggerFactory
 import java.time.Duration
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentSkipListMap
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.random.Random
 
@@ -517,6 +518,133 @@ class HubConnection(
                     is StreamCollectorException -> failure.cause!!.let { "collector failed: ${it::class.simpleName}: ${it.message}" }
                     else -> "collector failed: ${failure::class.simpleName}: ${failure.message}"
                 }
+                stream.out.trySend(ClientMessage.newBuilder().setCancel(Cancel.newBuilder().setRequestId(request.id).setReason(reason)).build())
+            }
+        }
+    }
+
+    /**
+     * Sends [request] as a subscription query (`mode = SUBSCRIPTION` is set here; `initial_credit` is the caller's window,
+     * at least 1) and waits for the initial part: returns [SubscribeResult.Open] with the open [HubSubscription], or
+     * [SubscribeResult.Closed] with the terminal message when the hub refused it or the initial result failed (an `Error`,
+     * or a `ReplyEnd` with an error). [Request.getId] must be fresh for every call. The pending entry stays registered
+     * after an open result until the subscription ends or is cancelled; see [HubSubscription].
+     *
+     * The local guard is the unary one: the hub's deadline bound for `timeout_ms` plus [HubProtocol.LOCAL_GUARD_MARGIN]
+     * (`timeout_ms` bounds the initial request, queue wait included); a quiet subscription afterwards is never timed out.
+     *
+     * @throws UnsupportedByHubException if the stream's ack does not list `subscription` (a legacy hub never does); nothing is sent
+     * @throws HubUnavailableException, HubConnectionLostException as [send]
+     * @throws MessageTimeoutException if no part or end arrives within the local guard (a `Cancel` is written)
+     * @throws InvalidMessageException `subscription <type> lost N part(s)` when the first part's `seq` is not 1
+     */
+    override suspend fun subscribe(request: Request): SubscribeResult = subscribe(request, awaitStream = true)
+
+    /** [subscribe]; [awaitStream] as for [send]. */
+    internal suspend fun subscribe(request: Request, awaitStream: Boolean): SubscribeResult {
+        val stream = liveStream(awaitStream)
+        val ack = capableAck(stream, HubProtocol.SUBSCRIPTION)
+        val window = request.initialCredit.takeIf { it > 0 } ?: HubProtocol.DEFAULT_INITIAL_CREDIT
+        val outgoing = request.toBuilder().setMode(RequestMode.SUBSCRIPTION).setInitialCredit(window).build()
+        val guardMs = HubProtocol.localGuardMs(outgoing.timeoutMs, outgoing.type, ack)
+        val entry = Pending.Multi(stream)
+        require(pending.putIfAbsent(request.id, entry) == null) { "request id ${request.id} is already in flight" }
+        var opened = false
+        var terminal: ServerMessage? = null
+        var failure: Throwable? = null
+        try {
+            write(stream, outgoing)
+            val first = withTimeoutOrNull(guardMs) { entry.messages.receive() } ?: throw MessageTimeoutException(request.type)
+            if (!first.hasPart()) {
+                terminal = first
+                return SubscribeResult.Closed(first)
+            }
+            // The initial part is seq 1 (the hub's own numbering): another number is a part the hub dropped.
+            val seq = first.part.seq
+            if (seq != 1L) {
+                throw InvalidMessageException(
+                    if (seq > 1) "subscription ${request.type} lost ${seq - 1} part(s)" else "subscription ${request.type} part seq $seq out of order (expected 1)",
+                )
+            }
+            opened = true
+            return SubscribeResult.Open(OpenSubscription(request, stream, entry, first.part, window))
+        } catch (e: Throwable) {
+            failure = e
+            throw e
+        } finally {
+            if (!opened) {
+                pending.remove(request.id, entry)
+                // The subscription is still open on the hub when it was not the stream to the hub that failed: tell it to stop.
+                if (terminal == null && failure !is HubConnectionLostException && failure !is HubUnavailableException) {
+                    val reason = when (failure) {
+                        null, is CancellationException -> "subscriber cancelled"
+                        is MessageTimeoutException -> "no initial result within the local guard"
+                        else -> "subscriber failed: ${failure::class.simpleName}: ${failure.message}"
+                    }
+                    stream.out.trySend(ClientMessage.newBuilder().setCancel(Cancel.newBuilder().setRequestId(request.id).setReason(reason)).build())
+                }
+            }
+        }
+    }
+
+    /** An open subscription of this instance as a sender: reads the parts of [entry], refills the credit, cancels on request. */
+    private inner class OpenSubscription(
+        private val request: Request,
+        private val stream: Stream,
+        private val entry: Pending.Multi,
+        override val initial: ReplyPart,
+        window: Int,
+    ) : HubSubscription {
+        /** Parts consumed per `Flow{refill}`: half the window, at least 1 (the initial part counts: it took a credit). */
+        private val refill = maxOf(1, window / 2)
+        private var received = 1L // the initial part
+        private var consumed = 0
+        private var handedOver = true // the initial part went to the caller with subscribe(): consumed at the first next()
+        private val cancelled = AtomicBoolean(false)
+
+        override suspend fun next(): ServerMessage? {
+            if (handedOver) { // the part returned last time is consumed now
+                handedOver = false
+                if (++consumed >= refill) {
+                    consumed = 0
+                    stream.out.trySend(ClientMessage.newBuilder().setFlow(Flow.newBuilder().setRequestId(request.id).setCredits(refill)).build())
+                }
+            }
+            val result = entry.messages.receiveCatching()
+            val message = result.getOrNull()
+            if (message == null) {
+                result.exceptionOrNull()?.let { throw it } // the stream broke: HubConnectionLostException
+                return null // cancelled locally (or the terminal message was handed over already)
+            }
+            if (message.hasPart()) {
+                val seq = message.part.seq
+                when {
+                    seq == received + 1 -> received++
+                    seq > received + 1 -> lost("subscription ${request.type} lost ${seq - received - 1} part(s)")
+                    else -> lost("subscription ${request.type} part seq $seq out of order (expected ${received + 1})")
+                }
+                handedOver = true
+                return message
+            }
+            // The end's count against the parts received tells a loss the seq check could not (the last part).
+            if (message.hasEnd()) {
+                val counted = Integer.toUnsignedLong(message.end.parts)
+                if (counted > received) lost("subscription ${request.type} lost ${counted - received} part(s)")
+            }
+            return message
+        }
+
+        private fun lost(text: String): Nothing {
+            cancel(text) // still open on the hub when a part went missing mid-way; a no-op after the end
+            throw InvalidMessageException(text)
+        }
+
+        override fun cancel(reason: String) {
+            if (!cancelled.compareAndSet(false, true)) return
+            // Still registered = not ended and its stream not broken: only then is there anything to cancel.
+            val live = pending.remove(request.id, entry)
+            entry.messages.close()
+            if (live) {
                 stream.out.trySend(ClientMessage.newBuilder().setCancel(Cancel.newBuilder().setRequestId(request.id).setReason(reason)).build())
             }
         }

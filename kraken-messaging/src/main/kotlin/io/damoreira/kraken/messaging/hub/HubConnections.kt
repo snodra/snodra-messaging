@@ -228,7 +228,19 @@ class HubConnections(
         }
 
     /**
-     * The hub choice and failover of [send], [gather] and [stream], restricted to the hubs that are [eligible] for
+     * Sends [request] as a subscription query through one live hub that supports it (see the class comment), with
+     * [HubConnection.subscribe]'s result and exceptions. `timeout_ms` bounds the initial request: it is what is left of the
+     * call's deadline after a hub wait or a hub that did not take the request, as for [send].
+     *
+     * @throws UnsupportedByHubException when hubs are live but none lists `subscription`
+     */
+    override suspend fun subscribe(request: Request): SubscribeResult =
+        route(request, eligible = { it.supportsSubscription }, feature = HubProtocol.SUBSCRIPTION) { connection, outgoing ->
+            connection.subscribe(outgoing, awaitStream = false)
+        }
+
+    /**
+     * The hub choice and failover of [send], [gather], [stream] and [subscribe], restricted to the hubs that are [eligible] for
      * [feature]. A positive `timeout_ms` is one deadline for the whole call: a hub wait or a hub that did not take the
      * request uses some of it and the request is sent with what is left, unless [keepTimeout] (a stream: `timeout_ms`
      * is its idle timeout, sent whole; the deadline bounds only the hub wait and the retries).

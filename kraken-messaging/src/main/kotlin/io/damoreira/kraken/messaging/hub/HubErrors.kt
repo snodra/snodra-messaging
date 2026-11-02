@@ -15,7 +15,7 @@ import io.damoreira.kraken.messaging.UnsupportedByHubException
 
 /**
  * Maps hub [ErrorCode]s to the exceptions thrown to callers of the buses. [feature] names the capability an
- * `UNSUPPORTED` answer is about (`scatter-gather`, `streaming`).
+ * `UNSUPPORTED` answer is about (`scatter-gather`, `streaming`, `subscription`).
  */
 object HubErrors {
     fun toException(
@@ -32,10 +32,11 @@ object HubErrors {
         ErrorCode.UNAUTHENTICATED -> UnauthenticatedException(message)
         ErrorCode.INVALID_REQUEST -> InvalidMessageException(message)
         ErrorCode.PERMISSION_DENIED -> AccessDeniedException(message)
-        ErrorCode.RESOURCE_EXHAUSTED -> HandlerBusyException(type)
+        // A subscription's RESOURCE_EXHAUSTED says why (a subscriber buffer overflow, an instance's subscription limit).
+        ErrorCode.RESOURCE_EXHAUSTED -> HandlerBusyException(type, message.takeIf { feature == HubProtocol.SUBSCRIPTION && it.isNotEmpty() })
         // A request mode the hub does not implement, or one this session did not declare (ADR 0017).
         ErrorCode.UNSUPPORTED -> UnsupportedByHubException(feature, message.ifEmpty { "unsupported by the hub" })
-        // A streaming query the hub ended for outliving its maximum duration (P4b).
+        // A streaming query or subscription the hub ended for outliving its maximum duration (P4b, P4c).
         ErrorCode.CANCELLED -> StreamCancelledException(message.ifEmpty { "cancelled by the hub" })
         else -> RemoteHandlerException(type, message, details, code.name)
     }

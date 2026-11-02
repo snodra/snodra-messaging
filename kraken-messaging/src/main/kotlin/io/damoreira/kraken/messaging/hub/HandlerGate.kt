@@ -52,4 +52,10 @@ interface HubTransport {
         HubProtocol.STREAMING,
         "${this::class.simpleName} does not support ${HubProtocol.STREAMING}",
     )
+
+    /** See [HubConnection.subscribe]. A transport without subscriptions fails with `UnsupportedByHubException`. */
+    suspend fun subscribe(request: io.damoreira.kraken.hub.v1.Request): SubscribeResult = throw io.damoreira.kraken.messaging.UnsupportedByHubException(
+        HubProtocol.SUBSCRIPTION,
+        "${this::class.simpleName} does not support ${HubProtocol.SUBSCRIPTION}",
+    )
 }
