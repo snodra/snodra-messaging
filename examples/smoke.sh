@@ -480,7 +480,7 @@ stream_steps() {
       [ "$i" -eq 20 ] && fail "$h still has requests in flight 10 s after the cancelled stream (totals.inFlight, per-instance sum: '$t')"
       sleep 0.5
     done
-    echo "   $h: totals.inFlight ${t%% *}, per-instance in-flight sum ${t#* }"
+    echo "   $h: sanity check, totals.inFlight ${t%% *}, per-instance in-flight sum ${t#* } (blind to subscriptions after their initial part)"
   done
 
   echo "19c. GET /stream/rows?count=10&failAt=3: the handler fails on row 3 (after 2 rows) and the error maps to 502 RemoteHandlerException ..."
@@ -498,10 +498,12 @@ stream_steps() {
 # subscription, then increments the counter twice through service-b (`POST $B/counters/<name>/increment`) and twice
 # through service-c (the command examples.IncrementCounter, sent by `POST $A/counters/<name>/increment`), and expects
 # the initial result and four updates, two from each service, increasing in value per service. Step 20b checks that no
-# subscription is left behind once the request returned (black-box: the hubs have no metrics endpoint, so it asks the
-# owners through the shared query examples.OpenSubscriptions, `GET $A/subscribe/open`, which counts every subscription
-# an instance serves: they must be back at what they were before step 20, and both hubs' in-flight counts at 0), and
-# that a follow-up subscription still gets the counters' current value; step 20c subscribes to a name nobody
+# subscription is left behind once the request returned. The proof is the owners' open counts (black-box: the hubs have
+# no metrics endpoint, so it asks the owners through the shared query examples.OpenSubscriptions,
+# `GET $A/subscribe/open`, which counts every subscription an instance serves) returning to what they were before step
+# 20: only a hub Cancel to each target removes a subscription there. The hubs' in-flight counts at 0 are a secondary
+# sanity check: a hub excludes a subscription from them after its initial part, by design, so they cannot see a
+# subscription that is left over. Step 20b also checks that a follow-up subscription still gets the counters' current value; step 20c subscribes to a name nobody
 # incremented and expects the initial result with the value 0. Needs jq or python3; SKIP_SUBSCRIBE=1 skips these steps,
 # ONLY_SUBSCRIBE=1 runs only them.
 subscribe_steps() {
@@ -558,7 +560,7 @@ subscribe_steps() {
   [ "$c_values" = "1,2" ] || fail "expected service-c's updates 1,2 in order, got '$c_values': $body"
   echo "   initial from $initial_service (value $initial_value); 4 updates: service-b $b_values, service-c $c_values"
 
-  echo "20b. nothing is left subscribed: the owners' open counts are back to $base_open and the hubs have nothing in flight ..."
+  echo "20b. nothing is left subscribed: the owners' open counts are back to $base_open, proving the hub's Cancel reached every target ..."
   for i in $(seq 1 50); do
     summary=$(curl -fsS --max-time 5 "$A/subscribe/open" 2>/dev/null | open_summary)
     read -r instances n detail <<< "${summary:-0 0 -}"
@@ -566,7 +568,9 @@ subscribe_steps() {
     [ "$i" -eq 50 ] && fail "after the request the owners still hold subscriptions: '${summary:-none}', before step 20: '$base_open'"
     sleep 0.2
   done
-  echo "   open subscriptions after: $detail"
+  echo "   open subscriptions after: $detail (the proof: the owners dropped them on the hub's Cancel)"
+  # Secondary sanity check only: the hub does not count a subscription as in flight after its initial part, so this cannot
+  # see a subscription left behind (the owners' counts above do); it catches a stuck initial request or a stuck permit.
   for h in "${hubs[@]}"; do
     for i in $(seq 1 20); do
       t=$(curl -fsS "$h/topology" 2>/dev/null | in_flight)

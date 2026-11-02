@@ -203,7 +203,8 @@ subscription, bumps the counter twice through service-b (`POST $B/counters/<name
 twice through service-c (`POST /counters/<name>/increment` on service-a) and expects the initial result (value 0) and four
 updates, `1,2` from each service in order; step 20b checks that no subscription is left behind once the request returned,
 **black-box** (the hub has no metrics endpoint): both owners' open-subscription counts are back to what they were before
-step 20, both hubs' `/topology` in-flight counts are 0, and a follow-up subscription (initial value 2 from either owner)
+step 20 (the proof that the hub's `Cancel` reached every target; the hubs' `/topology` in-flight counts, 0, are only a
+secondary sanity check, as the hub does not count a subscription as in flight after its initial part), and a follow-up subscription (initial value 2 from either owner)
 is cancelled and leaves the counts at the baseline again; step 20c subscribes to a name nobody incremented and expects the
 initial result with value 0. `SKIP_SUBSCRIBE=1` skips them, `ONLY_SUBSCRIBE=1` runs only them.
 
