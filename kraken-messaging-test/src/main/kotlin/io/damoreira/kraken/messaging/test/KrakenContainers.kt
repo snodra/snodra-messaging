@@ -6,6 +6,10 @@ import org.testcontainers.containers.wait.strategy.Wait
 import org.testcontainers.kafka.KafkaContainer
 import org.testcontainers.mongodb.MongoDBContainer
 import org.testcontainers.utility.DockerImageName
+import org.testcontainers.utility.MountableFile
+import java.nio.file.Files
+import java.nio.file.Path
+import java.security.MessageDigest
 
 /**
  * Shared Testcontainers definitions for kraken integration tests. Containers are returned unstarted;
@@ -38,6 +42,9 @@ object KrakenContainers {
     /** The P4c hub (subscription queries), for the subscription tests. */
     private val hubP4cImage: String get() = System.getenv("KRAKEN_HUB_P4C_IMAGE") ?: "kraken-hub:p4c-hub"
 
+    /** The P5a hub (access control and TLS), for the security tests. */
+    private val hubP5aImage: String get() = System.getenv("KRAKEN_HUB_P5A_IMAGE") ?: "kraken-hub:p5a-hub"
+
     fun kafka(): KafkaContainer = KafkaContainer(DockerImageName.parse(KAFKA_IMAGE)).withReuse(true)
 
     fun mongo(): MongoDBContainer = MongoDBContainer(DockerImageName.parse(MONGO_IMAGE)).withReplicaSet().withReuse(true)
@@ -67,6 +74,53 @@ object KrakenContainers {
     fun hubP4c(): GenericContainer<*> = hub(hubP4cImage).withExposedPorts(7000, 7001)
 
     /**
+     * The P5a hub image: `KRAKEN_HUB_P5A_IMAGE`, default `kraken-hub:p5a-hub`, with access control and optionally TLS.
+     *
+     * - [acl]: token -> ACL entry. The ACL file (digests only, as the hub wants it) is written into [directory] and copied
+     *   to the container; the plain tokens stay in the test. Mode [authMode] (`enforce` by default, `permissive` or `off`).
+     * - [tls]: certificate and key (see [TestCertificates]) copied to the container; the gRPC and HTTP listeners then
+     *   accept TLS only. Null: plain text.
+     * - [env]: further `KRAKEN_HUB_*` settings.
+     *
+     * Exposes gRPC 7000 and HTTP 7001; OTLP export is disabled.
+     */
+    fun hubP5a(
+        directory: Path,
+        acl: Map<String, AclEntry> = emptyMap(),
+        authMode: String = "enforce",
+        tls: TestCertificates? = null,
+        env: Map<String, String> = emptyMap(),
+    ): GenericContainer<*> {
+        val container = hub(hubP5aImage).withExposedPorts(7000, 7001).withEnv("KRAKEN_HUB_OTLP_ENDPOINT", "")
+        container.withEnv("KRAKEN_HUB_AUTH_MODE", authMode)
+        if (authMode != "off") {
+            val file = directory.resolve("acl.toml")
+            Files.writeString(file, aclToml(acl))
+            container.withCopyFileToContainer(MountableFile.forHostPath(file, 0b110_100_100), HUB_ACL_PATH)
+            container.withEnv("KRAKEN_HUB_ACL_FILE", HUB_ACL_PATH)
+        }
+        if (tls != null) {
+            container.withCopyFileToContainer(MountableFile.forHostPath(tls.certificate, 0b110_100_100), HUB_TLS_CERT_PATH)
+            container.withCopyFileToContainer(MountableFile.forHostPath(tls.privateKey, 0b110_100_100), HUB_TLS_KEY_PATH)
+            container.withEnv("KRAKEN_HUB_TLS_CERT", HUB_TLS_CERT_PATH).withEnv("KRAKEN_HUB_TLS_KEY", HUB_TLS_KEY_PATH)
+        }
+        return container.withEnv(env)
+    }
+
+    /** The ACL file of the hub: one `[[token]]` per entry, keyed by the SHA-256 of the token (the hub never sees it). */
+    fun aclToml(acl: Map<String, AclEntry>): String = acl.entries.joinToString("\n") { (token, entry) ->
+        fun list(items: List<String>) = items.joinToString(", ", "[", "]") { "\"$it\"" }
+        "[[token]]\ntoken_sha256 = \"${sha256Hex(token)}\"\nservice = \"${entry.service}\"\nhandle = ${list(entry.handle)}\nsend = ${list(entry.send)}\n"
+    }
+
+    private fun sha256Hex(token: String): String =
+        MessageDigest.getInstance("SHA-256").digest(token.toByteArray()).joinToString("") { "%02x".format(it) }
+
+    private const val HUB_ACL_PATH = "/etc/kraken-hub/acl.toml"
+    private const val HUB_TLS_CERT_PATH = "/etc/kraken-hub/tls/cert.pem"
+    private const val HUB_TLS_KEY_PATH = "/etc/kraken-hub/tls/key.pem"
+
+    /**
      * The hub under test with extra `KRAKEN_HUB_*` settings (for example `KRAKEN_HUB_QUEUE_CAPACITY_PER_INSTANCE` or
      * `KRAKEN_HUB_TIMEOUT_OVERRIDES`); OTLP export is disabled.
      */
@@ -85,6 +139,8 @@ object KrakenContainers {
     fun hubP4bImageAvailable(): Boolean = imageAvailable(hubP4bImage)
 
     fun hubP4cImageAvailable(): Boolean = imageAvailable(hubP4cImage)
+
+    fun hubP5aImageAvailable(): Boolean = imageAvailable(hubP5aImage)
 
     fun hubBaselineImageAvailable(): Boolean = imageAvailable(hubBaselineImage)
 
