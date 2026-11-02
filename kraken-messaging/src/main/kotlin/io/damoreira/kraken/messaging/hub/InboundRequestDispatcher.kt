@@ -11,6 +11,7 @@ import io.damoreira.kraken.messaging.UnauthenticatedException
 import io.damoreira.kraken.messaging.codec.JsonCodec
 import io.damoreira.kraken.messaging.handler.HandlerInvoker
 import io.damoreira.kraken.messaging.handler.InvocationResult
+import io.damoreira.kraken.messaging.handler.SubscriptionAdmission
 import io.damoreira.kraken.messaging.security.ForwardedIdentityResolver
 import io.damoreira.kraken.messaging.security.Identity
 import io.damoreira.kraken.messaging.security.SecurityContextElement
@@ -32,6 +33,9 @@ import org.springframework.security.core.context.SecurityContextHolder
  *
  * [dispatchStream] does the same for a streaming request (`mode = STREAMING`, P4b): the handler's flow is collected and
  * each element handed to the connection as a part; the outcome is null or the error that ends the stream.
+ *
+ * [dispatchSubscription] admits a subscription request (`mode = SUBSCRIPTION`, P4c); the initial result of a subscription
+ * is an ordinary unary request (its id ends in `#0`) answered by [dispatch].
  */
 class InboundRequestDispatcher(
     private val invoker: HandlerInvoker,
@@ -45,7 +49,8 @@ class InboundRequestDispatcher(
             is Caller.Rejected -> caller.failure
             is Caller.Resolved -> caller.run(req) { payload, ctx, identity ->
                 when (req.kind) {
-                    RequestKind.QUERY -> invoker.invokeQuery(req.type, payload, ctx, identity)
+                    // `<id>#0` is the initial request of a subscription (P4c): the hub's id scheme, the only marker it leaves.
+                    RequestKind.QUERY -> invoker.invokeQuery(req.type, payload, ctx, identity, subscriptionInitial = req.id.endsWith("#0"))
                     RequestKind.COMMAND -> invoker.invokeCommand(req.type, payload, ctx, identity)
                     else -> InvocationResult.Failure(ErrorCode.INVALID_REQUEST, "unsupported request kind ${req.kind}")
                 }
@@ -71,6 +76,23 @@ class InboundRequestDispatcher(
         return failure?.let {
             Error.newBuilder().setRequestId(req.id).setCode(it.code).setMessage(it.message).setDetails(ByteString.copyFrom(it.details)).build()
         }
+    }
+
+    /**
+     * Admits a subscription request (`mode = SUBSCRIPTION`, P4c, see [SubscriptionInbound]): the forwarded token is
+     * validated and the handler's pre-checks run as for a unary request; the decoded query goes to [register], whose
+     * error (the instance's subscription limit) or null is the result. Nothing is invoked: the initial result is answered
+     * by the separate `<id>#0` request.
+     */
+    suspend fun dispatchSubscription(req: Request, register: (query: Any) -> Error?): Error? {
+        val failure = when (val caller = callerOf(req)) {
+            is Caller.Rejected -> caller.failure
+            is Caller.Resolved -> when (val admission = invoker.admitSubscription(req.type, req.payload.toByteArray(), caller.ctx, caller.identity)) {
+                is SubscriptionAdmission.Rejected -> admission.failure
+                is SubscriptionAdmission.Accepted -> return register(admission.query)
+            }
+        }
+        return Error.newBuilder().setRequestId(req.id).setCode(failure.code).setMessage(failure.message).setDetails(ByteString.copyFrom(failure.details)).build()
     }
 
     private sealed interface Caller {

@@ -96,11 +96,11 @@ class HubConnectionTest {
         conn.start()
         assertTrue(conn.awaitRegistered(wait))
         val reg = hub.lastRegisterFrom("a")!!
-        assertEquals(listOf("flow-control", "instance-status", "scatter-gather", "streaming"), reg.capabilitiesList)
+        assertEquals(listOf("flow-control", "instance-status", "scatter-gather", "streaming", "subscription"), reg.capabilitiesList)
         assertEquals(4, reg.initialPermits)
         assertEquals(150, reg.loadFactor)
         assertEquals(mapOf("zone" to "eu-1"), reg.tagsMap)
-        assertEquals(listOf("flow-control", "instance-status", "scatter-gather", "streaming"), assertIs<HubHandshake.V2>(conn.handshake.value).ack.capabilitiesList)
+        assertEquals(listOf("flow-control", "instance-status", "scatter-gather", "streaming", "subscription"), assertIs<HubHandshake.V2>(conn.handshake.value).ack.capabilitiesList)
     }
 
     @Test fun `fewer than one handler or a negative load factor is rejected`() {
@@ -183,6 +183,7 @@ class HubConnectionTest {
         hub.instanceStatus = false
         hub.scatterGather = false
         hub.streaming = false
+        hub.subscription = false
         val handler = flowConnection("b", maxConcurrentHandlers = 4) { req -> payloadReply(req.id, "{}") }
         handler.register(setOf("test.Ping"), emptySet())
         handler.start()
@@ -443,7 +444,7 @@ class HubConnectionTest {
 
         val reg = assertNotNull(hub.lastRegisterFrom("a"))
         assertEquals(2, reg.protocolVersion)
-        assertEquals(listOf("flow-control", "instance-status", "scatter-gather", "streaming"), reg.capabilitiesList)
+        assertEquals(listOf("flow-control", "instance-status", "scatter-gather", "streaming", "subscription"), reg.capabilitiesList)
         assertTrue(reg.clientVersion.startsWith("kraken-messaging/"), reg.clientVersion)
         assertFalse(reg.clientVersion.endsWith("/unknown"), reg.clientVersion)
         val handshake = assertIs<HubHandshake.V2>(conn.handshake.value)

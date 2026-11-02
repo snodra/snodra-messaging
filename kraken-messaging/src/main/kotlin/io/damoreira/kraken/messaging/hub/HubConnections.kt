@@ -91,6 +91,10 @@ class HubConnections(
     },
     /** Serves `mode = STREAMING` requests (P4b); see [HubConnection]. */
     private val inboundStream: StreamingInbound = NO_STREAMING_HANDLERS,
+    /** The subscriptions this instance serves over every hub (P4c); see [HubConnection]. */
+    private val subscriptions: SubscriptionRegistry = SubscriptionRegistry(),
+    /** Admits `mode = SUBSCRIPTION` requests (P4c); see [HubConnection]. */
+    private val inboundSubscription: SubscriptionInbound = NO_SUBSCRIPTION_HANDLERS,
 ) : HubTransport {
     private val log = LoggerFactory.getLogger(HubConnections::class.java)
 
@@ -340,6 +344,8 @@ class HubConnections(
                     gate = gate,
                     initialPermits = { HubProtocol.initialPermits(maxConcurrentHandlers, hubsFor(self)) },
                     inboundStream = inboundStream,
+                    subscriptions = subscriptions,
+                    inboundSubscription = inboundSubscription,
                 )
                 self = connection
                 types?.let { connection.register(it.commands, it.queries, it.shared) }

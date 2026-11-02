@@ -184,6 +184,10 @@ class HubConnection(
     private val initialPermits: () -> Int = { maxConcurrentHandlers },
     /** Serves `mode = STREAMING` requests (P4b); without streaming handlers every stream ends with `INVALID_REQUEST`. */
     private val inboundStream: StreamingInbound = NO_STREAMING_HANDLERS,
+    /** The subscriptions this instance serves (P4c), shared by every hub connection; the update emitter delivers to them. */
+    private val subscriptions: SubscriptionRegistry = SubscriptionRegistry(),
+    /** Admits `mode = SUBSCRIPTION` requests (P4c); without subscription handlers every one ends with `INVALID_REQUEST`. */
+    private val inboundSubscription: SubscriptionInbound = NO_SUBSCRIPTION_HANDLERS,
 ) : HubTransport {
     private val log = LoggerFactory.getLogger(HubConnection::class.java)
 
@@ -334,6 +338,9 @@ class HubConnection(
 
     /** True while the current stream's ack lists `streaming` (never for a legacy hub). */
     val supportsStreaming: Boolean get() = current?.handshake.supports(HubProtocol.STREAMING)
+
+    /** True while the current stream's ack lists `subscription` (never for a legacy hub). */
+    val supportsSubscription: Boolean get() = current?.handshake.supports(HubProtocol.SUBSCRIPTION)
 
     /**
      * Replaces the announced handler types ([sharedQueryTypes]: `@QueryHandler(shared = true)`, sent as
@@ -617,6 +624,9 @@ class HubConnection(
                 // The hub forgot this stream's streaming targets (their senders got HANDLER_DISCONNECTED): a handler's
                 // flow waiting for credit would otherwise never move again, holding its permit.
                 cancelStreamingHandlers(stream, "hub stream closed: ${describe(status)}")
+                // Likewise its subscriptions (P4c): the hub forgot them, nobody would ever hear their updates.
+                val dropped = subscriptions.closeOwner(stream)
+                if (dropped > 0) log.info("Hub stream of {} ({}) closed: {} subscription(s) dropped", serviceName, instanceId, dropped)
             }
             // A stream the hub answered (ack or echo) proves the hub is back: start again from the floor.
             if (reachedHandshake) {
@@ -749,9 +759,16 @@ class HubConnection(
             // Credit for a stream this instance serves; a Flow for an unknown id (ended, or never forwarded here) is dropped.
             message.hasFlow() -> running[message.flow.requestId]?.credit?.add(message.flow.credits)
             // The hub gave up on a request this instance is handling (a stream, or a gather target past its end): stop it.
-            message.hasCancel() -> running[message.cancel.requestId]?.let { entry ->
-                log.debug("Hub cancelled request {}: {}", message.cancel.requestId, message.cancel.reason)
-                entry.job.cancel(CancellationException("cancelled by the hub: ${message.cancel.reason}"))
+            message.hasCancel() -> {
+                running[message.cancel.requestId]?.let { entry ->
+                    log.debug("Hub cancelled request {}: {}", message.cancel.requestId, message.cancel.reason)
+                    entry.job.cancel(CancellationException("cancelled by the hub: ${message.cancel.reason}"))
+                }
+                // A subscription this instance serves (P4c): after the job above, so a registration still running sees
+                // its cancellation (see serveSubscription) and one already registered is found here.
+                if (subscriptions.cancel(stream, message.cancel.requestId)) {
+                    log.debug("Hub cancelled subscription {}: {}", message.cancel.requestId, message.cancel.reason)
+                }
             }
             message.hasRegisterAck() -> onAck(stream, message.registerAck)
             message.hasHeartbeat() -> {
@@ -810,6 +827,10 @@ class HubConnection(
      * goes back. The hub's permit for the request is paid back when the coroutine completes, whichever way.
      */
     private fun dispatch(stream: Stream, request: Request) {
+        if (request.mode == RequestMode.SUBSCRIPTION) {
+            dispatchSubscription(stream, request)
+            return
+        }
         stream.permits.requestReceived()
         inFlight.update { it + 1 }
         gate.entered()
@@ -828,6 +849,53 @@ class HubConnection(
             grantPermit(stream)
         }
         job.start()
+    }
+
+    /**
+     * A `SUBSCRIPTION` request (an update target, P4c): the hub wrote it outside flow control, so it takes no handler
+     * permit, no [gate] slot and is no in-flight handler, and none is paid back ([PermitLedger] never sees it). Admission
+     * runs on [handlerDispatcher] (it validates the forwarded token) and ends in the [subscriptions] registry.
+     */
+    private fun dispatchSubscription(stream: Stream, request: Request) {
+        val entry = Running(stream, null)
+        // Lazy, so a Cancel arriving right after the request finds the entry.
+        val job = scope.launch(handlerDispatcher, start = CoroutineStart.LAZY) { serveSubscription(stream, request) }
+        entry.job = job
+        running[request.id] = entry
+        job.invokeOnCompletion { running.remove(request.id, entry) }
+        job.start()
+    }
+
+    private suspend fun serveSubscription(stream: Stream, request: Request) {
+        val sink = object : SubscriptionSink {
+            override fun part(requestId: String, seq: Long, payload: ByteArray): Boolean =
+                stream.out.trySend(
+                    ClientMessage.newBuilder().setPart(
+                        ReplyPart.newBuilder().setRequestId(requestId).setPayload(ByteString.copyFrom(payload)).setSeq(seq),
+                    ).build(),
+                ).isSuccess
+
+            override fun end(requestId: String, parts: Int, error: Error?): Boolean {
+                val end = ReplyEnd.newBuilder().setRequestId(requestId).setParts(parts)
+                if (error != null) end.setError(error)
+                return stream.out.trySend(ClientMessage.newBuilder().setEnd(end).build()).isSuccess
+            }
+        }
+        val error: Error? = try {
+            inboundSubscription(request) { query -> subscriptions.open(stream, request.id, request.type, query, sink) }
+        } catch (e: Throwable) {
+            if (e is CancellationException && !currentCoroutineContext().isActive) throw e // a hub Cancel before the registration
+            log.warn("Subscription {} request {} failed", request.type, request.id, e)
+            Error.newBuilder().setRequestId(request.id).setCode(ErrorCode.HANDLER_ERROR).setMessage("${e::class.simpleName}: ${e.message}").build()
+        }
+        if (error == null) {
+            // Registered. A hub Cancel that arrived meanwhile cancelled this job first and then looked in the registry, which
+            // may have been before the registration: the subscription would live on, so it is dropped here (see handle()).
+            if (!currentCoroutineContext().isActive) subscriptions.cancel(stream, request.id)
+            return
+        }
+        // Refused: the target ends with the error and the hub ends the whole subscription with it.
+        sink.end(request.id, 0, error)
     }
 
     private suspend fun serveUnary(stream: Stream, request: Request) {

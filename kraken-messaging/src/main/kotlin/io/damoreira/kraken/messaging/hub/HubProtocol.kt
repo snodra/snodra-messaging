@@ -28,8 +28,15 @@ object HubProtocol {
      */
     const val STREAMING = "streaming"
 
+    /**
+     * Capability name of subscription queries (P4c, ADR 0017): `Request.mode = SUBSCRIPTION` (an update target on handlers,
+     * the subscription itself from senders), client-sent `ReplyPart` and `ReplyEnd` for update targets, `Flow` and
+     * `Cancel`. Declared by senders and handlers alike: the hub subscribes only instances that negotiated it.
+     */
+    const val SUBSCRIPTION = "subscription"
+
     /** `Register.capabilities`: optional protocol features this client supports. */
-    val CAPABILITIES: List<String> = listOf(FLOW_CONTROL, INSTANCE_STATUS, SCATTER_GATHER, STREAMING)
+    val CAPABILITIES: List<String> = listOf(FLOW_CONTROL, INSTANCE_STATUS, SCATTER_GATHER, STREAMING, SUBSCRIPTION)
 
     /** `Request.initial_credit` the hub assumes when a sender sends 0; the library always sends at least 1. */
     const val DEFAULT_INITIAL_CREDIT = 64
