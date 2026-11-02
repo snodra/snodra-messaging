@@ -764,6 +764,7 @@ class HubConnection(
     private suspend fun connectLoop() {
         var backoff = settings.backoffMin
         var failures = 0
+        var hintLogged = false // the TLS hint has reached WARN since the last handshake
         while (currentCoroutineContext().isActive) {
             var channel: ManagedChannel? = null
             val stream = Stream(Channel(Channel.UNLIMITED), settings.heartbeatInterval.toMillis(), initialPermits().coerceAtLeast(1), settings.token.current())
@@ -805,6 +806,7 @@ class HubConnection(
             if (reachedHandshake) {
                 backoff = settings.backoffMin
                 failures = 0
+                hintLogged = false
                 rejection.value = null // a rejection no longer describes a hub that has answered since
                 lastLoggedRejection = null
             }
@@ -826,7 +828,11 @@ class HubConnection(
                 val retry = ReconnectBackoff.jittered(backoff, settings.backoffMax)
                 val text = "Hub stream of {} ({}) closed: {}{}; reconnecting in {}"
                 val hint = if (reachedHandshake) "" else transportHint(status)
-                if (failures == 1) log.warn(text, serviceName, instanceId, describe(status), hint, retry)
+                // WARN on the first failure and, once, on the first failure that carries the TLS hint whatever its number
+                // (the first attempt may have been a refusal because the hub was still starting); DEBUG otherwise.
+                val firstHint = hint.isNotEmpty() && !hintLogged
+                if (hint.isNotEmpty()) hintLogged = true
+                if (failures == 1 || firstHint) log.warn(text, serviceName, instanceId, describe(status), hint, retry)
                 else log.debug(text, serviceName, instanceId, describe(status), hint, retry)
                 backoff = ReconnectBackoff.next(backoff, settings.backoffMax)
                 retry

@@ -160,4 +160,33 @@ class HubTlsChannelTest {
         val warn = failingConnection(HubTls(), closed).first()
         assertTrue("tls" !in warn.lowercase(), warn)
     }
+
+    @Test fun `the TLS hint reaches WARN once even when the first attempt was a refusal`() = runBlocking {
+        val closed = java.net.ServerSocket(0).use { it.localPort } // the hub is still starting: nothing listens yet
+        val appender = ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>().also { it.start() }
+        connectionLog.addAppender(appender)
+        val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.Default)
+        val factory = DefaultHubChannelFactory(HubTls())
+        val attempts = java.util.concurrent.atomic.AtomicInteger()
+        val connection = HubConnection(
+            { factory.channel("localhost:${if (attempts.incrementAndGet() == 1) closed else tlsPort}") }, "svc", "i-1",
+            HubSettings(null, java.time.Duration.ofSeconds(10), java.time.Duration.ofMillis(50), java.time.Duration.ofMillis(200)),
+            { io.damoreira.kraken.hub.v1.Reply.getDefaultInstance() }, scope,
+        )
+        try {
+            connection.start()
+            withTimeout(20_000) { while (attempts.get() < 6) kotlinx.coroutines.delay(20) } // refused, then four mismatches
+            kotlinx.coroutines.delay(300)
+            val warns = appender.list.filter { it.level == ch.qos.logback.classic.Level.WARN }.map { it.formattedMessage }
+            assertEquals(1, warns.count { "kraken.messaging.hub.tls.enabled" in it }, warns.toString())
+            assertEquals(2, warns.size, warns.toString()) // the refusal (no hint), then the mismatch (hint)
+            assertTrue("kraken.messaging.hub.tls.enabled" !in warns.first(), warns.first())
+            val hinted = appender.list.filter { "kraken.messaging.hub.tls.enabled" in it.formattedMessage }
+            assertTrue(hinted.drop(1).all { it.level == ch.qos.logback.classic.Level.DEBUG }, hinted.toString())
+        } finally {
+            connection.stop()
+            scope.cancel()
+            connectionLog.detachAppender(appender)
+        }
+    }
 }
