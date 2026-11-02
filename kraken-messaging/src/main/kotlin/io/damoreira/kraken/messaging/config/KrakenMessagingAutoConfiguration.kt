@@ -13,6 +13,7 @@ import io.damoreira.kraken.messaging.tracing.TraceHeaders
 import io.micrometer.tracing.Tracer
 import io.micrometer.tracing.propagation.Propagator
 import org.springframework.beans.factory.ObjectProvider
+import org.springframework.boot.actuate.endpoint.SanitizingFunction
 import org.springframework.boot.autoconfigure.AutoConfiguration
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
@@ -85,6 +86,19 @@ class KrakenMessagingAutoConfiguration {
             TraceHeaders(propagator.ifAvailable, tracer.ifAvailable)
     }
 
+    /**
+     * Masks the hub token in the actuator's `configprops` and `env` output whatever `show-values` is, and whichever
+     * sanitization rules the application set (Spring Boot 4 has no `keys-to-sanitize`: a [SanitizingFunction] bean is the way).
+     */
+    @Configuration(proxyBeanMethods = false)
+    @ConditionalOnClass(name = ["org.springframework.boot.actuate.endpoint.SanitizingFunction"])
+    class HubTokenSanitizingConfiguration {
+        @Bean
+        fun krakenHubTokenSanitizingFunction(): SanitizingFunction = SanitizingFunction { data ->
+            if (HubTokenKeys.matches(data.key)) data.withSanitizedValue() else data
+        }
+    }
+
     companion object {
         /** Static so it is registered before other beans without instantiating this configuration; registry is resolved lazily. */
         @JvmStatic
@@ -104,5 +118,13 @@ class RemovedPropertiesGuard(environment: Environment) {
 
     companion object {
         const val REQUIRE_JWT = "kraken.messaging.security.require-jwt"
+    }
+}
+
+/** The names the hub token goes by: the property, its relaxed environment forms and the plain `KRAKEN_HUB_TOKEN`. */
+internal object HubTokenKeys {
+    fun matches(key: String?): Boolean {
+        val normalised = key?.lowercase()?.replace('_', '.')?.replace('-', '.') ?: return false
+        return normalised == "kraken.messaging.hub.token" || normalised == "kraken.hub.token"
     }
 }

@@ -37,9 +37,11 @@ dependencies {
     implementation(libs.spring.security.oauth2.resource.server)
     implementation(libs.spring.security.oauth2.jose)
     compileOnly(libs.micrometer.tracing)
+    compileOnly("org.springframework.boot:spring-boot-actuator") // optional: HubTokenSanitizingConfiguration masks the hub token in configprops/env
     compileOnly("jakarta.validation:jakarta.validation-api") // optional: violation messages go into HANDLER_ERROR details when present
 
     testImplementation(libs.spring.boot.starter.test)
+    testImplementation("org.springframework.boot:spring-boot-actuator")
     testImplementation(libs.kotlin.test.junit5)
     testImplementation(libs.mockk)
     testImplementation("jakarta.validation:jakarta.validation-api")

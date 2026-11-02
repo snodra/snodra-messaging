@@ -24,6 +24,12 @@
       "sourceMethod": "getRetry()"
     },
     {
+      "name": "kraken.messaging.hub.tls",
+      "type": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Tls",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties",
+      "sourceMethod": "getTls()"
+    },
+    {
       "name": "kraken.messaging.kafka",
       "type": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Kafka",
       "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties",
@@ -128,6 +134,37 @@
       "description": "Subscription queries this instance serves at once, over every hub (at least 1); the next one is refused with RESOURCE_EXHAUSTED. A subscription holds no handler permit, so max-concurrent-handlers does not bound it.",
       "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Hub",
       "defaultValue": 1024
+    },
+    {
+      "name": "kraken.messaging.hub.token",
+      "type": "java.lang.String",
+      "description": "Static token sent in Register.credentials.token of every hub stream (hub access control, P5a). Optional; empty is the same as none. Never logged and redacted in toString and in the actuator configprops and env output. Environment variable KRAKEN_MESSAGING_HUB_TOKEN, or KRAKEN_HUB_TOKEN when this property is unset.",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Hub"
+    },
+    {
+      "name": "kraken.messaging.hub.token-file",
+      "type": "java.nio.file.Path",
+      "description": "File holding the hub token (a container secret): read at startup, where an unreadable file fails the startup, and again on every reconnect. Wins over kraken.messaging.hub.token when both are set. Environment variable KRAKEN_MESSAGING_HUB_TOKEN_FILE, or KRAKEN_HUB_TOKEN_FILE when this property is unset.",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Hub"
+    },
+    {
+      "name": "kraken.messaging.hub.tls.enabled",
+      "type": "java.lang.Boolean",
+      "description": "Talk TLS to the hub, for every address form (static list and dns:///). Off: plain text.",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Tls",
+      "defaultValue": false
+    },
+    {
+      "name": "kraken.messaging.hub.tls.ca-file",
+      "type": "java.nio.file.Path",
+      "description": "PEM file with the CA certificate(s) that signed the hub's certificate; the JVM's system roots when absent. Read on every connection attempt.",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Tls"
+    },
+    {
+      "name": "kraken.messaging.hub.tls.server-name",
+      "type": "java.lang.String",
+      "description": "Name the hub's certificate is verified against instead of the address's host.",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Tls"
     },
     {
       "name": "kraken.messaging.hub.max-concurrent-handlers",

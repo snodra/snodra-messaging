@@ -3,6 +3,7 @@ package io.damoreira.kraken.messaging.config
 import io.damoreira.kraken.messaging.RetryPolicy
 import io.damoreira.kraken.messaging.hub.HubTargets
 import org.springframework.boot.context.properties.ConfigurationProperties
+import java.nio.file.Path
 import java.time.Duration
 
 /**
@@ -70,7 +71,30 @@ data class KrakenMessagingProperties(
          * per-instance limit (`KRAKEN_HUB_MAX_SUBSCRIPTIONS_PER_INSTANCE`).
          */
         val maxSubscriptions: Int = 1024,
+        /**
+         * Static token sent in `Register.credentials.token` of every hub stream (P5a, ADR 0018): the hub in mode `enforce`
+         * (or `permissive`) looks it up in its ACL. Optional; an empty value is the same as none. Never logged, and
+         * redacted in [toString] and in the actuator's `configprops` and `env` output. Environment variable
+         * `KRAKEN_MESSAGING_HUB_TOKEN` (relaxed binding), or `KRAKEN_HUB_TOKEN` when this property is unset.
+         */
+        val token: String? = null,
+        /**
+         * File holding the token (a container secret, for example `/run/secrets/kraken-hub-token`): read at startup (a file
+         * that cannot be read fails it) and again on every reconnect, so a rotated secret is picked up without a restart.
+         * Surrounding whitespace is ignored. When both [token] and this are set, the file wins. Environment variable
+         * `KRAKEN_MESSAGING_HUB_TOKEN_FILE`, or `KRAKEN_HUB_TOKEN_FILE` when this property is unset.
+         */
+        val tokenFile: Path? = null,
+        /** TLS towards the hub (P5a): off by default (plain text, as before). */
+        val tls: Tls = Tls(),
     ) {
+        /** The token never appears: every other field as the data class prints it. */
+        override fun toString(): String = "Hub(enabled=$enabled, address=$address, statusInterval=$statusInterval, " +
+            "requestTimeout=$requestTimeout, heartbeatInterval=$heartbeatInterval, reconnectBackoff=$reconnectBackoff, " +
+            "maxConcurrentHandlers=$maxConcurrentHandlers, loadFactor=$loadFactor, tags=$tags, priorities=$priorities, " +
+            "retry=$retry, streamCreditTimeout=$streamCreditTimeout, maxSubscriptions=$maxSubscriptions, " +
+            "token=${if (token.isNullOrEmpty()) token else "****"}, tokenFile=$tokenFile, tls=$tls)"
+
         init {
             // Checked at binding, so a bad value fails the startup even while the hub is disabled.
             require(maxConcurrentHandlers >= 1) {
@@ -87,6 +111,16 @@ data class KrakenMessagingProperties(
             require(maxSubscriptions >= 1) { "kraken.messaging.hub.max-subscriptions must be >= 1, was $maxSubscriptions" }
         }
     }
+
+    /** `hub.tls.*` (P5a, ADR 0018). mTLS (a client certificate) is P5c and has no setting here yet. */
+    data class Tls(
+        /** Talk TLS to the hub (every address form, `dns:///` too). Off: plain text. */
+        val enabled: Boolean = false,
+        /** PEM file with the CA certificate(s) that signed the hub's certificate; the JVM's system roots when absent. Read on every connection attempt. */
+        val caFile: Path? = null,
+        /** Name to verify the hub's certificate against instead of the address's host (for example an IP or a service alias). */
+        val serverName: String? = null,
+    )
 
     /** `hub.retry.*`: validated by [RetryPolicy]'s rules at startup, also while [enabled] is false. */
     data class Retry(

@@ -7,7 +7,10 @@ import io.damoreira.kraken.messaging.codec.MessageTypeResolver
 import io.damoreira.kraken.messaging.handler.HandlerInvoker
 import io.damoreira.kraken.messaging.handler.HandlerRegistry
 import io.damoreira.kraken.messaging.hub.HubBus
+import io.damoreira.kraken.messaging.hub.DefaultHubChannelFactory
 import io.damoreira.kraken.messaging.hub.HubChannelFactory
+import io.damoreira.kraken.messaging.hub.HubTls
+import io.damoreira.kraken.messaging.hub.HubToken
 import io.damoreira.kraken.messaging.hub.HubConnections
 import io.damoreira.kraken.messaging.hub.HubSettings
 import io.damoreira.kraken.messaging.hub.HubTargets
@@ -15,7 +18,6 @@ import io.damoreira.kraken.messaging.hub.InboundRequestDispatcher
 import io.damoreira.kraken.messaging.hub.SubscriptionRegistry
 import io.damoreira.kraken.messaging.security.ForwardedIdentityResolver
 import io.damoreira.kraken.messaging.tracing.TraceHeaders
-import io.grpc.ManagedChannelBuilder
 import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -32,10 +34,11 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
 import org.springframework.context.SmartLifecycle
 import org.springframework.context.annotation.Bean
+import org.springframework.core.env.Environment
 import java.time.Duration
 import java.util.UUID
 import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
+import java.nio.file.Path
 
 /**
  * The hub transport: [HubConnections] (one [io.damoreira.kraken.messaging.hub.HubConnection] per hub named by
@@ -51,14 +54,13 @@ class HubAutoConfiguration {
 
     @Bean(defaultCandidate = false)
     @ConditionalOnMissingBean(name = [CHANNEL_FACTORY])
-    fun krakenHubChannelFactory(): HubChannelFactory = HubChannelFactory { target ->
-        ManagedChannelBuilder.forTarget(target).usePlaintext()
-            // HTTP/2 pings detect a dead peer at the transport level even while the stream is idle.
-                // 10 s / 5 s: a one-way partition is caught by the transport about as fast as by the hub's 10 s heartbeat timeout.
-                .keepAliveTime(10, TimeUnit.SECONDS)
-                .keepAliveTimeout(5, TimeUnit.SECONDS)
-                .keepAliveWithoutCalls(true)
-                .build()
+    fun krakenHubChannelFactory(properties: KrakenMessagingProperties): HubChannelFactory {
+        val tls = properties.hub.tls
+        if (!tls.enabled && (tls.caFile != null || tls.serverName != null)) {
+            log.warn("kraken.messaging.hub.tls.ca-file / server-name are set but kraken.messaging.hub.tls.enabled is false: talking plain text to the hub")
+        }
+        // A bad CA file fails the startup here, with the setting's name, instead of failing every connection attempt.
+        return DefaultHubChannelFactory(HubTls(tls.enabled, tls.caFile, tls.serverName)).also { it.validate() }
     }
 
     @Bean
@@ -74,6 +76,7 @@ class HubAutoConfiguration {
         dispatcher: InboundRequestDispatcher,
         registry: HandlerRegistry,
         subscriptions: SubscriptionRegistry,
+        environment: Environment,
     ): HubLifecycle {
         val hub = properties.hub
         // The connect loop, stream collector and heartbeats stay on Default; handlers get virtual threads (see HubConnection).
@@ -84,7 +87,7 @@ class HubAutoConfiguration {
             channelFactory = channelFactory,
             serviceName = properties.serviceName,
             instanceId = UUID.randomUUID().toString(),
-            settings = HubSettings(hub.requestTimeout, hub.heartbeatInterval, hub.reconnectBackoff.min, hub.reconnectBackoff.max, hub.streamCreditTimeout),
+            settings = HubSettings(hub.requestTimeout, hub.heartbeatInterval, hub.reconnectBackoff.min, hub.reconnectBackoff.max, hub.streamCreditTimeout, hubToken(hub, environment)),
             inbound = dispatcher::dispatch,
             scope = scope,
             handlerDispatcher = handlerDispatcher,
@@ -131,8 +134,26 @@ class HubAutoConfiguration {
     @ConditionalOnMissingBean(QueryBus::class)
     fun queryBus(@Qualifier("hubBus") hubBus: HubBus): QueryBus = object : QueryBus by hubBus {}
 
+    private val log = LoggerFactory.getLogger(HubAutoConfiguration::class.java)
+
+    /**
+     * The hub token: `hub.token-file` (the only source when set, re-read on every reconnect), else `hub.token`; each falls
+     * back to the plain environment variable `KRAKEN_HUB_TOKEN_FILE` / `KRAKEN_HUB_TOKEN` (the name the hub's own
+     * documentation uses; relaxed binding alone only maps `KRAKEN_MESSAGING_HUB_TOKEN`) when its property is unset.
+     */
+    private fun hubToken(hub: KrakenMessagingProperties.Hub, environment: Environment): HubToken {
+        val file = hub.tokenFile ?: environment.getProperty(TOKEN_FILE_ENV)?.takeIf { it.isNotBlank() }?.let { Path.of(it) }
+        val inline = hub.token ?: environment.getProperty(TOKEN_ENV)
+        if (file != null && !inline.isNullOrBlank()) {
+            log.info("Both a hub token and a hub token file are configured: using the token file {}", file)
+        }
+        return HubToken.of(inline, file)
+    }
+
     companion object {
         const val CHANNEL_FACTORY = "krakenHubChannelFactory"
+        const val TOKEN_ENV = "KRAKEN_HUB_TOKEN"
+        const val TOKEN_FILE_ENV = "KRAKEN_HUB_TOKEN_FILE"
     }
 }
 
