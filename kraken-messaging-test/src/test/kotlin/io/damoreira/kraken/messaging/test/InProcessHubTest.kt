@@ -776,6 +776,8 @@ class InProcessHubTest {
         val (a, b, sender) = subscriptionTrio()
         val opened = open(sender, a, b, "sub1", credit = 1)
         a.send(part(opened.ta, 1, "{\"u\":1}"))
+        // Two streams reach the hub concurrently: the order of their updates is only defined once the first one has arrived.
+        withTimeout(TIMEOUT_MS) { while (hub.bufferedUpdatesOf("sub1") < 1) kotlinx.coroutines.delay(5) }
         b.send(part(opened.tb, 1, "{\"u\":2}"))
         sender.nothingWithin(150) // nothing before the initial
         assertEquals(2, hub.bufferedUpdatesOf("sub1"))
