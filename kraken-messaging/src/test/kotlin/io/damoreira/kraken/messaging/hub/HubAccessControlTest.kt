@@ -363,6 +363,8 @@ class HubAccessControlTest {
         val conn = connection("c-2")
         conn.start()
         assertTrue(conn.awaitRegistered(wait))
+        // The real hub closes the stream on a reload; this is the race where a request gets in before that happens.
+        hub.closeSessionsOnAuthChange = false
         hub.auth = HubAuth.enforce(emptyMap())
         val bus = bus(conn, retry = RetryPolicy(maxAttempts = 3, initialBackoff = Duration.ofMillis(10), multiplier = 1.0, maxBackoff = Duration.ofMillis(10)))
         assertFailsWith<UnauthenticatedException> { bus.send(GetCount("k")) }

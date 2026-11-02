@@ -887,8 +887,11 @@ result.updates.collect { change -> render(change) }   // completes when the hand
   hub: in `enforce` the first `Register` is closed with `UNAUTHENTICATED` (no credentials, an empty token, `jwt`, an unknown
   token) or `PERMISSION_DENIED` (another service name, a command, query or shared query outside `handle`), a later `Register`
   adding a forbidden type likewise, and a request outside `send` gets an immediate `Error{PERMISSION_DENIED}` in every
-  request mode (`UNAUTHENTICATED` if the token left `auth` meanwhile; `auth` may be replaced at runtime). `permissive` allows
-  and records. `authViolations()` lists every violation (code, message, enforced, a monotonic timestamp, so tests can assert
+  request mode (`UNAUTHENTICATED` if the token left `auth` meanwhile). `prefix.*` needs something after the dot (it does not
+  match `prefix.` itself). `auth` may be replaced at runtime and, like the real hub on an ACL reload, replacing it in `enforce`
+  closes the live sessions the new ACL no longer allows (`UNAUTHENTICATED` for a token that left, `PERMISSION_DENIED` for a
+  service name or handled type it no longer grants; their in-flight requests fail as on any disconnect); set
+  `closeSessionsOnAuthChange = false` to keep them and test the per-request refusal instead. `permissive` allows and records. `authViolations()` lists every violation (code, message, enforced, a monotonic timestamp, so tests can assert
   the spacing of reconnects) and `tokensSeenFrom(instanceId)` the token of every `Register` received, refused ones included.
 - `TestCertificates.generate(dir, names)`: a throwaway self-signed certificate made at test time with the JDK's `keytool`
   (PEM certificate, also the CA a client trusts, and PKCS#8 key; valid for `localhost` and `127.0.0.1` by default).

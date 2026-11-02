@@ -255,9 +255,29 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
     @Volatile
     var queueCapacity: Int = 10_000
 
-    /** Access control (P5a): the mode and the token -> ACL map. Read per `Register` and per request, so it may change at runtime. */
+    /**
+     * True (the default, as the real hub): setting [auth] closes the live sessions the new ACL no longer allows. False keeps
+     * them, to test the per-request refusal a request gets in the instant before a reload closes its stream.
+     */
     @Volatile
-    var auth: HubAuth = HubAuth.OFF
+    var closeSessionsOnAuthChange: Boolean = true
+
+    @Volatile
+    private var currentAuth: HubAuth = HubAuth.OFF
+
+    /**
+     * Access control (P5a): the mode and the token -> ACL map. Read per `Register` and per request, so it may change at
+     * runtime. Like the real hub on an ACL reload, setting it re-judges every live session: in `enforce` a session whose
+     * token is gone or whose registration the new ACL no longer allows is closed (`UNAUTHENTICATED` for a token that left,
+     * `PERMISSION_DENIED` for a service name or a handled type it no longer grants; its in-flight requests fail as on any
+     * disconnect); `permissive` and `off` keep every session.
+     */
+    var auth: HubAuth
+        get() = currentAuth
+        set(value) {
+            currentAuth = value
+            if (closeSessionsOnAuthChange) reevaluateSessions(value)
+        }
 
     private class Session(val out: SendChannel<ServerMessage>) {
         @Volatile var serviceName: String = ""
@@ -640,6 +660,30 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
             session.ack = ServerMessage.newBuilder().setRegisterAck(registerAck(reg.capabilitiesList)).build()
             acks.merge(reg.instanceId, 1, Int::plus)
         }
+    }
+
+    /** The real hub's `reevaluate_sessions`: re-judges every registered session against [acl], closing the denied ones in `enforce`. */
+    private fun reevaluateSessions(acl: HubAuth) {
+        if (acl.mode != AuthMode.ENFORCE) return
+        for (session in sessions.filter { it.registered }) {
+            val denied = recheck(session, acl) ?: continue
+            violations += AuthViolation(session.instanceId, denied.first, denied.second, true, System.nanoTime())
+            session.out.close(denied.first.toStatus().withDescription(denied.second).asException())
+            session.collector.cancel()
+        }
+    }
+
+    /** The first reason [session] is no longer allowed by [acl] (an `enforce` ACL), as the real hub's `recheck`, or null. */
+    private fun recheck(session: Session, acl: HubAuth): Pair<Status.Code, String>? {
+        val token = session.token ?: return Status.Code.UNAUTHENTICATED to "credentials required"
+        val entry = acl.tokens[token] ?: return Status.Code.UNAUTHENTICATED to "token no longer accepted"
+        if (entry.service != session.serviceName) {
+            return Status.Code.PERMISSION_DENIED to "token is not allowed to register as service ${session.serviceName}"
+        }
+        val denied = session.types.filterNot { HubAuth.matches(entry.handle, it) }
+        if (denied.isEmpty()) return null
+        val more = if (denied.size > 1) " (and ${denied.size - 1} more)" else ""
+        return Status.Code.PERMISSION_DENIED to "service ${session.serviceName} is not allowed to handle type ${denied.first()}$more"
     }
 
     /** Judges a `Register` against [auth]; throws the status that closes the stream in `enforce`. */
@@ -1368,7 +1412,8 @@ class HubAuth(val mode: AuthMode, val tokens: Map<String, AclEntry> = emptyMap()
         fun permissive(tokens: Map<String, AclEntry>) = HubAuth(AuthMode.PERMISSIVE, tokens)
 
         internal fun matches(patterns: List<String>, type: String): Boolean = patterns.any {
-            it == "*" || it == type || (it.endsWith(".*") && type.startsWith(it.removeSuffix("*")))
+            // `prefix.*` needs something after the dot, as the real hub's strict parsing: it does not match `prefix.` itself.
+            it == "*" || it == type || (it.endsWith(".*") && type.length > it.length - 1 && type.startsWith(it.removeSuffix("*")))
         }
     }
 }

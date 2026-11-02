@@ -175,6 +175,8 @@ class InProcessHubAuthTest {
         hub.auth = HubAuth.enforce(acl)
         val sender = Raw().also { it.register("billing-service", "s-1", token = billing) }
         assertTrue(sender.next().hasRegisterAck())
+        // The real hub closes the stream on a reload; this is the race where a request gets in before that happens.
+        hub.closeSessionsOnAuthChange = false
         hub.auth = HubAuth.enforce(acl - billing)
         sender.request("orders.Get", RequestMode.UNARY)
         assertEquals(ErrorCode.UNAUTHENTICATED, sender.next().error.code)
@@ -211,5 +213,69 @@ class InProcessHubAuthTest {
         withTimeout(5_000) { while (hub.registrationsFrom("i-1") < 2) kotlinx.coroutines.delay(5) }
         assertEquals(listOf<String?>("t-1", "t-1"), hub.tokensSeenFrom("i-1"))
         assertEquals(emptyList(), hub.authViolations())
+    }
+
+    // --- fidelity with the real hub on reload and on strict pattern parsing ---
+
+    @Test fun `a prefix star pattern does not match the bare prefix itself`() = runBlocking {
+        hub.auth = HubAuth.enforce(acl)
+        val bare = Raw().also { it.register("billing-service", "i-1", token = billing, commands = listOf("billing.")) }
+        val status = bare.status()
+        assertEquals(Status.Code.PERMISSION_DENIED, status.code)
+        assertTrue(status.description!!.contains("billing."), status.toString())
+        // ... while a type with something after the dot still matches.
+        val ok = Raw().also { it.register("billing-service", "i-2", token = billing, commands = listOf("billing.X")) }
+        assertTrue(ok.next().hasRegisterAck())
+    }
+
+    @Test fun `replacing auth in enforce closes live sessions the new ACL no longer allows, with the real hub's codes`() = runBlocking {
+        hub.auth = HubAuth.enforce(acl)
+        val revoked = Raw().also { it.register("billing-service", "i-revoked", token = billing, commands = listOf("billing.Charge")) }
+        val narrowed = Raw().also { it.register("orders-service", "i-narrowed", token = orders, commands = listOf("orders.Place", "other.Thing")) }
+        val renamed = Raw().also { it.register("orders-service", "i-renamed", token = orders, commands = listOf("orders.Cancel")) }
+        val kept = Raw().also { it.register("orders-service", "i-kept", token = orders, queries = listOf("orders.Get")) }
+        for (raw in listOf(revoked, narrowed, renamed, kept)) assertTrue(raw.next().hasRegisterAck())
+
+        hub.auth = HubAuth.enforce(
+            mapOf(
+                // billing's token is gone; the orders token keeps its service but only handles orders.*
+                orders to AclEntry("orders-service", handle = listOf("orders.*"), send = listOf("*")),
+            ),
+        )
+        // revoked: token left the ACL -> UNAUTHENTICATED; narrowed: handles other.Thing no more -> PERMISSION_DENIED.
+        assertEquals(Status.Code.UNAUTHENTICATED, revoked.status().code)
+        assertEquals(Status.Code.PERMISSION_DENIED, narrowed.status().code)
+        assertTrue(hub.sessionsOf("i-revoked") == 0 && hub.sessionsOf("i-narrowed") == 0)
+        assertEquals(1, hub.sessionsOf("i-renamed"))
+        assertEquals(1, hub.sessionsOf("i-kept"))
+
+        // The token now grants another service: a live session registered as orders-service is closed with PERMISSION_DENIED.
+        hub.auth = HubAuth.enforce(mapOf(orders to AclEntry("someone-else", handle = listOf("*"), send = listOf("*"))))
+        assertEquals(Status.Code.PERMISSION_DENIED, renamed.status().code)
+        assertEquals(Status.Code.PERMISSION_DENIED, kept.status().code)
+        assertEquals(4, hub.authViolations().count { it.enforced })
+    }
+
+    @Test fun `replacing auth fails the in-flight requests of a closed handler and never closes sessions in permissive or off`() = runBlocking {
+        hub.auth = HubAuth.enforce(acl)
+        val handler = Raw().also { it.register("orders-service", "h-1", token = orders, queries = listOf("orders.Get")) }
+        assertTrue(handler.next().hasRegisterAck())
+        val sender = Raw().also { it.register("billing-service", "s-1", token = billing) }
+        assertTrue(sender.next().hasRegisterAck())
+        val id = sender.request("orders.Get", RequestMode.UNARY)
+        assertEquals(id, handler.next().request.id)
+
+        hub.auth = HubAuth.permissive(emptyMap()) // nothing is closed in permissive
+        assertNull(withTimeoutOrNull(200) { handler.ended.await() })
+        hub.auth = HubAuth.OFF
+        assertNull(withTimeoutOrNull(200) { handler.ended.await() })
+        assertEquals(1, hub.sessionsOf("h-1"))
+        assertTrue(hub.authViolations().isEmpty())
+
+        hub.auth = HubAuth.enforce(acl - orders) // the handler's token is gone, the sender's stays
+        assertEquals(Status.Code.UNAUTHENTICATED, handler.status().code)
+        val error = sender.next().error
+        assertEquals(id, error.requestId)
+        assertEquals(ErrorCode.HANDLER_DISCONNECTED, error.code)
     }
 }
