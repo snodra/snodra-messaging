@@ -22,6 +22,10 @@ import io.damoreira.kraken.messaging.fixtures.Count
 import io.damoreira.kraken.messaging.fixtures.ExportRows
 import io.damoreira.kraken.messaging.fixtures.GetCount
 import io.damoreira.kraken.messaging.fixtures.Ping
+import io.damoreira.kraken.messaging.fixtures.Row
+import io.damoreira.kraken.messaging.fixtures.WatchAccount
+import io.damoreira.kraken.messaging.hub.NO_STREAMING_HANDLERS
+import io.damoreira.kraken.messaging.hub.StreamingInbound
 import io.damoreira.kraken.messaging.UnsupportedByHubException
 import io.damoreira.kraken.messaging.handler.HandlerInvoker
 import io.damoreira.kraken.messaging.handler.HandlerRegistry
@@ -375,6 +379,42 @@ class HubCompatTest {
         assertTrue(sender.connected.value) // the refusal is local: the stream is untouched
     }
 
+    // --- the P4b hub: no subscription (P4c clients against it) ---
+
+    @Test fun `P4b hub - subscribe is UnsupportedByHub without sending anything, unary queries, gathers and streams still work`() = runBlocking {
+        val hub = start(p4bHub())
+        val owner = connection(
+            hub, "b", "svc-b",
+            inbound = { req -> payloadReply(req.id, "{\"value\":7}") },
+            inboundStream = { _, emit ->
+                emit("{\"n\":1}".toByteArray())
+                emit("{\"n\":2}".toByteArray())
+                null
+            },
+        )
+        owner.register(emptySet(), setOf("test.ExportRows", "test.WatchAccount"), setOf("test.GetCount"))
+        owner.start()
+        val sender = connection(hub, "a", "svc-a")
+        sender.start()
+        assertTrue(owner.awaitRegistered(wait) && sender.awaitRegistered(wait))
+        val ack = assertIs<HubHandshake.V2>(sender.handshake.value).ack
+        assertEquals(listOf("flow-control", "instance-status", "scatter-gather", "streaming"), ack.capabilitiesList)
+        assertEquals(false, sender.supportsSubscription)
+        assertTrue(owner.supportsStreaming)
+
+        val bus = bus(sender)
+        val e = assertFailsWith<UnsupportedByHubException> { bus.subscribe(WatchAccount(7)) }
+        assertEquals("subscription", e.feature)
+        // Nothing reached the hub: the owner never heard of a subscription, the stream is untouched.
+        assertTrue(sender.connected.value)
+        val topology = HubGrpcKt.HubCoroutineStub(channel(hub)).topology(TopologyRequest.getDefaultInstance())
+        assertEquals(0, topology.servicesList.flatMap { it.instancesList }.sumOf { it.inFlightAsSender + it.inFlightAsHandler })
+
+        assertEquals(Count(7), bus.send(GetCount("k")))
+        assertEquals(listOf(Count(7)), bus.scatterGather(GetCount("k")).results)
+        assertEquals(listOf(Row(1), Row(2)), bus.stream(ExportRows(2)).toList())
+    }
+
     // --- the previous hub release (protocol v1): legacy mode ---
 
     @Test fun `baseline hub - one target through HubConnections runs in legacy mode`() = runBlocking {
@@ -486,6 +526,11 @@ class HubCompatTest {
         return KrakenContainers.hubP4a().withEnv("KRAKEN_HUB_OTLP_ENDPOINT", "")
     }
 
+    private fun p4bHub(): GenericContainer<*> {
+        Assumptions.assumeTrue(KrakenContainers.hubP4bImageAvailable(), "P4b hub image not available")
+        return KrakenContainers.hubP4b().withEnv("KRAKEN_HUB_OTLP_ENDPOINT", "")
+    }
+
     private fun baselineHub(): GenericContainer<*> {
         Assumptions.assumeTrue(KrakenContainers.hubBaselineImageAvailable(), "baseline hub image not available")
         return KrakenContainers.hubBaseline().withEnv("KRAKEN_HUB_OTLP_ENDPOINT", "")
@@ -507,6 +552,7 @@ class HubCompatTest {
         service: String,
         settings: HubSettings = defaults,
         maxConcurrentHandlers: Int = 256,
+        inboundStream: StreamingInbound = NO_STREAMING_HANDLERS,
         inbound: suspend (Request) -> Reply = { req -> errorReply(req.id, "unexpected") },
     ): HubConnection {
         val host = hub.host
@@ -520,6 +566,7 @@ class HubCompatTest {
             inbound = inbound,
             scope = scope,
             maxConcurrentHandlers = maxConcurrentHandlers,
+            inboundStream = inboundStream,
         ).also { connections += it }
     }
 
