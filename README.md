@@ -349,8 +349,10 @@ The token goes in `Register.credentials.token` of every stream (read once per st
 sanitization the application configured. An empty token is no token (a v1-style `Register` without credentials, which
 `off` and `permissive` hubs accept). **`token-file` wins when both are set** (it is the source that can rotate); the
 file is read at startup, where a missing file fails the startup, and on every reconnect, so replacing the secret and
-letting the connection reconnect (or fail once) is a rotation. A file that disappears later keeps the last token read
-and logs one warning.
+letting the connection reconnect (or fail once) is a rotation. **An empty file after a first good read** (a rotation that
+replaces the file non-atomically can be caught half way) is treated like an unreadable one: the last token read is kept
+and one `WARN` is logged, so a `Register` never goes out without its token just because of a race. At startup an empty
+file still means no token. A file that disappears later likewise keeps the last token read and logs one warning.
 
 **What the hub does with it**, and what you see:
 
@@ -367,13 +369,24 @@ in `HubConnection.lastRejection`, `awaitRegistered` throws `HubRegistrationRejec
 message, the connection reconnects at the backoff cap (80-100 % of `hub.reconnect-backoff.max`, no tight loop), logs at
 `ERROR` once per distinct message and then at `DEBUG`, and keeps retrying (a fixed ACL or token file heals it without a
 restart; `lastRejection` clears when a stream completes its handshake). The service keeps running; the hub counts every attempt as a
-violation. In `permissive` nothing is refused: the hub logs and counts what `enforce` would refuse.
+violation. In `permissive` nothing is refused: the hub logs and counts what `enforce` would refuse (except an instance-id
+takeover, below, which it refuses too).
+
+**Instance ids belong to a service.** A `Register` that names the instance id of a live session of *another* service is
+refused with `PERMISSION_DENIED` (`instance id … belongs to another service`) in `enforce` and `permissive`, and the owner's
+session is left alone, so a service with a valid token cannot hijack another one's stream and its queued requests. A
+reconnect of the *same* service still replaces its own older stream. Make instance ids unique per instance (the default is
+random) and never reuse another service's.
+
+**The back-off is validated.** `hub.reconnect-backoff.max` must be positive and `min` positive and not above `max`; a bad
+value fails the startup naming the property (a zero `max` would hot-loop handshakes against a refusing hub).
 
 **TLS.** `hub.tls.enabled=true` with `hub.tls.ca-file` (the CA that signed the hub's certificate; the JVM's trust store when
 absent) and, if the address is not a name on the certificate, `hub.tls.server-name`. It applies to every address form.
 Plain text against a TLS hub (or TLS against a plain-text one) never hangs: the stream fails at once as
-`UNAVAILABLE (io exception)` or `INTERNAL (http2 exception)` and the first `WARN` line says to check
-`kraken.messaging.hub.tls.enabled` and `tls.ca-file`. mTLS is P5c: `DefaultHubChannelFactory.customizeTls` is the (empty)
+`UNAVAILABLE (io exception)` or `INTERNAL (http2 exception)` and the first `WARN` line that applies (not
+necessarily the very first attempt: a hub that was still starting is a plain refusal, which carries no hint) says to check
+`kraken.messaging.hub.tls.enabled` and `tls.ca-file`; later attempts log it at `DEBUG`. mTLS is P5c: `DefaultHubChannelFactory.customizeTls` is the (empty)
 hook where a client certificate will go.
 
 **Rollout.** Hub first, clients second, `enforce` last (any order is safe because an older client or hub simply ignores
