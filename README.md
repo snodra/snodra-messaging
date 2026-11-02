@@ -89,6 +89,32 @@ POM also imports the Spring Boot BOM, so consumers do not need to manage them. B
 
 ## Upgrading
 
+**To hub access control and TLS (P5a).** Nothing breaks while the hub runs with `KRAKEN_HUB_AUTH_MODE=off` (the
+default) or `permissive`, and without TLS: configuration and behaviour are as before. New settings (all optional):
+`hub.token`, `hub.token-file`, `hub.tls.enabled`, `hub.tls.ca-file` and `hub.tls.server-name`; the environment forms are
+`KRAKEN_MESSAGING_HUB_TOKEN` (relaxed binding) and, when the property is unset, `KRAKEN_HUB_TOKEN` (likewise
+`..._TOKEN_FILE`). What changes for existing code:
+
+- A stream the hub closes with `UNAUTHENTICATED` or `PERMISSION_DENIED` is now a **registration rejection**, like
+  `ALREADY_EXISTS` and `INVALID_ARGUMENT` always were: `HubConnection.lastRejection` holds the status,
+  `awaitRegistered` throws `HubRegistrationRejectedException`, reconnects wait the backoff cap (`hub.reconnect-backoff.max`)
+  instead of restarting from the floor, and the rejection is logged at `ERROR` once per distinct message, then at `DEBUG`
+  (that applies to the two older codes as well, which used to log an `ERROR` line per attempt). Before, these two codes
+  were ordinary stream closures retried from the floor. `lastRejection` is cleared once a stream completes its handshake
+  again, so a fixed token or ACL is not held against the connection.
+- A request the hub answers `Error{PERMISSION_DENIED}` (type outside the token's `send`) was already an
+  `AccessDeniedException` and is never retried; nothing changes there.
+- A stream that fails before any handshake in the way a TLS mismatch fails (plain text to a TLS hub, TLS to a plain hub)
+  now says so in the `WARN` line.
+- Roll out in this order: hub in `permissive`, services with their tokens, watch the hub's violation counter, then `enforce`
+  (see [Hub security](#hub-security-token-acl-and-tls)). A client with a token works against every older hub, which ignores it.
+- API: `HubSettings` gained a last, defaulted parameter `token` (a `HubToken`, redacted in `toString`); `KrakenMessagingProperties.Hub`
+  gained `token`, `tokenFile` and `tls`; the default `krakenHubChannelFactory` bean is now a `DefaultHubChannelFactory` built
+  from `hub.tls.*` (an override bean of that name still replaces it); `HubChannelFactory` and `HubConnection(s)` are
+  unchanged. `InProcessHub` gained `auth`, `KrakenContainers` gained `hubP5a(...)` and `TestCertificates` is new (see
+  [Test helpers](#test-helpers-kraken-messaging-test)). `spring-boot-actuator` is an optional (`compileOnly`) dependency:
+  with it on the classpath the token is masked in `configprops` and `env`.
+
 **To subscription queries (P4c).** Nothing breaks: existing handlers, senders and configuration behave as before. On the
 wire `Register` also declares the `subscription` capability (an older hub ignores it), so a P4b hub or older makes
 `QueryBus.subscribe` throw `UnsupportedByHubException("subscription")` while everything else keeps working. New setting
@@ -201,6 +227,11 @@ All keys (`kraken.messaging.*`; durations accept `200ms`, `5s`, `7d`; relaxed bi
 | `hub.reconnect-backoff.max` | `5s` | Maximum reconnect delay. Every wait is jittered by ±20 % and capped at this value (at the cap: 80-100 % of it); the delay resets to `min` once an attempt reached the hub's handshake. |
 | `hub.max-subscriptions` | `1024` | Subscription queries this instance serves at once, over every hub (at least 1). The next one is refused with `RESOURCE_EXHAUSTED` ("subscription limit (N) reached"), which the subscriber sees as a `HandlerBusyException`. A subscription holds no handler permit, so `max-concurrent-handlers` does not bound it; the default equals the hub's own `KRAKEN_HUB_MAX_SUBSCRIPTIONS_PER_INSTANCE`. |
 | `hub.stream-credit-timeout` | `10m` | The longest a streaming handler of this instance waits for credit from the collector before it ends the stream with `TIMEOUT` ("no credit within ...") and frees its handler slot and hub permit (a hub that forgot the stream would otherwise leave them held forever). Must be positive; the default is the hub's default maximum stream duration (`KRAKEN_HUB_MAX_STREAM_DURATION`). |
+| `hub.token` | none | Static token sent in `Register.credentials.token` of **every** hub stream (hub access control, [Hub security](#hub-security-token-acl-and-tls)). Optional; an empty or blank value is the same as none. Never logged, redacted in `toString` and in the actuator's `configprops` and `env`. Environment: `KRAKEN_MESSAGING_HUB_TOKEN`, or `KRAKEN_HUB_TOKEN` when this key is unset. |
+| `hub.token-file` | none | File holding the token (a container secret such as `/run/secrets/kraken-hub-token`; surrounding whitespace ignored). Read at startup (an unreadable file fails it, naming the file) and **again on every reconnect**, so a rotated secret is picked up without a restart. **Wins over `hub.token` when both are set.** Environment: `KRAKEN_MESSAGING_HUB_TOKEN_FILE`, or `KRAKEN_HUB_TOKEN_FILE` when this key is unset. |
+| `hub.tls.enabled` | `false` | Talk TLS to the hub, for every `hub.address` form (a list of targets and `dns:///`). Off: plain text, as before. The hub must serve TLS on that port (`KRAKEN_HUB_TLS_CERT` / `KRAKEN_HUB_TLS_KEY`). |
+| `hub.tls.ca-file` | JVM system roots | PEM file with the CA certificate(s) that signed the hub's certificate (a self-signed hub certificate is its own CA). Read on every connection attempt; a file that cannot be used fails the startup. Set without `hub.tls.enabled` it is ignored with a warning. |
+| `hub.tls.server-name` | the address's host | Name to verify the hub's certificate against, for when the address is an IP or an alias the certificate does not list. |
 | `hub.max-concurrent-handlers` | `256` | Incoming hub requests handled concurrently by this instance, over all hubs (at least 1, else the startup fails); further requests wait for a free slot. Also announced as `initial_permits` to a hub with flow control (split over N hubs: `ceil(max / N)` each), which then queues the excess on its side. |
 | `hub.load-factor` | `100` | Relative capacity of this instance (`Register.load_factor`); weights its share of the hub's routing (keyed ring and load score). A negative value fails the startup; 0 is allowed (the hub reads it as 100). |
 | `hub.tags.<name>` | none | Labels announced in `Register.tags`, for example `hub.tags.zone=eu-1`; unkeyed requests prefer instances whose tags match the sender's. |
@@ -223,6 +254,8 @@ All keys (`kraken.messaging.*`; durations accept `200ms`, `5s`, `7d`; relaxed bi
 | `security.forward-jwt` | `true` | Put the current request's bearer token in the hub request's `authorization` header. |
 
 ### Security
+
+(The hub's own access control, the service token and TLS are in [Hub security](#hub-security-token-acl-and-tls) below.)
 
 Cross-service commands and queries are service-to-service calls on a private network, so they are **trusted by
 default**: a request with no token is anonymous and is still handled. A handler that needs an authenticated user
@@ -291,6 +324,63 @@ Notes:
 The resolved identity is installed in the `SecurityContext` while the handler runs, so `CallerContext` works inside
 handlers and nested sends re-forward the same token. `kraken.messaging.security.require-jwt` was removed; setting it
 fails startup with a hint.
+
+### Hub security: token, ACL and TLS
+
+Since P5a the hub can authenticate services and restrict what they register and send, and serve its gRPC port over TLS
+(decision record: umbrella `docs/adr/0018-hub-access-control.md`, operator how-to: `docs/06-security.md`). All of it is opt-in
+on the hub (`KRAKEN_HUB_AUTH_MODE=off|permissive|enforce`, default `off`); this section is the client's side. It is
+unrelated to [Security](#security) above, which is about the **user's** forwarded JWT.
+
+**The token.** Give each service its own random token (`openssl rand -hex 32`) and the same one in the hub's ACL file
+(which holds only its SHA-256):
+
+```yaml
+kraken:
+  messaging:
+    hub:
+      token: ${BILLING_HUB_TOKEN}            # or: token-file: /run/secrets/kraken-hub-token
+```
+
+The token goes in `Register.credentials.token` of every stream (read once per stream; the hub reads it from the first
+`Register` only). It is never logged, `HubSettings.toString()` and `KrakenMessagingProperties.toString()` print `****`, and with
+`spring-boot-actuator` on the classpath the starter contributes a `SanitizingFunction` that masks it (and
+`KRAKEN_HUB_TOKEN`) in `/actuator/configprops` and `/actuator/env` even with `show-values=ALWAYS` and whatever
+sanitization the application configured. An empty token is no token (a v1-style `Register` without credentials, which
+`off` and `permissive` hubs accept). **`token-file` wins when both are set** (it is the source that can rotate); the
+file is read at startup, where a missing file fails the startup, and on every reconnect, so replacing the secret and
+letting the connection reconnect (or fail once) is a rotation. A file that disappears later keeps the last token read
+and logs one warning.
+
+**What the hub does with it**, and what you see:
+
+| Hub (`enforce`) | Stream or request | In the client |
+|---|---|---|
+| no token, an empty token, an unknown token (or a JWT, until P5b) | the hub closes the stream with `UNAUTHENTICATED` | registration rejection |
+| `service-name` the token does not grant, or a handled type outside its `handle` | the hub closes the stream with `PERMISSION_DENIED` (naming the type) | registration rejection |
+| a request whose type is outside `send` (unary, scatter-gather, streaming, subscription) | an immediate `Error{PERMISSION_DENIED}`, nothing routed | `AccessDeniedException`, **never retried** |
+| a request after the token left the ACL | an immediate `Error{UNAUTHENTICATED}` | `UnauthenticatedException`, never retried |
+
+A **registration rejection** (`ALREADY_EXISTS`, `INVALID_ARGUMENT`, `UNAUTHENTICATED`, `PERMISSION_DENIED`): the status is
+in `HubConnection.lastRejection`, `awaitRegistered` throws `HubRegistrationRejectedException` naming the code and the hub's
+message, the connection reconnects at the backoff cap (80-100 % of `hub.reconnect-backoff.max`, no tight loop), logs at
+`ERROR` once per distinct message and then at `DEBUG`, and keeps retrying (a fixed ACL or token file heals it without a
+restart; `lastRejection` clears when a stream completes its handshake). The service keeps running; the hub counts every attempt as a
+violation. In `permissive` nothing is refused: the hub logs and counts what `enforce` would refuse.
+
+**TLS.** `hub.tls.enabled=true` with `hub.tls.ca-file` (the CA that signed the hub's certificate; the JVM's trust store when
+absent) and, if the address is not a name on the certificate, `hub.tls.server-name`. It applies to every address form.
+Plain text against a TLS hub (or TLS against a plain-text one) never hangs: the stream fails at once as
+`UNAVAILABLE (io exception)` or `INTERNAL (http2 exception)` and the first `WARN` line says to check
+`kraken.messaging.hub.tls.enabled` and `tls.ca-file`. mTLS is P5c: `DefaultHubChannelFactory.customizeTls` is the (empty)
+hook where a client certificate will go.
+
+**Rollout.** Hub first, clients second, `enforce` last (any order is safe because an older client or hub simply ignores
+the credentials): (1) run the hub with `KRAKEN_HUB_AUTH_MODE=permissive` and an ACL file; (2) give every service its
+token (and the CA, if the hub serves TLS); (3) watch `kraken_hub_auth_violations_total{reason,service}` and the dashboard until
+it stays flat; (4) switch the hub to `enforce`; (5) turn on TLS before tokens cross an untrusted network. A service
+whose token is missing or wrong in `enforce` fails visibly (`HubRegistrationRejectedException`, an `ERROR` line) instead of
+reconnecting in a tight loop.
 
 ### Handlers
 
@@ -792,6 +882,16 @@ result.updates.collect { change -> render(change) }   // completes when the hand
   `RESOURCE_EXHAUSTED`, `maxSubscriptionDuration` (off) ends with `CANCELLED`, and the gates are the real hub's;
   `subscription = false` emulates the P4b hub, and `openSubscriptions()`, `subscriptionTargetsOf(instanceId)`,
   `subscriptionCreditOf(requestId)` and `bufferedUpdatesOf(requestId)` observe it.
+- `InProcessHub.auth` (P5a): `HubAuth.enforce(tokens)`, `HubAuth.permissive(tokens)` or `HubAuth.OFF` (default), with `tokens` a
+  map from the plain test token to `AclEntry(service, handle, send)` (patterns: exact, `prefix.*`, `*`), answers like the real
+  hub: in `enforce` the first `Register` is closed with `UNAUTHENTICATED` (no credentials, an empty token, `jwt`, an unknown
+  token) or `PERMISSION_DENIED` (another service name, a command, query or shared query outside `handle`), a later `Register`
+  adding a forbidden type likewise, and a request outside `send` gets an immediate `Error{PERMISSION_DENIED}` in every
+  request mode (`UNAUTHENTICATED` if the token left `auth` meanwhile; `auth` may be replaced at runtime). `permissive` allows
+  and records. `authViolations()` lists every violation (code, message, enforced, a monotonic timestamp, so tests can assert
+  the spacing of reconnects) and `tokensSeenFrom(instanceId)` the token of every `Register` received, refused ones included.
+- `TestCertificates.generate(dir, names)`: a throwaway self-signed certificate made at test time with the JDK's `keytool`
+  (PEM certificate, also the CA a client trusts, and PKCS#8 key; valid for `localhost` and `127.0.0.1` by default).
 - `KrakenContainers`: unstarted Testcontainers definitions. `kafka()`, `mongo()` (single-node replica set, needed for
   transactions), `hub()` from image `kraken-hub:dev` or the one named by `KRAKEN_HUB_IMAGE`, `hubBaseline()` from the previous hub release
   `kraken-hub:v1-baseline` or `KRAKEN_HUB_BASELINE_IMAGE` and `hubP0()` from the P0 hub `kraken-hub:p0` or
@@ -799,10 +899,13 @@ result.updates.collect { change -> render(change) }   // completes when the hand
   `kraken-hub:p3-hub` or `KRAKEN_HUB_P3_IMAGE` with ports 7000 and 7001 (two-hub tests), `hubP4a()` from
   `kraken-hub:p4a-hub` or `KRAKEN_HUB_P4A_IMAGE` with ports 7000 and 7001 (scatter-gather tests), `hubP4b()` from
   `kraken-hub:p4b-hub` or `KRAKEN_HUB_P4B_IMAGE` with ports 7000 and 7001 (streaming tests), `hubP4c()` from
-  `kraken-hub:p4c-hub` or `KRAKEN_HUB_P4C_IMAGE` with ports 7000 and 7001 (subscription tests), `hub(env)` for the hub
+  `kraken-hub:p4c-hub` or `KRAKEN_HUB_P4C_IMAGE` with ports 7000 and 7001 (subscription tests), `hubP5a(dir, acl, authMode, tls, env)`
+  from `kraken-hub:p5a-hub` or `KRAKEN_HUB_P5A_IMAGE` (access control and TLS: it writes the ACL file, with the SHA-256 of
+  each token, into `dir` and copies it and the `TestCertificates` into the container, with `KRAKEN_HUB_AUTH_MODE`,
+  `KRAKEN_HUB_ACL_FILE`, `KRAKEN_HUB_TLS_CERT` and `KRAKEN_HUB_TLS_KEY` set), `hub(env)` for the hub
   under test with extra `KRAKEN_HUB_*` settings, and `hubImageAvailable()` / `hubBaselineImageAvailable()` /
   `hubP0ImageAvailable()` / `hubP2ImageAvailable()` / `hubP3ImageAvailable()` / `hubP4aImageAvailable()` /
-  `hubP4bImageAvailable()` / `hubP4cImageAvailable()`.
+  `hubP4bImageAvailable()` / `hubP4cImageAvailable()` / `hubP5aImageAvailable()`.
 - `KrakenTestKafka(bootstrap, typePrefix, topic).awaitEvent<T>()`: reads an event back from the topic.
 
 ```kotlin
@@ -827,6 +930,9 @@ Docker Compose from local builds together with the real `kraken-hub` image, Kafk
 
 ## Known limitations
 
+- Hub authentication is a static token per service (P5a). Keycloak client-credentials JWTs (P5b) and client certificates
+  (P5c, mTLS) are not built: a hub in `enforce` refuses `jwt` credentials, and `DefaultHubChannelFactory.customizeTls` is an
+  empty hook. The token is a long-lived secret: rotate it through `hub.token-file`.
 - No dead-letter topic: poison records are logged and skipped.
 - No leader election for the outbox publisher; with several instances delivery is at-least-once and ordering is per
   publishing instance.
