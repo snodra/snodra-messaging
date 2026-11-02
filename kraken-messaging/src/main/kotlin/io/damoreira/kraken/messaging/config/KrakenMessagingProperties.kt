@@ -63,6 +63,13 @@ data class KrakenMessagingProperties(
          * leave it waiting forever). Must be positive; the default is the hub's default maximum stream duration.
          */
         val streamCreditTimeout: Duration = Duration.ofMinutes(10),
+        /**
+         * Subscription queries (`SubscriptionQuery`) this instance serves at once, over every hub (>= 1): a new
+         * subscription beyond it is refused with `RESOURCE_EXHAUSTED` ("subscription limit (N) reached"). A subscription
+         * holds no handler permit, so `max-concurrent-handlers` does not bound it. The default is the hub's own
+         * per-instance limit (`KRAKEN_HUB_MAX_SUBSCRIPTIONS_PER_INSTANCE`).
+         */
+        val maxSubscriptions: Int = 1024,
     ) {
         init {
             // Checked at binding, so a bad value fails the startup even while the hub is disabled.
@@ -77,6 +84,7 @@ data class KrakenMessagingProperties(
             require(!streamCreditTimeout.isZero && !streamCreditTimeout.isNegative) {
                 "kraken.messaging.hub.stream-credit-timeout must be positive, was $streamCreditTimeout"
             }
+            require(maxSubscriptions >= 1) { "kraken.messaging.hub.max-subscriptions must be >= 1, was $maxSubscriptions" }
         }
     }
 

@@ -129,14 +129,18 @@ class SubscriptionRegistry(val maxSubscriptions: Int = DEFAULT_MAX_SUBSCRIPTIONS
 
     /**
      * Ends every subscription with a clean `ReplyEnd`, best effort (this instance is shutting down): to the hub this
-     * target's emitter completed; the subscriber's `updates` completes once every other target has too.
+     * target's emitter completed; the subscriber's `updates` completes once every other target has too. Returns how many
+     * subscriptions it ended.
      */
-    fun endAll() {
+    fun endAll(): Int {
+        var ended = 0
         for ((key, subscription) in open.entries.toList()) {
             if (open.remove(key, subscription)) {
+                ended++
                 runCatching { subscription.end(null) }.onFailure { log.debug("Ending subscription {} failed: {}", key.requestId, it.toString()) }
             }
         }
+        return ended
     }
 
     private fun error(requestId: String, code: ErrorCode, message: String): Error =

@@ -1,10 +1,13 @@
 package io.damoreira.kraken.messaging.config
 
+import io.damoreira.kraken.messaging.QueryUpdateEmitter
 import io.damoreira.kraken.messaging.codec.JsonCodec
 import io.damoreira.kraken.messaging.codec.MessageTypeResolver
 import io.damoreira.kraken.messaging.handler.HandlerBeanPostProcessor
 import io.damoreira.kraken.messaging.handler.HandlerInvoker
 import io.damoreira.kraken.messaging.handler.HandlerRegistry
+import io.damoreira.kraken.messaging.hub.HubQueryUpdateEmitter
+import io.damoreira.kraken.messaging.hub.SubscriptionRegistry
 import io.damoreira.kraken.messaging.security.ForwardedIdentityResolver
 import io.damoreira.kraken.messaging.tracing.TraceHeaders
 import io.micrometer.tracing.Tracer
@@ -44,6 +47,20 @@ class KrakenMessagingAutoConfiguration {
     @Bean
     @ConditionalOnMissingBean
     fun handlerInvoker(registry: HandlerRegistry, codec: JsonCodec) = HandlerInvoker(registry, codec)
+
+    /**
+     * The subscription queries this instance serves (P4c): filled by the hub connections, read by [queryUpdateEmitter].
+     * Transport-independent on purpose: with the hub disabled it simply stays empty and emitting is a no-op.
+     */
+    @Bean
+    @ConditionalOnMissingBean
+    fun subscriptionRegistry(properties: KrakenMessagingProperties) = SubscriptionRegistry(properties.hub.maxSubscriptions)
+
+    /** Pushes updates to subscription queries; inside a Spring transaction it waits for the commit. */
+    @Bean
+    @ConditionalOnMissingBean
+    fun queryUpdateEmitter(registry: SubscriptionRegistry, codec: JsonCodec, typeResolver: MessageTypeResolver): QueryUpdateEmitter =
+        HubQueryUpdateEmitter(registry, codec, typeResolver)
 
     /** Fails startup when a removed property is still configured (runs regardless of user-supplied beans). */
     @Bean

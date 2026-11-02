@@ -3,6 +3,19 @@ package io.damoreira.kraken.messaging.config
 import io.damoreira.kraken.messaging.CommandBus
 import io.damoreira.kraken.messaging.EventBus
 import io.damoreira.kraken.messaging.QueryBus
+import io.damoreira.kraken.messaging.QueryUpdateEmitter
+import io.damoreira.kraken.messaging.SubscriptionOptions
+import io.damoreira.kraken.messaging.fixtures.Balance
+import io.damoreira.kraken.messaging.fixtures.BalanceChanged
+import io.damoreira.kraken.messaging.fixtures.WatchAccount
+import io.damoreira.kraken.messaging.hub.AccountWatcher
+import io.damoreira.kraken.messaging.hub.HubQueryUpdateEmitter
+import io.damoreira.kraken.messaging.hub.SubscriptionRegistry
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.runBlocking
 import io.damoreira.kraken.messaging.api.Command
 import io.damoreira.kraken.messaging.codec.JsonCodec
 import io.damoreira.kraken.messaging.codec.MessageTypeResolver
@@ -67,6 +80,11 @@ class SharedCountHandlers {
 }
 
 @Configuration(proxyBeanMethods = false)
+class AccountWatcherConfig {
+    @Bean fun accountWatcher() = AccountWatcher()
+}
+
+@Configuration(proxyBeanMethods = false)
 class SharedHandlersConfig {
     @Bean fun sharedCountHandlers() = SharedCountHandlers()
 }
@@ -95,10 +113,38 @@ class MongoMockConfig {
     @Bean fun mongoDatabaseFactory(): MongoDatabaseFactory = mockk(relaxed = true)
 }
 
+/** A sender-only client of [hub], for what an application context under test is the other end of. */
+class HubConnectionsClient(hub: InProcessHub) {
+    private val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.Default)
+    private val resolver = MessageTypeResolver("test")
+    private val codec = JsonCodec()
+    private val registry = HandlerRegistry(resolver)
+    private val connection = io.damoreira.kraken.messaging.hub.HubConnection(
+        channelFactory = { hub.channel() },
+        serviceName = "subscriber",
+        instanceId = "subscriber-1",
+        settings = io.damoreira.kraken.messaging.hub.HubSettings(null, Duration.ofSeconds(10), Duration.ofMillis(20), Duration.ofMillis(200)),
+        inbound = { req -> io.damoreira.kraken.hub.v1.Reply.newBuilder().setRequestId(req.id).build() },
+        scope = scope,
+    ).also {
+        it.start()
+        runBlocking { check(it.awaitRegistered(Duration.ofSeconds(5))) }
+    }
+    val bus = HubBus(connection, registry, HandlerInvoker(registry, codec), codec, resolver, true, TraceHeaders(null, null), null, emptyMap(), null)
+
+    fun close() {
+        runBlocking { connection.stop() }
+        scope.cancel()
+    }
+}
+
 class AutoConfigurationTest {
     private val hub = InProcessHub().start()
 
-    @AfterEach fun tearDown() = hub.close()
+    @AfterEach fun tearDown() {
+        subscriptionHub?.close()
+        hub.close()
+    }
 
     private val runner = ApplicationContextRunner()
         .withConfiguration(
@@ -132,6 +178,9 @@ class AutoConfigurationTest {
             assertEquals(1, context.getBeansOfType(ForwardedIdentityResolver::class.java).size)
             assertEquals(1, context.getBeansOfType(MessageTypeResolver::class.java).size)
             assertEquals(1, context.getBeansOfType(TraceHeaders::class.java).size)
+            // The emitter does not need the hub: emitting with no subscription is a no-op, so a service starts in any mode.
+            assertIs<HubQueryUpdateEmitter>(context.getBean(QueryUpdateEmitter::class.java))
+            assertEquals(1024, context.getBean(SubscriptionRegistry::class.java).maxSubscriptions)
             // no MongoTemplate in this context: the Kafka/outbox configuration backs off
             assertTrue(context.getBeansOfType(EventBus::class.java).isEmpty())
         }
@@ -193,6 +242,55 @@ class AutoConfigurationTest {
             assertEquals(listOf("test.GetCount"), register.sharedQueryTypesList)
         }
     }
+
+    @Test fun `max-subscriptions sets the registry limit, and a user QueryUpdateEmitter bean replaces ours`() {
+        runner.withPropertyValues("kraken.messaging.hub.max-subscriptions=7").run { context ->
+            assertEquals(7, context.getBean(SubscriptionRegistry::class.java).maxSubscriptions)
+        }
+        val mine = object : QueryUpdateEmitter {
+            override fun <Q : io.damoreira.kraken.messaging.api.SubscriptionQuery<*, U>, U : Any> emit(queryType: kotlin.reflect.KClass<Q>, filter: (Q) -> Boolean, update: U) = Unit
+            override fun <Q : io.damoreira.kraken.messaging.api.SubscriptionQuery<*, *>> complete(queryType: kotlin.reflect.KClass<Q>, filter: (Q) -> Boolean) = Unit
+            override fun <Q : io.damoreira.kraken.messaging.api.SubscriptionQuery<*, *>> completeExceptionally(queryType: kotlin.reflect.KClass<Q>, filter: (Q) -> Boolean, cause: Throwable) = Unit
+        }
+        runner.withBean(QueryUpdateEmitter::class.java, { mine }).run { context ->
+            assertEquals(null, context.startupFailure)
+            assertTrue(context.getBean(QueryUpdateEmitter::class.java) === mine)
+        }
+    }
+
+    @Test fun `the lifecycle serves subscriptions, the emitter pushes updates, and closing the context ends them with a clean end`() = runBlocking {
+        val connection = InProcessHub().start().also { subscriptionHub = it }
+        val owner = ApplicationContextRunner()
+            .withConfiguration(AutoConfigurations.of(KrakenMessagingAutoConfiguration::class.java, HubAutoConfiguration::class.java, KafkaEventsAutoConfiguration::class.java))
+            .withPropertyValues(
+                "kraken.messaging.service-name=accounts", "kraken.messaging.type-prefix=test", "kraken.messaging.hub.enabled=true",
+                "kraken.messaging.kafka.consumer.enabled=false", "kraken.messaging.outbox.enabled=false",
+            )
+            .withBean("krakenHubChannelFactory", HubChannelFactory::class.java, { HubChannelFactory { connection.channel() } })
+            .withUserConfiguration(AccountWatcherConfig::class.java)
+        owner.run { context ->
+            assertEquals(null, context.startupFailure)
+            val connections = context.getBean(HubConnections::class.java)
+            await atMost Duration.ofSeconds(5) until { connections.connected.value && "test.WatchAccount" in connection.registeredTypes() }
+            assertEquals(listOf("flow-control", "instance-status", "scatter-gather", "streaming", "subscription"), connection.lastRegisterFrom(connections.instanceId)!!.capabilitiesList)
+
+            val subscriber = HubConnectionsClient(connection)
+            val result = runBlocking { subscriber.bus.subscribe(WatchAccount(7), SubscriptionOptions(timeout = Duration.ofSeconds(5))) }
+            assertEquals(Balance(107), result.initial)
+            val registry = context.getBean(SubscriptionRegistry::class.java)
+            await atMost Duration.ofSeconds(5) until { registry.size == 1 }
+            val emitter = context.getBean(QueryUpdateEmitter::class.java)
+            emitter.emit(WatchAccount::class, { true }, BalanceChanged(7, 1))
+            val updates = kotlinx.coroutines.CoroutineScope(Dispatchers.Default).async { result.updates.toList() }
+            await atMost Duration.ofSeconds(5) until { connection.openSubscriptions() == 1 }
+            context.close() // the lifecycle ends the subscription before it closes the stream
+            val seen = runBlocking { kotlinx.coroutines.withTimeout(5_000) { updates.await() } }
+            assertEquals(listOf(BalanceChanged(7, 1)), seen) // completed normally: a clean ReplyEnd, not HANDLER_DISCONNECTED
+            subscriber.close()
+        }
+    }
+
+    private var subscriptionHub: InProcessHub? = null
 
     @Test fun `lifecycle phases stop after the web server drain`() {
         val gracefulShutdown = SmartLifecycle.DEFAULT_PHASE - 1024 // WebServerApplicationContext.GRACEFUL_SHUTDOWN_PHASE

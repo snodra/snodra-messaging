@@ -32,6 +32,7 @@ class PropertiesBindingTest {
             assertEquals(Duration.ofMillis(500), p.hub.reconnectBackoff.min)
             assertEquals(Duration.ofSeconds(5), p.hub.reconnectBackoff.max)
             assertEquals(Duration.ofMinutes(10), p.hub.streamCreditTimeout) // the hub's default max stream duration
+            assertEquals(1024, p.hub.maxSubscriptions) // the hub's default per-instance subscription limit
             assertEquals("broker:19092", p.kafka.bootstrapServers)
             assertEquals("kraken.events", p.kafka.topic)
             assertEquals(true, p.kafka.consumer.enabled)
@@ -117,6 +118,16 @@ class PropertiesBindingTest {
         for (value in listOf("0s", "-1s")) {
             val messages = startupFailure("kraken.messaging.hub.stream-credit-timeout=$value")
             assertTrue("kraken.messaging.hub.stream-credit-timeout must be positive" in messages, messages)
+        }
+    }
+
+    @Test fun `max-subscriptions binds and must be at least 1`() {
+        runner.withPropertyValues(*required, "kraken.messaging.hub.max-subscriptions=7").run { context ->
+            assertEquals(7, context.getBean(KrakenMessagingProperties::class.java).hub.maxSubscriptions)
+        }
+        for (value in listOf("0", "-3")) {
+            val messages = startupFailure("kraken.messaging.hub.max-subscriptions=$value")
+            assertTrue("kraken.messaging.hub.max-subscriptions must be >= 1" in messages, messages)
         }
     }
 

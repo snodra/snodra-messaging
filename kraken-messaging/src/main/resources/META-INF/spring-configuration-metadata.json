@@ -123,6 +123,13 @@
       "defaultValue": "10m"
     },
     {
+      "name": "kraken.messaging.hub.max-subscriptions",
+      "type": "java.lang.Integer",
+      "description": "Subscription queries this instance serves at once, over every hub (at least 1); the next one is refused with RESOURCE_EXHAUSTED. A subscription holds no handler permit, so max-concurrent-handlers does not bound it.",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Hub",
+      "defaultValue": 1024
+    },
+    {
       "name": "kraken.messaging.hub.max-concurrent-handlers",
       "type": "java.lang.Integer",
       "description": "Incoming hub requests handled concurrently by this instance; further requests wait for a free slot. Also announced as initial_permits to a hub with flow control, which queues the excess.",

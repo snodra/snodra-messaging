@@ -12,6 +12,7 @@ import io.damoreira.kraken.messaging.hub.HubConnections
 import io.damoreira.kraken.messaging.hub.HubSettings
 import io.damoreira.kraken.messaging.hub.HubTargets
 import io.damoreira.kraken.messaging.hub.InboundRequestDispatcher
+import io.damoreira.kraken.messaging.hub.SubscriptionRegistry
 import io.damoreira.kraken.messaging.security.ForwardedIdentityResolver
 import io.damoreira.kraken.messaging.tracing.TraceHeaders
 import io.grpc.ManagedChannelBuilder
@@ -22,6 +23,7 @@ import kotlinx.coroutines.ExecutorCoroutineDispatcher
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Qualifier
@@ -71,6 +73,7 @@ class HubAutoConfiguration {
         @Qualifier(CHANNEL_FACTORY) channelFactory: HubChannelFactory,
         dispatcher: InboundRequestDispatcher,
         registry: HandlerRegistry,
+        subscriptions: SubscriptionRegistry,
     ): HubLifecycle {
         val hub = properties.hub
         // The connect loop, stream collector and heartbeats stay on Default; handlers get virtual threads (see HubConnection).
@@ -90,8 +93,10 @@ class HubAutoConfiguration {
             tags = hub.tags,
             statusInterval = hub.statusInterval,
             inboundStream = dispatcher::dispatchStream,
+            subscriptions = subscriptions,
+            inboundSubscription = dispatcher::dispatchSubscription,
         )
-        return HubLifecycle(connections, registry, scope, handlerDispatcher)
+        return HubLifecycle(connections, registry, scope, handlerDispatcher, subscriptions = subscriptions)
     }
 
     @Bean
@@ -140,9 +145,10 @@ class HubAutoConfiguration {
  * `DEFAULT_PHASE - 2048` in Boot 4.1), so the hub connection starts before the server accepts traffic and stops only
  * after the graceful HTTP drain (`GRACEFUL_SHUTDOWN_PHASE`, `DEFAULT_PHASE - 1024`) and the server stop.
  *
- * On stop it first announces an empty registration so the hubs stop routing to this instance, waits up to
- * [drainTimeout] for incoming handlers still running, then closes the stream, cancels [scope] and closes
- * [handlerDispatcher].
+ * On stop it first announces an empty registration so the hubs stop routing to this instance, then ends every
+ * subscription it serves with a clean `ReplyEnd` ([subscriptions], best effort: the hub treats it as that target's emitter
+ * completing), waits up to [drainTimeout] for incoming handlers still running, then closes the stream, cancels [scope]
+ * and closes [handlerDispatcher].
  */
 class HubLifecycle(
     val connections: HubConnections,
@@ -150,6 +156,7 @@ class HubLifecycle(
     private val scope: CoroutineScope,
     private val handlerDispatcher: ExecutorCoroutineDispatcher? = null,
     private val drainTimeout: Duration = Duration.ofSeconds(5),
+    private val subscriptions: SubscriptionRegistry? = null,
 ) : SmartLifecycle {
     private val log = LoggerFactory.getLogger(HubLifecycle::class.java)
     @Volatile private var running = false
@@ -172,6 +179,8 @@ class HubLifecycle(
                 connections.register(emptySet(), emptySet())
                 val deregistered = runCatching { connections.awaitRegistered(Duration.ofSeconds(1)) }.getOrDefault(false)
                 if (!deregistered) log.debug("Not every hub confirmed the empty registration before shutdown")
+                // Subscribers are told now, not after a slow handler drained; the pause lets the ends leave before the stream closes.
+                if (subscriptions != null && subscriptions.endAll() > 0) delay(SUBSCRIPTION_END_FLUSH.toMillis())
                 if (!connections.awaitHandlersIdle(drainTimeout)) {
                     log.warn("{} incoming hub request(s) still running after {}; stopping anyway", connections.inFlightHandlers.value, drainTimeout)
                 }
@@ -193,5 +202,8 @@ class HubLifecycle(
     companion object {
         /** `WebServerApplicationContext.START_STOP_LIFECYCLE_PHASE - 1` (the class is not on the starter's classpath). */
         const val PHASE = SmartLifecycle.DEFAULT_PHASE - 2049
+
+        /** How long shutdown waits after ending subscriptions, so the ends are written before the stream is closed. */
+        private val SUBSCRIPTION_END_FLUSH: Duration = Duration.ofMillis(200)
     }
 }
