@@ -177,8 +177,50 @@ class HubAccessControlTest {
         assertEquals(token, source.current())
         Files.delete(file)
         assertEquals(token, source.current())
-        Files.writeString(file, "")
-        assertNull(source.current(), "an empty file is no token")
+    }
+
+    @Test fun `an empty token file at startup is no token`(@TempDir dir: Path) {
+        val file = dir.resolve("hub-token")
+        Files.writeString(file, " \n")
+        val source = HubToken.of(null, file)
+        assertNull(source.current(), "an empty file at startup is no token")
+        Files.writeString(file, token)
+        assertEquals(token, source.current())
+    }
+
+    @Test fun `an empty token file read after a good one keeps the last token and warns once, a new token is then picked up`(@TempDir dir: Path) = runBlocking {
+        val tokenLog = LoggerFactory.getLogger(HubToken::class.java) as Logger
+        val tokenAppender = ListAppender<ILoggingEvent>().also { it.start() }
+        tokenLog.addAppender(tokenAppender)
+        try {
+            val file = dir.resolve("hub-token")
+            Files.writeString(file, token)
+            val conn = connection("i-1", settings = settings(HubToken.of(null, file)))
+            conn.start()
+            assertTrue(conn.awaitRegistered(wait))
+            assertEquals(token, hub.lastRegisterFrom("i-1")!!.credentials.token)
+
+            Files.writeString(file, "") // a non-atomic rotation caught half way
+            for (round in 2..3) { // two reconnects while the file stays empty
+                hub.dropInstance("i-1")
+                await atMost wait until { hub.streamsOpenedBy("i-1") >= round }
+                assertTrue(conn.awaitRegistered(wait))
+            }
+            assertEquals(listOf<String?>(token), hub.tokensSeenFrom("i-1").distinct(), "the old token went out, never a Register without one")
+            assertTrue(hub.tokensSeenFrom("i-1").none { it == null })
+            val warns = tokenAppender.list.filter { it.level == Level.WARN }
+            assertEquals(1, warns.size, warns.map { it.formattedMessage }.toString())
+            assertFalse(token in warns.single().formattedMessage)
+
+            val rotated = "rotated-" + UUID.randomUUID()
+            Files.writeString(file, rotated + "\n")
+            hub.dropInstance("i-1")
+            await atMost wait until { hub.streamsOpenedBy("i-1") >= 4 }
+            assertTrue(conn.awaitRegistered(wait))
+            assertEquals(rotated, hub.lastRegisterFrom("i-1")!!.credentials.token)
+        } finally {
+            tokenLog.detachAppender(tokenAppender)
+        }
     }
 
     @Test fun `a token file that is fixed makes the next attempt succeed`(@TempDir dir: Path) = runBlocking {
