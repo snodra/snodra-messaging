@@ -33,6 +33,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.consumeAsFlow
@@ -404,6 +405,25 @@ class SubscriptionQueryTest {
         val end = sender.next().end
         assertEquals(listOf("w1", 1, false), listOf(end.requestId, end.parts, end.hasError()))
         assertEquals(0, x.subscriptions.size)
+    }
+
+    @Test fun `stopping the connection delivers the updates and ends it queued, even to a hub that has not read them yet`() = runBlocking {
+        val x = owner("svc-x", "x-1", AccountWatcher())
+        val sender = RawSender("s-1").also { it.next() }
+        sender.send(subscribeRequest("w1", account = 7)); sender.next()
+        awaitUntil { x.subscriptions.size == 1 }
+        // The hub stops reading: it holds the update, the end waits in the client until the hub reads again.
+        hub.pauseReading = true
+        x.emitter.emit(WatchAccount::class, { it.account == 7 }, BalanceChanged(7, 1))
+        x.subscriptions.endAll()
+        coroutineScope {
+            launch { delay(200); hub.pauseReading = false }
+            x.connection.stop()
+        }
+        val received = mutableListOf<ServerMessage>()
+        do received += sender.next() while (!received.last().hasEnd())
+        assertEquals(listOf(true, false), received.map { it.hasPart() })
+        assertFalse(received.last().end.hasError(), "a clean end, not ${received.last().end.error.code}")
     }
 
     @Test fun `RequiresAuthentication is checked when the subscription is admitted`() = runBlocking {

@@ -295,6 +295,8 @@ class HubConnection(
         @Volatile var handshake: HubHandshake? = null
         @Volatile var heartbeatIntervalMs: Long = fallbackHeartbeatMs
         val handshakeReached = CompletableDeferred<Unit>()
+        /** Completed once the connect loop is done with this stream (the hub finished it, or it failed) and cleaned up. */
+        val closed = CompletableDeferred<Unit>()
     }
 
     private val lock = Any() // guards registration, generation and current
@@ -303,6 +305,8 @@ class HubConnection(
     private val acknowledged = MutableStateFlow(-1L) // generation confirmed by the hub on the current stream
     @Volatile private var current: Stream? = null
     @Volatile private var loop: Job? = null
+    /** [stop] was called: the connect loop ends with its current stream instead of opening another. */
+    @Volatile private var stopping = false
     private var lastHeartbeatAt = 0L
 
     /**
@@ -747,13 +751,21 @@ class HubConnection(
         return ms?.let { Duration.ofMillis(it.toLong()) } ?: HubProtocol.DEFAULT_REQUEST_TIMEOUT
     }
 
-    /** Closes the stream, stops reconnecting and fails every request in flight. */
+    /**
+     * Closes the stream, stops reconnecting and fails every request in flight. What is queued for the hub (a subscription's
+     * last updates and `ReplyEnd`) is written first: the outbound queue is closed, which half-closes the request side after
+     * its last message, and the hub's answer (it finishing its side) is awaited, for [STOP_CLOSE_TIMEOUT] at most.
+     * Cancelling the loop at once would shut the channel down under what gRPC had not written yet, and a hub that never saw
+     * a subscription target's end fails the subscription with `HANDLER_DISCONNECTED`.
+     */
     suspend fun stop() {
-        val job = synchronized(lock) {
+        val (job, stream) = synchronized(lock) {
+            stopping = true
             current?.out?.close()
-            loop
+            loop to current
         }
         failPending(null, HubConnectionLostException("hub connection stopped"))
+        if (stream != null) withTimeoutOrNull(STOP_CLOSE_TIMEOUT.toMillis()) { stream.closed.await() }
         job?.cancelAndJoin()
         failPending(null, HubConnectionLostException("hub connection stopped"))
     }
@@ -765,7 +777,7 @@ class HubConnection(
         var backoff = settings.backoffMin
         var failures = 0
         var hintLogged = false // the TLS hint has reached WARN since the last handshake
-        while (currentCoroutineContext().isActive) {
+        while (currentCoroutineContext().isActive && !stopping) {
             var channel: ManagedChannel? = null
             val stream = Stream(Channel(Channel.UNLIMITED), settings.heartbeatInterval.toMillis(), initialPermits().coerceAtLeast(1), settings.token.current())
             var status: Status = Status.CANCELLED
@@ -801,7 +813,9 @@ class HubConnection(
                 // Likewise its subscriptions (P4c): the hub forgot them, nobody would ever hear their updates.
                 val dropped = subscriptions.closeOwner(stream)
                 if (dropped > 0) log.info("Hub stream of {} ({}) closed: {} subscription(s) dropped", serviceName, instanceId, dropped)
+                stream.closed.complete(Unit)
             }
+            if (stopping) break
             // A stream the hub answered (ack or echo) proves the hub is back: start again from the floor.
             if (reachedHandshake) {
                 backoff = settings.backoffMin
@@ -1255,4 +1269,9 @@ class HubConnection(
      * would come back as the handler's own `HANDLER_ERROR`).
      */
     private class NoCreditException(timeoutMs: Long) : CancellationException("no credit within $timeoutMs ms")
+
+    private companion object {
+        /** How long [stop] waits for the hub to finish a stream it half-closed. */
+        val STOP_CLOSE_TIMEOUT: Duration = Duration.ofSeconds(2)
+    }
 }

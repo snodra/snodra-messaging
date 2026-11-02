@@ -25,7 +25,6 @@ import kotlinx.coroutines.ExecutorCoroutineDispatcher
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Qualifier
@@ -200,8 +199,8 @@ class HubLifecycle(
                 connections.register(emptySet(), emptySet())
                 val deregistered = runCatching { connections.awaitRegistered(Duration.ofSeconds(1)) }.getOrDefault(false)
                 if (!deregistered) log.debug("Not every hub confirmed the empty registration before shutdown")
-                // Subscribers are told now, not after a slow handler drained; the pause lets the ends leave before the stream closes.
-                if (subscriptions != null && subscriptions.endAll() > 0) delay(SUBSCRIPTION_END_FLUSH.toMillis())
+                // Subscribers are told now, not after a slow handler drained; stopping the connections writes the ends before it closes the stream.
+                subscriptions?.endAll()
                 if (!connections.awaitHandlersIdle(drainTimeout)) {
                     log.warn("{} incoming hub request(s) still running after {}; stopping anyway", connections.inFlightHandlers.value, drainTimeout)
                 }
@@ -223,8 +222,5 @@ class HubLifecycle(
     companion object {
         /** `WebServerApplicationContext.START_STOP_LIFECYCLE_PHASE - 1` (the class is not on the starter's classpath). */
         const val PHASE = SmartLifecycle.DEFAULT_PHASE - 2049
-
-        /** How long shutdown waits after ending subscriptions, so the ends are written before the stream is closed. */
-        private val SUBSCRIPTION_END_FLUSH: Duration = Duration.ofMillis(200)
     }
 }
