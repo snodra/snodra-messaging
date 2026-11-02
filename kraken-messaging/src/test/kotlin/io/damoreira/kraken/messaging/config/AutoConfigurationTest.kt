@@ -294,6 +294,7 @@ class AutoConfigurationTest {
             assertEquals(listOf(BalanceChanged(7, 1)), seen) // completed normally: a clean ReplyEnd, not HANDLER_DISCONNECTED
             subscriber.close()
         }
+        Unit // a test method must return nothing: JUnit skips one that returns a value (run() returns the runner)
     }
 
     private var subscriptionHub: InProcessHub? = null

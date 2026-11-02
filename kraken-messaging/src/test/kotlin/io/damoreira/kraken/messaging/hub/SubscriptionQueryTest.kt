@@ -867,6 +867,7 @@ class SubscriptionQueryTest {
         emitter.emit(WatchAccount::class, { true }, BalanceChanged(1, 1))
         assertEquals(1, withTimeout(5_000) { update.await() }.single().value)
         assertIs<HandlerDisconnectedException>(runCatching { withTimeout(5_000) { viaB.updates.toList() } }.exceptionOrNull())
+        Unit // a test method must return nothing: JUnit skips one that returns a value
     }
 
     @Test fun `the bearer token is read when subscribe is called, not when the updates are collected`() = runBlocking {
