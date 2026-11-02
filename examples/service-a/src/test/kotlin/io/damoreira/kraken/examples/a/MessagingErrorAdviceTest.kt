@@ -1,5 +1,6 @@
 package io.damoreira.kraken.examples.a
 
+import io.damoreira.kraken.messaging.AccessDeniedException
 import io.damoreira.kraken.messaging.HandlerBusyException
 import io.damoreira.kraken.messaging.HandlerDisconnectedException
 import io.damoreira.kraken.messaging.HubUnavailableException
@@ -40,6 +41,12 @@ class MessagingErrorAdviceTest {
         val response = advice.handle(StreamCancelledException("max stream duration (10m) exceeded"))
         assertEquals(HttpStatus.BAD_GATEWAY, response.statusCode)
         assertEquals(ErrorBody("StreamCancelledException", "max stream duration (10m) exceeded"), response.body)
+    }
+
+    @Test fun `a request the hub's access control refuses is 403`() {
+        val response = advice.handle(AccessDeniedException("type examples.ForbiddenProbe is not allowed to send"))
+        assertEquals(HttpStatus.FORBIDDEN, response.statusCode)
+        assertEquals(ErrorBody("AccessDeniedException", "type examples.ForbiddenProbe is not allowed to send"), response.body)
     }
 
     @Test fun `any other messaging failure is 502`() {

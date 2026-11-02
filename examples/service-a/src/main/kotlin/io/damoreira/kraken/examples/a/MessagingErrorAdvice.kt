@@ -1,5 +1,6 @@
 package io.damoreira.kraken.examples.a
 
+import io.damoreira.kraken.messaging.AccessDeniedException
 import io.damoreira.kraken.messaging.HandlerBusyException
 import io.damoreira.kraken.messaging.HandlerDisconnectedException
 import io.damoreira.kraken.messaging.MessageTimeoutException
@@ -17,7 +18,8 @@ data class ErrorBody(val error: String, val message: String)
 /**
  * Maps hub failures to HTTP: nobody owns the type (503), the owner vanished (503), the owner's hub queue is full (503),
  * no reply in time (504), a hub without the feature (scatter-gather or streaming on an older hub: 501), a stream the hub
- * ended for outliving its maximum duration (502: the upstream ended it, the caller did not), else 502.
+ * ended for outliving its maximum duration (502: the upstream ended it, the caller did not), a request the hub's access control refuses (`PERMISSION_DENIED`: the token's `send`
+ * patterns do not list the type: 403), else 502.
  */
 @RestControllerAdvice
 class MessagingErrorAdvice {
@@ -28,6 +30,7 @@ class MessagingErrorAdvice {
             is MessageTimeoutException -> HttpStatus.GATEWAY_TIMEOUT
             is UnsupportedByHubException -> HttpStatus.NOT_IMPLEMENTED
             is StreamCancelledException -> HttpStatus.BAD_GATEWAY
+            is AccessDeniedException -> HttpStatus.FORBIDDEN
             else -> HttpStatus.BAD_GATEWAY
         }
         return ResponseEntity.status(status).body(ErrorBody(e::class.simpleName ?: "MessagingException", e.message ?: ""))
