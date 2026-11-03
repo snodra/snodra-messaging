@@ -25,7 +25,10 @@ import java.time.Instant
 import java.util.Date
 import java.util.UUID
 import java.util.concurrent.Callable
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
+import java.util.concurrent.Future
+import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.locks.ReentrantLock
@@ -105,29 +108,45 @@ class SagaDispatchRelay(
     @Volatile private var stopRequested = false
     private var thread: Thread? = null
     private var pool: ExecutorService? = null
+    private var renewer: ScheduledExecutorService? = null
+    private val inFlight: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
     /**
-     * One pass: dispatches the due entries of every claimable saga and returns how many entries it dealt with (sent,
-     * published, failed or put back to wait). Never throws for one saga's trouble: it is logged and tried again next pass.
+     * One synchronous pass: hands the due failure notices and sagas to the pool ([submitDue]) and waits for exactly those
+     * to finish; returns how many entries and notices they dealt with. What the tests and a caller that wants to know
+     * call; the polling thread uses [submitDue] and never waits.
      */
-    fun pollOnce(): Int {
-        val notices = deliverDueNotices()
-        val sagas = dueSagas()
-        return notices + dispatchAll(sagas)
+    fun pollOnce(): Int = submitDue().sumOf { it.get() }
+
+    /**
+     * Hands every claimable due saga and every due failure notice to the worker pool and returns at once, **never waiting
+     * for the sends** and skipping what is already in flight on this instance: one saga whose adapter call hangs (a local
+     * adapter has no timeout of its own) holds back only itself. While a saga's send is alive its lease is renewed (see
+     * [sendCommand]), so no other instance takes the saga over and sends its entry again.
+     */
+    internal fun submitDue(): List<Future<Int>> {
+        val futures = ArrayList<Future<Int>?>()
+        for (notice in claimDueNotices()) futures += submit("notice:${notice.id}") { deliverNoticeQuietly(notice) }
+        for (sagaId in dueSagas()) futures += submit("saga:$sagaId") { dispatchSaga(sagaId) }
+        return futures.filterNotNull()
     }
 
-    private fun dispatchAll(sagas: List<String>): Int {
-        if (sagas.isEmpty()) return 0
-        if (sagas.size == 1 || settings.parallelism == 1) return sagas.sumOf { dispatchSaga(it) }
-        val futures = sagas.map { executor().submit(Callable { dispatchSaga(it) }) }
-        return futures.sumOf { it.get() }
+    /** Runs [work] on the pool unless [key] is already in flight (then null); the key is released when it finishes. */
+    private fun submit(key: String, work: () -> Int): Future<Int>? {
+        if (!inFlight.add(key)) return null
+        return try {
+            executor().submit(Callable { try { work() } finally { inFlight.remove(key) } })
+        } catch (e: RuntimeException) {
+            inFlight.remove(key) // the pool is shut down
+            null
+        }
     }
 
     /** The sagas whose first pending entry is due, oldest work first. */
     private fun dueSagas(): List<String> {
         val now = Date.from(clock.instant())
         val aggregation = Aggregation.newAggregation(
-            Aggregation.match(Criteria.where("dispatchedAt").isNull.and("failedAt").isNull),
+            Aggregation.match(Criteria.where("dispatchedAt").isNull.and("failedAt").isNull.and("sagaId").nin(inFlight.filter { it.startsWith("saga:") }.map { it.removePrefix("saga:") })),
             Aggregation.sort(Sort.by("sagaId", "seq")),
             Aggregation.group("sagaId").first("nextAttemptAt").`as`("next"),
             Aggregation.match(Criteria().orOperator(Criteria.where("next").isNull, Criteria.where("next").lte(now))),
@@ -175,6 +194,8 @@ class SagaDispatchRelay(
     private fun sendCommand(entry: SagaDispatchDocument): Boolean {
         val correlationId = entry.headers[DISPATCH_CORRELATION_HEADER] ?: entry.id
         val headers = entry.headers.filterKeys { it != DISPATCH_CORRELATION_HEADER } + mapOf("idempotency-key" to entry.id, "saga-id" to entry.sagaId)
+        val period = maxOf(settings.lease.toMillis() / 3, MIN_RENEW_PERIOD_MS)
+        val beat = leaseRenewer().scheduleAtFixedRate({ keepLease(entry.sagaId) }, period, period, TimeUnit.MILLISECONDS)
         val outcome = try {
             runBlocking(CorrelationContext(correlationId)) {
                 commands.sendRaw(entry.type, entry.payload.toByteArray(Charsets.UTF_8), SendOptions(routingKey = entry.routingKey, retry = RetryPolicy.NONE, headers = headers))
@@ -182,6 +203,8 @@ class SagaDispatchRelay(
         } catch (e: Exception) {
             if (e is InterruptedException) Thread.currentThread().interrupt()
             RawFailures.classify(e)
+        } finally {
+            beat.cancel(false)
         }
         return when (outcome) {
             RawOutcome.Success -> {
@@ -226,10 +249,10 @@ class SagaDispatchRelay(
         deliverNotice(entry.copy(attempts = attempts, failedAt = now, failureReason = reason, failureMessage = message, noticePending = true, noticeAttempts = 0))
     }
 
-    /** Delivers the pending failure notices that are due, each claimed first so that no other instance delivers it meanwhile; how many. */
-    private fun deliverDueNotices(): Int {
-        var delivered = 0
-        while (delivered < settings.batchSize && !stopRequested) {
+    /** Claims the pending failure notices that are due (up to a batch, not those in flight here), each reserved for this instance by moving `noticeNextAt` a lease ahead. */
+    private fun claimDueNotices(): List<SagaDispatchDocument> {
+        val claimed = ArrayList<SagaDispatchDocument>()
+        while (claimed.size < settings.batchSize && !stopRequested) {
             val now = clock.instant()
             val entry = mongo.findAndModify(
                 Query(
@@ -240,14 +263,18 @@ class SagaDispatchRelay(
                 FindAndModifyOptions.options().returnNew(true),
                 SagaDispatchDocument::class.java,
             ) ?: break
-            delivered++
-            try {
-                deliverNotice(entry)
-            } catch (e: Exception) {
-                log.warn("Delivering the failure notice of {} failed, trying again when its claim expires: {}", entry.id, e.toString())
-            }
+            claimed += entry
         }
-        return delivered
+        return claimed
+    }
+
+    private fun deliverNoticeQuietly(entry: SagaDispatchDocument): Int {
+        try {
+            deliverNotice(entry)
+        } catch (e: Exception) {
+            log.warn("Delivering the failure notice of {} failed, trying again when its claim expires: {}", entry.id, e.toString())
+        }
+        return 1
     }
 
     /**
@@ -334,6 +361,15 @@ class SagaDispatchRelay(
         SagaDispatchLeaseDocument::class.java,
     ).matchedCount == 1L
 
+    /** The heartbeat of a live send: extends the lease so that it never expires under an adapter call that is still running. */
+    private fun keepLease(sagaId: String) {
+        try {
+            if (!renew(sagaId)) log.warn("Lost the dispatch lease of saga {} while a send was running", sagaId)
+        } catch (e: Exception) {
+            log.debug("Could not renew the dispatch lease of saga {}: {}", sagaId, e.toString())
+        }
+    }
+
     private fun release(sagaId: String) {
         try {
             mongo.remove(Query(Criteria.where("_id").`is`(sagaId).and("owner").`is`(owner)), SagaDispatchLeaseDocument::class.java)
@@ -350,6 +386,12 @@ class SagaDispatchRelay(
         }.also { pool = it }
     }
 
+    private fun leaseRenewer(): ScheduledExecutorService = synchronized(this) {
+        renewer?.takeUnless { it.isShutdown } ?: Executors.newSingleThreadScheduledExecutor { r ->
+            Thread(r, "kraken-saga-lease-renewer").apply { isDaemon = true }
+        }.also { renewer = it }
+    }
+
     override fun start() {
         lock.withLock {
             if (running) return
@@ -362,7 +404,7 @@ class SagaDispatchRelay(
     private fun loop() {
         while (running) {
             try {
-                pollOnce()
+                submitDue()
             } catch (e: Exception) {
                 log.warn("Saga dispatch poll failed", e)
             }
@@ -382,8 +424,13 @@ class SagaDispatchRelay(
         t?.join(STOP_JOIN_MS)
         synchronized(this) {
             pool?.shutdown()
-            pool?.awaitTermination(STOP_JOIN_MS, TimeUnit.MILLISECONDS)
+            if (pool?.awaitTermination(STOP_JOIN_MS, TimeUnit.MILLISECONDS) == false) {
+                log.warn("Saga dispatch sends are still running {} s after stop; abandoning them (their leases expire)", STOP_JOIN_MS / 1000)
+                pool?.shutdownNow()
+            }
             pool = null
+            renewer?.shutdownNow()
+            renewer = null
         }
     }
 
@@ -395,5 +442,6 @@ class SagaDispatchRelay(
     companion object {
         const val PHASE = SmartLifecycle.DEFAULT_PHASE - 1850
         private const val STOP_JOIN_MS = 15_000L
+        private const val MIN_RENEW_PERIOD_MS = 10L
     }
 }

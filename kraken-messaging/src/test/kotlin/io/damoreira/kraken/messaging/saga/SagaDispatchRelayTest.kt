@@ -334,6 +334,61 @@ class SagaDispatchRelayTest {
         assertTrue(listOf("a", "b").all { entries(it).single().dispatchedAt != null })
     }
 
+    private fun awaitTrue(what: String, timeoutMs: Long = 10_000, check: () -> Boolean) {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (!check()) {
+            if (System.currentTimeMillis() > deadline) throw AssertionError("timed out waiting for: $what")
+            Thread.sleep(20)
+        }
+    }
+
+    @Test
+    fun `a saga whose adapter call hangs does not hold back the dispatch of another saga`() {
+        record("hung", 1000)
+        val release = CountDownLatch(1)
+        sender.script = { call ->
+            if (call.headers["saga-id"] == "hung") release.await(30, TimeUnit.SECONDS)
+            RawOutcome.Success
+        }
+        val relay = relay()
+        try {
+            relay.start()
+            awaitTrue("the hung saga's send to start") { sender.keys().contains("hung:1000") }
+
+            record("fine", 1000) // becomes due while the first send is still alive
+
+            awaitTrue("the other saga to be dispatched meanwhile") { entry("fine:1000").dispatchedAt != null }
+            assertNull(entry("hung:1000").dispatchedAt)
+            assertEquals(listOf("hung:1000", "fine:1000"), sender.keys(), "the hung saga was not sent a second time either")
+        } finally {
+            release.countDown()
+        }
+        awaitTrue("the released send to be marked") { entry("hung:1000").dispatchedAt != null }
+    }
+
+    @Test
+    fun `the lease of a saga is renewed while its send is alive, so another relay does not take it over`() {
+        record("slow", 1000)
+        val short = settings.copy(lease = Duration.ofMillis(600))
+        val release = CountDownLatch(1)
+        sender.script = { release.await(30, TimeUnit.SECONDS); RawOutcome.Success }
+        val first = relay(settings = short)
+        val second = relay(settings = short)
+        try {
+            first.start()
+            awaitTrue("the send to start") { sender.calls.size == 1 }
+
+            clock.now = clock.now.plus(Duration.ofHours(1)) // far past the lease the send started with
+            awaitTrue("the lease to be renewed to the new time") { mongo.findById("slow", SagaDispatchLeaseDocument::class.java)!!.until.isAfter(clock.now) }
+
+            second.pollOnce()
+            assertEquals(1, sender.calls.size, "the live send still owns the saga: no second send of the same key")
+        } finally {
+            release.countDown()
+        }
+        awaitTrue("the entry to be marked") { entry("slow:1000").dispatchedAt != null }
+    }
+
     @Test
     fun `a step in retry holds back that saga's later steps only`() {
         record("a", 1000, type = "rl.First")
