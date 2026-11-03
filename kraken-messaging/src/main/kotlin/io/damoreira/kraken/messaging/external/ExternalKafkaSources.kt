@@ -66,6 +66,24 @@ class ExternalKafkaSources(
                     "(for example @Component(\"$name\") or a @Bean method called $name) that turns the partner's records into events"
             }
         }
+        for ((name, source) in sources) {
+            // A fixed key would be overwritten without a word: the one in `properties` would never take effect.
+            source.properties.keys.firstOrNull { it in FIXED_KEYS }?.let { key ->
+                throw IllegalStateException(
+                    "kraken.messaging.external.kafka.sources.$name.properties[$key] cannot be set: the library fixes it " +
+                        "(use the source's own bootstrap-servers and group-id; deserializers and auto-commit are not configurable). " +
+                        "Fixed keys: ${FIXED_KEYS.joinToString()}",
+                )
+            }
+        }
+    }
+
+    private companion object {
+        /** The consumer properties the library sets itself, after the source's `properties`. */
+        val FIXED_KEYS = listOf(
+            ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, ConsumerConfig.GROUP_ID_CONFIG, ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG,
+            ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG,
+        )
     }
 
     internal fun groupIdFor(name: String): String = sources.getValue(name).groupId ?: "$serviceName.external.$name"

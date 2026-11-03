@@ -304,7 +304,7 @@ All keys (`kraken.messaging.*`; durations accept `200ms`, `5s`, `7d`; relaxed bi
 | `external.kafka.sources.<name>.topic` | required | A partner's topic, consumed into local kraken events (never republished to `kraken.events`). Each source needs an `ExternalRecordTranslator` bean named `<name>`; a source without one fails the startup naming it. |
 | `external.kafka.sources.<name>.bootstrap-servers` | `kafka.bootstrap-servers` | The partner's cluster. |
 | `external.kafka.sources.<name>.group-id` | `<service-name>.external.<name>` | The source's consumer group. |
-| `external.kafka.sources.<name>.properties.*` | none | Extra consumer properties (for example `security.protocol`); bootstrap servers, group id, deserializers and auto-commit are fixed by the library. `auto.offset.reset` is `earliest` unless set here. Record retries use `kafka.consumer.max-attempts`. |
+| `external.kafka.sources.<name>.properties.*` | none | Extra consumer properties (for example `security.protocol`); bootstrap servers, group id, deserializers and auto-commit are fixed by the library: an entry for one of those keys fails the startup, naming it. `auto.offset.reset` is `earliest` unless set here. Record retries use `kafka.consumer.max-attempts`. |
 
 ### Security
 
@@ -1217,8 +1217,8 @@ class PrinterTranslator(private val codec: JsonCodec) : ExternalRecordTranslator
 The library runs one consumer per source (group `<service-name>.external.<name>`, `earliest` for a new group), translates each
 record and dispatches the event **locally**: the service's `@EventHandler`s and sagas, never `kraken.events`. The `dedupeKey` (the
 partner's own id) makes two records for one event apply once; without it the key is `<name>:<partition>:<offset>`. A translator
-exception retries the record up to `kafka.consumer.max-attempts` times, then logs and skips it. `properties` cannot override the
-servers, the group id, the deserializers or auto-commit. `kafka-clients` is an `api` dependency of the starter, so the
+exception retries the record up to `kafka.consumer.max-attempts` times, then logs and skips it. `properties` cannot set the
+servers, the group id, the deserializers or auto-commit: such an entry fails the startup, naming it. `kafka-clients` is an `api` dependency of the starter, so the
 translator's `ConsumerRecord` compiles without declaring it.
 
 ### Hearing from the partner: a webhook

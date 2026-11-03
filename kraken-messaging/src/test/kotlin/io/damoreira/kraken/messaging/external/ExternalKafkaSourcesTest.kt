@@ -181,6 +181,21 @@ class ExternalKafkaSourcesTest {
     }
 
     @Test
+    fun `a properties entry for a key the library fixes fails the startup naming the source and the key`() {
+        val fixed = listOf(
+            "bootstrap.servers", "group.id", "key.deserializer", "value.deserializer", "enable.auto.commit",
+        )
+        for (key in fixed) {
+            val e = assertFailsWith<IllegalStateException>(key) {
+                sources(source = KrakenMessagingProperties.Source(topic = topic, properties = mapOf(key to "x")))
+            }
+            assertTrue("printer" in e.message!! && key in e.message!!, "$key: ${e.message}")
+        }
+        // the keys the library does not fix still pass through
+        sources(source = KrakenMessagingProperties.Source(topic = topic, properties = mapOf("security.protocol" to "PLAINTEXT", "auto.offset.reset" to "latest")))
+    }
+
+    @Test
     fun `a record on the partner topic becomes a local event a saga handles`() {
         startSources()
         send("""{"jobId":"j1","status":"done"}""")
