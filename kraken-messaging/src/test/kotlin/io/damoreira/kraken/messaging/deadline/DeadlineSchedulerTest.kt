@@ -84,6 +84,7 @@ class DlSaga {
     var timeoutDeadline: String? = null
     var fired = 0
     var reasons: MutableList<String> = mutableListOf()
+    var firedWithCorrelation: String? = null
 
     @StartSaga
     @SagaEventHandler(associationProperty = "orderId")
@@ -112,9 +113,10 @@ class DlSaga {
     fun on(e: DlPaid) = Unit
 
     @DeadlineHandler("charge-timeout")
-    fun timeout(payload: DlTimeoutPayload, commands: SagaCommands) {
+    fun timeout(payload: DlTimeoutPayload, commands: SagaCommands, ctx: io.damoreira.kraken.messaging.MessageContext) {
         if (DlSwitch.broken.get()) throw IllegalStateException("deadline handler failed on purpose")
         fired++
+        firedWithCorrelation = ctx.correlationId
         reasons += payload.reason
         commands.send(DlCancelCharge("ref-$orderId"))
     }
@@ -195,6 +197,20 @@ class DeadlineSchedulerTest {
         if (sagaId == null) Query() else Query(Criteria.where("sagaId").`is`(sagaId)), DeadlineDocument::class.java,
     )
     private fun fired(orderId: String) = saga(orderId).stateDoc.getInteger("fired")
+
+    @Test
+    fun `a deadline carries the correlation id of the message that scheduled it, to its handler and to the commands it sends`() {
+        deliver(DlPlaced("o40", seconds = 60), id = "e-40") // delivered with the correlation id "corr-e-40"
+        val stored = mongo.find(Query(), org.bson.Document::class.java, "deadlines").single()
+        assertEquals("corr-e-40", stored.getString("correlationId"), "stored with the deadline")
+
+        advance(61)
+        scheduler().pollOnce()
+
+        assertEquals("corr-e-40", saga("o40").stateDoc.getString("firedWithCorrelation"), "the handler's MessageContext")
+        val sent = mongo.findAll(SagaDispatchDocument::class.java).single()
+        assertEquals("corr-e-40", sent.headers["correlation-id"], "the command it sent")
+    }
 
     @Test
     fun `a due deadline fires its handler once with its payload`() {

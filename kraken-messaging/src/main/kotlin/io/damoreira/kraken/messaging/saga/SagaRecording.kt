@@ -87,6 +87,7 @@ internal class RecordingDeadlineManager(
     private val sagaId: String,
     private val now: Instant,
     private val codec: JsonCodec,
+    private val correlationId: String,
 ) : DeadlineManager {
     val ops = mutableListOf<DeadlineOp>()
 
@@ -103,6 +104,7 @@ internal class RecordingDeadlineManager(
                 payload = payload?.let { String(codec.encode(it), Charsets.UTF_8) },
                 payloadType = payload?.let { deadlinePayloadType(it::class) },
                 dueAt = at,
+                correlationId = correlationId,
             ),
         )
         return id
