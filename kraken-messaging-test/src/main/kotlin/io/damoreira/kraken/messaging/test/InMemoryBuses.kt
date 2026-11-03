@@ -7,6 +7,7 @@ import io.damoreira.kraken.messaging.QueryBus
 import io.damoreira.kraken.messaging.QueryUpdateEmitter
 import io.damoreira.kraken.messaging.RemoteHandlerException
 import io.damoreira.kraken.messaging.ScatterOptions
+import io.damoreira.kraken.messaging.SendOptions
 import io.damoreira.kraken.messaging.ScatterPart
 import io.damoreira.kraken.messaging.ScatterResult
 import io.damoreira.kraken.messaging.StreamOptions
@@ -88,16 +89,22 @@ class InMemoryBuses(
         invoker.invokeEvent(type, codec.encode(event), context(type))
     }
 
+    override suspend fun <R> send(command: Command<R>, routingKey: String?): R = send(command, SendOptions(routingKey = routingKey))
+
+    /** Like the hub bus, [SendOptions.headers] reach the handler's `MessageContext.headers`; the other options have no effect in memory. */
     @Suppress("UNCHECKED_CAST")
-    override suspend fun <R> send(command: Command<R>, routingKey: String?): R {
+    override suspend fun <R> send(command: Command<R>, options: SendOptions): R {
         val type = resolver.typeNameOf(command::class)
-        return unwrap(type, command::class, invoker.invokeCommand(type, codec.encode(command), context(type), identity())) as R
+        return unwrap(type, command::class, invoker.invokeCommand(type, codec.encode(command), context(type, options.headers), identity())) as R
     }
 
+    override suspend fun <R> send(query: Query<R>): R = send(query, SendOptions())
+
+    /** As [send] for a command: [SendOptions.headers] reach the handler's `MessageContext.headers`. */
     @Suppress("UNCHECKED_CAST")
-    override suspend fun <R> send(query: Query<R>): R {
+    override suspend fun <R> send(query: Query<R>, options: SendOptions): R {
         val type = resolver.typeNameOf(query::class)
-        return unwrap(type, query::class, invoker.invokeQuery(type, codec.encode(query), context(type), identity())) as R
+        return unwrap(type, query::class, invoker.invokeQuery(type, codec.encode(query), context(type, options.headers), identity())) as R
     }
 
     @Suppress("UNCHECKED_CAST")
@@ -158,14 +165,14 @@ class InMemoryBuses(
         is InvocationResult.Failure -> throw HubErrors.toException(type, result.code, result.message, result.details)
     }
 
-    private fun context(type: String) = MessageContext(
+    private fun context(type: String, headers: Map<String, String> = emptyMap()) = MessageContext(
         messageId = UUID.randomUUID().toString(),
         type = type,
         correlationId = UUID.randomUUID().toString(),
         userId = userId,
         roles = roles,
         authorization = null,
-        headers = emptyMap(),
+        headers = headers,
     )
 
     /**

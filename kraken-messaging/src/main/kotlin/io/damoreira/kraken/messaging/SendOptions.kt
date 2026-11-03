@@ -14,13 +14,29 @@ import kotlin.random.Random
  * @property routingKey commands only: same key, same owning instance (consistent hashing on the hub).
  * @property retry the [RetryPolicy] for this call; [RetryPolicy.NONE] disables a configured one.
  *   Default: `kraken.messaging.hub.retry.*` when enabled, else no retry.
+ * @property headers extra request headers, delivered to the handler's `MessageContext.headers` whether it runs on
+ *   another service (sent to the hub in `Request.headers`) or locally (short-circuit). The library's own headers
+ *   (`authorization`, `traceparent`, `tracestate`, `correlation-id`, `correlationId`; compared ignoring case) cannot be
+ *   set here: such a name is an `IllegalArgumentException` on construction. The saga relay uses it for `idempotency-key`
+ *   and `saga-id`.
  */
 data class SendOptions(
     val priority: Int? = null,
     val timeout: Duration? = null,
     val routingKey: String? = null,
     val retry: RetryPolicy? = null,
-)
+    val headers: Map<String, String> = emptyMap(),
+) {
+    init {
+        headers.keys.firstOrNull { it.lowercase() in RESERVED_HEADERS }?.let {
+            throw IllegalArgumentException("Header '$it' is set by the library and cannot be given in SendOptions.headers")
+        }
+    }
+
+    private companion object {
+        val RESERVED_HEADERS = setOf("authorization", "traceparent", "tracestate", "correlation-id", "correlationid")
+    }
+}
 
 /** Whether a message is a command (may have side effects) or a query (read only); decides what may be retried. */
 enum class MessageKind { COMMAND, QUERY }

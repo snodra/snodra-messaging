@@ -362,9 +362,9 @@ class HubBus(
         if (local != null) {
             val correlationId = CorrelationContext.resolve(currentCoroutineContext())
             val token = CallerContext.currentBearerToken()
-            return invokeLocally(type, kind, message::class, codec.encode(message), correlationId, token)
+            return invokeLocally(type, kind, message::class, codec.encode(message), correlationId, token, options.headers)
         }
-        val template = template(message, kind, options.routingKey, options.priority)
+        val template = template(message, kind, options.routingKey, options.priority, extra = options.headers)
         val messageKind = if (kind == RequestKind.COMMAND) MessageKind.COMMAND else MessageKind.QUERY
         return withRetry(type, messageKind, options.timeout, options.retry, retryIf = { true }) { timeout ->
             attempt(template, message::class, timeout)
@@ -385,7 +385,9 @@ class HubBus(
 
     /**
      * The hub request for [message] without id and timeout: payload, correlation id, [caller] headers (bearer token and
-     * trace, see [callerHeaders]), priority. The correlation id comes from the coroutine context, so it is resolved here.
+     * trace, see [callerHeaders]), priority, and the caller's [extra] headers ([SendOptions.headers]; the library's own
+     * headers win, though `SendOptions` already refuses those names). The correlation id comes from the coroutine
+     * context, so it is resolved here.
      */
     private suspend fun template(
         message: Any,
@@ -393,11 +395,13 @@ class HubBus(
         routingKey: String?,
         priority: Int?,
         caller: Map<String, String> = callerHeaders(),
+        extra: Map<String, String> = emptyMap(),
     ): Request {
         val type = typeResolver.typeNameOf(message::class)
         val payload = codec.encode(message)
         val correlationId = CorrelationContext.resolve(currentCoroutineContext())
-        val headers = mutableMapOf("correlationId" to correlationId)
+        val headers = extra.toMutableMap()
+        headers["correlationId"] = correlationId
         headers += caller
         return Request.newBuilder()
             .setKind(kind)
@@ -478,6 +482,7 @@ class HubBus(
         payload: ByteArray,
         correlationId: String,
         token: String?,
+        extra: Map<String, String>,
     ): Any {
         val identity = LocalIdentity.current()
         val ctx = MessageContext(
@@ -487,7 +492,7 @@ class HubBus(
             userId = identity?.userId,
             roles = identity?.roles ?: emptySet(),
             authorization = token?.let { "Bearer $it" },
-            headers = mapOf("correlationId" to correlationId),
+            headers = extra + ("correlationId" to correlationId),
         )
         // Same thread and coroutine as the caller (so a thread-bound transaction of the caller is joined).
         val result = withContext(CorrelationContext(correlationId)) {
