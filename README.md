@@ -1343,6 +1343,9 @@ adapter against a fake of the partner, the controller with a mock request and a 
 - **Ordinary `@EventHandler`s run first, and a failing one does not hide the event from the sagas.** The saga stage runs even
   when an ordinary handler failed, and the failure is then thrown, so the consumer retries and then skips the record as it
   always did; the sagas have applied the event once by then (their own markers make the redeliveries safe).
+- **A saga sends through `SagaCommands` only.** A handler parameter of type `CommandBus`, `QueryBus`, `EventBus`, `RawCommandSender`,
+  `RawEventPublisher` or `HubBus` (or a subclass or implementation of one) fails the startup: it would send at once, outside the
+  saga's transaction, with no relay ordering, retry or idempotency key.
 - **Saga commands have no caller.** A target with `@RequiresAuthentication` refuses them (`DENIED`).
 - **Handlers of one event type run in method-name order**, not declaration order: name them so that order is the one you want.
 - **Saga state is JSON.** Use `var` properties with defaults (or nullable ones) and types the library's codec can write; the

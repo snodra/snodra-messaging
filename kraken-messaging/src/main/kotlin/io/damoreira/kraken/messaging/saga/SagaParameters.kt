@@ -35,6 +35,7 @@ internal object SagaParameters {
     /** The plan for [fn]'s parameters after the receiver; [first] decides what a first parameter is (event or payload). */
     fun plan(label: String, fn: KFunction<*>, first: ParamKind?): List<ParamKind> {
         val params = fn.parameters.drop(1)
+        params.forEach { refuseOutsideSenders(label, it) }
         return params.mapIndexed { index, p ->
             when (val special = special(p)) {
                 null -> when {
@@ -44,6 +45,20 @@ internal object SagaParameters {
                 else -> special
             }
         }
+    }
+
+    /**
+     * A bus, a raw sender or a publisher (or any subclass or implementation of one, `HubBus` among them) would send or publish
+     * at once, outside the saga's transaction and outside the dispatch relay's ordering, retry and idempotency key: a command
+     * could run for a state that rolls back. Such a parameter fails the startup; a saga sends through `SagaCommands`.
+     */
+    private fun refuseOutsideSenders(label: String, p: KParameter) {
+        val klass = p.type.classifier as? KClass<*> ?: return
+        if (FORBIDDEN_SENDERS.none { klass.isSubclassOf(it) }) return
+        throw IllegalStateException(
+            "Saga handler $label: parameter '${p.name}' of type ${klass.simpleName} would send or publish outside the saga's transaction " +
+                "(a command could run for a state that rolls back, with no relay ordering, retry or idempotency key): use SagaCommands",
+        )
     }
 
     private fun special(p: KParameter): ParamKind? = when (p.type.classifier) {
@@ -66,6 +81,12 @@ internal object SagaParameters {
         }
         return ParamKind.Bean(klass)
     }
+
+    private val FORBIDDEN_SENDERS: List<KClass<*>> = listOf(
+        io.damoreira.kraken.messaging.CommandBus::class, io.damoreira.kraken.messaging.QueryBus::class,
+        io.damoreira.kraken.messaging.EventBus::class, RawCommandSender::class, RawEventPublisher::class,
+        io.damoreira.kraken.messaging.hub.HubBus::class,
+    )
 
     private val NOT_BEANS: Set<KClass<*>> = setOf(
         Any::class, Unit::class, String::class, Number::class, Boolean::class, Char::class,

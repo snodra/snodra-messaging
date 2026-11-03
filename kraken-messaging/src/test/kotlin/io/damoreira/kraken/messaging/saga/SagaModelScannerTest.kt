@@ -1,5 +1,10 @@
 package io.damoreira.kraken.messaging.saga
 
+import io.damoreira.kraken.messaging.CommandBus
+import io.damoreira.kraken.messaging.EventBus
+import io.damoreira.kraken.messaging.QueryBus
+import io.damoreira.kraken.messaging.hub.HubBus
+import io.damoreira.kraken.messaging.kafka.OutboxEventBus
 import io.damoreira.kraken.messaging.MessageContext
 import io.damoreira.kraken.messaging.api.Command
 import io.damoreira.kraken.messaging.api.Event
@@ -95,6 +100,54 @@ class NotAnEventSaga {
 class BadDeadlineParamSaga {
     @StartSaga @SagaEventHandler(associationProperty = "orderId") fun on(e: OrderPlaced) = Unit
     @DeadlineHandler("t") fun timeout(deadlines: DeadlineManager, attempts: Int) = Unit
+}
+
+@Saga
+class CommandBusSaga {
+    @StartSaga @SagaEventHandler(associationProperty = "orderId") fun on(e: OrderPlaced, bus: CommandBus) = Unit
+}
+
+@Saga
+class QueryBusSaga {
+    @StartSaga @SagaEventHandler(associationProperty = "orderId") fun on(e: OrderPlaced, bus: QueryBus) = Unit
+}
+
+@Saga
+class EventBusSaga {
+    @StartSaga @SagaEventHandler(associationProperty = "orderId") fun on(e: OrderPlaced, bus: EventBus) = Unit
+}
+
+@Saga
+class RawSenderSaga {
+    @StartSaga @SagaEventHandler(associationProperty = "orderId") fun on(e: OrderPlaced, sender: RawCommandSender) = Unit
+}
+
+@Saga
+class RawPublisherSaga {
+    @StartSaga @SagaEventHandler(associationProperty = "orderId") fun on(e: OrderPlaced, publisher: RawEventPublisher) = Unit
+}
+
+@Saga
+class HubBusSaga {
+    @StartSaga @SagaEventHandler(associationProperty = "orderId") fun on(e: OrderPlaced, hub: HubBus) = Unit
+}
+
+/** An implementation of a forbidden interface is as forbidden as the interface. */
+@Saga
+class OutboxBusSaga {
+    @StartSaga @SagaEventHandler(associationProperty = "orderId") fun on(e: OrderPlaced, outbox: OutboxEventBus) = Unit
+}
+
+@Saga
+class DeadlineBusSaga {
+    @StartSaga @SagaEventHandler(associationProperty = "orderId") fun on(e: OrderPlaced) = Unit
+    @DeadlineHandler("t") fun timeout(deadlines: DeadlineManager, bus: CommandBus) = Unit
+}
+
+@Saga
+class DeadlineFirstBusSaga {
+    @StartSaga @SagaEventHandler(associationProperty = "orderId") fun on(e: OrderPlaced) = Unit
+    @DeadlineHandler("t") fun timeout(bus: CommandBus) = Unit
 }
 
 @Saga
@@ -223,6 +276,22 @@ class SagaModelScannerTest {
     fun `a deadline handler with an unresolvable parameter`() {
         val e = failure(BadDeadlineParamSaga::class)
         assertTrue("BadDeadlineParamSaga.timeout" in e.message!! && "attempts" in e.message!!, e.message)
+    }
+
+    @Test
+    fun `a handler parameter that would send or publish outside the saga's transaction fails the startup naming class, method and type`() {
+        val cases = listOf(
+            CommandBusSaga::class to "CommandBus", QueryBusSaga::class to "QueryBus", EventBusSaga::class to "EventBus",
+            RawSenderSaga::class to "RawCommandSender", RawPublisherSaga::class to "RawEventPublisher", HubBusSaga::class to "HubBus",
+            OutboxBusSaga::class to "OutboxEventBus", DeadlineBusSaga::class to "CommandBus", DeadlineFirstBusSaga::class to "CommandBus",
+        )
+        for ((klass, parameterType) in cases) {
+            val e = failure(klass)
+            val message = e.message!!
+            assertTrue(klass.simpleName!! in message && parameterType in message && "SagaCommands" in message, "$klass: $message")
+        }
+        assertTrue("on" in failure(CommandBusSaga::class).message!!)
+        assertTrue("timeout" in failure(DeadlineBusSaga::class).message!!)
     }
 
     @Test
