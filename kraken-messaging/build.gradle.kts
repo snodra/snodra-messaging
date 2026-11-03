@@ -54,6 +54,7 @@ dependencies {
     testImplementation(libs.testcontainers.kafka)
     testImplementation(libs.testcontainers.mongodb)
     testImplementation(libs.nimbus.jose.jwt)
+    testImplementation(libs.bouncycastle.pkix) // test certificates with a URI SAN and a short validity (mTLS, P5c)
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 

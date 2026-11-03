@@ -64,6 +64,8 @@ testcontainers-kafka = { module = "org.testcontainers:testcontainers-kafka", ver
 testcontainers-mongodb = { module = "org.testcontainers:testcontainers-mongodb", version.ref = "testcontainers" }
 awaitility = { module = "org.awaitility:awaitility-kotlin" }
 mockk = { module = "io.mockk:mockk", version.ref = "mockk" }
+# Builds the test certificates of the mTLS tests (a URI SAN, a seconds-long validity); test scope only.
+bouncycastle-pkix = { module = "org.bouncycastle:bcpkix-jdk18on", version = "1.85" }
 
 # API docs
 springdoc-openapi-webmvc-ui = { module = "org.springdoc:springdoc-openapi-starter-webmvc-ui", version.ref = "springdoc" }
