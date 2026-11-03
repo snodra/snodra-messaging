@@ -67,7 +67,9 @@ class SagaIndexesTest {
         assertEquals(Duration.ofDays(30), index("sagas", listOf("endedAt")).expireAfter.orElse(null))
 
         index("saga_dispatch", listOf("sagaId", "seq"))
-        index("saga_dispatch", listOf("dispatchedAt", "nextAttemptAt"))
+        index("saga_dispatch", listOf("dispatchedAt", "failedAt", "sagaId", "seq")) // what the relay's due-saga aggregation matches and sorts by
+        val notice = index("saga_dispatch", listOf("noticeNextAt")).partialFilterExpression!!
+        assertTrue("noticePending" in notice && "true" in notice, notice)
         assertEquals(Duration.ofDays(7), index("saga_dispatch", listOf("dispatchedAt")).expireAfter.orElse(null))
         assertEquals(Duration.ZERO, index("saga_dispatch_leases", listOf("until")).expireAfter.orElse(null))
 

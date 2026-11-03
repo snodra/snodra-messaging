@@ -309,6 +309,24 @@ class SagaDispatchRelayTest {
     }
 
     @Test
+    fun `the oldest work is dispatched first when more sagas are due than one pass takes`() {
+        val names = listOf("h", "g", "f", "e", "d", "c", "b", "a") // created in this order: the opposite of their ids
+        names.forEachIndexed { i, name ->
+            clock.now = start.plusSeconds(i.toLong())
+            record(name, 1000)
+        }
+        clock.now = start.plusSeconds(100)
+        val oneAtATime = settings.copy(parallelism = 1, batchSize = 3)
+        val relay = relay(settings = oneAtATime)
+
+        relay.pollOnce()
+        assertEquals(listOf("h:1000", "g:1000", "f:1000"), sender.keys(), "the three oldest, oldest first")
+
+        relay.pollOnce()
+        assertEquals(listOf("h:1000", "g:1000", "f:1000", "e:1000", "d:1000", "c:1000"), sender.keys())
+    }
+
+    @Test
     fun `the relay sends with RetryPolicy NONE so the bus's own retry never stacks under the relay's`() {
         record("s1", 1000)
 

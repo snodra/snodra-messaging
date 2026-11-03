@@ -36,8 +36,10 @@ class SagaIndexes(
         mongo.indexOps("saga_dispatch").createIndex(
             Index().on("sagaId", Sort.Direction.ASC).on("seq", Sort.Direction.ASC).named("sagaId_1_seq_1"),
         )
+        // What the relay's due-saga aggregation matches (dispatchedAt and failedAt null) and sorts by (sagaId, seq).
         mongo.indexOps("saga_dispatch").createIndex(
-            Index().on("dispatchedAt", Sort.Direction.ASC).on("nextAttemptAt", Sort.Direction.ASC).named("dispatchedAt_1_nextAttemptAt_1"),
+            Index().on("dispatchedAt", Sort.Direction.ASC).on("failedAt", Sort.Direction.ASC).on("sagaId", Sort.Direction.ASC).on("seq", Sort.Direction.ASC)
+                .named("dispatchedAt_1_failedAt_1_sagaId_1_seq_1"),
         )
         mongo.indexOps("saga_dispatch").createIndex(Index().on("dispatchedAt", Sort.Direction.ASC).expire(dispatchRetention).named("dispatchedAt_ttl"))
         mongo.indexOps("saga_dispatch").createIndex(

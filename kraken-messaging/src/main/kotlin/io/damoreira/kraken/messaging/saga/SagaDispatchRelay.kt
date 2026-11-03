@@ -148,8 +148,9 @@ class SagaDispatchRelay(
         val aggregation = Aggregation.newAggregation(
             Aggregation.match(Criteria.where("dispatchedAt").isNull.and("failedAt").isNull.and("sagaId").nin(inFlight.filter { it.startsWith("saga:") }.map { it.removePrefix("saga:") })),
             Aggregation.sort(Sort.by("sagaId", "seq")),
-            Aggregation.group("sagaId").first("nextAttemptAt").`as`("next"),
+            Aggregation.group("sagaId").first("nextAttemptAt").`as`("next").first("createdAt").`as`("since"),
             Aggregation.match(Criteria().orOperator(Criteria.where("next").isNull, Criteria.where("next").lte(now))),
+            Aggregation.sort(Sort.by("since", "_id")), // oldest work first: the first pending entry of each saga, by when it was recorded
             Aggregation.limit(settings.batchSize.toLong()),
         ).withOptions(Aggregation.newAggregationOptions().allowDiskUse(true).build())
         return mongo.aggregate(aggregation, "saga_dispatch", org.bson.Document::class.java).mappedResults.map { it.getString("_id") }
