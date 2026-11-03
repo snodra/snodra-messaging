@@ -11,10 +11,15 @@
 #        SECURE=1 runs against the secure sandbox (kraken/infra/compose.secure.yaml, secrets from
 #        kraken/infra/scripts/dev-hub-pki.sh): the hub calls are https with the dev CA and carry the dashboard token, every
 #        other step runs unchanged, and the security steps 21 and 21b are added; SKIP_SECURE=1 skips those two, ONLY_SECURE=1
-#        runs only them; SECRETS_DIR names the secrets directory, default KRAKEN_SECRETS_DIR or INFRA_DIR/.secrets)
+#        runs only them; SECRETS_DIR names the secrets directory, default KRAKEN_SECRETS_DIR or INFRA_DIR/.secrets;
+#        JWT=1 (needs SECURE=1) runs against the JWT overlay on top of it (kraken/infra/compose.jwt.yaml: service-b and
+#        service-c authenticate with Keycloak client-credentials tokens, service-a keeps its static token), every other
+#        step runs unchanged, and the JWT steps 22 and 22b are added; SKIP_JWT=1 skips those two, ONLY_JWT=1 runs only
+#        them, C_CONTAINER names service-c's container)
 set -euo pipefail
 
 SECURE=${SECURE:-0}
+JWT=${JWT:-0}
 A=${A:-http://localhost:8091}
 if [ "$SECURE" = "1" ]; then
   HUB=${HUB:-https://localhost:7001}
@@ -56,6 +61,13 @@ if [ "$SECURE" = "1" ]; then
       command curl "$@"
     fi
   }
+fi
+
+# JWT=1: the JWT overlay (kraken/infra/compose.jwt.yaml) on top of the secure one. It matters here because the flow steps
+# recreate service-b and service-c with these files: without it they would come back with static tokens.
+if [ "$JWT" = "1" ]; then
+  [ "$SECURE" = "1" ] || fail "JWT=1 needs SECURE=1 (the JWT overlay sits on top of the secure sandbox)"
+  COMPOSE_FILES+=(-f compose.jwt.yaml)
 fi
 
 # Recreates service-b and service-c from the sandbox compose files plus the given extra files, without touching
@@ -763,6 +775,105 @@ secure_steps() {
   trap - EXIT
 }
 
+# P5b (ADR 0019), only with SECURE=1 JWT=1 against the JWT sandbox (kraken/infra/compose.jwt.yaml): service-b (Kotlin) and
+# service-c (Rust) register with a Keycloak access token (a dev identity provider, tokens that live 30 s), service-a with its
+# static token. Step 22: both hubs list service-b and service-c with authKind jwt and an expiresAt, and service-a with
+# authKind token. Step 22b: within ~40 s the expiresAt of both services advances on both hubs while the instance, and the
+# stream it registered on (connectedSinceMs), stay the same: the token was renewed and handed to the live stream as
+# ClientMessage.credentials, not by a reconnect (service-c's log has no new "registered with the hub" line either); the hubs
+# never logged "credentials expired". SKIP_JWT=1 skips them, ONLY_JWT=1 runs only them.
+# The hub's counters (kraken_hub_jwt_validations_total{result="ok"}, ...) go out over OTLP only, which the examples closure
+# does not run a collector for; authKind jwt on the topology is the hub saying it validated the token.
+
+# "<instanceId> <connectedSinceMs> <authKind> <expiresAt or ->" of <service>'s first instance on <hub url>'s topology.
+jwt_session() { # <hub url> <service>
+  local fields id since kind exp
+  # instance_fields stops at "tags":{} (it splits at '{'), before authKind and expiresAt: cut at each instanceId instead and take
+  # the chunk that follows the service's name.
+  fields=$(curl -fsS "$1/topology" 2>/dev/null | sed 's/"instanceId"/\n"instanceId"/g' \
+    | awk -v s="\"serviceName\":\"$2\"" 'index($0, s) { f = 1; next } f && /^"instanceId"/ { print; exit }' || true)
+  id=$(printf '%s' "$fields" | sed -n 's/.*"instanceId":"\([^"]*\)".*/\1/p')
+  since=$(printf '%s' "$fields" | sed -n 's/.*"connectedSinceMs":\([0-9]*\).*/\1/p')
+  kind=$(printf '%s' "$fields" | sed -n 's/.*"authKind":"\([^"]*\)".*/\1/p')
+  exp=$(printf '%s' "$fields" | sed -n 's/.*"expiresAt":\([0-9]*\).*/\1/p')
+  echo "${id:--} ${since:--} ${kind:--} ${exp:--}"
+}
+
+# Waits until <service> shows authKind <kind> on <hub url> (a service that just reconnected needs a moment) and prints its session.
+await_auth_kind() { # <hub url> <service> <kind>
+  local i sess
+  for i in $(seq 1 60); do
+    sess=$(jwt_session "$1" "$2")
+    if [ "$(echo "$sess" | cut -d' ' -f3)" = "$3" ]; then echo "$sess"; return 0; fi
+    sleep 1
+  done
+  fail "$2 does not show authKind $3 on $1/topology within 60s (last: '$sess')"
+}
+
+# How many lines of <container>'s log contain <pattern>.
+log_count() { # <container> <pattern>
+  { docker logs "$1" 2>&1 | grep -c -- "$2"; } || true
+}
+
+jwt_steps() {
+  local h1=${HUB_CONTAINER:-kraken-hub} h2=${HUB2_CONTAINER:-kraken-hub-2} c=${C_CONTAINER:-kraken-example-c}
+  local h svc sess id since kind exp i k advanced registered_before registered_after expired
+  local ids=() sinces=() exps=()    # per (hub, service), in the order of the loops below (no associative arrays: macOS bash 3.2)
+  command -v docker >/dev/null || fail "docker CLI needed for the JWT steps (or set SKIP_JWT=1)"
+  docker inspect "$h1" >/dev/null 2>&1 || fail "container $h1 not found (set HUB_CONTAINER, or SKIP_JWT=1)"
+  docker inspect "$h2" >/dev/null 2>&1 || fail "container $h2 not found (set HUB2_CONTAINER, or SKIP_JWT=1)"
+  docker inspect "$c" >/dev/null 2>&1 || fail "container $c not found (set C_CONTAINER, or SKIP_JWT=1)"
+
+  echo "22. both hubs show service-b (Kotlin) and service-c (Rust) with authKind jwt and an expiresAt, service-a with token ..."
+  for h in "$HUB" "$HUB2"; do
+    for svc in service-b service-c; do
+      sess=$(await_auth_kind "$h" "$svc" jwt)
+      read -r id since kind exp <<< "$sess"
+      [ "$exp" != "-" ] || fail "$svc shows authKind jwt on $h but no expiresAt: $sess"
+      echo "   $h $svc: authKind $kind, expiresAt $exp ($(( exp / 1000 - $(date +%s) )) s from now)"
+      ids+=("$id"); sinces+=("$since"); exps+=("$exp")
+    done
+    sess=$(await_auth_kind "$h" service-a token)
+    read -r id since kind exp <<< "$sess"
+    [ "$exp" = "-" ] || fail "service-a (static token) must have no expiresAt on $h, got $exp"
+    echo "   $h service-a: authKind $kind, no expiresAt"
+  done
+  docker logs "$h1" 2>&1 | grep 'register refused' | grep -E 'jwks not loaded' | head -n 1 | sed 's/^/   hub (before it had the keys): /' || true
+
+  echo "22b. within ~40 s the tokens are renewed on the live streams: expiresAt advances, same instance, same stream, no reconnect ..."
+  registered_before=$(log_count "$c" 'registered with the hub')
+  for i in $(seq 1 45); do
+    advanced=1; k=0
+    for h in "$HUB" "$HUB2"; do
+      for svc in service-b service-c; do
+        read -r id since kind exp <<< "$(jwt_session "$h" "$svc")"
+        if [ "$exp" = "-" ] || [ "$exp" -le "${exps[$k]}" ]; then advanced=0; fi
+        k=$((k + 1))
+      done
+    done
+    [ "$advanced" = "1" ] && break
+    sleep 1
+  done
+  [ "$advanced" = "1" ] || fail "expiresAt did not advance on both hubs for both services in 45s (last: $h $svc $id $since $kind $exp)"
+  k=0
+  for h in "$HUB" "$HUB2"; do
+    for svc in service-b service-c; do
+      read -r id since kind exp <<< "$(jwt_session "$h" "$svc")"
+      [ "$id" = "${ids[$k]}" ] && [ "$since" = "${sinces[$k]}" ] \
+        || fail "$svc reconnected to $h while its token was renewed (instance ${ids[$k]} -> $id, connectedSinceMs ${sinces[$k]} -> $since)"
+      echo "   $h $svc: expiresAt ${exps[$k]} -> $exp (+$(( (exp - ${exps[$k]}) / 1000 )) s), same instance $id, connectedSinceMs $since unchanged"
+      k=$((k + 1))
+    done
+  done
+  registered_after=$(log_count "$c" 'registered with the hub')
+  [ "$registered_before" = "$registered_after" ] \
+    || fail "service-c logged $((registered_after - registered_before)) new 'registered with the hub' line(s) while its token was renewed"
+  echo "   service-c's log has no new 'registered with the hub' line ($registered_after, as before)"
+  expired=$(( $(log_count "$h1" 'credentials expired') + $(log_count "$h2" 'credentials expired') ))
+  [ "$expired" -eq 0 ] || fail "the hubs logged 'credentials expired' $expired time(s)"
+  echo "   neither hub logged 'credentials expired'"
+}
+
 echo "1. waiting for service-a at $A ..."
 for i in $(seq 1 90); do
   if curl -fsS "$A/actuator/health" 2>/dev/null | grep -q '"UP"'; then break; fi
@@ -812,6 +923,13 @@ if [ "${ONLY_SECURE:-0}" = "1" ]; then
   [ "$SECURE" = "1" ] || fail "ONLY_SECURE=1 needs SECURE=1"
   secure_steps
   echo "SMOKE OK (security steps only)"
+  exit 0
+fi
+
+if [ "${ONLY_JWT:-0}" = "1" ]; then
+  [ "$JWT" = "1" ] || fail "ONLY_JWT=1 needs JWT=1 (and SECURE=1)"
+  jwt_steps
+  echo "SMOKE OK (JWT steps only)"
   exit 0
 fi
 
@@ -900,5 +1018,6 @@ echo "   delivered: $TEXTS"
 [ "${SKIP_STREAM:-0}" = "1" ] || stream_steps
 [ "${SKIP_SUBSCRIBE:-0}" = "1" ] || subscribe_steps
 if [ "$SECURE" = "1" ] && [ "${SKIP_SECURE:-0}" != "1" ]; then secure_steps; fi
+if [ "$JWT" = "1" ] && [ "${SKIP_JWT:-0}" != "1" ]; then jwt_steps; fi
 
 echo "SMOKE OK"

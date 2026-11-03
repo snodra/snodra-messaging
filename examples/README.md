@@ -232,6 +232,9 @@ ONLY_SUBSCRIBE=1 bash examples/smoke.sh # only the subscription-query steps (nee
 SECURE=1 bash examples/smoke.sh        # against the secure sandbox (see "Secure sandbox"): every step plus 21 and 21b
 SECURE=1 SKIP_SECURE=1 bash examples/smoke.sh  # the secure sandbox without steps 21 and 21b
 SECURE=1 ONLY_SECURE=1 bash examples/smoke.sh  # only steps 21 and 21b (needs the docker CLI)
+SECURE=1 JWT=1 bash examples/smoke.sh  # against the JWT sandbox (see "JWT sandbox"): every step plus 21, 21b, 22 and 22b
+SECURE=1 JWT=1 SKIP_JWT=1 bash examples/smoke.sh  # the JWT sandbox without steps 22 and 22b
+SECURE=1 JWT=1 ONLY_JWT=1 bash examples/smoke.sh  # only steps 22 and 22b (needs the docker CLI)
 ```
 
 ## Secure sandbox
@@ -288,6 +291,47 @@ existing step unchanged (the flow and HA steps recreate containers with the over
 `SECRETS_DIR` (default `KRAKEN_SECRETS_DIR`, else `INFRA_DIR/.secrets`) names the secrets directory; `HUB_CONTAINER`, `HUB2_CONTAINER` and
 `A_CONTAINER` name the containers the steps read logs and the image from. `SKIP_SECURE=1` skips steps 21 and 21b, `ONLY_SECURE=1` runs
 only them (both need `SECURE=1`).
+
+## JWT sandbox
+
+The secure sandbox with service-b (Kotlin) and service-c (Rust) authenticating by JWT (P5b, umbrella ADR 0019): the overlay
+`kraken/infra/compose.jwt.yaml` on top of the secure one, with a throwaway Keycloak (`hub-idp`, container `kraken-hub-idp`, its own
+realm `kraken-hub-dev`, tokens that live 30 s). service-a keeps its static token, so both credential kinds run side by side. The
+identity provider, the realm and the client secrets are dev only; the secrets come from `dev-hub-pki.sh` into the git-ignored
+`kraken/infra/.secrets/` (rerun it with `--force` once if that directory predates P5b).
+
+```bash
+# from kraken/infra
+scripts/dev-hub-pki.sh
+docker compose -f compose.yaml -f compose.local.yaml -f compose.secure.yaml -f compose.jwt.yaml --profile examples \
+  up -d --force-recreate hub hub-2 hub-idp service-a service-b service-c
+# from kraken-messaging
+SECURE=1 JWT=1 INFRA_DIR=../kraken/infra bash examples/smoke.sh     # every step, plus 21, 21b, 22 and 22b; ends with SMOKE OK
+# from kraken/infra: back to the secure stack, and stop the identity provider
+docker compose -f compose.yaml -f compose.local.yaml -f compose.secure.yaml --profile examples \
+  up -d --force-recreate hub hub-2 service-a service-b service-c
+docker rm -f kraken-hub-idp
+```
+
+The hubs start without waiting for the provider (`KRAKEN_HUB_JWT_ISSUER=http://hub-idp:8080/realms/kraken-hub-dev`,
+`KRAKEN_HUB_JWT_AUDIENCE=kraken-hub`): until their first key fetch works a JWT register is answered `UNAVAILABLE` "jwks not loaded yet"
+and the clients retry, so the stack converges by itself. The services set `KRAKEN_HUB_OAUTH2_TOKEN_URI` (the provider's token endpoint)
+and `KRAKEN_HUB_OAUTH2_CLIENT_SECRET_FILE`; the client id defaults to the service name, which the hub checks against the token's `azp`.
+Their static token variables and mounts are removed, because a static token together with OAuth2 is a startup error. The ACL has a
+`[[service]]` table for service-b and service-c with the same `handle` / `send` as their `[[token]]` entries.
+
+`SECURE=1 JWT=1 bash examples/smoke.sh` (JWT needs SECURE) runs every step above unchanged (the flow steps recreate service-b and
+service-c with the JWT overlay as well) and adds, last:
+
+- **Step 22**: on both hubs' `/topology`, service-b and service-c have `authKind` `jwt` and an `expiresAt` (epoch milliseconds) and
+  service-a has `token` and none. (The hub's `kraken_hub_jwt_validations_total` goes out over OTLP only, which the examples closure
+  runs no collector for; `authKind` `jwt` is the hub saying it validated the token.)
+- **Step 22b**: within ~45 s `expiresAt` advances on both hubs for both services (a new 30 s token, renewed at about 80 % of its life)
+  while the instance id and `connectedSinceMs` stay the same, so the token reached the live stream as `ClientMessage.credentials` and
+  there was no reconnect. service-c's log has no new `registered with the hub` line and neither hub logged `credentials expired`.
+
+`C_CONTAINER` names service-c's container; `HUB_CONTAINER`, `HUB2_CONTAINER` as for the secure steps. `SKIP_JWT=1` skips steps 22 and 22b,
+`ONLY_JWT=1` runs only them (both need `JWT=1`).
 
 ## Experiments
 
