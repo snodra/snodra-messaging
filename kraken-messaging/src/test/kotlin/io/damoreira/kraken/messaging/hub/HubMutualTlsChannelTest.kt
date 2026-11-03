@@ -110,11 +110,12 @@ class HubMutualTlsChannelTest {
         assertEquals(Status.Code.UNAVAILABLE, e.status.code)
     }
 
-    @Test fun `every new channel presents the pair the files hold now, so a rotated pair needs no restart`() {
+    @Test fun `every new channel presents the pair the connection attempt read just before, so a rotated pair needs no restart`() {
         val first = certificate()
         val source = HubClientCertificate(certFile, keyFile, "billing-service")
         val factory = DefaultHubChannelFactory(tls(source))
         fun hubId() = runBlocking {
+            source.refresh(connecting = true) // the connection reads the files once per attempt (HubConnection.connectLoop); the factory only presents
             val channel = factory.channel("localhost:${server.port}").also { channels += it }
             withTimeout(10_000) { HubGrpcKt.HubCoroutineStub(channel).topology(TopologyRequest.getDefaultInstance()).hubId }
         }

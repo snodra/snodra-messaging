@@ -38,10 +38,12 @@ import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import org.slf4j.LoggerFactory
+import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Instant
 import java.time.Duration
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
@@ -63,6 +65,7 @@ class HubCertificateSessionTest {
     private val keyFile get() = dir.resolve("client.key")
 
     private val log = LoggerFactory.getLogger(HubConnection::class.java) as Logger
+    private val certificateLog = LoggerFactory.getLogger(HubClientCertificate::class.java) as Logger
     private val appender = ListAppender<ILoggingEvent>()
 
     /** What the client did to the hub's stream, in order: `register:<types>`, `half-close`, `closed`, `channel`. */
@@ -73,10 +76,12 @@ class HubCertificateSessionTest {
         ca.issue("svc-a").writeTo(certFile, keyFile)
         appender.start()
         log.addAppender(appender)
+        certificateLog.addAppender(appender)
     }
 
     @AfterEach fun tearDown() = runBlocking {
         log.detachAppender(appender)
+        certificateLog.detachAppender(appender)
         connections.forEach { it.stop() }
         scope.cancel()
         hub.close()
@@ -161,6 +166,41 @@ class HubCertificateSessionTest {
         now = Instant.now()
         await atMost Duration.ofSeconds(10) until { conn.connected.value }
         assertNull(conn.lastRejection.value)
+    }
+
+    // --- one refresh per connection attempt ---
+
+    /** A connection whose channels are the real TLS ones of the starter (to a port nobody listens on: only the attempt matters), counted per attempt. */
+    private fun tlsConnection(certificate: HubClientCertificate, beforeChannel: () -> Unit = {}): Pair<HubConnection, AtomicInteger> {
+        val attempts = AtomicInteger()
+        val factory = DefaultHubChannelFactory(HubTls(clientCertificate = certificate))
+        val conn = HubConnection(
+            { beforeChannel(); factory.channel("localhost:1").also { attempts.incrementAndGet() } }, "svc-a", "i-1",
+            settings(certificate).copy(backoffMin = Duration.ofSeconds(30), backoffMax = Duration.ofSeconds(30)), { reply(it.id) }, scope,
+        ).also { connections += it }
+        return conn to attempts
+    }
+
+    @Test fun `a half-written pair seen at one reconnect is seen once, so it is not logged at ERROR yet`() = runBlocking {
+        val certificate = certificate()
+        Files.writeString(certFile, "half a file")
+        val (conn, attempts) = tlsConnection(certificate)
+        conn.start()
+        await atMost wait until { attempts.get() == 1 }
+        delay(200)
+        assertEquals(emptyList(), appender.list.filter { it.level == Level.ERROR }.map { it.formattedMessage }, "the second-sighting rule: one attempt is one sighting")
+        assertEquals(1, appender.list.count { it.level == Level.WARN && "presenting the last good certificate" in it.formattedMessage })
+    }
+
+    @Test fun `a pair that appears while an attempt builds its channel is not presented by it, so the connection's generation is still the certificate's`() = runBlocking {
+        val certificate = certificate()
+        val (conn, attempts) = tlsConnection(certificate) { ca.issue("svc-a").writeTo(certFile, keyFile) } // renewed right after the attempt read the files
+        conn.start()
+        await atMost wait until { attempts.get() == 1 }
+        // The attempt presents what it read; the renewed pair is adopted by the next check, which then rolls this connection.
+        assertEquals(certificate.generation, conn.certificateGeneration, "what the stream presents and what it is recorded as must agree")
+        certificate.refresh()
+        assertTrue(conn.certificateGeneration < certificate.generation, "the renewed pair is newer than the stream's, the next tick rolls it")
     }
 
     // --- the close at notAfter ---

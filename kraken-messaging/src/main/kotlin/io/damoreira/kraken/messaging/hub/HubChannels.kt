@@ -13,7 +13,7 @@ import java.util.concurrent.TimeUnit
  * TLS towards the hub (P5a, ADR 0018). [enabled] false is plain text; [caFile] is the PEM CA that signed the hub's
  * certificate (the JVM's system roots when null); [serverName] is the name the certificate is verified against instead
  * of the address's host. [clientCertificate] (P5c, ADR 0020) is the pair every TLS channel presents to the hub: it implies TLS ([tls]), and is
- * read again for each new channel ([HubClientCertificate.refresh]), so a rotated pair needs no restart.
+ * read again before each new connection attempt ([HubClientCertificate.refresh], by the connection, not by the channel factory), so a rotated pair needs no restart.
  */
 data class HubTls(
     val enabled: Boolean = false,
@@ -62,8 +62,10 @@ open class DefaultHubChannelFactory(private val tls: HubTls = HubTls()) : HubCha
             throw IllegalStateException("kraken.messaging.hub.tls.ca-file ${tls.caFile} cannot be used: ${e.message}", e)
         }
         tls.clientCertificate?.let { source ->
-            // The files are read again for every channel: a rotated pair is presented by the next connection attempt.
-            val certificate = source.refresh(connecting = true)
+            // The connection attempt read the files just before it asked for this channel (HubConnection.connectLoop) and recorded the
+            // generation it presents: reading them again here would count one attempt as two sightings of a half-written pair, and could
+            // present a pair the connection did not record.
+            val certificate = source.current
             try {
                 builder.keyManager(ByteArrayInputStream(certificate.chainPem), ByteArrayInputStream(certificate.keyPem))
             } catch (e: IOException) {
