@@ -63,7 +63,7 @@ open class DefaultHubChannelFactory(private val tls: HubTls = HubTls()) : HubCha
         }
         tls.clientCertificate?.let { source ->
             // The files are read again for every channel: a rotated pair is presented by the next connection attempt.
-            val certificate = source.refresh()
+            val certificate = source.refresh(connecting = true)
             try {
                 builder.keyManager(ByteArrayInputStream(certificate.chainPem), ByteArrayInputStream(certificate.keyPem))
             } catch (e: IOException) {

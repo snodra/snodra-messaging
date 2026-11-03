@@ -66,6 +66,7 @@ class HubCertificateRotationTest {
 
     private val log = LoggerFactory.getLogger(HubClientCertificate::class.java) as Logger
     private val appender = ListAppender<ILoggingEvent>()
+    private val rolloverLog = LoggerFactory.getLogger(HubConnections::class.java) as Logger
 
     /** What the handler instance did to each hub's stream, in order: `A:register:<types>`, `A:half-close`, `A:closed`, `A:channel`. */
     private val events = CopyOnWriteArrayList<String>()
@@ -75,10 +76,12 @@ class HubCertificateRotationTest {
         ca.issue("svc-a").writeTo(certFile, keyFile)
         appender.start()
         log.addAppender(appender)
+        rolloverLog.addAppender(appender)
     }
 
     @AfterEach fun tearDown() = runBlocking {
         log.detachAppender(appender)
+        rolloverLog.detachAppender(appender)
         clients.forEach { it.stop() }
         scope.cancel()
         a.close()
@@ -126,13 +129,13 @@ class HubCertificateRotationTest {
     )
 
     /** The handler instance `svc-a` with the certificate, on [hubs]; check tick 50 ms. */
-    private fun handler(hubs: List<InProcessHub>, certificate: HubClientCertificate, inbound: suspend (Request) -> Reply = { reply(it.id) }) = HubConnections(
+    private fun handler(hubs: List<InProcessHub>, certificate: HubClientCertificate, reconnectTimeout: Duration = Duration.ofSeconds(5), inbound: suspend (Request) -> Reply = { reply(it.id) }) = HubConnections(
         targets = HubTargets.Static(hubs.map { it.name }),
         channelFactory = HubChannelFactory { target -> recordingChannel(byName.getValue(target)) },
         serviceName = "svc-a", instanceId = "i-a", settings = settings(certificate), inbound = inbound, scope = scope,
         statusInterval = Duration.ofMillis(200),
         certificateCheckInterval = Duration.ofMillis(50),
-        rolloverDrainTimeout = Duration.ofSeconds(3), rolloverReconnectTimeout = Duration.ofSeconds(5),
+        rolloverDrainTimeout = Duration.ofSeconds(3), rolloverReconnectTimeout = reconnectTimeout,
     ).also { clients += it; it.register(setOf("test.Ping"), emptySet()); it.start() }
 
     private fun sender(hubs: List<InProcessHub>) = HubConnections(
@@ -264,6 +267,53 @@ class HubCertificateRotationTest {
         assertEquals(emptyList(), lines(Level.ERROR))
     }
 
+    @Test fun `a hub with another live hub leaves routing at once, the only hub only after its work in flight finished`() = runBlocking {
+        val release = CompletableDeferred<Unit>()
+        val two = handler(listOf(a, b), certificate()) { req -> release.await(); reply(req.id) }
+        val sender = sender(listOf(a, b))
+        assertTrue(two.awaitRegistered(wait) && sender.awaitRegistered(wait))
+        // A blocked request on whichever hub it picks; keep sending until one is in flight.
+        scope.launch { runCatching { sender.send(ping()) } }
+        await atMost wait until { two.inFlightHandlers.value == 1 }
+        renew()
+        await atMost wait until { "A:register:" in events }
+        assertEquals(1, two.liveHubIds().size, "hub A is out of routing at once, hub B still takes work")
+        release.complete(Unit)
+        await atMost wait until { two.authStatus().certificateRotations == 1L && listOf(a, b).all { it.streamsOpenedBy("i-a") == 2 } && two.liveHubIds().size == 2 }
+    }
+
+    @Test fun `the only hub stays in routing while its handlers finish`() = runBlocking {
+        val release = CompletableDeferred<Unit>()
+        val one = handler(listOf(a), certificate()) { req -> release.await(); reply(req.id) }
+        val sender = sender(listOf(a))
+        assertTrue(one.awaitRegistered(wait) && sender.awaitRegistered(wait))
+        scope.launch { runCatching { sender.send(ping()) } }
+        await atMost wait until { one.inFlightHandlers.value == 1 }
+        renew()
+        await atMost wait until { "A:register:" in events }
+        delay(300)
+        assertEquals(1, one.liveHubIds().size, "the gap starts when the handlers are done, not before")
+        release.complete(Unit)
+        await atMost wait until { a.streamsOpenedBy("i-a") == 2 && one.liveHubIds().size == 1 && one.authStatus().certificateRotations == 1L }
+    }
+
+    @Test fun `a hub that does not register again in time stops the rollover for that pair, with one ERROR, until the files change again`() = runBlocking {
+        val handler = handler(listOf(a, b), certificate(), reconnectTimeout = Duration.ofMillis(400))
+        assertTrue(handler.awaitRegistered(wait))
+        a.ackDelay = Duration.ofSeconds(3) // hub A is slow to acknowledge a new stream
+        events.clear()
+        renew()
+        await atMost wait until { events.count { it == "A:channel" } >= 1 }
+        delay(1_200)
+        assertEquals(1, b.streamsOpenedBy("i-a"), "hub B keeps the old pair, and is not touched on later ticks")
+        val errors = rolloverLog.let { appender.list.filter { e -> e.level == Level.ERROR && "did not complete" in e.formattedMessage } }
+        assertEquals(1, errors.size, appender.list.map { it.formattedMessage }.toString())
+
+        a.ackDelay = Duration.ZERO
+        renew() // the files change again: both are rolled
+        await atMost wait until { b.streamsOpenedBy("i-a") == 2 && handler.liveHubIds().size == 2 }
+    }
+
     @Test fun `the auth status of a certificate service names the certificate, its end and the rotations`() = runBlocking {
         val certificate = certificate()
         val handler = handler(listOf(a), certificate)
@@ -273,6 +323,7 @@ class HubCertificateRotationTest {
         assertEquals(certificate.current.fingerprint, before.certificateFingerprint)
         assertEquals(certificate.current.notAfter, before.certificateExpiresAt)
         assertEquals(0L, before.certificateRotations)
+        assertEquals("svc-a", before.certificateService)
         assertEquals(null, before.tokenExpiresAt)
         assertEquals(0L, before.credentialsRefreshesSent)
 

@@ -39,6 +39,7 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import org.slf4j.LoggerFactory
 import java.nio.file.Path
+import java.time.Instant
 import java.time.Duration
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.test.assertEquals
@@ -141,6 +142,25 @@ class HubCertificateSessionTest {
         assertEquals(emptyList(), hub.tokensSeenFrom("i-1").filterNotNull())
         assertEquals(emptyList(), hub.credentialsSeenFrom("i-1"))
         assertEquals(0, conn.credentialsRefreshesSent)
+    }
+
+    @Test fun `a certificate that has ended is refused locally with UNAUTHENTICATED, no stream is opened, and it is logged once`() = runBlocking {
+        var now = Instant.now()
+        val certificate = HubClientCertificate(certFile, keyFile, "svc-a") { now }
+        now = certificate.current.notAfter.plusSeconds(5)
+        val conn = connection("i-1", settings = settings(certificate))
+        conn.start()
+        await atMost Duration.ofSeconds(3) until { conn.lastRejection.value != null }
+        assertEquals(Status.Code.UNAUTHENTICATED, conn.lastRejection.value!!.code)
+        assertTrue("expired at" in conn.lastRejection.value!!.description!!, conn.lastRejection.value.toString())
+        assertEquals(0, hub.streamsOpenedBy("i-1"))
+        assertEquals(0, events.count { it == "channel" }, "no channel, no handshake")
+        assertEquals(1, appender.list.count { it.level == Level.ERROR && "expired at" in it.formattedMessage })
+        // The files are renewed: the next attempt (at the rejection back-off) presents them.
+        ca.issue("svc-a").writeTo(certFile, keyFile)
+        now = Instant.now()
+        await atMost Duration.ofSeconds(10) until { conn.connected.value }
+        assertNull(conn.lastRejection.value)
     }
 
     // --- the close at notAfter ---

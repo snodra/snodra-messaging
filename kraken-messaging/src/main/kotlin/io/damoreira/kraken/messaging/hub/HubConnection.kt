@@ -411,11 +411,13 @@ class HubConnection(
      *     [STOP_CLOSE_TIMEOUT] at most, then the channel is shut down.
      *  4. Reconnects at once (no back-off) with the pair the files hold, and waits up to [reconnectTimeout] for the new stream's registration.
      *
+     * [onDrained] runs after step 2, before the close (the owner takes this hub out of routing there when it is the only one).
+     *
      * Requests queued and not yet written when the stream closes fail with [HubUnavailableException] (never reached the hub: a caller may send
      * them again), the ones written fail as for any lost stream. Returns true when the connection has a stream registered again, or had none
      * to replace (it presents the current pair when it connects); false when [stop] came first or the new stream did not register in time.
      */
-    internal suspend fun rollOver(drainTimeout: Duration, reconnectTimeout: Duration): Boolean {
+    internal suspend fun rollOver(drainTimeout: Duration, reconnectTimeout: Duration, onDrained: () -> Unit = {}): Boolean {
         val stream = synchronized(lock) { if (stopping) null else current } ?: return true
         if (stream.handshake == null) return true // not registered yet: it is ahead of nothing, and its generation tells the next tick to roll it
         log.info("Rolling the hub stream of {} ({}) to {} over to the renewed client certificate", serviceName, instanceId, target)
@@ -433,6 +435,7 @@ class HubConnection(
         if (!drained) {
             log.warn("{} request(s) still in flight on the hub stream to {} after {}; rolling it over anyway", pending.size + inFlight.value, target, drainTimeout)
         }
+        onDrained() // the work is done: from here on this stream takes nothing new
         synchronized(lock) {
             rollingStream = stream
             if (current === stream) stream.out.close() // half-close after the last queued message
@@ -889,8 +892,14 @@ class HubConnection(
                 }
                 // The files are read again for every attempt; what this stream presents is at least this generation.
                 settings.clientCertificate?.let {
-                    it.refresh()
+                    it.refresh(connecting = true)
                     certificateGeneration = it.generation
+                    // The hub refuses a certificate that has ended: say so here, through the rejection path, without a handshake.
+                    if (it.expired()) {
+                        throw LocalRejection(
+                            Status.UNAUTHENTICATED.withDescription("client certificate ${it.current.fingerprint} of ${it.current.service} expired at ${it.current.notAfter}: renew the files"),
+                        )
+                    }
                 }
                 // Inside the try: a factory that throws (e.g. an unparsable address) is a failed attempt, not the end of the loop.
                 channel = channelFactory()
@@ -899,6 +908,8 @@ class HubConnection(
                 status = Status.UNAVAILABLE.withDescription("hub closed the stream")
             } catch (e: CancellationException) {
                 throw e
+            } catch (e: LocalRejection) {
+                status = e.status
             } catch (e: HubTokenException) {
                 noToken = e
                 status = Status.UNAUTHENTICATED.withDescription("no access token: ${e.message}").withCause(e)
@@ -1442,12 +1453,16 @@ class HubConnection(
                 "trusts the hub's own certificate)"
         }
         return " (the transport failed before the hub answered: if the hub serves TLS set kraken.messaging.hub.tls.enabled=true" +
-            " and kraken.messaging.hub.tls.ca-file, if it serves plain text leave kraken.messaging.hub.tls.enabled off)"
+            " and kraken.messaging.hub.tls.ca-file, if it serves plain text leave kraken.messaging.hub.tls.enabled off; a hub that requires client certificates " +
+            "does that to a client that presents none: set kraken.messaging.hub.tls.client-cert-file and client-key-file)"
     }
 
     private fun describe(status: Status) = status.code.name + (status.description?.let { " ($it)" } ?: "")
 
     private class HeartbeatTimeoutException(message: String) : RuntimeException(message)
+
+    /** A registration this client refuses to send (a client certificate that has ended): handled like the hub's `UNAUTHENTICATED`, without a stream. */
+    private class LocalRejection(val status: Status) : RuntimeException(status.description)
 
     /**
      * A streaming handler waited [HubSettings.streamCreditTimeout] for credit: its stream ends with `TIMEOUT`. A

@@ -169,10 +169,12 @@ class HubClientCertificateTest {
         assertEquals(1, source.generation, "unchanged again")
     }
 
-    @Test fun `refresh keeps the current pair when the new one is invalid and logs one ERROR per distinct problem`() {
+    @Test fun `refresh keeps the current pair when the new one is invalid, logging at debug first and one ERROR once the problem persists for a second check`() {
         val first = issue()
         val source = load()
         Files.writeString(certFile, "garbage")
+        assertEquals(first.fingerprint, source.refresh().fingerprint)
+        assertEquals(emptyList(), lines(Level.ERROR), "a pair replaced in two writes is half-written for a moment: the first sighting is not an error")
         repeat(3) { assertEquals(first.fingerprint, source.refresh().fingerprint) }
         assertEquals(1, lines(Level.ERROR).size, lines(Level.ERROR).toString())
         assertEquals(0, source.generation)
@@ -182,8 +184,22 @@ class HubClientCertificateTest {
         val renewed = issue()
         assertEquals(renewed.fingerprint, source.refresh().fingerprint) // fixed: adopted
         Files.writeString(certFile, "garbage")
-        source.refresh()
+        repeat(2) { source.refresh() }
         assertEquals(3, lines(Level.ERROR).size, "the same problem after a recovery is news again")
+    }
+
+    @Test fun `a refresh at connect time that finds an invalid pair falls back to the last good one with one WARN per problem`() {
+        val first = issue()
+        val source = load()
+        Files.writeString(certFile, "garbage")
+        assertEquals(first.fingerprint, source.refresh(connecting = true).fingerprint)
+        val warnings = lines(Level.WARN)
+        assertEquals(1, warnings.size, warnings.toString())
+        assertTrue(first.fingerprint in warnings[0], warnings[0])
+        assertEquals(emptyList(), lines(Level.ERROR), "the ERROR waits for a second check, as for the tick")
+        repeat(2) { assertEquals(first.fingerprint, source.refresh(connecting = true).fingerprint) }
+        assertEquals(1, lines(Level.WARN).size, "one WARN per problem")
+        assertEquals(1, lines(Level.ERROR).size)
     }
 
     @Test fun `a half-written replacement (new certificate, old key) is not adopted until the pair matches`() {
@@ -200,10 +216,10 @@ class HubClientCertificateTest {
         val first = issue()
         val source = load()
         issue(validFor = Duration.ofMinutes(1), notBefore = Instant.now().minusSeconds(3600))
-        assertEquals(first.fingerprint, source.refresh().fingerprint)
+        repeat(2) { assertEquals(first.fingerprint, source.refresh().fingerprint) }
         assertTrue(lines(Level.ERROR).any { "expired" in it }, lines(Level.ERROR).toString())
         issue(notBefore = Instant.now().plusSeconds(3600))
-        assertEquals(first.fingerprint, source.refresh().fingerprint)
+        repeat(2) { assertEquals(first.fingerprint, source.refresh().fingerprint) }
         assertTrue(lines(Level.ERROR).any { "not valid before" in it }, lines(Level.ERROR).toString())
     }
 
@@ -240,13 +256,21 @@ class HubClientCertificateTest {
         assertEquals(1, lines(Level.WARN).size)
     }
 
-    @Test fun `a certificate that has ended is logged once at ERROR and kept`() {
+    @Test fun `a certificate that has ended is reported by expired(), kept, and not logged by the files check`() {
         issue(validFor = Duration.ofHours(1))
         var now = Instant.now()
         val source = load { now }
+        assertFalse(source.expired())
         now = source.current.notAfter.plusSeconds(5)
         repeat(3) { source.refresh() }
-        assertEquals(1, lines(Level.ERROR).count { "expired" in it }, lines(Level.ERROR).toString())
+        assertTrue(source.expired())
+        assertEquals(emptyList(), lines(Level.ERROR), "the connection reports it, through the rejection path")
         assertEquals(0, source.generation)
+    }
+
+    @Test fun `a pair that has already ended at startup fails the startup`() {
+        issue(validFor = Duration.ofMinutes(1), notBefore = Instant.now().minusSeconds(3600))
+        val message = problem()
+        assertTrue("expired" in message && "client-cert-file" in message, message)
     }
 }

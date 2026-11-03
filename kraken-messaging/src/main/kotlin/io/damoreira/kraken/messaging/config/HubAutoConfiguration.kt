@@ -72,6 +72,13 @@ class HubAutoConfiguration {
         val tls = properties.hub.tls
         val certFile = tls.clientCertFile ?: return null
         val keyFile = checkNotNull(tls.clientKeyFile) { "kraken.messaging.hub.tls.client-key-file is not set" }
+        // Setting the certificate implies TLS; saying "no TLS" next to it is a contradiction that would otherwise be resolved silently.
+        if (environment.getProperty("kraken.messaging.hub.tls.enabled")?.trim().equals("false", ignoreCase = true)) {
+            throw IllegalStateException(
+                "kraken.messaging.hub.tls.client-cert-file is set but kraken.messaging.hub.tls.enabled is false: a client certificate is presented over TLS, " +
+                    "remove tls.enabled or set it to true",
+            )
+        }
         rejectOtherCredentials(properties.hub, environment)
         return HubClientCertificate(certFile, keyFile, properties.serviceName)
     }

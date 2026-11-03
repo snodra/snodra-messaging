@@ -64,7 +64,7 @@ object HubProtocol {
     val ROLLOVER_DRAIN_TIMEOUT: Duration = Duration.ofSeconds(10)
 
     /** The longest a rollover waits for the new stream to register (P5c). */
-    val ROLLOVER_RECONNECT_TIMEOUT: Duration = Duration.ofSeconds(10)
+    val ROLLOVER_RECONNECT_TIMEOUT: Duration = Duration.ofSeconds(30)
 
     /**
      * `Register.initial_permits` for one hub when the instance is connected to [hubs] hubs: `ceil(max / hubs)`, the

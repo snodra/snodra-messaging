@@ -503,15 +503,16 @@ kraken:
 Environment names (relaxed binding): `KRAKEN_MESSAGING_HUB_TLS_CLIENT_CERT_FILE`, `KRAKEN_MESSAGING_HUB_TLS_CLIENT_KEY_FILE`.
 
 - **Both files or neither.** One alone fails the startup naming the missing one. A client certificate **implies TLS**: `hub.tls.enabled`
-  need not be set (the Rust library does the same with `KRAKEN_HUB_TLS_CLIENT_CERT`/`_KEY`).
+  need not be set, and an explicit `hub.tls.enabled=false` next to the certificate settings fails the startup (the Rust library does the
+  same with `KRAKEN_HUB_TLS_CLIENT_CERT`/`_KEY`).
 - **One credential kind per service.** A client certificate together with a static token (`hub.token`, `hub.token-file`,
   `KRAKEN_HUB_TOKEN`, `KRAKEN_HUB_TOKEN_FILE`) or OAuth2 (`hub.oauth2.*`, `KRAKEN_HUB_OAUTH2_*`) fails the startup naming both: a stale
   token next to a good certificate would be refused by the hub. With a certificate the library sends no credentials at all.
 - **The SAN rule.** The leaf must carry exactly one URI SAN `kraken://service/<name>` (the name is 1 to 128 characters of
   `[A-Za-z0-9._-]`; DNS, IP and other URI SANs are ignored; two such SANs, even equal ones, are refused as the hub refuses them), and
   `<name>` must be `kraken.messaging.service-name`. The hub would refuse anything else with `PERMISSION_DENIED` at `Register`; the
-  starter says so at startup instead. Also checked at startup: both files exist, are not empty and parse, and the key belongs to the
-  certificate. The key must be **PKCS#8 PEM** (`-----BEGIN PRIVATE KEY-----`); RSA (`BEGIN RSA PRIVATE KEY`), SEC1 (`BEGIN EC PRIVATE KEY`)
+  starter says so at startup instead. Also checked at startup: both files exist, are not empty and parse, the key belongs to the
+  certificate, and the certificate has not ended. The key must be **PKCS#8 PEM** (`-----BEGIN PRIVATE KEY-----`); RSA (`BEGIN RSA PRIVATE KEY`), SEC1 (`BEGIN EC PRIVATE KEY`)
   and encrypted keys are refused with the conversion hint (`openssl pkcs8 -topk8 -nocrypt`). The JDK reads RSA, EC and Ed25519 keys.
 - **How to issue one.** Follow `docs/06-security.md`, "mTLS mode" (`openssl`, or cert-manager with `uris:
   [kraken://service/billing-service]` and `usages: [client auth]`). Issue short-lived certificates (hours to days): there is no
@@ -520,20 +521,23 @@ Environment names (relaxed binding): `KRAKEN_MESSAGING_HUB_TLS_CLIENT_CERT_FILE`
   trust fails the TLS handshake, which TLS 1.3 shows when the stream opens: `UNAVAILABLE` ("ssl exception"), **not** a registration
   rejection. The library retries with its normal back-off and logs one `WARN` that names the fingerprint and what to check (the hub's
   `KRAKEN_HUB_TLS_CLIENT_CA`, the certificate's end, `hub.tls.ca-file`). A certificate that names no or several services, or another
-  service than `service-name`, is `PERMISSION_DENIED` at `Register`: a rejection (`HubRegistrationRejectedException`).
+  service than `service-name`, is `PERMISSION_DENIED` at `Register`: a rejection (`HubRegistrationRejectedException`). A client that presents **no** certificate to a hub that requires one gets the same transport
+  failure; its `WARN` says that a hub which requires client certificates does that to a client that presents none, and to set
+  `hub.tls.client-cert-file` and `client-key-file`.
 
 **Rotation without a restart.** The files are read again on every (re)connect and once per check tick (3 s, the hub's heartbeat period).
-When the pair changed and is valid (the same checks as at startup, not expired, already valid), the hub connections **roll over to it
+A new connection attempt whose files cannot be used presents the last good certificate instead, with one `WARN` per problem. When the pair changed and is valid (the same checks as at startup, not expired, already valid), the hub connections **roll over to it
 one hub at a time**: (1) the hub is told this instance is stopping (a `Register` with no types, as at shutdown), so it routes new work
 to other instances; (2) the library waits up to 10 s for the work in flight on that stream (requests it sent and has no answer for,
 requests it is handling); (3) the stream is closed gracefully (half-close, the hub's end awaited for 2 s); (4) it reconnects at once
-with the new pair and registers again; only then the next hub is rolled. Write the key first and the certificate second, or both with
-one rename each: a pair that does not match (a half-written replacement) is not adopted, it is logged at `ERROR` once per distinct problem
-and the current connection stays; the next tick adopts it when it is complete.
+(no back-off) with the new pair and waits up to 30 s for it to register again; only then the next hub is rolled, in target order. Write
+the key first and the certificate second, or both with one rename each: a pair that does not match (a half-written replacement) is not
+adopted and the current connection stays; the problem is logged at `DEBUG` when first seen and at `ERROR` (once) when the next check finds
+it again, and the next check adopts the pair when it is complete.
 
 - *Failed requests.* Requests accepted before the roll finish on the old stream. A sender that picks a hub in the middle of its roll gets
   `NO_HANDLER` from it when this instance was the only owner there, so a unary send **now fails over to another live hub that has a handler**
-  (every hub answering `NO_HANDLER` returns the answer at once). A hub being rolled takes no new request from this instance's own sends.
+  (every hub answering `NO_HANDLER` returns the answer at once). A hub that has another live hub leaves this instance's own routing at once; the only hub leaves it after its work in flight finished.
 - *One hub: a short gap.* With a single hub there is nobody to take over: for the roll (drain, close, reconnect: well under a second when
   idle) the instance has no stream. Its own sends wait for the new stream within the call's deadline; requests other services send to
   it meanwhile get `NO_HANDLER` from the hub (give such a service two instances, or two hubs).
@@ -541,15 +545,17 @@ and the current connection stays; the next tick adopts it when it is complete.
   A subscription this instance serves does not hold the roll: it ends with the old stream (the hub tells the subscriber
   `HANDLER_DISCONNECTED`), as at any reconnect.
 - *Requests not yet written* when the stream closes follow the usual lost-stream rules (`HubUnavailableException`, sent again on another hub).
-- A roll that does not complete (the new stream does not register within 10 s) leaves the other hubs on the old pair until the next tick.
+- A roll that does not complete (the new stream does not register within 30 s) stops the rollover for that pair with one `ERROR`: the other
+  hubs keep the old pair until the files change again (the hub that did not register keeps trying with the new pair on its own).
 
 **Expiry.** The hub closes a certificate session at `notAfter` with `UNAUTHENTICATED` "certificate expired" and no grace. A service whose
 files are renewed before that never meets it. Otherwise: with less than a tenth of its lifetime (24 hours at most) left and no renewed
 file, the library logs one `WARN` per certificate; when the hub closes the session at `notAfter` the library treats it as a normal
 reconnect (it is **not** a registration rejection: no back-off at the cap) and reads the files again; if they still hold the expired
-certificate, the handshake fails (a transport error, backing off) and one `ERROR` says the certificate expired.
+certificate, the attempt fails locally, without a handshake, as a registration rejection (`UNAUTHENTICATED` "client certificate ... expired
+at ...": one `ERROR`, then retried at the back-off cap), and a renewed file is picked up by the next attempt.
 
-**What you can read.** `HubConnections.authStatus()` has `kind = CERTIFICATE`, `certificateFingerprint` (the first 8 hex characters of
+**What you can read.** `HubConnections.authStatus()` has `kind = CERTIFICATE`, `certificateService`, `certificateFingerprint` (the first 8 hex characters of
 the leaf's SHA-256, the only form of the certificate that is logged or shown; the hub's topology shows the same value), `certificateExpiresAt`
 (`notAfter`) and `certificateRotations` (pairs adopted since start). With Micrometer the starter binds
 `kraken_messaging_hub_certificate_rotations_total`. Logs name a certificate only by that fingerprint and the service; no key material

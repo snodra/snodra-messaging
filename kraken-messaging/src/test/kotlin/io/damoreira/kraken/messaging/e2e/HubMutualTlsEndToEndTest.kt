@@ -256,7 +256,7 @@ class HubMutualTlsEndToEndTest {
         assertFalse(anonymous.connected.value)
         assertNull(anonymous.lastRejection.value, "a transport failure is not a rejection")
         assertEquals(emptyList(), lines(Level.ERROR))
-        assertTrue(lines(Level.WARN).any { "UNAVAILABLE" in it }, lines(Level.WARN).toString())
+        assertTrue(lines(Level.WARN).any { "UNAVAILABLE" in it && "kraken.messaging.hub.tls.client-cert-file" in it }, lines(Level.WARN).toString())
         assertFalse(anonymous.awaitRegistered(Duration.ofMillis(500)))
     }
 

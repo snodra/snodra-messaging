@@ -77,10 +77,10 @@ import java.util.concurrent.atomic.AtomicInteger
  *   read ([HubClientCertificate.refresh]); when a renewed, valid pair was adopted, the connections whose stream presents an older one are
  *   rolled over **one hub at a time** ([HubConnection.rollOver]): the hub is told this instance is stopping, the work in flight on its
  *   stream is awaited ([rolloverDrainTimeout]), the stream is closed gracefully and a new one registers with the new pair
- *   ([rolloverReconnectTimeout]); only then the next hub. A hub being rolled takes no new request from this instance's senders (the others
- *   do; with a single hub a sender waits for the new stream within its call's deadline: a short gap). Open subscriptions of the rolled
- *   stream end (the hub tells their subscribers `HANDLER_DISCONNECTED`). A roll that does not complete leaves the remaining hubs on the old
- *   pair until the next tick.
+ *   ([rolloverReconnectTimeout]); only then the next hub. A hub with another live hub leaves routing at once; the only hub leaves it after its work in flight
+ *   finished (a sender then waits for the new stream within its call's deadline: a short gap). Open subscriptions of the rolled
+ *   stream end (the hub tells their subscribers `HANDLER_DISCONNECTED`). A roll that does not complete stops the rollover for that pair (one ERROR); the remaining hubs
+ *   keep the old pair until the files change again.
  * - **Status**: every [statusInterval], and whenever the live set changes, each live hub whose ack lists
  *   `instance-status` gets an `InstanceStatus` with the ids of the acknowledged (protocol v2) live hubs and the handlers
  *   in flight. Hubs without the capability never get one.
@@ -173,6 +173,7 @@ class HubConnections(
             tokenFetches = provider?.let { p -> TokenFetchResult.entries.associate { it.label to p.fetches(it) } }.orEmpty(),
             credentialsRefreshesSent = refreshesSent.get(),
             certificateFingerprint = certificate?.current?.fingerprint,
+            certificateService = certificate?.current?.service,
             certificateExpiresAt = certificate?.current?.notAfter,
             certificateRotations = certificate?.rotations ?: 0,
         )
@@ -575,32 +576,48 @@ class HubConnections(
         add(resolved)
     }
 
+    /** The generation of the pair whose roll did not complete: not tried again until the files change (ERROR logged once). */
+    private var abandonedGeneration = -1L
+
     /**
-     * The check tick of a client certificate (P5c): read the files, then roll over the hubs whose stream presents an older pair, one at a time.
-     * A hub with no live stream is skipped (its next attempt reads the files anyway); a roll that does not complete ends the round, the next
-     * tick finds the connections that are still behind.
+     * The check tick of a client certificate (P5c): read the files, then roll over the hubs whose stream presents an older pair, one at a
+     * time in target order. A hub with no live stream is skipped (its next attempt reads the files anyway). A hub with another live hub leaves
+     * routing at once; the only hub leaves it after its work in flight finished (a sender then waits for the new stream, within its deadline).
+     * A roll that does not complete (the new stream does not register in time) ends the rollover for that pair with one ERROR: the other hubs
+     * keep the old pair until the files change again.
      */
     private suspend fun certificateLoop(certificate: HubClientCertificate) {
         while (true) {
             delay(certificateCheckInterval.toMillis())
             certificate.refresh()
+            if (certificate.generation == abandonedGeneration) continue
             for (connection in connections()) {
                 if (stopped) return
                 if (!connection.connected.value || connection.certificateGeneration >= certificate.generation) continue
-                connection.rolling = true
-                onHandshake(connection) // out of the live hubs: a sender picks another hub, or waits for this one's new stream
+                if (synchronized(lock) { live.value.any { it !== connection } }) takeOutOfRouting(connection)
                 val rolled = try {
-                    connection.rollOver(rolloverDrainTimeout, rolloverReconnectTimeout)
+                    connection.rollOver(rolloverDrainTimeout, rolloverReconnectTimeout, onDrained = { takeOutOfRouting(connection) })
                 } finally {
                     connection.rolling = false
                 }
                 onHandshake(connection) // back in, if its new stream is registered
-                if (!rolled) {
-                    log.warn("The roll of hub {} onto the renewed client certificate did not complete; the other hubs stay as they are until the next check", connection.target)
+                if (!rolled && !stopped) {
+                    abandonedGeneration = certificate.generation
+                    log.error(
+                        "The roll of hub {} onto the renewed client certificate {} did not complete within {}; the other hubs keep the old pair until the files change again",
+                        connection.target, certificate.current.fingerprint, rolloverReconnectTimeout,
+                    )
                     break
                 }
             }
         }
+    }
+
+    /** A hub being rolled takes no new request from this instance's senders: out of the live hubs (a sender picks another hub, or waits for this one's new stream). */
+    private fun takeOutOfRouting(connection: HubConnection) {
+        if (connection.rolling) return
+        connection.rolling = true
+        onHandshake(connection)
     }
 
     private suspend fun drain(member: Member) {
@@ -623,7 +640,7 @@ enum class HubAuthKind { NONE, TOKEN, JWT, CERTIFICATE }
  * [HubConnections.authStatus]: [kind]; for a JWT the [tokenExpiresAt] of the current access token (null before the first fetch), the
  * [lastTokenError] (null when the last fetch worked), [tokenFetches] by result (`ok`, `http_error`, `oauth_error`, `io_error`,
  * `bad_response`: the `result` label of `kraken_messaging_hub_token_fetches_total`) and [credentialsRefreshesSent]
- * (`kraken_messaging_hub_credentials_refreshes_sent_total`). For a client certificate (P5c): the [certificateFingerprint] (first 8 hex characters of
+ * (`kraken_messaging_hub_credentials_refreshes_sent_total`). For a client certificate (P5c): the [certificateService] it names, the [certificateFingerprint] (first 8 hex characters of
  * the leaf's SHA-256, what the hub shows too), its end ([certificateExpiresAt], `notAfter`) and the pairs adopted since start
  * ([certificateRotations], `kraken_messaging_hub_certificate_rotations_total`). Holds no token and no key.
  */
@@ -633,6 +650,7 @@ data class HubAuthStatus(
     val lastTokenError: String?,
     val tokenFetches: Map<String, Long>,
     val credentialsRefreshesSent: Long,
+    val certificateService: String? = null,
     val certificateFingerprint: String? = null,
     val certificateExpiresAt: java.time.Instant? = null,
     val certificateRotations: Long = 0,

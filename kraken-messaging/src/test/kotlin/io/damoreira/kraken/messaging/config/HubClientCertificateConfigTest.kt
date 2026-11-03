@@ -161,6 +161,16 @@ class HubClientCertificateConfigTest {
         }
     }
 
+    @Test fun `an explicit hub tls enabled=false next to the client certificate settings fails the startup naming both`() {
+        pair()
+        val property = failure(starter().withPropertyValues(*files(), "kraken.messaging.hub.tls.enabled=false"))
+        assertTrue("kraken.messaging.hub.tls.enabled" in property && "client-cert-file" in property, property)
+        val env = failure(starter().withPropertyValues(*files()).withEnv("KRAKEN_MESSAGING_HUB_TLS_ENABLED" to "false"))
+        assertTrue("tls.enabled" in env && "client-cert-file" in env, env)
+        // true is fine, and so is leaving it out (covered above)
+        starter().withPropertyValues(*files(), "kraken.messaging.hub.tls.enabled=true").run { assertEquals(null, it.startupFailure) }
+    }
+
     @Test fun `a client certificate together with a static token names both settings`() {
         pair()
         for (setting in listOf("kraken.messaging.hub.token=abc", "kraken.messaging.hub.token-file=${dir.resolve("t")}")) {

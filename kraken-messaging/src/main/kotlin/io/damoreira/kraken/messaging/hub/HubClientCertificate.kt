@@ -66,9 +66,11 @@ class HubClientCertificate(
 
     @Volatile private var presenting: ClientCertificate
     private var presentingRaw: Raw
-    private var lastProblem: String? = null
+    /** The problem the latest check found (null when it found none): an error is logged only when the next check finds it again. */
+    private var seenProblem: String? = null
+    private var errorLoggedFor: String? = null
+    private var warnedAtConnect: String? = null
     private var warnedFor: String? = null
-    private var expiredFor: String? = null
     @Volatile private var generationCount = 0L
     @Volatile private var rotationCount = 0L
 
@@ -80,7 +82,10 @@ class HubClientCertificate(
         }
         presentingRaw = raw
         presenting = try {
-            parse(raw)
+            parse(raw).also {
+                // A pair that has ended can never connect: say so now instead of failing every attempt (a renewal later is adopted as usual).
+                if (!it.notAfter.isAfter(clock())) throw Problem("kraken.messaging.hub.tls.client-cert-file $certFile: the certificate ${it.fingerprint} expired at ${it.notAfter}")
+            }
         } catch (e: Problem) {
             throw IllegalStateException(e.message, e)
         }
@@ -97,8 +102,16 @@ class HubClientCertificate(
     /** Pairs adopted since start (the `kraken_messaging_hub_certificate_rotations_total` counter): the sessions are moved over by [HubConnections]. */
     val rotations: Long get() = rotationCount
 
-    /** Reads the files again and returns [current] (see the class comment). Never throws: a file that cannot be used is logged and kept out. */
-    @Synchronized fun refresh(): ClientCertificate {
+    /** True when [current] has ended: the hub refuses it, so a connection reports it locally instead of opening a stream. */
+    fun expired(): Boolean = !presenting.notAfter.isAfter(clock())
+
+    /**
+     * Reads the files again and returns [current] (see the class comment). Never throws: a file that cannot be used is kept out. A pair
+     * replaced in two writes is half-written for a moment, so a problem is logged at DEBUG when first seen and at ERROR (once) when the next
+     * check finds it again; [connecting] (a new attempt is about to present [current]) also logs one WARN per problem saying which
+     * certificate is presented instead.
+     */
+    @Synchronized fun refresh(connecting: Boolean = false): ClientCertificate {
         try {
             val raw = read()
             if (!raw.sameAs(presentingRaw)) {
@@ -116,12 +129,22 @@ class HubClientCertificate(
                     candidate.service, old.fingerprint, candidate.fingerprint, candidate.notAfter,
                 )
             }
-            lastProblem = null
+            seenProblem = null
+            errorLoggedFor = null
+            warnedAtConnect = null
         } catch (e: Problem) {
-            // The current pair stays; one ERROR per distinct problem (a half-written replacement is complete on a later tick).
-            if (e.message != lastProblem) {
-                lastProblem = e.message
-                log.error("The hub client certificate files changed but cannot be used, keeping certificate {}: {}", presenting.fingerprint, e.message)
+            // The current pair stays; a half-written replacement is complete on a later check.
+            val problem = e.message
+            if (connecting && problem != warnedAtConnect) {
+                warnedAtConnect = problem
+                log.warn("The hub client certificate files cannot be used, presenting the last good certificate {}: {}", presenting.fingerprint, problem)
+            }
+            if (problem != seenProblem) {
+                seenProblem = problem
+                log.debug("The hub client certificate files changed but cannot be used (first sighting), keeping certificate {}: {}", presenting.fingerprint, problem)
+            } else if (problem != errorLoggedFor) {
+                errorLoggedFor = problem
+                log.error("The hub client certificate files cannot be used, keeping certificate {}: {}", presenting.fingerprint, problem)
             }
         }
         lifecycle(presenting)
@@ -130,16 +153,7 @@ class HubClientCertificate(
 
     private fun lifecycle(certificate: ClientCertificate) {
         val now = clock()
-        if (!certificate.notAfter.isAfter(now)) {
-            if (expiredFor != certificate.fingerprint) {
-                expiredFor = certificate.fingerprint
-                log.error(
-                    "Hub client certificate {} of {} expired at {}: the hub refuses it. Renew {} (and {}); the files are read again on every reconnect",
-                    certificate.fingerprint, certificate.service, certificate.notAfter, certFile, keyFile,
-                )
-            }
-            return
-        }
+        if (!certificate.notAfter.isAfter(now)) return // reported by the connections, through the rejection path
         val lifetime = Duration.between(certificate.notBefore, certificate.notAfter)
         val warnWithin = minOf(lifetime.dividedBy(10), Duration.ofHours(24))
         if (Duration.between(now, certificate.notAfter) < warnWithin && warnedFor != certificate.fingerprint) {

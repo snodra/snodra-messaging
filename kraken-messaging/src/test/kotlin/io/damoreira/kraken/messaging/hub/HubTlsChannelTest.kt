@@ -150,6 +150,11 @@ class HubTlsChannelTest {
         assertTrue("UNAVAILABLE" in warn && "set kraken.messaging.hub.tls.enabled=true" in warn, warn)
     }
 
+    @Test fun `the same hint names the client certificate settings for a hub that requires one`() {
+        val warn = failingConnection(HubTls(), tlsPort).first()
+        assertTrue("requires client certificates" in warn && "kraken.messaging.hub.tls.client-cert-file" in warn && "client-key-file" in warn, warn)
+    }
+
     @Test fun `a stream that fails because the hub is plain text says to leave TLS off`() {
         val warn = failingConnection(ca(), plainServer.port).first()
         assertTrue("leave kraken.messaging.hub.tls.enabled off" in warn, warn)
