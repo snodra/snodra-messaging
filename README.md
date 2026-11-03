@@ -526,10 +526,13 @@ Environment names (relaxed binding): `KRAKEN_MESSAGING_HUB_TLS_CLIENT_CERT_FILE`
   `hub.tls.client-cert-file` and `client-key-file`.
 
 **Rotation without a restart.** The files are read again on every (re)connect and once per check tick (3 s, the hub's heartbeat period).
-A new connection attempt whose files cannot be used presents the last good certificate instead, with one `WARN` per problem. When the pair changed and is valid (the same checks as at startup, not expired, already valid), the hub connections **roll over to it
+A new connection attempt whose files cannot be used presents the last good certificate instead, with one `WARN` per problem. When the pair changed and is valid (the same checks as at startup, not expired, already valid), the instance first waits a **random delay**, uniform in
+[0, min(30 s, 10 % of what is left of the certificate its streams present)] (none when that certificate has ended), so the replicas of a service
+that read the renewed file within the same tick do not all deregister at once; the files are read again after the wait and the roll goes to the
+pair that is current then. Then the hub connections **roll over to it
 one hub at a time**: (1) the hub is told this instance is stopping (a `Register` with no types, as at shutdown), so it routes new work
 to other instances; (2) the library waits up to 10 s for the work in flight on that stream (requests it sent and has no answer for,
-requests it is handling); (3) the stream is closed gracefully (half-close, the hub's end awaited for 2 s); (4) it reconnects at once
+requests it is handling; **not** the streams and subscriptions this instance itself consumes, see below); (3) the stream is closed gracefully (half-close, the hub's end awaited for 2 s); (4) it reconnects at once
 (no back-off) with the new pair and waits up to 30 s for it to register again; only then the next hub is rolled, in target order. Write
 the key first and the certificate second, or both with one rename each: a pair that does not match (a half-written replacement) is not
 adopted and the current connection stays; the problem is logged at `DEBUG` when first seen and at `ERROR` (once) when the next check finds
@@ -538,12 +541,17 @@ it again, and the next check adopts the pair when it is complete.
 - *Failed requests.* Requests accepted before the roll finish on the old stream. A sender that picks a hub in the middle of its roll gets
   `NO_HANDLER` from it when this instance was the only owner there, so a unary send **now fails over to another live hub that has a handler**
   (every hub answering `NO_HANDLER` returns the answer at once). A hub that has another live hub leaves this instance's own routing at once; the only hub leaves it after its work in flight finished.
-- *One hub: a short gap.* With a single hub there is nobody to take over: for the roll (drain, close, reconnect: well under a second when
-  idle) the instance has no stream. Its own sends wait for the new stream within the call's deadline; requests other services send to
-  it meanwhile get `NO_HANDLER` from the hub (give such a service two instances, or two hubs).
+- *One hub: a gap.* With a single hub there is nobody to take over: from the hub being told until the new stream is registered, the
+  instance has no stream and takes no work. That is up to the drain (10 s at most, usually much less: only requests that are really in
+  flight are waited for) plus the reconnect. Its own sends wait for the new stream within the call's deadline; requests other services send to
+  it meanwhile get `NO_HANDLER` from the hub (give such a service two instances, or two hubs). The random delay above keeps the replicas of a
+  service from all being in that gap at the same moment.
 - *Streams and subscriptions.* A streaming handler counts as work in flight (it is waited for, up to 10 s, then cut like any lost stream).
   A subscription this instance serves does not hold the roll: it ends with the old stream (the hub tells the subscriber
-  `HANDLER_DISCONNECTED`), as at any reconnect.
+  `HANDLER_DISCONNECTED`), as at any reconnect. **The same holds on the consumer side:** streams (`queryBus.stream`) and subscriptions
+  (`queryBus.subscribe`) this instance itself consumes through the hub being rolled are not waited for either (they have no end of their own,
+  so waiting would always cost the full 10 s); the roll cuts them, the stream or the `updates` flow fails with `HubConnectionLostException`,
+  and the consumer subscribes again, as after any lost stream. A scatter-gather in flight, which ends within its deadline, is waited for.
 - *Requests not yet written* when the stream closes follow the usual lost-stream rules (`HubUnavailableException`, sent again on another hub).
 - A roll that does not complete (the new stream does not register within 30 s) stops the rollover for that pair with one `ERROR`: the other
   hubs keep the old pair until the files change again (the hub that did not register keeps trying with the new pair on its own).

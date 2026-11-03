@@ -75,13 +75,17 @@ import java.util.concurrent.atomic.AtomicInteger
  *   hub that joins or returns gets `ceil(max / N)` on its new stream, and nothing is ever revoked (rule shared with
  *   the Rust library). One [HandlerGate] keeps the local bound at [maxConcurrentHandlers] over all hubs.
  * - **Client certificate rotation** (P5c, ADR 0020): with [HubSettings.clientCertificate], every [certificateCheckInterval] the files are
- *   read ([HubClientCertificate.refresh]); when a renewed, valid pair was adopted, the connections whose stream presents an older one are
- *   rolled over **one hub at a time** ([HubConnection.rollOver]): the hub is told this instance is stopping, the work in flight on its
- *   stream is awaited ([rolloverDrainTimeout]), the stream is closed gracefully and a new one registers with the new pair
- *   ([rolloverReconnectTimeout]); only then the next hub. A hub with another live hub leaves routing at once; the only hub leaves it after its work in flight
- *   finished (a sender then waits for the new stream within its call's deadline: a short gap). Open subscriptions of the rolled
- *   stream end (the hub tells their subscribers `HANDLER_DISCONNECTED`). A roll that does not complete stops the rollover for that pair (one ERROR); the remaining hubs
- *   keep the old pair until the files change again.
+ *   read ([HubClientCertificate.refresh]); when a renewed, valid pair was adopted, the instance first waits a random delay (uniform in
+ *   [0, min([rolloverMaxDelay], 10 % of what is left of the pair its streams present)], once per pair, so replicas that see the same renewed
+ *   file do not all deregister at once), reads the files again, and rolls the connections whose stream presents an older pair over
+ *   **one hub at a time** ([HubConnection.rollOver]): the hub is told this instance is stopping, the work in flight on its stream is awaited
+ *   ([rolloverDrainTimeout]; the streams and subscriptions this instance itself consumes are not: they have no end of their own and are cut by
+ *   the roll), the stream is closed gracefully and a new one registers with the new pair ([rolloverReconnectTimeout]); only then the next hub.
+ *   A hub with another live hub leaves routing at once; the only hub leaves it after its work in flight finished (from then until its new stream
+ *   registers, up to the drain plus the reconnect, a sender of this instance waits within its call's deadline and other services get
+ *   `NO_HANDLER`). Open subscriptions of the rolled stream end (the hub tells their subscribers `HANDLER_DISCONNECTED`). A roll that does not
+ *   complete stops the rollover for that pair (one ERROR); the remaining hubs keep the old pair until the files change again. An unexpected
+ *   exception in a check is logged once and the next tick checks again.
  * - **Status**: every [statusInterval], and whenever the live set changes, each live hub whose ack lists
  *   `instance-status` gets an `InstanceStatus` with the ids of the acknowledged (protocol v2) live hubs and the handlers
  *   in flight. Hubs without the capability never get one.
