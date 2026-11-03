@@ -587,30 +587,50 @@ class HubConnections(
      * keep the old pair until the files change again.
      */
     private suspend fun certificateLoop(certificate: HubClientCertificate) {
+        var reported: String? = null // the unexpected problem logged at ERROR and not seen to clear since
         while (true) {
             delay(certificateCheckInterval.toMillis())
-            certificate.refresh()
-            if (certificate.generation == abandonedGeneration) continue
-            for (connection in connections()) {
-                if (stopped) return
-                if (!connection.connected.value || connection.certificateGeneration >= certificate.generation) continue
-                if (synchronized(lock) { live.value.any { it !== connection } }) takeOutOfRouting(connection)
-                val rolled = try {
-                    connection.rollOver(rolloverDrainTimeout, rolloverReconnectTimeout, onDrained = { takeOutOfRouting(connection) })
-                } finally {
-                    connection.rolling = false
-                }
-                onHandshake(connection) // back in, if its new stream is registered
-                if (!rolled && !stopped) {
-                    abandonedGeneration = certificate.generation
-                    log.error(
-                        "The roll of hub {} onto the renewed client certificate {} did not complete within {}; the other hubs keep the old pair until the files change again",
-                        connection.target, certificate.current.fingerprint, rolloverReconnectTimeout,
-                    )
-                    break
+            try {
+                if (!checkCertificate(certificate)) return
+                reported = null
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // Anything unexpected (a JCA provider exception on a key it cannot parse, say) must not end the rotation for the life of the
+                // process: log it once per distinct problem and check again on the next tick.
+                val problem = "${e.javaClass.name}: ${e.message}"
+                if (problem != reported) {
+                    reported = problem
+                    log.error("The client certificate check failed, rotation continues with the next check: {}", problem, e)
                 }
             }
         }
+    }
+
+    /** One tick of [certificateLoop]; false when this instance was stopped meanwhile. */
+    private suspend fun checkCertificate(certificate: HubClientCertificate): Boolean {
+        certificate.refresh()
+        if (certificate.generation == abandonedGeneration) return true
+        for (connection in connections()) {
+            if (stopped) return false
+            if (!connection.connected.value || connection.certificateGeneration >= certificate.generation) continue
+            if (synchronized(lock) { live.value.any { it !== connection } }) takeOutOfRouting(connection)
+            val rolled = try {
+                connection.rollOver(rolloverDrainTimeout, rolloverReconnectTimeout, onDrained = { takeOutOfRouting(connection) })
+            } finally {
+                connection.rolling = false
+            }
+            onHandshake(connection) // back in, if its new stream is registered
+            if (!rolled && !stopped) {
+                abandonedGeneration = certificate.generation
+                log.error(
+                    "The roll of hub {} onto the renewed client certificate {} did not complete within {}; the other hubs keep the old pair until the files change again",
+                    connection.target, certificate.current.fingerprint, rolloverReconnectTimeout,
+                )
+                break
+            }
+        }
+        return true
     }
 
     /** A hub being rolled takes no new request from this instance's senders: out of the live hubs (a sender picks another hub, or waits for this one's new stream). */

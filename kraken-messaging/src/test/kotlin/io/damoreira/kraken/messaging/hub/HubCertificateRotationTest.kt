@@ -375,6 +375,25 @@ class HubCertificateRotationTest {
         assertEquals(emptyList(), lines(Level.ERROR))
     }
 
+    @Test fun `an unexpected exception in a check is logged once and does not end the rotation`() = runBlocking {
+        val failing = AtomicInteger(0) // checks that still throw
+        val thrown = AtomicInteger()
+        val certificate = HubClientCertificate(certFile, keyFile, "svc-a") {
+            if (failing.get() > 0 && thrown.get() < failing.get()) { thrown.incrementAndGet(); throw IllegalStateException("odd key DER") }
+            java.time.Instant.now()
+        }
+        val handler = handler(listOf(a), certificate)
+        assertTrue(handler.awaitRegistered(wait))
+        failing.set(3) // the next three checks throw (a JCA provider exception on a key it cannot parse, say), the same problem each time
+        await atMost wait until { thrown.get() == 3 }
+        delay(200)
+        assertEquals(1, lines(Level.ERROR).count { "odd key DER" in it }, lines(Level.ERROR).toString())
+
+        val renewed = renew() // the loop is still alive: the renewed pair is rolled to
+        await atMost wait until { handler.authStatus().certificateRotations == 1L && a.streamsOpenedBy("i-a") == 2 && handler.liveHubIds().size == 1 }
+        assertEquals(renewed.fingerprint, handler.authStatus().certificateFingerprint)
+    }
+
     @Test fun `stopping while a roll is waiting for work in flight ends at once`() = runBlocking {
         val release = CompletableDeferred<Unit>()
         val handler = handler(listOf(a), certificate()) { req -> release.await(); reply(req.id) }
