@@ -10,6 +10,7 @@ import io.damoreira.kraken.messaging.hub.HubAuthMetrics
 import io.damoreira.kraken.messaging.hub.HubBus
 import io.damoreira.kraken.messaging.hub.DefaultHubChannelFactory
 import io.damoreira.kraken.messaging.hub.HubChannelFactory
+import io.damoreira.kraken.messaging.hub.HubClientCertificate
 import io.damoreira.kraken.messaging.hub.HubTls
 import io.damoreira.kraken.messaging.hub.HubToken
 import io.damoreira.kraken.messaging.hub.HubConnections
@@ -31,6 +32,7 @@ import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
 import org.slf4j.LoggerFactory
+import org.springframework.beans.factory.ObjectProvider
 import org.springframework.beans.factory.annotation.Qualifier
 import org.springframework.boot.autoconfigure.AutoConfiguration
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass
@@ -58,15 +60,32 @@ import java.nio.file.Path
 @ConditionalOnProperty(prefix = "kraken.messaging.hub", name = ["enabled"], havingValue = "true", matchIfMissing = true)
 class HubAutoConfiguration {
 
+    /**
+     * The client certificate of `hub.tls.client-cert-file` / `client-key-file` (mTLS, P5c), or null without them: read and checked here, so a
+     * file that cannot be used, a key that does not match, a certificate that does not name this service, or a static token or OAuth2 next
+     * to it fails the startup naming the settings. One instance, shared by the channel factory (which presents it) and the connections (which
+     * roll over to a renewed pair).
+     */
+    @Bean
+    @ConditionalOnMissingBean
+    fun krakenHubClientCertificate(properties: KrakenMessagingProperties, environment: Environment): HubClientCertificate? {
+        val tls = properties.hub.tls
+        val certFile = tls.clientCertFile ?: return null
+        val keyFile = checkNotNull(tls.clientKeyFile) { "kraken.messaging.hub.tls.client-key-file is not set" }
+        rejectOtherCredentials(properties.hub, environment)
+        return HubClientCertificate(certFile, keyFile, properties.serviceName)
+    }
+
     @Bean(defaultCandidate = false)
     @ConditionalOnMissingBean(name = [CHANNEL_FACTORY])
-    fun krakenHubChannelFactory(properties: KrakenMessagingProperties): HubChannelFactory {
+    fun krakenHubChannelFactory(properties: KrakenMessagingProperties, certificate: ObjectProvider<HubClientCertificate>): HubChannelFactory {
         val tls = properties.hub.tls
-        if (!tls.enabled && (tls.caFile != null || tls.serverName != null)) {
+        val clientCertificate = certificate.getIfAvailable()
+        if (!tls.enabled && clientCertificate == null && (tls.caFile != null || tls.serverName != null)) {
             log.warn("kraken.messaging.hub.tls.ca-file / server-name are set but kraken.messaging.hub.tls.enabled is false: talking plain text to the hub")
         }
         // A bad CA file fails the startup here, with the setting's name, instead of failing every connection attempt.
-        return DefaultHubChannelFactory(HubTls(tls.enabled, tls.caFile, tls.serverName)).also { it.validate() }
+        return DefaultHubChannelFactory(HubTls(tls.enabled, tls.caFile, tls.serverName, clientCertificate)).also { it.validate() }
     }
 
     @Bean
@@ -83,8 +102,11 @@ class HubAutoConfiguration {
         registry: HandlerRegistry,
         subscriptions: SubscriptionRegistry,
         environment: Environment,
+        certificate: ObjectProvider<HubClientCertificate>,
     ): HubLifecycle {
         val hub = properties.hub
+        // First: a client certificate next to a token or OAuth2 fails with that message, before any token file is read.
+        certificate.getIfAvailable()
         // The connect loop, stream collector and heartbeats stay on Default; handlers get virtual threads (see HubConnection).
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default + CoroutineName("kraken-hub"))
         val token = hubToken(hub, environment)
@@ -156,6 +178,25 @@ class HubAutoConfiguration {
     }
 
     private val log = LoggerFactory.getLogger(HubAutoConfiguration::class.java)
+
+    /** A client certificate is the service's one credential: a static token or OAuth2 next to it would be refused by the hub (ADR 0020 ruling 6). */
+    private fun rejectOtherCredentials(hub: KrakenMessagingProperties.Hub, environment: Environment) {
+        fun env(name: String) = environment.getProperty(name)?.takeIf { it.isNotBlank() }
+        val other = listOfNotNull(
+            "kraken.messaging.hub.token".takeIf { !hub.token.isNullOrBlank() },
+            "kraken.messaging.hub.token-file".takeIf { hub.tokenFile != null },
+            TOKEN_ENV.takeIf { env(it) != null },
+            TOKEN_FILE_ENV.takeIf { env(it) != null },
+            "kraken.messaging.hub.oauth2.token-uri".takeIf { hub.oauth2.tokenUri != null },
+            OAUTH2_TOKEN_URI_ENV.takeIf { env(it) != null },
+        )
+        if (other.isNotEmpty()) {
+            throw IllegalStateException(
+                "kraken.messaging.hub.tls.client-cert-file and ${other.joinToString(", ")} are both set: a service authenticates with one credential kind " +
+                    "(a certificate, a static token or OAuth2), remove one",
+            )
+        }
+    }
 
     /**
      * The hub token: `hub.token-file` (the only source when set, re-read on every reconnect), else `hub.token`; each falls

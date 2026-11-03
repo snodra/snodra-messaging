@@ -130,15 +130,35 @@ data class KrakenMessagingProperties(
         }
     }
 
-    /** `hub.tls.*` (P5a, ADR 0018). mTLS (a client certificate) is P5c and has no setting here yet. */
+    /** `hub.tls.*` (P5a, ADR 0018); the client certificate (mTLS) is P5c, ADR 0020. */
     data class Tls(
-        /** Talk TLS to the hub (every address form, `dns:///` too). Off: plain text. */
+        /** Talk TLS to the hub (every address form, `dns:///` too). Off: plain text, unless a client certificate is set (it implies TLS). */
         val enabled: Boolean = false,
         /** PEM file with the CA certificate(s) that signed the hub's certificate; the JVM's system roots when absent. Read on every connection attempt. */
         val caFile: Path? = null,
         /** Name to verify the hub's certificate against instead of the address's host (for example an IP or a service alias). */
         val serverName: String? = null,
-    )
+        /**
+         * PEM file with the client certificate chain (leaf first) presented in the TLS handshake (mTLS, P5c, ADR 0020). The leaf must have
+         * exactly one URI SAN `kraken://service/<name>` with `<name>` equal to `kraken.messaging.service-name`. Needs [clientKeyFile]; implies TLS;
+         * cannot be combined with a static token or OAuth2. Checked at startup, read again on every reconnect and heartbeat tick: a renewed pair
+         * is adopted without a restart (the hub connections roll over to it one hub at a time). Environment variable
+         * `KRAKEN_MESSAGING_HUB_TLS_CLIENT_CERT_FILE`.
+         */
+        val clientCertFile: Path? = null,
+        /** PEM file with the private key of [clientCertFile], unencrypted PKCS#8 (`-----BEGIN PRIVATE KEY-----`). Environment variable `KRAKEN_MESSAGING_HUB_TLS_CLIENT_KEY_FILE`. */
+        val clientKeyFile: Path? = null,
+    ) {
+        init {
+            // At binding, so one setting alone fails the startup naming the other, also while the hub is disabled.
+            require(clientCertFile == null || clientKeyFile != null) {
+                "kraken.messaging.hub.tls.client-cert-file is set but kraken.messaging.hub.tls.client-key-file is not: a client certificate needs its key"
+            }
+            require(clientKeyFile == null || clientCertFile != null) {
+                "kraken.messaging.hub.tls.client-key-file is set but kraken.messaging.hub.tls.client-cert-file is not: a client key needs its certificate"
+            }
+        }
+    }
 
     /**
      * `hub.oauth2.*` (P5b, ADR 0019). Every setting also reads the plain environment variable `KRAKEN_HUB_OAUTH2_<NAME>` (`TOKEN_URI`,

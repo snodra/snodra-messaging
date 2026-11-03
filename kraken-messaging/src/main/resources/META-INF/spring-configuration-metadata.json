@@ -209,6 +209,18 @@
       "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Tls"
     },
     {
+      "name": "kraken.messaging.hub.tls.client-cert-file",
+      "type": "java.nio.file.Path",
+      "description": "PEM file with the client certificate chain (leaf first) presented to the hub (mTLS). The leaf needs exactly one URI SAN kraken://service/<name> equal to the service name. Needs hub.tls.client-key-file, implies TLS, cannot be combined with a static token or OAuth2. Read at startup and on every reconnect; a renewed pair is adopted without a restart.",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Tls"
+    },
+    {
+      "name": "kraken.messaging.hub.tls.client-key-file",
+      "type": "java.nio.file.Path",
+      "description": "PEM file with the private key of hub.tls.client-cert-file: unencrypted PKCS#8 (BEGIN PRIVATE KEY).",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Tls"
+    },
+    {
       "name": "kraken.messaging.hub.max-concurrent-handlers",
       "type": "java.lang.Integer",
       "description": "Incoming hub requests handled concurrently by this instance; further requests wait for a free slot. Also announced as initial_permits to a hub with flow control, which queues the excess.",
