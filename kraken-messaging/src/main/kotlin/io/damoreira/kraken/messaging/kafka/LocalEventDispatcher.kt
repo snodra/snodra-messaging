@@ -18,10 +18,13 @@ import java.time.Instant
  *
  * Stage 1 is the consumer's own behaviour: the idempotency marker ([ProcessedEventDocument], id [dedupeId]) is inserted
  * and the handlers run inside one Mongo transaction; a duplicate marker (from the marker insert only) skips the stage, a
- * handler failure rolls the marker back and is thrown, so the caller redelivers the record (and stage 2 does not run
- * for it). Handlers run via `runBlocking` on the calling thread so the thread-bound transaction wraps them. Stage 2 runs
- * after stage 1 committed, with markers and transactions of its own, so a redelivered record whose stage 1 is done goes
- * straight to it. Both stages finish before the caller acknowledges the record.
+ * handler failure rolls the marker back. Handlers run via `runBlocking` on the calling thread so the thread-bound
+ * transaction wraps them. Stage 2 runs after stage 1 committed, with markers and transactions of its own, so a redelivered
+ * record whose stage 1 is done goes straight to it. **Stage 2 runs even when stage 1 failed** (review amendment, ruling
+ * 26): the failure is held, stage 2 runs, and then the failure is thrown, so the caller redelivers or skips the record by
+ * its own rules; a record that is skipped (a non-retried `InvalidMessageException`, or the last attempt) has still been
+ * seen by the sagas, and a redelivery applies nothing twice because stage 2's markers decide. Both stages finish before the
+ * caller acknowledges the record.
  */
 class LocalEventDispatcher(
     private val registry: HandlerRegistry,
@@ -57,6 +60,7 @@ class LocalEventDispatcher(
         if (!ordinary && !saga) return Outcome.NO_INTEREST
 
         var duplicate = false
+        var stage1Failure: Exception? = null
         if (ordinary) {
             try {
                 tx.executeWithoutResult {
@@ -70,9 +74,21 @@ class LocalEventDispatcher(
             } catch (_: AlreadyProcessed) {
                 log.debug("Event {} of type {} already processed, skipping", dedupeId, type)
                 duplicate = true
+            } catch (e: Exception) {
+                // Held until stage 2 ran: the sagas must not miss an event because an ordinary handler failed.
+                stage1Failure = e
             }
         }
-        if (saga) sagaStage.process(type, payload, ctx)
+        if (saga) {
+            try {
+                sagaStage.process(type, payload, ctx)
+            } catch (e: Exception) {
+                val first = stage1Failure
+                if (first == null) throw e
+                first.addSuppressed(e) // both failed: the caller redelivers for stage 1's, stage 2's is kept with it
+            }
+        }
+        stage1Failure?.let { throw it }
         return if (duplicate && !saga) Outcome.DUPLICATE else Outcome.HANDLED
     }
 

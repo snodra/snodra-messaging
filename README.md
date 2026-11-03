@@ -1340,8 +1340,9 @@ adapter against a fake of the partner, the controller with a mock request and a 
   your saga's state, with the same conventions; an `ObjectMapper` of your own may read the same JSON differently.
 - **Associate the saga with its own id** (`saga.associateWith("sagaId", saga.sagaId)`) if it handles `SagaCommandFailed`.
 - **A saga only sees events consumed after it is deployed.** There is no replay of past events into a new saga type.
-- **Ordinary `@EventHandler`s run first.** If one of them keeps failing on an event, the consumer retries the record and then
-  skips it, and the sagas never see it. Keep handlers that sagas depend on from failing for good.
+- **Ordinary `@EventHandler`s run first, and a failing one does not hide the event from the sagas.** The saga stage runs even
+  when an ordinary handler failed, and the failure is then thrown, so the consumer retries and then skips the record as it
+  always did; the sagas have applied the event once by then (their own markers make the redeliveries safe).
 - **Saga commands have no caller.** A target with `@RequiresAuthentication` refuses them (`DENIED`).
 - **Handlers of one event type run in method-name order**, not declaration order: name them so that order is the one you want.
 - **Saga state is JSON.** Use `var` properties with defaults (or nullable ones) and types the library's codec can write; the

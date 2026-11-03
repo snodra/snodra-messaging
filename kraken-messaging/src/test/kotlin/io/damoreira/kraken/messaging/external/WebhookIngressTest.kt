@@ -136,9 +136,9 @@ class WebhookIngressTest {
         handlers.failuresLeft.set(1)
 
         assertFailsWith<IllegalStateException> { ingress.accept("printer", "evt-4", WhHook("j4", "done")) }
-        assertEquals(null, sagaOf("j4"), "stage 1 failed: the saga stage did not run")
+        assertEquals(1, sagaOf("j4")?.stateDoc?.getInteger("hooks"), "stage 1 failed but the saga stage ran")
         assertEquals(ExternalEventIngress.Result.ACCEPTED, ingress.accept("printer", "evt-4", WhHook("j4", "done")), "a failed call is not a duplicate")
-        assertEquals(1, sagaOf("j4")?.stateDoc?.getInteger("hooks"))
+        assertEquals(1, sagaOf("j4")?.stateDoc?.getInteger("hooks"), "the retry did not apply it to the saga a second time")
     }
 
     private fun hmac(secret: String, body: ByteArray): String =

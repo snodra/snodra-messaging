@@ -122,19 +122,19 @@ class LocalEventDispatcherTest {
     }
 
     @Test
-    fun `a stage 1 failure does not run stage 2 (the record is redelivered)`() {
+    fun `a stage 1 failure still runs stage 2 and is then rethrown (the record is redelivered)`() {
         val stage = RecordingStage(true, mongo, handlers)
         val dispatcher = dispatcher(stage)
         handlers.failAlways.set("poison-1")
 
         assertFailsWith<IllegalStateException> { dispatcher.dispatch("poison-1", "test.Happened", payload("poison-1"), ctx("poison-1")) }
 
-        assertEquals(0, stage.calls.size)
+        assertEquals(1, stage.calls.size, "the sagas must not miss the event because an ordinary handler failed")
         assertEquals(0, markers(), "the marker rolled back with the handler")
 
-        handlers.failAlways.set(null) // fixed: the redelivery runs both stages
+        handlers.failAlways.set(null) // fixed: the redelivery runs both stages again (stage 2's own markers make that safe)
         assertEquals(Outcome.HANDLED, dispatcher.dispatch("poison-1", "test.Happened", payload("poison-1"), ctx("poison-1")))
-        assertEquals(1, stage.calls.size)
+        assertEquals(2, stage.calls.size)
         assertEquals(1, markers())
     }
 
