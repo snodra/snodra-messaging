@@ -95,7 +95,10 @@ class HubCertificateRotationTest {
 
     private fun label(hub: InProcessHub) = if (hub === a) "A" else "B"
 
-    private fun recordingChannel(hub: InProcessHub): ManagedChannel {
+    /** When each instance last told a hub it is stopping (the empty Register that starts its roll), by instance id, in nanoTime. */
+    private val deregisteredAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    private fun recordingChannel(hub: InProcessHub, instanceId: String = "i-a"): ManagedChannel {
         val label = label(hub)
         events += "$label:channel"
         val recorder = object : ClientInterceptor {
@@ -113,6 +116,7 @@ class HubCertificateRotationTest {
                     override fun sendMessage(message: ReqT) {
                         (message as? ClientMessage)?.takeIf { it.hasRegister() }?.let {
                             events += "$label:register:" + (it.register.commandTypesList + it.register.queryTypesList).joinToString(",")
+                            if (it.register.commandTypesList.isEmpty() && it.register.queryTypesList.isEmpty()) deregisteredAt.putIfAbsent(instanceId, System.nanoTime())
                         }
                         super.sendMessage(message)
                     }
@@ -136,14 +140,16 @@ class HubCertificateRotationTest {
     /** The handler instance `svc-a` with the certificate, on [hubs]; check tick 50 ms. */
     private fun handler(
         hubs: List<InProcessHub>, certificate: HubClientCertificate, reconnectTimeout: Duration = Duration.ofSeconds(5),
-        drainTimeout: Duration = Duration.ofSeconds(3), inbound: suspend (Request) -> Reply = { reply(it.id) },
+        drainTimeout: Duration = Duration.ofSeconds(3), instanceId: String = "i-a",
+        maxDelay: Duration = Duration.ZERO, random: () -> Double = { 0.0 }, inbound: suspend (Request) -> Reply = { reply(it.id) },
     ) = HubConnections(
         targets = HubTargets.Static(hubs.map { it.name }),
-        channelFactory = HubChannelFactory { target -> recordingChannel(byName.getValue(target)) },
-        serviceName = "svc-a", instanceId = "i-a", settings = settings(certificate), inbound = inbound, scope = scope,
+        channelFactory = HubChannelFactory { target -> recordingChannel(byName.getValue(target), instanceId) },
+        serviceName = "svc-a", instanceId = instanceId, settings = settings(certificate), inbound = inbound, scope = scope,
         statusInterval = Duration.ofMillis(200),
         certificateCheckInterval = Duration.ofMillis(50),
         rolloverDrainTimeout = drainTimeout, rolloverReconnectTimeout = reconnectTimeout,
+        rolloverMaxDelay = maxDelay, rolloverRandom = random,
     ).also { clients += it; it.register(setOf("test.Ping"), emptySet()); it.start() }
 
     private fun sender(hubs: List<InProcessHub>) = HubConnections(
@@ -379,6 +385,60 @@ class HubCertificateRotationTest {
         await atMost Duration.ofSeconds(4) until { a.streamsOpenedBy("i-a") == 2 && handler.liveHubIds().size == 1 }
         assertEquals(emptyList(), lines(Level.WARN).filter { "still in flight" in it })
         assertEquals(emptyList(), lines(Level.ERROR))
+    }
+
+    // --- the random delay before a roll (spreads the replicas of one service) ---
+
+    private fun millisSince(start: Long, instanceId: String) = (deregisteredAt.getValue(instanceId) - start) / 1_000_000
+
+    @Test fun `two replicas that see the same renewed pair do not deregister at the same instant`() = runBlocking {
+        val first = handler(listOf(a), certificate(), instanceId = "i-a1", maxDelay = Duration.ofSeconds(2), random = { 0.0 })
+        val second = handler(listOf(a), certificate(), instanceId = "i-a2", maxDelay = Duration.ofSeconds(2), random = { 1.0 })
+        assertTrue(first.awaitRegistered(wait) && second.awaitRegistered(wait))
+        val start = System.nanoTime()
+        renew()
+        await atMost wait until { deregisteredAt.size == 2 }
+        val early = millisSince(start, "i-a1")
+        val late = millisSince(start, "i-a2")
+        assertTrue(late - early >= 1_500, "the replicas deregistered ${late - early} ms apart (first after $early ms, second after $late ms)")
+        await atMost wait until { listOf(first, second).all { it.authStatus().certificateRotations == 1L && it.liveHubIds().size == 1 } && a.streamsOpenedBy("i-a1") == 2 && a.streamsOpenedBy("i-a2") == 2 }
+    }
+
+    @Test fun `the delay is at most a tenth of what is left of the presented certificate`() = runBlocking {
+        ca.issue("svc-a", notBefore = java.time.Instant.now(), validFor = Duration.ofSeconds(20)).writeTo(certFile, keyFile) // 20 s left: at most 2 s
+        val handler = handler(listOf(a), certificate(), maxDelay = Duration.ofSeconds(30), random = { 1.0 })
+        assertTrue(handler.awaitRegistered(wait))
+        val start = System.nanoTime()
+        renew()
+        await atMost wait until { deregisteredAt.containsKey("i-a") }
+        val waited = millisSince(start, "i-a")
+        assertTrue(waited in 1_500..6_000, "waited $waited ms, expected about 2000 (a tenth of 20 s)")
+        await atMost wait until { handler.authStatus().certificateRotations == 1L && a.streamsOpenedBy("i-a") == 2 && handler.liveHubIds().size == 1 }
+    }
+
+    @Test fun `a presented certificate that has ended is rolled without a delay`() = runBlocking {
+        var now = java.time.Instant.now()
+        val certificate = HubClientCertificate(certFile, keyFile, "svc-a") { now }
+        val handler = handler(listOf(a), certificate, maxDelay = Duration.ofSeconds(30), random = { 1.0 })
+        assertTrue(handler.awaitRegistered(wait))
+        now = certificate.current.notAfter.plusSeconds(60) // the presented pair ended (the hub would close the session)
+        val start = System.nanoTime()
+        ca.issue("svc-a", validFor = Duration.ofHours(4)).writeTo(certFile, keyFile)
+        await atMost wait until { deregisteredAt.containsKey("i-a") }
+        assertTrue(millisSince(start, "i-a") < 3_000, "waited ${millisSince(start, "i-a")} ms")
+    }
+
+    @Test fun `a pair renewed again during the delay is rolled to once, as the newer one`() = runBlocking {
+        val certificate = certificate()
+        val handler = handler(listOf(a), certificate, maxDelay = Duration.ofSeconds(2), random = { 1.0 })
+        assertTrue(handler.awaitRegistered(wait))
+        renew()
+        delay(600) // the first pair is seen, the delay runs
+        val newest = renew()
+        await atMost wait until { handler.authStatus().certificateFingerprint == newest.fingerprint && a.streamsOpenedBy("i-a") >= 2 && handler.liveHubIds().size == 1 }
+        delay(500)
+        assertEquals(2, a.streamsOpenedBy("i-a"), "one roll, to the newest pair, not one per pair")
+        assertEquals(newest.fingerprint, certificate.current.fingerprint)
     }
 
     @Test fun `an unexpected exception in a check is logged once and does not end the rotation`() = runBlocking {

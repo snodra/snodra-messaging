@@ -26,6 +26,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import org.slf4j.LoggerFactory
 import java.net.InetAddress
 import java.time.Duration
+import java.util.concurrent.ThreadLocalRandom
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
@@ -114,6 +115,14 @@ class HubConnections(
     private val rolloverDrainTimeout: Duration = HubProtocol.ROLLOVER_DRAIN_TIMEOUT,
     /** The longest a rollover waits, per hub, for the new stream to register before it leaves the other hubs on the old pair until the next tick (P5c). */
     private val rolloverReconnectTimeout: Duration = HubProtocol.ROLLOVER_RECONNECT_TIMEOUT,
+    /**
+     * The longest this instance waits after it first sees a renewed pair before it starts rolling the hubs onto it (P5c): the wait is uniform
+     * in [0, min([rolloverMaxDelay], 10 % of the remaining validity of the pair the streams present)], so replicas that see the same renewed
+     * file within one tick do not all deregister at once. Zero for no wait (tests).
+     */
+    private val rolloverMaxDelay: Duration = HubProtocol.ROLLOVER_MAX_DELAY,
+    /** The random source of the wait before a rollover: a value in [0, 1). Replaced in tests. */
+    private val rolloverRandom: () -> Double = { ThreadLocalRandom.current().nextDouble() },
 ) : HubTransport {
     private val log = LoggerFactory.getLogger(HubConnections::class.java)
 
@@ -576,6 +585,21 @@ class HubConnections(
         add(resolved)
     }
 
+    /** The generation of the pair this instance already waited its random delay for (once per pair, not per hub). */
+    private var delayedGeneration = -1L
+
+    /**
+     * The wait before the roll to a newly seen pair starts: uniform in [0, min([rolloverMaxDelay], 10 % of what is left of the shortest-lived
+     * pair the [stale] streams present)], zero when that pair has ended (the hub closes such a session anyway).
+     */
+    private fun rolloverDelay(certificate: HubClientCertificate, stale: List<HubConnection>): Duration {
+        val now = certificate.now()
+        val left = stale.mapNotNull { it.certificatePresented?.let { presented -> Duration.between(now, presented.notAfter) } }.minOrNull()
+        val bound = if (left == null) rolloverMaxDelay else minOf(rolloverMaxDelay, left.dividedBy(10))
+        if (bound.isNegative || bound.isZero) return Duration.ZERO
+        return Duration.ofMillis((bound.toMillis() * rolloverRandom().coerceIn(0.0, 1.0)).toLong())
+    }
+
     /** The generation of the pair whose roll did not complete: not tried again until the files change (ERROR logged once). */
     private var abandonedGeneration = -1L
 
@@ -611,6 +635,20 @@ class HubConnections(
     private suspend fun checkCertificate(certificate: HubClientCertificate): Boolean {
         certificate.refresh()
         if (certificate.generation == abandonedGeneration) return true
+        if (certificate.generation != delayedGeneration) {
+            val stale = connections().filter { it.connected.value && it.certificateGeneration < certificate.generation }
+            if (stale.isNotEmpty()) {
+                val wait = rolloverDelay(certificate, stale)
+                if (!wait.isZero) {
+                    log.info("Renewed client certificate {} seen: starting the roll of {} hub(s) in {} ms (spreads the replicas of this service)", certificate.current.fingerprint, stale.size, wait.toMillis())
+                    delay(wait.toMillis())
+                    // The files may have changed again meanwhile: roll to the pair that is current now, with no second wait.
+                    certificate.refresh()
+                    if (certificate.generation == abandonedGeneration) return true
+                }
+                delayedGeneration = certificate.generation
+            }
+        }
         for (connection in connections()) {
             if (stopped) return false
             if (!connection.connected.value || connection.certificateGeneration >= certificate.generation) continue

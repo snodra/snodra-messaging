@@ -334,6 +334,8 @@ class HubConnection(
      * not presented by this stream, so [HubConnections] rolls the stream over. -1 before the first attempt.
      */
     @Volatile internal var certificateGeneration = -1L
+    /** The pair the current attempt read just before its channel was built (what the stream presents, up to a pair adopted in the meantime); null before the first attempt. */
+    @Volatile internal var certificatePresented: ClientCertificate? = null
     /** [HubConnections] is rolling this connection over: it takes no new work from this instance's senders (see [HubConnections]). */
     @Volatile internal var rolling = false
     @Volatile private var loop: Job? = null
@@ -904,7 +906,7 @@ class HubConnection(
                 }
                 // The files are read again for every attempt; what this stream presents is at least this generation.
                 settings.clientCertificate?.let {
-                    it.refresh(connecting = true)
+                    certificatePresented = it.refresh(connecting = true)
                     certificateGeneration = it.generation
                     // The hub refuses a certificate that has ended: say so here, through the rejection path, without a handshake.
                     if (it.expired()) {

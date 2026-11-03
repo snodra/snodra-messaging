@@ -102,6 +102,9 @@ class HubClientCertificate(
     /** Pairs adopted since start (the `kraken_messaging_hub_certificate_rotations_total` counter): the sessions are moved over by [HubConnections]. */
     val rotations: Long get() = rotationCount
 
+    /** The clock of the validity checks (the remaining validity of a presented pair is counted with it too). */
+    internal fun now(): Instant = clock()
+
     /** True when [current] has ended: the hub refuses it, so a connection reports it locally instead of opening a stream. */
     fun expired(): Boolean = !presenting.notAfter.isAfter(clock())
 

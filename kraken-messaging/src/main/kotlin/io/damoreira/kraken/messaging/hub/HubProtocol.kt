@@ -63,6 +63,9 @@ object HubProtocol {
     /** The longest a rollover waits for the work in flight on a stream before it closes it (P5c; shared with the Rust library). */
     val ROLLOVER_DRAIN_TIMEOUT: Duration = Duration.ofSeconds(10)
 
+    /** The longest wait, in [0, this], before a rollover starts after a renewed pair was seen (P5c, spreads the replicas of a service; shared with the Rust library). */
+    val ROLLOVER_MAX_DELAY: Duration = Duration.ofSeconds(30)
+
     /** The longest a rollover waits for the new stream to register (P5c). */
     val ROLLOVER_RECONNECT_TIMEOUT: Duration = Duration.ofSeconds(30)
 
