@@ -4,6 +4,7 @@ import io.damoreira.kraken.messaging.EventBus
 import io.damoreira.kraken.messaging.api.Event
 import io.damoreira.kraken.messaging.codec.JsonCodec
 import io.damoreira.kraken.messaging.codec.MessageTypeResolver
+import io.damoreira.kraken.messaging.saga.RawEventPublisher
 import io.damoreira.kraken.messaging.security.CallerContext
 import io.damoreira.kraken.messaging.tracing.TraceHeaders
 import io.damoreira.kraken.messaging.tracing.CorrelationContext
@@ -26,27 +27,36 @@ class OutboxEventBus(
     private val codec: JsonCodec,
     private val typeResolver: MessageTypeResolver,
     private val traceHeaders: TraceHeaders,
-) : EventBus {
+) : EventBus, RawEventPublisher {
     private val seq = AtomicLong(System.currentTimeMillis() shl 20)
 
     override suspend fun publish(event: Event, key: String?) = insert(event, key, currentCoroutineContext())
 
     override fun publishBlocking(event: Event, key: String?) = insert(event, key, null)
 
+    /** A saga's recorded event: no caller (so an empty `userId` header) and the correlation id of the message that caused it. */
+    override fun publishRaw(type: String, key: String?, payload: org.bson.Document, correlationId: String) =
+        insertDocument(type, key, payload, correlationId, userId = "")
+
     /** The correlation id comes from [context]'s [CorrelationContext], else the MDC, else a fresh UUID. */
-    private fun insert(event: Event, key: String?, context: CoroutineContext?) {
+    private fun insert(event: Event, key: String?, context: CoroutineContext?) = insertDocument(
+        typeResolver.typeNameOf(event::class), key, org.bson.Document.parse(String(codec.encode(event), Charsets.UTF_8)),
+        CorrelationContext.resolve(context), CallerContext.currentUserId() ?: "",
+    )
+
+    private fun insertDocument(type: String, key: String?, payload: org.bson.Document, correlationId: String, userId: String) {
         val headers = linkedMapOf(
-            EventHeaders.CORRELATION_ID to CorrelationContext.resolve(context),
-            EventHeaders.USER_ID to (CallerContext.currentUserId() ?: ""),
+            EventHeaders.CORRELATION_ID to correlationId,
+            EventHeaders.USER_ID to userId,
         )
         traceHeaders.inject(headers)
         mongo.insert(
             OutboxDocument(
                 id = UUID.randomUUID().toString(),
-                type = typeResolver.typeNameOf(event::class),
+                type = type,
                 key = key,
                 headers = headers,
-                payload = org.bson.Document.parse(String(codec.encode(event), Charsets.UTF_8)),
+                payload = payload,
                 createdAt = Instant.now(),
                 seq = seq.incrementAndGet(),
             ),

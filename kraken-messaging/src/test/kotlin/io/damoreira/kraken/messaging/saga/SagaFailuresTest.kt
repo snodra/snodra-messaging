@@ -21,7 +21,6 @@ import org.springframework.transaction.support.TransactionTemplate
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
-import java.time.ZoneId
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -44,12 +43,6 @@ class RtFlakySaga {
         placed++
         commands.send(RtDoIt(e.orderId))
     }
-}
-
-private class SettableClock(@Volatile var now: Instant) : Clock() {
-    override fun getZone(): ZoneId = ZoneId.of("UTC")
-    override fun withZone(zone: ZoneId?): Clock = this
-    override fun instant(): Instant = now
 }
 
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)

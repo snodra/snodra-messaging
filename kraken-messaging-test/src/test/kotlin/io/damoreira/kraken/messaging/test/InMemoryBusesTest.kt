@@ -19,6 +19,8 @@ import io.damoreira.kraken.messaging.api.Event
 import io.damoreira.kraken.messaging.api.MessageType
 import io.damoreira.kraken.messaging.handler.CommandHandler
 import io.damoreira.kraken.messaging.handler.EventHandler
+import io.damoreira.kraken.messaging.saga.RawOutcome
+import io.damoreira.kraken.messaging.saga.SagaCommandFailed
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
@@ -58,6 +60,16 @@ class Handlers {
 }
 
 class InMemoryBusesTest {
+    @Test
+    fun `sendRaw runs a command by wire type name and reports an unknown type as NO_HANDLER`() = runBlocking {
+        val buses = InMemoryBuses().register(Handlers())
+
+        assertEquals(RawOutcome.Success, buses.sendRaw("test.Ping", """{"text":"hi"}""".toByteArray()))
+        val unknown = buses.sendRaw("test.Nobody", "{}".toByteArray())
+
+        assertEquals(SagaCommandFailed.Reason.NO_HANDLER, (unknown as RawOutcome.Permanent).reason)
+    }
+
     @Test fun `send round trips through local handler with typed response`() = runBlocking {
         val buses = InMemoryBuses().register(Handlers())
         val pong: Pong = buses.send(Ping("x"))
@@ -199,4 +211,5 @@ class AdminOnly {
     @io.damoreira.kraken.messaging.handler.RequiresAuthentication("hasRole('kraken-admin')")
     fun handle(command: Ping, ctx: io.damoreira.kraken.messaging.MessageContext) =
         Pong("admin:${ctx.userId}", java.time.Instant.EPOCH)
+
 }

@@ -14,6 +14,9 @@ interface SagaMetrics {
 
     /** A deadline of [name] ran its handler. */
     fun deadlineFired(name: String) = Unit
+
+    /** A `SagaCommandFailed` for [commandType] reached no saga or handler: logged at error, `kraken_saga_command_failures_total`. */
+    fun commandFailureUnhandled(commandType: String, reason: SagaCommandFailed.Reason) = Unit
 }
 
 /** No metrics: used when no `MeterRegistry` bean exists. */

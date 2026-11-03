@@ -22,6 +22,9 @@ import io.damoreira.kraken.messaging.codec.JsonCodec
 import io.damoreira.kraken.messaging.codec.MessageTypeResolver
 import io.damoreira.kraken.messaging.codec.ResponseTypes
 import io.damoreira.kraken.messaging.handler.HandlerInvoker
+import io.damoreira.kraken.messaging.saga.LocalRawCommandSender
+import io.damoreira.kraken.messaging.saga.RawCommandSender
+import io.damoreira.kraken.messaging.saga.RawOutcome
 import io.damoreira.kraken.messaging.security.Identity
 import io.damoreira.kraken.messaging.security.KrakenForwardedAuthentication
 import io.damoreira.kraken.messaging.security.LocalIdentity
@@ -59,7 +62,7 @@ class InMemoryBuses(
     typePrefix: String = "test",
     private val userId: String? = "user-1",
     private val roles: Set<String> = emptySet(),
-) : EventBus, CommandBus, QueryBus {
+) : EventBus, CommandBus, QueryBus, RawCommandSender {
     private val resolver = MessageTypeResolver(typePrefix)
     private val codec = JsonCodec()
     val registry = HandlerRegistry(resolver)
@@ -97,6 +100,10 @@ class InMemoryBuses(
         val type = resolver.typeNameOf(command::class)
         return unwrap(type, command::class, invoker.invokeCommand(type, codec.encode(command), context(type, options.headers), identity())) as R
     }
+
+    /** The saga relay's raw path in memory: [LocalRawCommandSender] over the registered handlers, with no caller (as a saga command has none). */
+    override suspend fun sendRaw(type: String, payload: ByteArray, options: SendOptions): RawOutcome =
+        LocalRawCommandSender(invoker).sendRaw(type, payload, options)
 
     override suspend fun <R> send(query: Query<R>): R = send(query, SendOptions())
 

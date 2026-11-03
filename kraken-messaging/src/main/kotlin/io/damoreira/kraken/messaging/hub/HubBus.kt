@@ -30,6 +30,10 @@ import io.damoreira.kraken.messaging.codec.ResponseTypes
 import io.damoreira.kraken.messaging.handler.HandlerInvoker
 import io.damoreira.kraken.messaging.handler.HandlerRegistry
 import io.damoreira.kraken.messaging.handler.InvocationResult
+import io.damoreira.kraken.messaging.saga.LocalRawCommandSender
+import io.damoreira.kraken.messaging.saga.RawCommandSender
+import io.damoreira.kraken.messaging.saga.RawFailures
+import io.damoreira.kraken.messaging.saga.RawOutcome
 import io.damoreira.kraken.messaging.security.CallerContext
 import io.damoreira.kraken.messaging.security.LocalIdentity
 import io.damoreira.kraken.messaging.tracing.TraceHeaders
@@ -60,6 +64,9 @@ import kotlin.reflect.KClass
  * deadline for the type ([HubTransport.hubTimeoutFor]). Each attempt sends the remaining budget as `timeout_ms` (at least 1 ms). A retry is
  * started only if, after its backoff, at least `max(initialBackoff, RetryPolicy.MIN_ATTEMPT_BUDGET)` of the budget
  * is left; otherwise the last error is thrown at once, without waiting. Local handlers never retry.
+ *
+ * [sendRaw] is the saga relay's own way in ([RawCommandSender], kept out of [CommandBus]): a command known only by wire type
+ * name and JSON bytes, sent with no caller and answered with a classified [RawOutcome] instead of a decoded reply.
  *
  * Scatter-gather ([scatterGather], [scatterGatherFlow], ADR 0017) always goes through the hub, also when this instance
  * owns the type. Each part is decoded like a unary reply (the query's declared result type); a part's error becomes a
@@ -115,13 +122,50 @@ class HubBus(
     private val priorities: Map<String, Int> = emptyMap(),
     /** Default retry policy (`kraken.messaging.hub.retry.*` when enabled); null = no retry. */
     private val retry: RetryPolicy? = null,
-) : CommandBus, QueryBus {
+) : CommandBus, QueryBus, RawCommandSender {
 
     override suspend fun <R> send(command: Command<R>, routingKey: String?): R = send(command, SendOptions(routingKey = routingKey))
 
     @Suppress("UNCHECKED_CAST")
     override suspend fun <R> send(command: Command<R>, options: SendOptions): R =
         dispatch(command, RequestKind.COMMAND, options) as R
+
+    /**
+     * The saga relay's send path ([io.damoreira.kraken.messaging.saga.RawCommandSender]): a command known by wire [type]
+     * and JSON [payload]. A handler in this instance is invoked directly, otherwise the request goes to the hub, with
+     * [options] (routing key, headers, timeout, retry) and the correlation id of the calling coroutine. It carries **no
+     * caller**: no bearer token and no identity, whoever is signed in on the thread (a saga's triggering event is not a
+     * caller). The reply is not decoded; a failure is returned classified, see [io.damoreira.kraken.messaging.saga.RawFailures].
+     */
+    override suspend fun sendRaw(type: String, payload: ByteArray, options: SendOptions): RawOutcome {
+        if (registry.commandHandler(type) != null) return localRaw.sendRaw(type, payload, options)
+        return try {
+            val template = rawTemplate(type, payload, options)
+            withRetry(type, MessageKind.COMMAND, options.timeout, options.retry, retryIf = { true }) { timeout ->
+                attemptReply(template, timeout)
+            }
+            RawOutcome.Success
+        } catch (e: MessagingException) {
+            RawFailures.classify(e)
+        }
+    }
+
+    private val localRaw = LocalRawCommandSender(invoker)
+
+    /** The request of [sendRaw]: correlation id and trace context, [SendOptions.headers], never the caller's token. */
+    private suspend fun rawTemplate(type: String, payload: ByteArray, options: SendOptions): Request {
+        val headers = options.headers.toMutableMap()
+        headers["correlationId"] = CorrelationContext.resolve(currentCoroutineContext())
+        traceHeaders.inject(headers)
+        return Request.newBuilder()
+            .setKind(RequestKind.COMMAND)
+            .setType(type)
+            .setRoutingKey(options.routingKey.orEmpty())
+            .setPayload(ByteString.copyFrom(payload))
+            .putAllHeaders(headers)
+            .setPriority(options.priority ?: priorities[type] ?: 0)
+            .build()
+    }
 
     override suspend fun <R> send(query: Query<R>): R = send(query, SendOptions())
 
@@ -460,14 +504,18 @@ class HubBus(
         .build()
 
     /** One hub request built from [template] with a fresh id and [timeout] as `timeout_ms` (null sends 0). */
-    private suspend fun attempt(template: Request, messageClass: KClass<*>, timeout: Duration?): Any {
+    private suspend fun attempt(template: Request, messageClass: KClass<*>, timeout: Duration?): Any =
+        decodeReply(template.type, messageClass, attemptReply(template, timeout))
+
+    /** [attempt] up to the reply: its payload bytes, or the failure the hub's answer maps to. */
+    private suspend fun attemptReply(template: Request, timeout: Duration?): ByteArray {
         val type = template.type
         val answer = connection.send(withFreshId(template, timeout))
         return when {
             answer.hasReply() && answer.reply.hasError() -> throw answer.reply.error.let {
                 HubErrors.toException(type, it.code, it.message, it.details.toByteArray())
             }
-            answer.hasReply() -> decodeReply(type, messageClass, answer.reply.payload.toByteArray())
+            answer.hasReply() -> answer.reply.payload.toByteArray()
             answer.hasError() -> throw answer.error.let {
                 HubErrors.toException(type, it.code, it.message, it.details.toByteArray())
             }

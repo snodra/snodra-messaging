@@ -1,0 +1,503 @@
+package io.damoreira.kraken.messaging.saga
+
+import ch.qos.logback.classic.Level
+import ch.qos.logback.classic.Logger
+import ch.qos.logback.classic.spi.ILoggingEvent
+import ch.qos.logback.core.read.ListAppender
+import com.mongodb.client.MongoClient
+import com.mongodb.client.MongoClients
+import com.mongodb.client.result.UpdateResult
+import io.damoreira.kraken.messaging.MessageContext
+import io.damoreira.kraken.messaging.RetryPolicy
+import io.damoreira.kraken.messaging.SendOptions
+import io.damoreira.kraken.messaging.api.Command
+import io.damoreira.kraken.messaging.api.Event
+import io.damoreira.kraken.messaging.api.MessageType
+import io.damoreira.kraken.messaging.codec.JsonCodec
+import io.damoreira.kraken.messaging.codec.MessageTypeResolver
+import io.damoreira.kraken.messaging.external.RetryableExternalException
+import io.damoreira.kraken.messaging.handler.CommandHandler
+import io.damoreira.kraken.messaging.handler.HandlerInvoker
+import io.damoreira.kraken.messaging.handler.HandlerRegistry
+import io.damoreira.kraken.messaging.handler.RequiresAuthentication
+import io.damoreira.kraken.messaging.kafka.LocalEventDispatcher
+import io.damoreira.kraken.messaging.kafka.OutboxDocument
+import io.damoreira.kraken.messaging.kafka.OutboxEventBus
+import io.damoreira.kraken.messaging.saga.SagaCommandFailed.Reason
+import io.damoreira.kraken.messaging.test.KrakenContainers
+import io.damoreira.kraken.messaging.tracing.CorrelationContext
+import io.damoreira.kraken.messaging.tracing.TraceHeaders
+import kotlinx.coroutines.currentCoroutineContext
+import org.junit.jupiter.api.AfterAll
+import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.BeforeAll
+import org.junit.jupiter.api.BeforeEach
+import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.TestInstance
+import org.slf4j.LoggerFactory
+import org.springframework.data.domain.Sort
+import org.springframework.data.mongodb.MongoTransactionManager
+import org.springframework.data.mongodb.core.MongoTemplate
+import org.springframework.data.mongodb.core.SimpleMongoClientDatabaseFactory
+import org.springframework.data.mongodb.core.query.Criteria
+import org.springframework.data.mongodb.core.query.Query
+import org.springframework.data.mongodb.core.query.UpdateDefinition
+import org.springframework.security.core.context.SecurityContextHolder
+import org.springframework.security.oauth2.jwt.Jwt
+import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken
+import org.springframework.transaction.support.TransactionTemplate
+import java.time.Duration
+import java.time.Instant
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
+
+@MessageType("rl.Start")
+data class RlStart(val orderId: String) : Event
+
+@MessageType("rl.StartAndEnd")
+data class RlStartAndEnd(val orderId: String) : Event
+
+@MessageType("rl.Announced")
+data class RlAnnounced(val orderId: String) : Event
+
+@MessageType("rl.Charge")
+data class RlCharge(val ref: String) : Command<Unit>
+
+@MessageType("rl.Secured")
+data class RlSecured(val ref: String) : Command<Unit>
+
+@MessageType("rl.Boom")
+data class RlBoom(val ref: String) : Command<Unit>
+
+@MessageType("rl.Busy")
+data class RlBusy(val ref: String) : Command<Unit>
+
+/** Adapters of the relay tests: an open one, one that needs a caller, one that fails and one that asks for a retry. */
+class RlAdapter {
+    val charged = CopyOnWriteArrayList<Pair<String, MessageContext>>()
+    val busyCalls = CopyOnWriteArrayList<String>()
+
+    @CommandHandler fun handle(c: RlCharge, ctx: MessageContext) { charged += c.ref to ctx }
+
+    @RequiresAuthentication @CommandHandler fun handle(c: RlSecured) = Unit
+
+    @CommandHandler fun handle(c: RlBoom): Unit = throw IllegalStateException("printer on fire")
+
+    @CommandHandler fun handle(c: RlBusy) {
+        busyCalls += c.ref
+        throw RetryableExternalException("partner is busy")
+    }
+}
+
+/** Sends a charge when an order starts and remembers the command failures it is told about. */
+@Saga(name = "rl.Order")
+class RlSaga {
+    var orderId: String? = null
+    var failures: MutableList<String> = mutableListOf()
+
+    @StartSaga
+    @SagaEventHandler(associationProperty = "orderId")
+    fun on(e: RlStart, saga: SagaLifecycle, commands: SagaCommands) {
+        orderId = e.orderId
+        saga.associateWith("sagaId", saga.sagaId)
+        commands.send(RlCharge(e.orderId))
+    }
+
+    /** Sends and publishes, then ends in the same handling: its entries must still go out. */
+    @StartSaga
+    @EndSaga
+    @SagaEventHandler(associationProperty = "orderId")
+    fun on(e: RlStartAndEnd, commands: SagaCommands) {
+        orderId = e.orderId
+        commands.send(RlCharge("ended-${e.orderId}"))
+        commands.publish(RlAnnounced(e.orderId), "key-${e.orderId}")
+    }
+
+    @SagaEventHandler(associationProperty = "sagaId")
+    fun on(e: SagaCommandFailed) {
+        failures += "${e.commandType}:${e.reason}"
+    }
+}
+
+/** A sender the test scripts: every call is recorded, the outcome comes from [script]. */
+private class ScriptedSender : RawCommandSender {
+    class Call(val type: String, val payload: String, val headers: Map<String, String>, val correlationId: String?)
+
+    val calls = CopyOnWriteArrayList<Call>()
+    @Volatile var script: (Call) -> RawOutcome = { RawOutcome.Success }
+
+    override suspend fun sendRaw(type: String, payload: ByteArray, options: SendOptions): RawOutcome {
+        val call = Call(type, String(payload, Charsets.UTF_8), options.headers, currentCoroutineContext()[CorrelationContext]?.correlationId)
+        calls += call
+        return script(call)
+    }
+
+    fun keys() = calls.map { it.headers["idempotency-key"] }
+}
+
+private class RelayMetrics : SagaMetrics {
+    val unhandled = CopyOnWriteArrayList<Pair<String, Reason>>()
+    override fun commandFailureUnhandled(commandType: String, reason: Reason) { unhandled += commandType to reason }
+}
+
+/** A template whose next update that sets `dispatchedAt` fails: the crash between sending (or publishing) and marking. */
+private class MarkFailingTemplate(factory: SimpleMongoClientDatabaseFactory) : MongoTemplate(factory) {
+    val failNextMark = AtomicBoolean()
+
+    override fun updateFirst(query: Query, update: UpdateDefinition, entityClass: Class<*>): UpdateResult {
+        if (entityClass == SagaDispatchDocument::class.java && "dispatchedAt" in update.updateObject.toString() && failNextMark.getAndSet(false)) {
+            throw IllegalStateException("crashed before marking the entry dispatched")
+        }
+        return super.updateFirst(query, update, entityClass)
+    }
+}
+
+@TestInstance(TestInstance.Lifecycle.PER_CLASS)
+class SagaDispatchRelayTest {
+    private val mongoContainer = KrakenContainers.mongo()
+    private lateinit var client: MongoClient
+    private lateinit var mongo: MarkFailingTemplate
+    private lateinit var tx: TransactionTemplate
+    private val codec = JsonCodec()
+    private val resolver = MessageTypeResolver("rl")
+    private val start = Instant.parse("2026-11-03T10:00:00Z")
+    private val clock = SettableClock(start)
+    private val settings = RelaySettings(
+        pollInterval = Duration.ofMillis(50), lease = Duration.ofSeconds(30), maxAttempts = 3,
+        initialBackoff = Duration.ofSeconds(1), multiplier = 2.0, maxBackoff = Duration.ofMinutes(5),
+    )
+    private lateinit var adapter: RlAdapter
+    private lateinit var registry: HandlerRegistry
+    private lateinit var runtime: SagaRuntime
+    private lateinit var sender: ScriptedSender
+    private lateinit var metrics: RelayMetrics
+    private val relays = mutableListOf<SagaDispatchRelay>()
+
+    @BeforeAll
+    fun start() {
+        mongoContainer.start()
+        client = MongoClients.create(mongoContainer.connectionString + "/?directConnection=true")
+        val factory = SimpleMongoClientDatabaseFactory(client, "saga_relay_test")
+        mongo = MarkFailingTemplate(factory)
+        tx = TransactionTemplate(MongoTransactionManager(factory))
+        SagaIndexes(mongo, Duration.ofDays(30), Duration.ofDays(7), Duration.ofDays(7)).afterPropertiesSet()
+        listOf("processed_events", "saga_failures", "outbox").forEach { if (!mongo.collectionExists(it)) mongo.createCollection(it) }
+    }
+
+    @AfterAll
+    fun stop() {
+        client.close()
+        mongoContainer.stop()
+    }
+
+    @BeforeEach
+    fun setUp() {
+        listOf("sagas", "saga_dispatch", "saga_dispatch_leases", "deadlines", "saga_failures", "processed_events", "outbox").forEach { mongo.remove(Query(), it) }
+        clock.now = start
+        adapter = RlAdapter()
+        registry = HandlerRegistry(resolver).also { it.register(adapter) }
+        runtime = SagaRuntime(
+            types = SagaModelScanner(resolver, codec).scan(listOf(RlSaga::class)), mongo = mongo, tx = tx, codec = codec, typeResolver = resolver,
+            beans = { error("no beans") }, clock = clock, retry = SagaRetry(RetryPolicy(maxAttempts = 2, initialBackoff = Duration.ofMillis(1), multiplier = 1.0, maxBackoff = Duration.ofMillis(1))),
+        )
+        sender = ScriptedSender()
+        metrics = RelayMetrics()
+    }
+
+    @AfterEach
+    fun tearDown() {
+        relays.forEach { it.stop() }
+        relays.clear()
+        SecurityContextHolder.clearContext()
+    }
+
+    private fun relay(
+        commands: RawCommandSender = sender, stage: SagaStage = runtime, settings: RelaySettings = this.settings,
+        template: MongoTemplate = mongo,
+    ): SagaDispatchRelay {
+        val dispatcher = LocalEventDispatcher(registry, HandlerInvoker(registry, codec), tx, template, stage)
+        val events = OutboxEventBus(template, codec, resolver, TraceHeaders(null, null))
+        return SagaDispatchRelay(template, tx, commands, events, dispatcher, codec, resolver, clock, settings, metrics).also { relays += it }
+    }
+
+    private fun deliver(event: Event, id: String, correlationId: String = "corr-$id") {
+        val type = resolver.typeNameOf(event::class)
+        runtime.process(type, codec.encode(event), MessageContext(id, type, correlationId, null, emptySet(), null, mapOf("id" to id, "type" to type)))
+    }
+
+    private fun sagaOf(orderId: String) = mongo.findAll(SagaDocument::class.java).single { it.state.getString("orderId") == orderId }
+    private fun entries(sagaId: String) = mongo.find(Query(Criteria.where("sagaId").`is`(sagaId)).with(Sort.by("seq")), SagaDispatchDocument::class.java)
+    private fun entry(id: String) = mongo.findById(id, SagaDispatchDocument::class.java)!!
+    private fun failuresOf(orderId: String): List<String> = sagaOf(orderId).state.getList("failures", String::class.java) ?: emptyList()
+
+    /** Records an entry as a saga transaction would have; [seq] decides its place in the saga's order. */
+    private fun record(
+        sagaId: String, seq: Long, type: String = "rl.Charge", payload: String = """{"ref":"r$seq"}""",
+        kind: DispatchKind = DispatchKind.COMMAND, routingKey: String? = null,
+    ): SagaDispatchDocument = SagaDispatchDocument(
+        id = "$sagaId:$seq", sagaId = sagaId, seq = seq, kind = kind, type = type, payload = org.bson.Document.parse(payload),
+        headers = mapOf("correlation-id" to "corr-$sagaId"), routingKey = routingKey, createdAt = clock.now,
+    ).also { mongo.insert(it) }
+
+    @Test
+    fun `entries of one saga are dispatched in seq order`() {
+        record("s1", 3000)
+        record("s1", 1000)
+        record("s1", 2000)
+
+        relay().pollOnce()
+
+        assertEquals(listOf("s1:1000", "s1:2000", "s1:3000"), sender.keys())
+        assertTrue(entries("s1").all { it.dispatchedAt != null })
+    }
+
+    @Test
+    fun `entries of different sagas are dispatched in parallel`() {
+        record("a", 1000)
+        record("b", 1000)
+        val both = CountDownLatch(2)
+        sender.script = {
+            both.countDown()
+            // Each send waits for the other saga's send: only parallel dispatch lets both through.
+            if (both.await(5, TimeUnit.SECONDS)) RawOutcome.Success else RawOutcome.Transient("the other saga was never dispatched meanwhile")
+        }
+
+        relay().pollOnce()
+
+        assertEquals(setOf("a:1000", "b:1000"), sender.keys().toSet())
+        assertTrue(listOf("a", "b").all { entries(it).single().dispatchedAt != null })
+    }
+
+    @Test
+    fun `a step in retry holds back that saga's later steps only`() {
+        record("a", 1000, type = "rl.First")
+        record("a", 2000, type = "rl.Second")
+        record("b", 1000, type = "rl.Other")
+        var firstFails = true
+        sender.script = { if (it.type == "rl.First" && firstFails) RawOutcome.Transient("hub down") else RawOutcome.Success }
+        val relay = relay()
+
+        relay.pollOnce()
+
+        assertEquals(setOf("rl.First", "rl.Other"), sender.calls.map { it.type }.toSet(), "the second step of saga a waits, saga b goes on")
+        assertEquals(1, entry("a:1000").attempts)
+        assertTrue(entry("a:1000").nextAttemptAt!! > clock.now)
+        assertNull(entry("a:2000").dispatchedAt)
+        assertNotNull(entry("b:1000").dispatchedAt)
+
+        relay.pollOnce()
+        assertEquals(2, sender.calls.size, "still backing off")
+
+        firstFails = false
+        clock.now = clock.now.plus(Duration.ofHours(1))
+        relay.pollOnce()
+        assertEquals(listOf("rl.First", "rl.First", "rl.Second"), sender.calls.filter { it.headers["saga-id"] == "a" }.map { it.type }, "in order, the retried step first")
+        assertNotNull(entry("a:2000").dispatchedAt)
+    }
+
+    @Test
+    fun `an event entry reaches the outbox exactly once`() {
+        record("s1", 1000, type = "rl.Announced", payload = """{"orderId":"o1"}""", kind = DispatchKind.EVENT, routingKey = "key-o1")
+        val relay = relay()
+        mongo.failNextMark.set(true) // the crash between inserting into the outbox and marking: one transaction, so neither survives
+
+        relay.pollOnce()
+        assertEquals(0, mongo.count(Query(), "outbox"), "the outbox insert rolled back with the failed mark")
+        assertNull(entry("s1:1000").dispatchedAt)
+
+        relay.pollOnce()
+        relay.pollOnce()
+
+        val outbox = mongo.findAll(OutboxDocument::class.java).single()
+        assertEquals("rl.Announced", outbox.type)
+        assertEquals("key-o1", outbox.key)
+        assertEquals("o1", outbox.payload.getString("orderId"))
+        assertEquals("corr-s1", outbox.headers["correlationId"])
+        assertNotNull(entry("s1:1000").dispatchedAt)
+    }
+
+    @Test
+    fun `a command carries idempotency-key sagaId-seq, saga-id and the correlation id of its cause`() {
+        deliver(RlStart("o1"), "e-1", correlationId = "corr-cause")
+        val saga = sagaOf("o1")
+
+        relay().pollOnce()
+
+        val call = sender.calls.single()
+        assertEquals("rl.Charge", call.type)
+        assertEquals("o1", codec.decodeTree(call.payload.toByteArray()).get("ref").asString())
+        assertEquals("${saga.id}:${entries(saga.id).single().seq}", call.headers["idempotency-key"])
+        assertEquals(saga.id, call.headers["saga-id"])
+        assertEquals("corr-cause", call.correlationId)
+    }
+
+    @Test
+    fun `a crash after the send and before marking re-sends with the same key`() {
+        record("s1", 1000)
+        val relay = relay()
+        mongo.failNextMark.set(true)
+
+        relay.pollOnce()
+        assertNull(entry("s1:1000").dispatchedAt, "the mark failed")
+
+        relay.pollOnce()
+
+        assertEquals(listOf("s1:1000", "s1:1000"), sender.keys())
+        assertNotNull(entry("s1:1000").dispatchedAt)
+        relay.pollOnce()
+        assertEquals(2, sender.calls.size, "marked dispatched: never sent again")
+    }
+
+    @Test
+    fun `transient failures back off and become EXHAUSTED after the limit`() {
+        deliver(RlStart("o1"), "e-1")
+        val saga = sagaOf("o1")
+        val key = "${saga.id}:${entries(saga.id).single().seq}"
+        sender.script = { RawOutcome.Transient("hub down") }
+        val relay = relay()
+
+        relay.pollOnce()
+        assertEquals(1, entry(key).attempts)
+        relay.pollOnce()
+        assertEquals(1, sender.calls.size, "no second attempt before the backoff passed")
+
+        clock.now = clock.now.plus(Duration.ofHours(1))
+        relay.pollOnce()
+        assertEquals(2, entry(key).attempts)
+        assertNull(entry(key).failedAt)
+        clock.now = clock.now.plus(Duration.ofHours(1))
+        relay.pollOnce()
+
+        assertEquals(3, sender.calls.size)
+        assertNotNull(entry(key).failedAt, "the limit of 3 attempts is reached")
+        assertEquals(listOf("rl.Charge:EXHAUSTED"), failuresOf("o1"))
+        relay.pollOnce()
+        assertEquals(3, sender.calls.size, "given up: never sent again")
+    }
+
+    @Test
+    fun `an adapter failure marked retryable backs off like a transient one`() {
+        deliver(RlStart("o1"), "e-1")
+        val sagaId = sagaOf("o1").id
+        record(sagaId, 9000, type = "rl.Busy", payload = """{"ref":"b"}""")
+        val relay = relay(commands = LocalRawCommandSender(HandlerInvoker(registry, codec)))
+
+        relay.pollOnce()
+
+        assertEquals(listOf("b"), adapter.busyCalls)
+        assertEquals(1, entry("$sagaId:9000").attempts)
+        assertNull(entry("$sagaId:9000").failedAt, "retried later, not failed")
+        assertEquals(emptyList(), failuresOf("o1"))
+    }
+
+    @Test
+    fun `NO_HANDLER, DENIED, INVALID and FAILED become SagaCommandFailed at once and a saga handling it by sagaId receives it`() {
+        deliver(RlStart("o1"), "e-1")
+        val sagaId = sagaOf("o1").id
+        record(sagaId, 9001, type = "rl.Nobody", payload = """{"ref":"n"}""")
+        record(sagaId, 9002, type = "rl.Secured", payload = """{"ref":"s"}""")
+        record(sagaId, 9003, type = "rl.Charge", payload = """{"bad":1}""")
+        record(sagaId, 9004, type = "rl.Boom", payload = """{"ref":"b"}""")
+        record(sagaId, 9005, type = "rl.Charge", payload = """{"ref":"after"}""")
+        val relay = relay(commands = LocalRawCommandSender(HandlerInvoker(registry, codec)))
+
+        relay.pollOnce()
+
+        assertEquals(
+            listOf("rl.Nobody:NO_HANDLER", "rl.Secured:DENIED", "rl.Charge:INVALID", "rl.Boom:FAILED"),
+            failuresOf("o1"),
+        )
+        assertTrue((9001..9004).all { entry("$sagaId:$it").failedAt != null })
+        assertEquals(listOf("o1", "after"), adapter.charged.map { it.first }, "a failed step does not hold back the saga's later steps")
+        relay.pollOnce()
+        assertEquals(2, adapter.charged.size, "failed steps are not sent again")
+        assertEquals(4, failuresOf("o1").size, "nor their failure events delivered again")
+    }
+
+    @Test
+    fun `an unhandled SagaCommandFailed is logged at error and counted`() {
+        record("lost", 1000, type = "rl.Nobody")
+        val log = LoggerFactory.getLogger(SagaDispatchRelay::class.java) as Logger
+        val appender = ListAppender<ILoggingEvent>().also { it.start(); log.addAppender(it) }
+        val relay = relay(commands = LocalRawCommandSender(HandlerInvoker(registry, codec)), stage = SagaStage.NONE)
+
+        try {
+            relay.pollOnce()
+        } finally {
+            log.detachAppender(appender)
+        }
+
+        assertEquals(listOf("rl.Nobody" to Reason.NO_HANDLER), metrics.unhandled)
+        val error = appender.list.single { it.level == Level.ERROR }
+        assertTrue("lost:1000" in error.formattedMessage && "NO_HANDLER" in error.formattedMessage, error.formattedMessage)
+        assertNotNull(entry("lost:1000").failedAt)
+    }
+
+    @Test
+    fun `entries recorded before a saga ended are still dispatched`() {
+        deliver(RlStartAndEnd("o9"), "e-9")
+        val saga = sagaOf("o9")
+        assertTrue(saga.ended)
+
+        relay().pollOnce()
+
+        assertEquals(listOf("rl.Charge"), sender.calls.map { it.type })
+        assertEquals("ended-o9", adapterlessRef(sender.calls.single().payload))
+        assertEquals("rl.Announced", mongo.findAll(OutboxDocument::class.java).single().type)
+        assertTrue(entries(saga.id).all { it.dispatchedAt != null })
+    }
+
+    private fun adapterlessRef(payload: String) = codec.decodeTree(payload.toByteArray()).get("ref").asString()
+
+    @Test
+    fun `two relays never dispatch one saga's entries concurrently`() {
+        record("s1", 1000)
+        record("s1", 2000)
+        val inFlight = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        sender.script = { call ->
+            if (call.headers["idempotency-key"] == "s1:1000") {
+                inFlight.countDown()
+                release.await(10, TimeUnit.SECONDS)
+            }
+            RawOutcome.Success
+        }
+        val first = relay()
+        val second = relay()
+        val running = Thread { first.pollOnce() }.also { it.start() }
+        assertTrue(inFlight.await(10, TimeUnit.SECONDS), "the first relay is inside the first step")
+
+        second.pollOnce()
+
+        assertEquals(listOf("s1:1000"), sender.keys(), "the second relay must not send the later step past the first")
+        release.countDown()
+        running.join(10_000)
+        assertEquals(listOf("s1:1000", "s1:2000"), sender.keys())
+        assertEquals(0, mongo.count(Query(), "saga_dispatch_leases"), "the lease is released when the saga's turn is done")
+    }
+
+    @Test
+    fun `a saga command reaches a handler without @RequiresAuthentication and is DENIED by one that requires it`() {
+        deliver(RlStart("o1"), "e-1")
+        val sagaId = sagaOf("o1").id
+        record(sagaId, 9002, type = "rl.Secured", payload = """{"ref":"s"}""")
+        // Whoever signed in on the thread that runs the relay is not the saga's caller.
+        SecurityContextHolder.getContext().authentication =
+            JwtAuthenticationToken(Jwt.withTokenValue("the-user-token").header("alg", "none").subject("user-7").build())
+        val relay = relay(commands = LocalRawCommandSender(HandlerInvoker(registry, codec)))
+
+        relay.pollOnce()
+
+        assertEquals(listOf("o1"), adapter.charged.map { it.first }, "the open handler ran")
+        val ctx = adapter.charged.single().second
+        assertNull(ctx.userId, "no user: ${ctx.userId}")
+        assertNull(ctx.authorization)
+        assertEquals(listOf("rl.Secured:DENIED"), failuresOf("o1"))
+    }
+}

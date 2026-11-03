@@ -5,8 +5,10 @@ import io.damoreira.kraken.messaging.api.Command
 import io.damoreira.kraken.messaging.api.Event
 import io.damoreira.kraken.messaging.api.MessageType
 import org.slf4j.MDC
+import java.time.Clock
 import java.time.Duration
 import java.time.Instant
+import java.time.ZoneId
 import java.util.concurrent.CyclicBarrier
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
@@ -159,4 +161,11 @@ class RtHeaderSaga {
     fun on(e: RtNote) {
         notes++
     }
+}
+
+/** A clock the test moves: the relay's backoff and the scheduler's due times read it. */
+internal class SettableClock(@Volatile var now: Instant) : Clock() {
+    override fun getZone(): ZoneId = ZoneId.of("UTC")
+    override fun withZone(zone: ZoneId?): Clock = this
+    override fun instant(): Instant = now
 }

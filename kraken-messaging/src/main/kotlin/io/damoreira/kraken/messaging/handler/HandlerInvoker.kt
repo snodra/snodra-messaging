@@ -6,6 +6,8 @@ import io.damoreira.kraken.messaging.InvalidMessageException
 import io.damoreira.kraken.messaging.MessageContext
 import io.damoreira.kraken.messaging.UnauthenticatedException
 import io.damoreira.kraken.messaging.codec.JsonCodec
+import io.damoreira.kraken.messaging.external.ExternalFailureMarkers
+import io.damoreira.kraken.messaging.external.RetryableExternalException
 import io.damoreira.kraken.messaging.security.Identity
 import jakarta.validation.ConstraintViolationException
 import kotlinx.coroutines.flow.Flow
@@ -189,6 +191,8 @@ class HandlerInvoker(private val registry: HandlerRegistry, private val codec: J
         is AccessDeniedException -> InvocationResult.Failure(ErrorCode.PERMISSION_DENIED, e.message ?: "access denied")
         is org.springframework.security.access.AccessDeniedException -> InvocationResult.Failure(ErrorCode.PERMISSION_DENIED, e.message ?: "access denied")
         is org.springframework.security.core.AuthenticationException -> InvocationResult.Failure(ErrorCode.UNAUTHENTICATED, e.message ?: "unauthenticated")
+        // An adapter asks for a later attempt: the marker in the details tells the saga relay (also across the hub).
+        is RetryableExternalException -> InvocationResult.Failure(ErrorCode.HANDLER_ERROR, describe(e), ExternalFailureMarkers.RETRYABLE)
         is IllegalArgumentException -> InvocationResult.Failure(ErrorCode.HANDLER_ERROR, e.message ?: e::class.simpleName.orEmpty(), violations(e))
         else -> when {
             isConstraintViolation(e) -> InvocationResult.Failure(ErrorCode.HANDLER_ERROR, e.message ?: e::class.simpleName.orEmpty(), violations(e))
