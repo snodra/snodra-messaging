@@ -5,9 +5,14 @@ import ch.qos.logback.classic.Logger
 import ch.qos.logback.classic.spi.ILoggingEvent
 import ch.qos.logback.core.read.ListAppender
 import io.damoreira.kraken.messaging.fixtures.TestPki
+import io.damoreira.kraken.messaging.hub.HubAuthKind
 import io.damoreira.kraken.messaging.hub.HubChannelFactory
+import io.damoreira.kraken.messaging.hub.HubConnections
 import io.damoreira.kraken.messaging.hub.HubClientCertificate
 import io.damoreira.kraken.messaging.test.InProcessHub
+import org.awaitility.kotlin.atMost
+import org.awaitility.kotlin.await
+import org.awaitility.kotlin.until
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -21,7 +26,9 @@ import org.springframework.core.env.StandardEnvironment
 import org.springframework.core.env.SystemEnvironmentPropertySource
 import java.nio.file.Files
 import java.nio.file.Path
+import java.time.Duration
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -121,6 +128,21 @@ class HubClientCertificateConfigTest {
             val certificate = context.getBean(HubClientCertificate::class.java)
             assertEquals(issued.fingerprint, certificate.current.fingerprint)
             assertEquals("orders", certificate.current.service)
+        }
+    }
+
+    @Test fun `a certificate service reports the kind CERTIFICATE and registers without credentials`() {
+        val issued = pair()
+        starter().withPropertyValues(*files()).run { context ->
+            assertEquals(null, context.startupFailure)
+            val connections = context.getBean(HubConnections::class.java)
+            await atMost Duration.ofSeconds(5) until { hub.acksSentTo(connections.instanceId) >= 1 }
+            val status = connections.authStatus()
+            assertEquals(HubAuthKind.CERTIFICATE, status.kind)
+            assertEquals(issued.fingerprint, status.certificateFingerprint)
+            assertEquals(issued.certificate.notAfter.toInstant(), status.certificateExpiresAt)
+            assertEquals(0L, status.certificateRotations)
+            assertFalse(hub.lastRegisterFrom(connections.instanceId)!!.hasCredentials())
         }
     }
 

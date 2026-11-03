@@ -106,7 +106,7 @@ class HubAutoConfiguration {
     ): HubLifecycle {
         val hub = properties.hub
         // First: a client certificate next to a token or OAuth2 fails with that message, before any token file is read.
-        certificate.getIfAvailable()
+        val clientCertificate = certificate.getIfAvailable()
         // The connect loop, stream collector and heartbeats stay on Default; handlers get virtual threads (see HubConnection).
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default + CoroutineName("kraken-hub"))
         val token = hubToken(hub, environment)
@@ -114,6 +114,7 @@ class HubAutoConfiguration {
         val provider = hubOAuth2(properties, environment, token)?.let { HubTokenProvider(TokenEndpoint(it), scope) }
         val settings = HubSettings(
             hub.requestTimeout, hub.heartbeatInterval, hub.reconnectBackoff.min, hub.reconnectBackoff.max, hub.streamCreditTimeout, token, provider,
+            clientCertificate,
         )
         val handlerDispatcher = Executors.newVirtualThreadPerTaskExecutor().asCoroutineDispatcher()
         val connections = HubConnections(
