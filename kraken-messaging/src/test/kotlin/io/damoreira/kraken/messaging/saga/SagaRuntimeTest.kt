@@ -341,6 +341,21 @@ class SagaRuntimeTest {
     }
 
     @Test
+    fun `removing the start association frees the start key, so a later start event creates a new instance`() {
+        deliver(RtOrderPlaced("o31"))
+        assertEquals("rt.Order|orderId=o31", saga("o31").startKey)
+
+        deliver(RtAssoc("o31", "orderId", "o31", remove = true)) // the start association (key orderId, value o31) goes
+        assertEquals(null, sagas().single().startKey, "the start key is released with its association")
+
+        deliver(RtOrderPlaced("o31")) // no live instance is associated with orderId=o31 any more
+
+        assertEquals(2, sagas().size, "a second instance started under the freed key")
+        assertEquals(1, sagas().count { it.startKey == "rt.Order|orderId=o31" })
+        assertEquals(0, mongo.count(Query(), "saga_failures"), "nothing was parked on a duplicate start key")
+    }
+
+    @Test
     fun `a saga type whose handler always throws is parked within well under a second, after two attempts`() {
         val broken = SagaRuntime(
             types = SagaModelScanner(resolver, codec).scan(listOf(RtBrokenSaga::class)), mongo = mongo, tx = tx, codec = codec, typeResolver = resolver,

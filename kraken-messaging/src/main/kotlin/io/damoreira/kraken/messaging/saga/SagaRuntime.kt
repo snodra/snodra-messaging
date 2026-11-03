@@ -324,9 +324,11 @@ class SagaRuntime(
         fun plan(saga: Any, doc: SagaDocument?, startKey: String?): Planned {
             val ended = lifecycle.endRequested
             val state = String(codec.encode(saga), Charsets.UTF_8)
+            // The start key lives and dies with its association: remove that one and the key is free for a new instance (as in Axon).
+            val keptStartKey = doc?.startKey?.takeIf { key -> lifecycle.associations.any { "${sagaType.name}|${it.k}=${it.v}" == key } }
             val next = doc?.copy(
-                state = state, associations = lifecycle.associations.toList(), ended = ended, endedAt = if (ended) now else null,
-                version = version, updatedAt = now,
+                state = state, associations = lifecycle.associations.toList(), startKey = keptStartKey, ended = ended,
+                endedAt = if (ended) now else null, version = version, updatedAt = now,
             ) ?: SagaDocument(
                 id = sagaId, type = sagaType.name, state = state, associations = lifecycle.associations.toList(), startKey = startKey,
                 ended = ended, endedAt = if (ended) now else null, version = 0, createdAt = now, updatedAt = now,
