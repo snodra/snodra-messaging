@@ -2,6 +2,7 @@ package io.damoreira.kraken.messaging.config
 
 import io.damoreira.kraken.messaging.codec.MessageTypeResolver
 import io.damoreira.kraken.messaging.config.emptyscan.EmptyScanConfig
+import io.damoreira.kraken.messaging.config.idemscan.IdemBeanConfig
 import io.damoreira.kraken.messaging.config.idemscan.IdemScanConfig
 import io.damoreira.kraken.messaging.config.sagascan.SagaScanConfig
 import io.damoreira.kraken.messaging.deadline.DeadlineScheduler
@@ -169,6 +170,17 @@ class SagaAutoConfigurationTest {
         runner.withUserConfiguration(IdemScanConfig::class.java).withPropertyValues("kraken.messaging.external.calls.enabled=false").run { context ->
             assertTrue(context.getBeansOfType(IdempotencyInterceptor::class.java).isEmpty())
         }
+    }
+
+    @Test fun `an @IdempotentHandler bean without an interceptor fails the startup naming the handler and the property`() {
+        runner.withUserConfiguration(IdemBeanConfig::class.java).withPropertyValues("kraken.messaging.external.calls.enabled=false").run { context ->
+            val failure = context.startupFailure
+            assertNotNull(failure, "the context must not start with an adapter that would fail at call time")
+            val messages = generateSequence<Throwable>(failure) { it.cause }.mapNotNull { it.message }.toList()
+            assertTrue(messages.any { "ScanAdapter.handle" in it && "kraken.messaging.external.calls.enabled" in it }, messages.toString())
+        }
+        // with the interceptor (the default for a class in the application's packages) the same bean starts
+        runner.withUserConfiguration(IdemBeanConfig::class.java).run { context -> assertEquals(null, context.startupFailure) }
     }
 
     @Test fun `a configured source without its translator fails the startup`() {

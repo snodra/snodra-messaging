@@ -39,6 +39,10 @@ class HandlerRegistry(private val typeResolver: MessageTypeResolver) {
         return added
     }
 
+    /** Every registered handler marked `@IdempotentHandler`: what [HandlerInvoker.verifyIdempotency] checks at startup. */
+    fun idempotentHandlers(): List<HandlerMethod> =
+        (events.values.flatten() + commands.values + queries.values).filter { it.idempotency != null }
+
     fun eventHandlers(type: String): List<HandlerMethod> = events[type]?.toList().orEmpty()
     fun commandHandler(type: String): HandlerMethod? = commands[type]
     fun queryHandler(type: String): HandlerMethod? = queries[type]

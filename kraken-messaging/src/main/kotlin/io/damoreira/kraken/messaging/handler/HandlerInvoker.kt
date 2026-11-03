@@ -15,6 +15,7 @@ import io.damoreira.kraken.messaging.security.Identity
 import jakarta.validation.ConstraintViolationException
 import kotlinx.coroutines.flow.Flow
 import org.slf4j.LoggerFactory
+import org.springframework.beans.factory.SmartInitializingSingleton
 import kotlin.coroutines.cancellation.CancellationException
 
 sealed interface InvocationResult {
@@ -57,8 +58,27 @@ class HandlerInvoker(
     private val codec: JsonCodec,
     /** Runs the handlers annotated with `@IdempotentHandler`; without one such a handler fails when called. */
     private val idempotency: IdempotencyInterceptor? = null,
-) {
+) : SmartInitializingSingleton {
     private val log = LoggerFactory.getLogger(HandlerInvoker::class.java)
+
+    /** Once every bean exists (so every handler is registered): an `@IdempotentHandler` with no interceptor fails the startup, not the first call. */
+    override fun afterSingletonsInstantiated() = verifyIdempotency()
+
+    /**
+     * Fails with an [IllegalStateException] naming the handler when a registered handler is an `@IdempotentHandler` and this
+     * invoker has no [IdempotencyInterceptor]: such a handler would never run (it fails when called), so the service must not
+     * start. The interceptor exists when a class in the application's packages has such a method; set
+     * `kraken.messaging.external.calls.enabled=true` when the adapter lives elsewhere (and not `false` while one exists).
+     */
+    fun verifyIdempotency() {
+        if (idempotency != null) return
+        val handler = registry.idempotentHandlers().firstOrNull() ?: return
+        throw IllegalStateException(
+            "Handler ${handler.label} is an @IdempotentHandler but this service has no idempotency support (no IdempotencyInterceptor): " +
+                "it would fail when called. The interceptor exists when a class in the application's packages has an @IdempotentHandler method; " +
+                "set kraken.messaging.external.calls.enabled=true when the adapter lives elsewhere, and do not set it to false while one exists",
+        )
+    }
 
     /** [identity] is the resolved caller (null = anonymous); it is checked against the handler's `@RequiresAuthentication`. */
     suspend fun invokeCommand(type: String, payload: ByteArray, ctx: MessageContext, identity: Identity?): InvocationResult =

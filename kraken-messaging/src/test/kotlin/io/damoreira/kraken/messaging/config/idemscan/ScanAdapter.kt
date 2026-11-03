@@ -20,3 +20,11 @@ class ScanAdapter {
 @Configuration(proxyBeanMethods = false)
 @AutoConfigurationPackage
 class IdemScanConfig
+
+/** The adapter as a bean, so the registry holds its idempotent handler. */
+@Configuration(proxyBeanMethods = false)
+@AutoConfigurationPackage
+class IdemBeanConfig {
+    @org.springframework.context.annotation.Bean
+    fun scanAdapter() = ScanAdapter()
+}

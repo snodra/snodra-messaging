@@ -390,6 +390,15 @@ class IdempotentHandlerTest {
         assertEquals(0, adapter.bodies.get())
     }
 
+    @Test
+    fun `an invoker without the interceptor refuses to start while the registry holds an idempotent handler`() {
+        val e = assertFailsWith<IllegalStateException> { HandlerInvoker(registry, codec).verifyIdempotency() }
+        assertTrue("ExPrinterAdapter." in e.message!! && "@IdempotentHandler" in e.message!! && "kraken.messaging.external.calls.enabled" in e.message!!, e.message)
+
+        invoker.verifyIdempotency() // with the interceptor it is fine
+        HandlerInvoker(HandlerRegistry(resolver), codec).verifyIdempotency() // and so is a registry without idempotent handlers
+    }
+
     // ---- with the saga relay -----------------------------------------------------------------------------------------
 
     private class Harness(val relay: SagaDispatchRelay, val runtime: SagaRuntime, val charge: ChargeAdapter)
