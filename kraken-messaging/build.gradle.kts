@@ -25,6 +25,8 @@ dependencies {
     api(libs.kotlinx.coroutines.core)
     implementation(libs.spring.boot.starter)
     implementation(libs.spring.kafka)
+    // ExternalRecordTranslator.translate takes a Kafka ConsumerRecord: a service writing one needs the client on its compile classpath.
+    api("org.apache.kafka:kafka-clients")
     implementation(libs.spring.boot.starter.data.mongodb)
     implementation(libs.jackson.module.kotlin)
     implementation(libs.kotlin.reflect)
