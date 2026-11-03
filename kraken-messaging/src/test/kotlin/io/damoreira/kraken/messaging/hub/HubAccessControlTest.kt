@@ -29,6 +29,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
 import org.awaitility.kotlin.atMost
@@ -167,6 +168,34 @@ class HubAccessControlTest {
         assertTrue(conn.awaitRegistered(wait))
         assertEquals(second, hub.lastRegisterFrom("i-1")!!.credentials.token)
         assertEquals(listOf<String?>(first, second), hub.tokensSeenFrom("i-1").distinct())
+    }
+
+    @Test fun `a token file that changes is sent to the hub as a refresh on the live stream, no reconnect, and a hub without the capability gets none`(@TempDir dir: Path) = runBlocking {
+        hub.heartbeatInterval = Duration.ofMillis(100) // the connection looks at its token file once per heartbeat
+        val rotated = "rotated-" + UUID.randomUUID()
+        hub.auth = HubAuth.enforce(acl + (rotated to AclEntry("svc-a", handle = listOf("test.*"), send = listOf("other.*"))))
+        val file = dir.resolve("hub-token")
+        Files.writeString(file, token + "\n")
+        val conn = connection("i-1", settings = settings(HubToken.of(null, file)))
+        conn.start()
+        assertTrue(conn.awaitRegistered(wait))
+        delay(300)
+        assertTrue(hub.credentialsSeenFrom("i-1").isEmpty(), "an unchanged file sends nothing")
+
+        Files.writeString(file, rotated + "\n")
+        await atMost wait until { hub.credentialsSeenFrom("i-1").isNotEmpty() }
+        assertEquals(listOf(rotated), hub.credentialsSeenFrom("i-1").distinct())
+        assertEquals(1, hub.streamsOpenedBy("i-1"), "rotated on the same stream")
+        assertEquals(1, conn.credentialsRefreshesSent)
+        assertTrue(hub.authViolations().isEmpty())
+
+        hub.credentialsRefresh = false
+        val old = connection("i-2", settings = settings(HubToken.of(null, file)))
+        old.start()
+        assertTrue(old.awaitRegistered(wait))
+        Files.writeString(file, token + "\n")
+        delay(400)
+        assertTrue(hub.credentialsSeenFrom("i-2").isEmpty())
     }
 
     @Test fun `a token file that disappears keeps the last token read, one that is missing at startup fails`(@TempDir dir: Path) {

@@ -35,8 +35,15 @@ object HubProtocol {
      */
     const val SUBSCRIPTION = "subscription"
 
+    /**
+     * Capability name of credential refresh (P5b, ADR 0019): `ClientMessage.credentials`, a fresh credential for a live session
+     * (a JWT session is closed at its `exp` plus the hub's grace without one). Declared by every `Register`, static token
+     * sessions too; sent only on a stream whose ack lists it.
+     */
+    const val CREDENTIALS_REFRESH = "credentials-refresh"
+
     /** `Register.capabilities`: optional protocol features this client supports. */
-    val CAPABILITIES: List<String> = listOf(FLOW_CONTROL, INSTANCE_STATUS, SCATTER_GATHER, STREAMING, SUBSCRIPTION)
+    val CAPABILITIES: List<String> = listOf(FLOW_CONTROL, INSTANCE_STATUS, SCATTER_GATHER, STREAMING, SUBSCRIPTION, CREDENTIALS_REFRESH)
 
     /** `Request.initial_credit` the hub assumes when a sender sends 0; the library always sends at least 1. */
     const val DEFAULT_INITIAL_CREDIT = 64

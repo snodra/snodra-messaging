@@ -291,7 +291,7 @@ class StreamingQueryTest {
         conn.register(emptySet(), setOf("test.ExportRows"))
         conn.start()
         assertTrue(conn.awaitRegistered(wait))
-        assertEquals(listOf("flow-control", "instance-status", "scatter-gather", "streaming", "subscription"), hub.lastRegisterFrom("a")!!.capabilitiesList)
+        assertEquals(listOf("flow-control", "instance-status", "scatter-gather", "streaming", "subscription", "credentials-refresh"), hub.lastRegisterFrom("a")!!.capabilitiesList)
         assertTrue(conn.supportsStreaming)
         hub.streaming = false
         val old = connection("b")

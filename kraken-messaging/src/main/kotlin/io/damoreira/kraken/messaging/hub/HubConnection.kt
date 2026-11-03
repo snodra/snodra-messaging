@@ -82,6 +82,12 @@ data class HubSettings(
      * is redacted, so printing the settings never prints the token.
      */
     val token: HubToken = HubToken.NONE,
+    /**
+     * The OAuth2 access token of this service (P5b, ADR 0019), shared by every hub connection: when set, each stream registers
+     * with `Register.credentials.jwt` instead of [token] and gets every renewal as `ClientMessage.credentials`. Its `toString`
+     * is redacted too.
+     */
+    val tokenProvider: HubTokenProvider? = null,
 ) {
     /** [requestTimeout] when the caller chose one; zero (or negative) counts as unset, never as an instant deadline. */
     val chosenRequestTimeout: Duration? get() = requestTimeout?.takeIf { !it.isZero && !it.isNegative }
@@ -286,7 +292,9 @@ class HubConnection(
      * One open stream: its outbound queue, handshake, the heartbeats awaiting an echo (`sentAtMs` -> generation) and the
      * permit accounting against its `initial_permits`.
      */
-    private class Stream(val out: Channel<ClientMessage>, fallbackHeartbeatMs: Long, val initialPermits: Int, val token: String? = null) {
+    private class Stream(val out: Channel<ClientMessage>, fallbackHeartbeatMs: Long, val initialPermits: Int) {
+        /** The credential the hub knows for this stream: the one `Register` carries, then the latest refresh written (guarded by the stream itself). */
+        var credentials: Credentials? = null
         val probes = ConcurrentSkipListMap<Long, Long>()
         val permits = PermitLedger(initialPermits)
         /** `initial_permits` plus every top-up written on this stream (guarded by the stream itself). */
@@ -305,6 +313,7 @@ class HubConnection(
     private val acknowledged = MutableStateFlow(-1L) // generation confirmed by the hub on the current stream
     @Volatile private var current: Stream? = null
     @Volatile private var loop: Job? = null
+    @Volatile private var renewals: Job? = null
     /** [stop] was called: the connect loop ends with its current stream instead of opening another. */
     @Volatile private var stopping = false
     private var lastHeartbeatAt = 0L
@@ -339,6 +348,10 @@ class HubConnection(
         synchronized(lock) {
             check(loop == null) { "HubConnection already started" }
             loop = scope.launch { connectLoop() }
+            settings.tokenProvider?.let { provider ->
+                // Every renewal goes to the live stream (a stream that cannot take it, or none, is skipped: see refreshCredentials).
+                renewals = scope.launch { provider.current.collect { current?.let(::refreshCredentials) } }
+            }
         }
     }
 
@@ -360,7 +373,8 @@ class HubConnection(
         if (outcome == false) {
             val status = rejection.value
             throw HubRegistrationRejectedException(
-                "hub rejected the registration of $serviceName ($instanceId): " + (status?.let(::describe) ?: "unknown"),
+                if (status?.cause is HubTokenException) "no access token for $serviceName ($instanceId): ${status.cause?.message}"
+                else "hub rejected the registration of $serviceName ($instanceId): " + (status?.let(::describe) ?: "unknown"),
             )
         }
         return outcome == true
@@ -766,6 +780,7 @@ class HubConnection(
         }
         failPending(null, HubConnectionLostException("hub connection stopped"))
         if (stream != null) withTimeoutOrNull(STOP_CLOSE_TIMEOUT.toMillis()) { stream.closed.await() }
+        renewals?.cancel()
         job?.cancelAndJoin()
         failPending(null, HubConnectionLostException("hub connection stopped"))
     }
@@ -773,22 +788,44 @@ class HubConnection(
     /** The rejection message last logged at `error`; touched only by the connect loop. */
     private var lastLoggedRejection: String? = null
 
+    /** [rejection] currently says the token endpoint refused (no stream was opened), not the hub; touched only by the connect loop. */
+    private var tokenRejected = false
+
+    /** What a new stream's `Register` carries: the access token (P5b) or the static token (P5a), or nothing. */
+    private suspend fun initialCredentials(): Credentials? {
+        val provider = settings.tokenProvider
+        return if (provider != null) Credentials.newBuilder().setJwt(provider.token().value).build() else staticCredentials()
+    }
+
+    private fun staticCredentials(): Credentials? = settings.token.current()?.let { Credentials.newBuilder().setToken(it).build() }
+
     private suspend fun connectLoop() {
         var backoff = settings.backoffMin
         var failures = 0
         var hintLogged = false // the TLS hint has reached WARN since the last handshake
         while (currentCoroutineContext().isActive && !stopping) {
             var channel: ManagedChannel? = null
-            val stream = Stream(Channel(Channel.UNLIMITED), settings.heartbeatInterval.toMillis(), initialPermits().coerceAtLeast(1), settings.token.current())
+            val stream = Stream(Channel(Channel.UNLIMITED), settings.heartbeatInterval.toMillis(), initialPermits().coerceAtLeast(1))
             var status: Status = Status.CANCELLED
             var reachedHandshake = false
+            var noToken: HubTokenException? = null
             try {
+                // A stream is not opened without its credential: the token provider answers first (the cached token, or one fetch for everybody).
+                stream.credentials = initialCredentials()
+                if (tokenRejected) { // the endpoint answers again
+                    tokenRejected = false
+                    rejection.value = null
+                    lastLoggedRejection = null
+                }
                 // Inside the try: a factory that throws (e.g. an unparsable address) is a failed attempt, not the end of the loop.
                 channel = channelFactory()
                 openAndCollect(channel, stream)
                 status = Status.UNAVAILABLE.withDescription("hub closed the stream")
             } catch (e: CancellationException) {
                 throw e
+            } catch (e: HubTokenException) {
+                noToken = e
+                status = Status.UNAUTHENTICATED.withDescription("no access token: ${e.message}").withCause(e)
             } catch (e: HeartbeatTimeoutException) {
                 status = Status.UNAVAILABLE.withDescription(e.message)
             } catch (e: Throwable) {
@@ -825,7 +862,22 @@ class HubConnection(
                 lastLoggedRejection = null
             }
             failures++
-            val wait = if (isRegistrationRejection(status)) {
+            val wait = if (noToken != null) {
+                // Not the hub's answer: the stream was never opened. Retried with the normal back-off (the hub may be fine, the endpoint is not).
+                tokenRejected = true
+                rejection.value = status
+                val retry = ReconnectBackoff.jittered(backoff, settings.backoffMax)
+                backoff = ReconnectBackoff.next(backoff, settings.backoffMax)
+                val text = "No access token for {} ({}): {}; not connecting to {}, retrying in {}"
+                val message = describe(status)
+                if (message != lastLoggedRejection) {
+                    lastLoggedRejection = message
+                    log.error(text, serviceName, instanceId, noToken.message, target, retry)
+                } else {
+                    log.debug(text, serviceName, instanceId, noToken.message, target, retry)
+                }
+                retry
+            } else if (isRegistrationRejection(status)) {
                 rejection.value = status
                 val retry = ReconnectBackoff.jittered(settings.backoffMax, settings.backoffMax)
                 // The same message repeats at every attempt: one error line, then debug (a refused service retries for as long as it runs).
@@ -873,6 +925,7 @@ class HubConnection(
                     throw HeartbeatTimeoutException("no heartbeat echo from the hub for ${System.currentTimeMillis() - oldest} ms")
                 }
                 heartbeat(stream)
+                if (settings.tokenProvider == null) refreshCredentials(stream) // a rotated token file reaches the hub without a reconnect
             }
         }
         HubGrpcKt.HubCoroutineStub(channel).connect(stream.out.receiveAsFlow()).collect { message -> handle(stream, message) }
@@ -896,7 +949,7 @@ class HubConnection(
     private fun announce(stream: Stream) {
         val register = registration.toBuilder().setInitialPermits(stream.initialPermits)
             // Every Register of the stream carries the stream's token (the hub reads it from the first one only).
-            .apply { stream.token?.let { credentials = Credentials.newBuilder().setToken(it).build() } }
+            .apply { synchronized(stream) { stream.credentials }?.let { credentials = it } }
             .build()
         stream.out.trySend(ClientMessage.newBuilder().setRegister(register).build())
         stream.registeredGeneration = generation.value
@@ -1025,6 +1078,30 @@ class HubConnection(
             }
         }
         stream.handshakeReached.complete(Unit)
+        refreshCredentials(stream) // a credential renewed between this stream's Register and its ack
+    }
+
+    private val refreshes = AtomicLong()
+
+    /** `ClientMessage.credentials` written to this hub over all of its streams (`kraken_messaging_hub_credentials_refreshes_sent_total`). */
+    val credentialsRefreshesSent: Long get() = refreshes.get()
+
+    /**
+     * Gives the live [stream] the credential the hub should know now when it differs from the one it was told, if its ack lists
+     * `credentials-refresh`: the provider's latest access token, or a static token that changed in its file (a rotation without
+     * reconnecting). A stream without the capability gets nothing; its next reconnect presents the new credential.
+     */
+    private fun refreshCredentials(stream: Stream) {
+        if (current !== stream) return
+        val ack = (stream.handshake as? HubHandshake.V2)?.ack ?: return
+        if (HubProtocol.CREDENTIALS_REFRESH !in ack.capabilitiesList) return
+        val provider = settings.tokenProvider
+        val wanted = (if (provider != null) provider.current.value?.let { Credentials.newBuilder().setJwt(it.value).build() } else staticCredentials()) ?: return
+        val changed = synchronized(stream) { (wanted != stream.credentials).also { if (it) stream.credentials = wanted } }
+        if (changed && stream.out.trySend(ClientMessage.newBuilder().setCredentials(wanted).build()).isSuccess) {
+            refreshes.incrementAndGet()
+            log.debug("Credentials refreshed on the stream of {} ({}) to {}", serviceName, instanceId, target)
+        }
     }
 
     /**

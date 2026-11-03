@@ -117,7 +117,7 @@ class HubCompatTest {
         val ack = assertIs<HubHandshake.V2>(conn.handshake.value).ack
         assertEquals("compat-hub", ack.hubId)
         assertEquals(2, ack.protocolVersion)
-        assertEquals(listOf("flow-control", "instance-status", "scatter-gather", "streaming", "subscription"), ack.capabilitiesList)
+        assertEquals(listOf("flow-control", "instance-status", "scatter-gather", "streaming", "subscription", "credentials-refresh"), ack.capabilitiesList)
         assertEquals(3_000, ack.heartbeatIntervalMs)
         assertEquals(10_000, ack.heartbeatTimeoutMs)
         assertEquals(5_000, ack.defaultTimeoutMs)

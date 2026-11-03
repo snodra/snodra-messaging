@@ -141,7 +141,7 @@ class ScatterGatherTest {
         conn.start()
         assertTrue(conn.awaitRegistered(wait))
         val register = hub.lastRegisterFrom("a")!!
-        assertEquals(listOf("flow-control", "instance-status", "scatter-gather", "streaming", "subscription"), register.capabilitiesList)
+        assertEquals(listOf("flow-control", "instance-status", "scatter-gather", "streaming", "subscription", "credentials-refresh"), register.capabilitiesList)
         assertEquals(listOf("test.Get"), register.queryTypesList)
         assertEquals(listOf("test.GetCount"), register.sharedQueryTypesList)
         assertTrue(conn.supportsScatterGather)

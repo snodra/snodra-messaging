@@ -191,7 +191,8 @@ class HubConnections(
         for (c in waiting) {
             val status = c.lastRejection.value ?: continue
             throw HubRegistrationRejectedException(
-                "hub ${c.target} rejected the registration of $serviceName ($instanceId): " +
+                if (status.cause is HubTokenException) "no access token for $serviceName ($instanceId), not connecting to ${c.target}: ${status.cause?.message}"
+                else "hub ${c.target} rejected the registration of $serviceName ($instanceId): " +
                     status.code.name + (status.description?.let { " ($it)" } ?: ""),
             )
         }
