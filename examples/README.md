@@ -235,6 +235,9 @@ SECURE=1 ONLY_SECURE=1 bash examples/smoke.sh  # only steps 21 and 21b (needs th
 SECURE=1 JWT=1 bash examples/smoke.sh  # against the JWT sandbox (see "JWT sandbox"): every step plus 21, 21b, 22 and 22b
 SECURE=1 JWT=1 SKIP_JWT=1 bash examples/smoke.sh  # the JWT sandbox without steps 22 and 22b
 SECURE=1 JWT=1 ONLY_JWT=1 bash examples/smoke.sh  # only steps 22 and 22b (needs the docker CLI)
+SECURE=1 MTLS=1 bash examples/smoke.sh # against the mTLS sandbox (see "mTLS sandbox"): every step plus 21, 21b, 23 and 23b
+SECURE=1 MTLS=1 SKIP_MTLS=1 bash examples/smoke.sh  # the mTLS sandbox without steps 23 and 23b
+SECURE=1 MTLS=1 ONLY_MTLS=1 bash examples/smoke.sh  # only steps 23 and 23b (needs the docker CLI and openssl)
 ```
 
 ## Secure sandbox
@@ -332,6 +335,48 @@ service-c with the JWT overlay as well) and adds, last:
 
 `C_CONTAINER` names service-c's container; `HUB_CONTAINER`, `HUB2_CONTAINER` as for the secure steps. `SKIP_JWT=1` skips steps 22 and 22b,
 `ONLY_JWT=1` runs only them (both need `JWT=1`).
+
+## mTLS sandbox
+
+The secure sandbox with service-a (Kotlin) and service-c (Rust) authenticating with a client certificate (P5c, umbrella ADR 0020): the
+overlay `kraken/infra/compose.mtls.yaml` on top of the secure one. service-b keeps its static token (the hubs run
+`KRAKEN_HUB_TLS_CLIENT_AUTH=optional`), so both kinds run side by side. It is not combined with the JWT overlay. The client CA, the
+certificates (EC P-256, 30 days, exactly one URI SAN `kraken://service/<name>`) and their keys come from `dev-hub-pki.sh` into the
+git-ignored `kraken/infra/.secrets/` (rerun it with `--force` once if that directory predates P5c).
+
+```bash
+# from kraken/infra
+scripts/dev-hub-pki.sh
+docker compose -f compose.yaml -f compose.local.yaml -f compose.secure.yaml -f compose.mtls.yaml --profile examples \
+  up -d --force-recreate hub hub-2 service-a service-b service-c
+# from kraken-messaging
+SECURE=1 MTLS=1 INFRA_DIR=../kraken/infra bash examples/smoke.sh    # every step, plus 21, 21b, 23 and 23b; ends with SMOKE OK
+# from kraken/infra: back to the secure stack
+docker compose -f compose.yaml -f compose.local.yaml -f compose.secure.yaml --profile examples \
+  up -d --force-recreate hub hub-2 service-a service-b service-c
+```
+
+service-a sets `KRAKEN_MESSAGING_HUB_TLS_CLIENT_CERT_FILE` / `KRAKEN_MESSAGING_HUB_TLS_CLIENT_KEY_FILE` (`kraken.messaging.hub.tls.client-cert-file`
+/ `client-key-file`), service-c `KRAKEN_HUB_TLS_CLIENT_CERT` / `KRAKEN_HUB_TLS_CLIENT_KEY`. Their token variables are emptied and their
+token mounts removed (a token together with a certificate is a startup error). Each mounts its own **directory**
+(`.secrets/mtls/<service>/`, `client.pem` and `client.key`) and the hub CA, read-only: a rotation replaces the files by rename, which a
+single-file bind mount would not show. The ACL has a `[[service]]` table for service-a and service-c with the rights of their `[[token]]` entries.
+
+`SECURE=1 MTLS=1 bash examples/smoke.sh` (MTLS needs SECURE and excludes JWT) runs every step above unchanged (the flow steps recreate
+service-b and service-c with the mTLS overlay as well) and adds, last:
+
+- **Step 23**: on both hubs' `/topology`, service-a and service-c have `authKind` `certificate`, a `certFingerprint` equal to the
+  first 8 hex characters of the SHA-256 of the certificate in their directory, and an `expiresAt` (the certificate's `notAfter`);
+  service-b has `token` and no fingerprint.
+- **Step 23b**: `dev-hub-pki.sh --rotate service-c` replaces service-c's certificate and key on disk while a steady trickle of calls goes
+  through service-a (alternating service-b and service-c as targets). Within ~30 s both hubs show the new `certFingerprint` for the same
+  instance id (the library rolled its hub connections over one hub at a time, so `connectedSinceMs` is new), every call answered
+  200, and neither hub logged `certificate expired`. The same is then done for service-a (Kotlin). The script cannot sign on demand
+  (the client CA key is deleted), so it hands out one of ten spare pairs per service (`.secrets/mtls-spare/`); each smoke run uses
+  one per service, and when they are gone `dev-hub-pki.sh --force` issues more.
+
+`A_CONTAINER`, `HUB_CONTAINER` and `HUB2_CONTAINER` name the containers as for the secure steps. `SKIP_MTLS=1` skips steps 23 and 23b,
+`ONLY_MTLS=1` runs only them (both need `MTLS=1`).
 
 ## Experiments
 

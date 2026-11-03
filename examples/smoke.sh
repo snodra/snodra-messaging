@@ -15,11 +15,17 @@
 #        JWT=1 (needs SECURE=1) runs against the JWT overlay on top of it (kraken/infra/compose.jwt.yaml: service-b and
 #        service-c authenticate with Keycloak client-credentials tokens, service-a keeps its static token), every other
 #        step runs unchanged, and the JWT steps 22 and 22b are added; SKIP_JWT=1 skips those two, ONLY_JWT=1 runs only
-#        them, C_CONTAINER names service-c's container)
+#        them, C_CONTAINER names service-c's container;
+#        MTLS=1 (needs SECURE=1, excludes JWT=1) runs against the mTLS overlay on top of the secure sandbox
+#        (kraken/infra/compose.mtls.yaml: service-a and service-c authenticate with a client certificate, service-b keeps
+#        its static token), every other step runs unchanged, and the certificate steps 23 and 23b are added (23b rotates
+#        service-c's and service-a's certificates on disk with kraken/infra/scripts/dev-hub-pki.sh --rotate while calls
+#        flow); SKIP_MTLS=1 skips those two, ONLY_MTLS=1 runs only them, A_CONTAINER names service-a's container)
 set -euo pipefail
 
 SECURE=${SECURE:-0}
 JWT=${JWT:-0}
+MTLS=${MTLS:-0}
 A=${A:-http://localhost:8091}
 if [ "$SECURE" = "1" ]; then
   HUB=${HUB:-https://localhost:7001}
@@ -68,6 +74,15 @@ fi
 if [ "$JWT" = "1" ]; then
   [ "$SECURE" = "1" ] || fail "JWT=1 needs SECURE=1 (the JWT overlay sits on top of the secure sandbox)"
   COMPOSE_FILES+=(-f compose.jwt.yaml)
+fi
+
+# MTLS=1: the mTLS overlay (kraken/infra/compose.mtls.yaml) on top of the secure one; the flow steps recreate service-b and
+# service-c with these files, and service-c must come back with its certificate. It is not combinable with JWT=1: both
+# overlays rewrite service-c's credentials.
+if [ "$MTLS" = "1" ]; then
+  [ "$SECURE" = "1" ] || fail "MTLS=1 needs SECURE=1 (the mTLS overlay sits on top of the secure sandbox)"
+  [ "$JWT" = "0" ] || fail "MTLS=1 and JWT=1 exclude each other (both overlays rewrite service-c's credentials)"
+  COMPOSE_FILES+=(-f compose.mtls.yaml)
 fi
 
 # Recreates service-b and service-c from the sandbox compose files plus the given extra files, without touching
@@ -785,13 +800,18 @@ secure_steps() {
 # The hub's counters (kraken_hub_jwt_validations_total{result="ok"}, ...) go out over OTLP only, which the examples closure
 # does not run a collector for; authKind jwt on the topology is the hub saying it validated the token.
 
+# <service>'s first instance on <hub url>'s topology, from "instanceId" on, as one line (empty while it is not listed).
+# instance_fields stops at "tags":{} (it splits at '{'), before authKind and expiresAt: cut at each instanceId instead and take
+# the chunk that follows the service's name.
+session_fields() { # <hub url> <service>
+  curl -fsS "$1/topology" 2>/dev/null | sed 's/"instanceId"/\n"instanceId"/g' \
+    | awk -v s="\"serviceName\":\"$2\"" 'index($0, s) { f = 1; next } f && /^"instanceId"/ { print; exit }' || true
+}
+
 # "<instanceId> <connectedSinceMs> <authKind> <expiresAt or ->" of <service>'s first instance on <hub url>'s topology.
 jwt_session() { # <hub url> <service>
   local fields id since kind exp
-  # instance_fields stops at "tags":{} (it splits at '{'), before authKind and expiresAt: cut at each instanceId instead and take
-  # the chunk that follows the service's name.
-  fields=$(curl -fsS "$1/topology" 2>/dev/null | sed 's/"instanceId"/\n"instanceId"/g' \
-    | awk -v s="\"serviceName\":\"$2\"" 'index($0, s) { f = 1; next } f && /^"instanceId"/ { print; exit }' || true)
+  fields=$(session_fields "$1" "$2")
   id=$(printf '%s' "$fields" | sed -n 's/.*"instanceId":"\([^"]*\)".*/\1/p')
   since=$(printf '%s' "$fields" | sed -n 's/.*"connectedSinceMs":\([0-9]*\).*/\1/p')
   kind=$(printf '%s' "$fields" | sed -n 's/.*"authKind":"\([^"]*\)".*/\1/p')
@@ -876,6 +896,111 @@ jwt_steps() {
   echo "   neither hub logged 'credentials expired' since $jwt_started"
 }
 
+# P5c (ADR 0020), only with SECURE=1 MTLS=1 against the mTLS sandbox (kraken/infra/compose.mtls.yaml): service-a (Kotlin) and
+# service-c (Rust) register with a client certificate (a dev client CA, exactly one URI SAN kraken://service/<name>), service-b
+# with its static token (the hubs run with KRAKEN_HUB_TLS_CLIENT_AUTH=optional). Step 23: both hubs list service-a and
+# service-c with authKind certificate, the fingerprint of the certificate in the service's mounted directory and an
+# expiresAt, and service-b with token. Step 23b: the certificate of service-c (then of service-a) is replaced on disk by a new
+# one (new key; dev-hub-pki.sh --rotate) while a steady trickle of calls goes through service-a (alternating service-b and
+# service-c as the target): within ~30 s both hubs show the new fingerprint for the same instance (the libraries roll the
+# connections over one hub at a time, no restart) and no call failed. SKIP_MTLS=1 skips them, ONLY_MTLS=1 runs only them.
+
+# The first 8 hex characters of the SHA-256 of the DER encoding of the certificate in <pem>: what the hub shows.
+cert_fp_of() { # <pem>
+  openssl x509 -in "$1" -noout -fingerprint -sha256 | sed 's/.*=//; s/://g' | tr 'A-F' 'a-f' | cut -c1-8
+}
+
+# "<instanceId> <connectedSinceMs> <authKind> <certFingerprint or ->" of <service>'s first instance on <hub url>'s topology.
+cert_session() { # <hub url> <service>
+  local fields id since kind fp
+  fields=$(session_fields "$1" "$2")
+  id=$(printf '%s' "$fields" | sed -n 's/.*"instanceId":"\([^"]*\)".*/\1/p')
+  since=$(printf '%s' "$fields" | sed -n 's/.*"connectedSinceMs":\([0-9]*\).*/\1/p')
+  kind=$(printf '%s' "$fields" | sed -n 's/.*"authKind":"\([^"]*\)".*/\1/p')
+  fp=$(printf '%s' "$fields" | sed -n 's/.*"certFingerprint":"\([^"]*\)".*/\1/p')
+  echo "${id:--} ${since:--} ${kind:--} ${fp:--}"
+}
+
+# Waits until <service> shows authKind certificate and <fingerprint> on <hub url>; prints its session.
+await_cert() { # <hub url> <service> <fingerprint> <seconds>
+  local i sess
+  for i in $(seq 1 "$4"); do
+    sess=$(cert_session "$1" "$2")
+    if [ "$(echo "$sess" | cut -d' ' -f3)" = "certificate" ] && [ "$(echo "$sess" | cut -d' ' -f4)" = "$3" ]; then
+      echo "$sess"; return 0
+    fi
+    sleep 1
+  done
+  fail "$2 does not show authKind certificate with fingerprint $3 on $1/topology within $4 s (last: '$sess')"
+}
+
+mtls_steps() {
+  local h1=${HUB_CONTAINER:-kraken-hub} h2=${HUB2_CONTAINER:-kraken-hub-2}
+  local h svc sess id since kind fp fp2 exp k n started waited codes bad total mtls_started stop out loop_pid
+  local ids=() sinces=()    # per hub, in the order of the loops below (no associative arrays: macOS bash 3.2)
+  command -v docker >/dev/null || fail "docker CLI needed for the certificate steps (or set SKIP_MTLS=1)"
+  command -v openssl >/dev/null || fail "openssl needed for the certificate steps (or set SKIP_MTLS=1)"
+  [ -f "$INFRA/scripts/dev-hub-pki.sh" ] || fail "kraken/infra/scripts/dev-hub-pki.sh not found (set INFRA_DIR)"
+  docker inspect "$h1" >/dev/null 2>&1 || fail "container $h1 not found (set HUB_CONTAINER, or SKIP_MTLS=1)"
+  docker inspect "$h2" >/dev/null 2>&1 || fail "container $h2 not found (set HUB2_CONTAINER, or SKIP_MTLS=1)"
+  mtls_started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+  echo "23. both hubs show service-a (Kotlin) and service-c (Rust) with authKind certificate, the fingerprint of their certificate and an expiresAt, service-b with token ..."
+  for h in "$HUB" "$HUB2"; do
+    for svc in service-a service-c; do
+      fp=$(cert_fp_of "$SECRETS/mtls/$svc/client.pem")
+      sess=$(await_cert "$h" "$svc" "$fp" 60)
+      read -r id since kind fp <<< "$sess"
+      exp=$(session_fields "$h" "$svc" | sed -n 's/.*"expiresAt":\([0-9]*\).*/\1/p')
+      [ -n "$exp" ] || fail "$svc shows authKind certificate on $h but no expiresAt"
+      echo "   $h $svc: authKind $kind, certFingerprint $fp, expiresAt $exp ($(( (exp / 1000 - $(date +%s)) / 86400 )) days from now)"
+    done
+    sess=$(await_auth_kind "$h" service-b token)
+    read -r id since kind exp <<< "$sess"
+    if session_fields "$h" service-b | grep -q certFingerprint; then fail "service-b (static token) must show no certFingerprint on $h"; fi
+    echo "   $h service-b: authKind $kind, no certFingerprint"
+  done
+
+  echo "23b. the certificate is replaced on disk (new key) while calls flow: both hubs show the new fingerprint, same instance, no call fails ..."
+  for svc in service-c service-a; do
+    ids=(); sinces=(); k=0
+    for h in "$HUB" "$HUB2"; do
+      read -r id since kind fp <<< "$(cert_session "$h" "$svc")"
+      ids+=("$id"); sinces+=("$since")
+    done
+    stop=$(mktemp -u); out=$(mktemp)
+    started=$(now_ms)
+    ha_loop "$out" "$stop" "$started" &
+    loop_pid=$!
+    sleep 2
+    fp=$(cert_fp_of "$SECRETS/mtls/$svc/client.pem")
+    bash "$INFRA/scripts/dev-hub-pki.sh" --dir "$SECRETS" --rotate "$svc" | sed 's#^#   #; s#(in .*; #(#'
+    n=$(cert_fp_of "$SECRETS/mtls/$svc/client.pem")
+    [ "$n" != "$fp" ] || { : > "$stop"; wait "$loop_pid" || true; fail "the rotation did not change $svc's certificate ($fp)"; }
+    started=$(now_ms)
+    for h in "$HUB" "$HUB2"; do
+      sess=$(await_cert "$h" "$svc" "$n" 45) || { : > "$stop"; wait "$loop_pid" || true; exit 1; }
+      waited=$(( ($(now_ms) - started) / 1000 ))
+      read -r id since kind fp2 <<< "$sess"
+      [ "$id" = "${ids[$k]}" ] || { : > "$stop"; wait "$loop_pid" || true; fail "$svc changed instance on $h during the rotation (${ids[$k]} -> $id)"; }
+      [ "$since" != "${sinces[$k]}" ] || { : > "$stop"; wait "$loop_pid" || true; fail "$svc shows the new fingerprint on $h but did not reconnect (connectedSinceMs $since unchanged)"; }
+      echo "   $h $svc: certFingerprint $fp -> $n after ${waited} s, same instance $id, connectedSinceMs ${sinces[$k]} -> $since"
+      k=$((k + 1))
+    done
+    sleep 2
+    : > "$stop"; wait "$loop_pid" || true
+    codes=$(cut -d' ' -f1 "$out"); total=$(printf '%s\n' "$codes" | grep -c . || true)
+    bad=$(printf '%s\n' "$codes" | grep -vc '^200$' || true)
+    rm -f "$stop" "$out"
+    [ "$total" -ge 10 ] || fail "only $total calls went through while $svc's certificate was rotated"
+    [ "$bad" -eq 0 ] || fail "$bad of $total calls failed while $svc's certificate was rotated: $(printf '%s\n' "$codes" | sort | uniq -c | tr '\n' ' ')"
+    echo "   $total calls through service-a (service-b and service-c as targets) during the rotation of $svc, every one answered 200"
+  done
+  k=$(( $(log_count "$h1" 'certificate expired' "$mtls_started") + $(log_count "$h2" 'certificate expired' "$mtls_started") ))
+  [ "$k" -eq 0 ] || fail "the hubs logged 'certificate expired' $k time(s) since $mtls_started"
+  echo "   neither hub logged 'certificate expired' since $mtls_started"
+}
+
 echo "1. waiting for service-a at $A ..."
 for i in $(seq 1 90); do
   if curl -fsS "$A/actuator/health" 2>/dev/null | grep -q '"UP"'; then break; fi
@@ -932,6 +1057,13 @@ if [ "${ONLY_JWT:-0}" = "1" ]; then
   [ "$JWT" = "1" ] || fail "ONLY_JWT=1 needs JWT=1 (and SECURE=1)"
   jwt_steps
   echo "SMOKE OK (JWT steps only)"
+  exit 0
+fi
+
+if [ "${ONLY_MTLS:-0}" = "1" ]; then
+  [ "$MTLS" = "1" ] || fail "ONLY_MTLS=1 needs MTLS=1 (and SECURE=1)"
+  mtls_steps
+  echo "SMOKE OK (certificate steps only)"
   exit 0
 fi
 
@@ -1021,5 +1153,6 @@ echo "   delivered: $TEXTS"
 [ "${SKIP_SUBSCRIBE:-0}" = "1" ] || subscribe_steps
 if [ "$SECURE" = "1" ] && [ "${SKIP_SECURE:-0}" != "1" ]; then secure_steps; fi
 if [ "$JWT" = "1" ] && [ "${SKIP_JWT:-0}" != "1" ]; then jwt_steps; fi
+if [ "$MTLS" = "1" ] && [ "${SKIP_MTLS:-0}" != "1" ]; then mtls_steps; fi
 
 echo "SMOKE OK"
