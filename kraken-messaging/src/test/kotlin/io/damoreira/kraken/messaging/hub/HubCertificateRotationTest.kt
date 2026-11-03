@@ -67,6 +67,7 @@ class HubCertificateRotationTest {
     private val log = LoggerFactory.getLogger(HubClientCertificate::class.java) as Logger
     private val appender = ListAppender<ILoggingEvent>()
     private val rolloverLog = LoggerFactory.getLogger(HubConnections::class.java) as Logger
+    private val connectionLog = LoggerFactory.getLogger(HubConnection::class.java) as Logger
 
     /** What the handler instance did to each hub's stream, in order: `A:register:<types>`, `A:half-close`, `A:closed`, `A:channel`. */
     private val events = CopyOnWriteArrayList<String>()
@@ -77,11 +78,13 @@ class HubCertificateRotationTest {
         appender.start()
         log.addAppender(appender)
         rolloverLog.addAppender(appender)
+        connectionLog.addAppender(appender)
     }
 
     @AfterEach fun tearDown() = runBlocking {
         log.detachAppender(appender)
         rolloverLog.detachAppender(appender)
+        connectionLog.detachAppender(appender)
         clients.forEach { it.stop() }
         scope.cancel()
         a.close()
@@ -129,13 +132,16 @@ class HubCertificateRotationTest {
     )
 
     /** The handler instance `svc-a` with the certificate, on [hubs]; check tick 50 ms. */
-    private fun handler(hubs: List<InProcessHub>, certificate: HubClientCertificate, reconnectTimeout: Duration = Duration.ofSeconds(5), inbound: suspend (Request) -> Reply = { reply(it.id) }) = HubConnections(
+    private fun handler(
+        hubs: List<InProcessHub>, certificate: HubClientCertificate, reconnectTimeout: Duration = Duration.ofSeconds(5),
+        drainTimeout: Duration = Duration.ofSeconds(3), inbound: suspend (Request) -> Reply = { reply(it.id) },
+    ) = HubConnections(
         targets = HubTargets.Static(hubs.map { it.name }),
         channelFactory = HubChannelFactory { target -> recordingChannel(byName.getValue(target)) },
         serviceName = "svc-a", instanceId = "i-a", settings = settings(certificate), inbound = inbound, scope = scope,
         statusInterval = Duration.ofMillis(200),
         certificateCheckInterval = Duration.ofMillis(50),
-        rolloverDrainTimeout = Duration.ofSeconds(3), rolloverReconnectTimeout = reconnectTimeout,
+        rolloverDrainTimeout = drainTimeout, rolloverReconnectTimeout = reconnectTimeout,
     ).also { clients += it; it.register(setOf("test.Ping"), emptySet()); it.start() }
 
     private fun sender(hubs: List<InProcessHub>) = HubConnections(
@@ -345,6 +351,28 @@ class HubCertificateRotationTest {
         val plain = SimpleMeterRegistry()
         HubAuthMetrics(sender(listOf(a))).bindTo(plain)
         assertTrue(plain.find("kraken.messaging.hub.certificate.rotations").functionCounter() == null)
+    }
+
+    @Test fun `a roll does not wait for the subscription this instance itself consumes`() = runBlocking {
+        // svc-c serves a subscription that never ends; the rolled instance (svc-a) is its consumer.
+        val owner = HubConnections(
+            targets = HubTargets.Static(listOf(a.name)),
+            channelFactory = HubChannelFactory { target -> InProcessChannelBuilder.forName(target).build() },
+            serviceName = "svc-c", instanceId = "i-c", settings = settings(null),
+            inbound = { reply(it.id) }, scope = scope, statusInterval = Duration.ofMillis(200),
+            subscriptions = SubscriptionRegistry(), inboundSubscription = { _, register -> register(Any()) },
+        ).also { clients += it; it.register(emptySet(), setOf("test.Watch")); it.start() }
+        val handler = handler(listOf(a), certificate(), drainTimeout = Duration.ofSeconds(10))
+        assertTrue(owner.awaitRegistered(wait) && handler.awaitRegistered(wait))
+        val watch = Request.newBuilder().setId(java.util.UUID.randomUUID().toString()).setKind(RequestKind.QUERY).setType("test.Watch")
+            .setPayload(ByteString.copyFromUtf8("{}")).setTimeoutMs(3_000).build()
+        assertTrue(handler.subscribe(watch) is SubscribeResult.Open, "the subscription is open")
+
+        renew()
+        // The drain of 10 s must not wait for the subscription: the roll is done in well under that.
+        await atMost Duration.ofSeconds(4) until { a.streamsOpenedBy("i-a") == 2 && handler.liveHubIds().size == 1 }
+        assertEquals(emptyList(), lines(Level.WARN).filter { "still in flight" in it })
+        assertEquals(emptyList(), lines(Level.ERROR))
     }
 
     @Test fun `stopping while a roll is waiting for work in flight ends at once`() = runBlocking {

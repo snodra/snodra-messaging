@@ -267,8 +267,12 @@ class HubConnection(
             }
         }
 
-        /** A scatter-gather or a stream: its `ReplyPart`s in arrival order, then its `ReplyEnd` (or an `Error`), then closed. */
-        class Multi(stream: Stream) : Pending(stream) {
+        /**
+         * A scatter-gather, a stream or a subscription: its `ReplyPart`s in arrival order, then its `ReplyEnd` (or an `Error`), then closed.
+         * [boundedByDeadline] is false for a stream and a subscription this instance consumes: they can run for minutes or forever, so a
+         * rollover (P5c) does not wait for them ([HubConnection.rolloverIdle]); a gather ends within its deadline and is waited for.
+         */
+        class Multi(stream: Stream, val boundedByDeadline: Boolean = true) : Pending(stream) {
             val messages = Channel<ServerMessage>(Channel.UNLIMITED)
             override fun fail(cause: Throwable) {
                 messages.close(cause)
@@ -363,6 +367,12 @@ class HubConnection(
     /** No request of this instance is waiting for this hub's answer and no request of this hub is being handled. */
     internal val idle: Boolean get() = pending.isEmpty() && inFlight.value == 0
 
+    /**
+     * What a rollover (P5c) waits for: [idle], but the streams and subscriptions this instance itself consumes ([Pending.Multi] with
+     * `boundedByDeadline` false) do not count: they never finish on their own and are cut by the roll (the consumer sees the loss of the stream).
+     */
+    private val rolloverIdle: Boolean get() = inFlight.value == 0 && pending.values.all { it is Pending.Multi && !it.boundedByDeadline }
+
     /** Starts the connect loop in the connection's scope. */
     fun start() {
         synchronized(lock) {
@@ -407,6 +417,8 @@ class HubConnection(
      *  1. Tells the hub the instance is stopping: a `Register` with no types (the shutdown path's), so it routes new work to other instances or
      *     other hubs. What the connection registers on its next stream is untouched.
      *  2. Waits up to [drainTimeout] for the work in flight on the stream (requests this instance sent and has no answer for, requests it is handling).
+     *     Streams and subscriptions this instance itself consumes are not waited for (they have no end of their own): the close cuts them,
+     *     the consumer's `updates`/stream fail with [HubConnectionLostException] and it subscribes again (see [rolloverIdle]).
      *  3. Closes it gracefully, as [stop] does: the request side is half-closed after its last message and the hub's end awaited for
      *     [STOP_CLOSE_TIMEOUT] at most, then the channel is shut down.
      *  4. Reconnects at once (no back-off) with the pair the files hold, and waits up to [reconnectTimeout] for the new stream's registration.
@@ -429,11 +441,11 @@ class HubConnection(
             // The hub reads a stream in order: once it echoes the heartbeat that follows the empty Register, no request it forwarded before
             // reading that Register is still on its way, so what is in flight now is all there will be.
             while (stream.probes.containsKey(probe)) delay(10)
-            while (!idle) delay(20)
+            while (!rolloverIdle) delay(20)
             true
         } == true
         if (!drained) {
-            log.warn("{} request(s) still in flight on the hub stream to {} after {}; rolling it over anyway", pending.size + inFlight.value, target, drainTimeout)
+            log.warn("{} request(s) still in flight on the hub stream to {} after {}; rolling it over anyway", pending.values.count { it !is Pending.Multi || it.boundedByDeadline } + inFlight.value, target, drainTimeout)
         }
         onDrained() // the work is done: from here on this stream takes nothing new
         synchronized(lock) {
@@ -583,7 +595,7 @@ class HubConnection(
         val bound = HubProtocol.hubDeadlineBoundMs(outgoing.timeoutMs, outgoing.type, ack)
         val margin = HubProtocol.LOCAL_GUARD_MARGIN.toMillis()
         val refill = maxOf(1, window / 2)
-        val entry = Pending.Multi(stream)
+        val entry = Pending.Multi(stream, boundedByDeadline = false)
         require(pending.putIfAbsent(request.id, entry) == null) { "request id ${request.id} is already in flight" }
         var terminal: ServerMessage? = null
         var failure: Throwable? = null
@@ -669,7 +681,7 @@ class HubConnection(
         val window = request.initialCredit.takeIf { it > 0 } ?: HubProtocol.DEFAULT_INITIAL_CREDIT
         val outgoing = request.toBuilder().setMode(RequestMode.SUBSCRIPTION).setInitialCredit(window).build()
         val guardMs = HubProtocol.localGuardMs(outgoing.timeoutMs, outgoing.type, ack)
-        val entry = Pending.Multi(stream)
+        val entry = Pending.Multi(stream, boundedByDeadline = false)
         require(pending.putIfAbsent(request.id, entry) == null) { "request id ${request.id} is already in flight" }
         var opened = false
         var terminal: ServerMessage? = null
