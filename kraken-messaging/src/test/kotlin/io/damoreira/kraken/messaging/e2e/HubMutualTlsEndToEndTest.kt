@@ -276,10 +276,10 @@ class HubMutualTlsEndToEndTest {
         val keyFile = dir.resolve("o.key")
         otherCa.issue("billing-service").writeTo(certFile, keyFile)
         val stranger = connection(hub, "billing-service", HubClientCertificate(certFile, keyFile, "billing-service")).also { it.start() }
-        delay(3_000)
+        // The very first attempt may be refused by the port forwarder (no hint); a later one fails the handshake and carries it.
+        await atMost Duration.ofSeconds(15) until { lines(Level.WARN).any { "KRAKEN_HUB_TLS_CLIENT_CA" in it } }
         assertFalse(stranger.connected.value)
         assertNull(stranger.lastRejection.value)
-        assertTrue(lines(Level.WARN).any { "KRAKEN_HUB_TLS_CLIENT_CA" in it }, lines(Level.WARN).toString())
     }
 
     @Test fun `a certificate that lives a few seconds is closed by the hub at notAfter and the client comes back with the renewed file`() = runBlocking {
