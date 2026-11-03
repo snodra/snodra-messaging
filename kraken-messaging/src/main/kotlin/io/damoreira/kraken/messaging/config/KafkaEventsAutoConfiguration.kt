@@ -108,7 +108,7 @@ class KafkaEventsAutoConfiguration {
 
     @Bean
     @ConditionalOnMissingBean(EventBus::class)
-    fun outboxEventBus(mongo: MongoTemplate, codec: JsonCodec, typeResolver: MessageTypeResolver, traceHeaders: TraceHeaders): EventBus =
+    fun outboxEventBus(mongo: MongoTemplate, codec: JsonCodec, typeResolver: MessageTypeResolver, traceHeaders: TraceHeaders): OutboxEventBus =
         OutboxEventBus(mongo, codec, typeResolver, traceHeaders)
 
     @Bean

@@ -3,6 +3,7 @@ package io.damoreira.kraken.messaging.config
 import io.damoreira.kraken.messaging.QueryUpdateEmitter
 import io.damoreira.kraken.messaging.codec.JsonCodec
 import io.damoreira.kraken.messaging.codec.MessageTypeResolver
+import io.damoreira.kraken.messaging.external.IdempotencyInterceptor
 import io.damoreira.kraken.messaging.handler.HandlerBeanPostProcessor
 import io.damoreira.kraken.messaging.handler.HandlerInvoker
 import io.damoreira.kraken.messaging.handler.HandlerRegistry
@@ -47,7 +48,8 @@ class KrakenMessagingAutoConfiguration {
 
     @Bean
     @ConditionalOnMissingBean
-    fun handlerInvoker(registry: HandlerRegistry, codec: JsonCodec) = HandlerInvoker(registry, codec)
+    fun handlerInvoker(registry: HandlerRegistry, codec: JsonCodec, idempotency: ObjectProvider<IdempotencyInterceptor>) =
+        HandlerInvoker(registry, codec, idempotency.getIfAvailable()) // the interceptor exists with an @IdempotentHandler (ExternalAutoConfiguration)
 
     /**
      * The subscription queries this instance serves (P4c): filled by the hub connections, read by [queryUpdateEmitter].

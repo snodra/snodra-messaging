@@ -1,7 +1,9 @@
 package io.damoreira.kraken.messaging.config
 
 import io.damoreira.kraken.messaging.RetryPolicy
+import io.damoreira.kraken.messaging.deadline.DeadlineSettings
 import io.damoreira.kraken.messaging.hub.HubTargets
+import io.damoreira.kraken.messaging.saga.RelaySettings
 import org.springframework.boot.context.properties.ConfigurationProperties
 import java.net.URI
 import java.nio.file.Path
@@ -22,6 +24,8 @@ data class KrakenMessagingProperties(
     val outbox: Outbox = Outbox(),
     val idempotency: Idempotency = Idempotency(),
     val security: Security = Security(),
+    val sagas: Sagas = Sagas(),
+    val deadlines: Deadlines = Deadlines(),
     val external: External = External(),
 ) {
     data class Hub(
@@ -254,10 +258,94 @@ data class KrakenMessagingProperties(
         val forwardJwt: Boolean = true,
     )
 
-    /** `external.*`: the integration toolkit's inbound edge (S1 plan, Tasks 10 and 13). */
+    /**
+     * `sagas.*` (S1 plan, R4 and R8). The saga runtime, the dispatch relay and the deadline scheduler exist only when the
+     * application has a `@Saga` class and [enabled] is true. Every duration must be positive; checked at binding, so a bad
+     * value fails the startup also in a service with no saga.
+     */
+    data class Sagas(
+        /** Switch for the saga runtime, the dispatch relay and the deadline scheduler; they exist only with a `@Saga` class anyway. */
+        val enabled: Boolean = true,
+        /** Attempts per saga event (first try included) for version conflicts, start-key duplicates and handler exceptions before the event is parked in `saga_failures` (>= 1). */
+        val maxAttempts: Int = 5,
+        val relay: SagaRelay = SagaRelay(),
+        /** Ended sagas are deleted this long after they ended (TTL index on `sagas.endedAt`). */
+        val endedRetention: Duration = Duration.ofDays(30),
+        /** Dispatched `saga_dispatch` entries are deleted this long after they were sent (TTL index). */
+        val dispatchRetention: Duration = Duration.ofDays(7),
+    ) {
+        init {
+            require(maxAttempts >= 1) { "kraken.messaging.sagas.max-attempts must be >= 1, was $maxAttempts" }
+            requirePositive("kraken.messaging.sagas.ended-retention", endedRetention)
+            requirePositive("kraken.messaging.sagas.dispatch-retention", dispatchRetention)
+        }
+    }
+
+    /** `sagas.relay.*`: the after-commit relay that sends what sagas recorded in `saga_dispatch`, in order per saga. */
+    data class SagaRelay(
+        /** How often the relay looks for due entries. */
+        val pollInterval: Duration = Duration.ofMillis(500),
+        /** How long a relay instance holds one saga's dispatch order before another may take over (a crashed instance's lease expires). */
+        val lease: Duration = Duration.ofSeconds(30),
+        /** Attempts per command for transient failures (first try included, >= 1) before it becomes a `SagaCommandFailed(EXHAUSTED)`. */
+        val maxAttempts: Int = 10,
+        /** Wait before the second attempt of a command; doubles per attempt up to [maxBackoff]. */
+        val initialBackoff: Duration = Duration.ofSeconds(1),
+        /** Upper bound of one wait between attempts. */
+        val maxBackoff: Duration = Duration.ofMinutes(5),
+    ) {
+        init {
+            try {
+                toSettings()
+            } catch (e: IllegalArgumentException) {
+                throw IllegalArgumentException("kraken.messaging.sagas.relay: ${e.message}", e)
+            }
+        }
+
+        fun toSettings() = RelaySettings(pollInterval, lease, maxAttempts, initialBackoff, 2.0, maxBackoff)
+    }
+
+    /** `deadlines.*`: the scheduler that fires due saga deadlines, at least once. */
+    data class Deadlines(
+        /** How often the scheduler looks for due deadlines. */
+        val pollInterval: Duration = Duration.ofSeconds(1),
+        /** How long a claimed deadline stays reserved for the instance that claimed it; an expired claim lets it fire again. */
+        val lease: Duration = Duration.ofSeconds(30),
+        /** Fired and cancelled deadlines are deleted this long after (TTL index on `deadlines.finishedAt`). */
+        val retention: Duration = Duration.ofDays(7),
+    ) {
+        init {
+            requirePositive("kraken.messaging.deadlines.poll-interval", pollInterval)
+            requirePositive("kraken.messaging.deadlines.lease", lease)
+            requirePositive("kraken.messaging.deadlines.retention", retention)
+        }
+
+        fun toSettings() = DeadlineSettings(pollInterval, lease)
+    }
+
+    /** `external.*`: the integration toolkit (S1 plan, Tasks 9, 10 and 13). */
     data class External(
+        val calls: ExternalCalls = ExternalCalls(),
         val kafka: ExternalKafka = ExternalKafka(),
     )
+
+    /** `external.calls.*`: the `external_calls` collection behind `@IdempotentHandler`. */
+    data class ExternalCalls(
+        /**
+         * Whether the idempotency interceptor and the `external_calls` indexes exist. Unset (the default): they exist when a class in
+         * the application's packages has an `@IdempotentHandler` method. Set it to true when the adapter lives outside those packages.
+         */
+        val enabled: Boolean? = null,
+        /** How long an `IN_PROGRESS` call may take before its outcome counts as unknown (a crash in the middle of a call). */
+        val lease: Duration = Duration.ofMinutes(5),
+        /** `external_calls` documents older than this are deleted (TTL index on `updatedAt`). */
+        val retention: Duration = Duration.ofDays(30),
+    ) {
+        init {
+            requirePositive("kraken.messaging.external.calls.lease", lease)
+            requirePositive("kraken.messaging.external.calls.retention", retention)
+        }
+    }
 
     data class ExternalKafka(
         /**
@@ -282,4 +370,8 @@ data class KrakenMessagingProperties(
             require(topic.isNotBlank()) { "the topic of an external Kafka source must not be blank" }
         }
     }
+}
+
+private fun requirePositive(key: String, value: Duration) {
+    require(!value.isZero && !value.isNegative) { "$key must be positive, was $value" }
 }
