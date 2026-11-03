@@ -17,6 +17,8 @@ dependencies {
     api(libs.grpc.inprocess)
     implementation(libs.grpc.stub)
     implementation(libs.grpc.protobuf)
+    // UnverifiedJwt reads the claims of a jwt credential.
+    implementation("tools.jackson.core:jackson-databind")
     implementation(libs.grpc.kotlin.stub)
 
     testImplementation(libs.kotlin.test.junit5)

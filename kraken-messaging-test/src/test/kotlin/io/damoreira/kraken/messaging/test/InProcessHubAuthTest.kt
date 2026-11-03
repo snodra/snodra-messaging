@@ -73,10 +73,16 @@ class InProcessHubAuthTest {
         ) {
             val reg = Register.newBuilder().setServiceName(service).setInstanceId(instance).setProtocolVersion(2)
                 .addAllCommandTypes(commands).addAllQueryTypes(queries).addAllSharedQueryTypes(shared)
-                .addAllCapabilities(listOf("scatter-gather", "streaming", "subscription"))
+                .addAllCapabilities(listOf("scatter-gather", "streaming", "subscription", "credentials-refresh"))
             if (token != null) reg.credentials = Credentials.newBuilder().setToken(token).build()
             if (jwt != null) reg.credentials = Credentials.newBuilder().setJwt(jwt).build()
             out.trySend(ClientMessage.newBuilder().setRegister(reg).build())
+        }
+
+        /** A `ClientMessage.credentials` (P5b): a fresh `jwt` or `token` for the session. */
+        fun refresh(jwt: String? = null, token: String? = null) {
+            val credentials = Credentials.newBuilder().apply { jwt?.let { setJwt(it) }; token?.let { setToken(it) } }
+            out.trySend(ClientMessage.newBuilder().setCredentials(credentials).build())
         }
 
         fun request(type: String, mode: RequestMode, id: String = UUID.randomUUID().toString()): String {
@@ -315,5 +321,89 @@ class InProcessHubAuthTest {
         val reconnect = Raw().also { it.register("orders-service", own, token = orders) }
         assertTrue(reconnect.next().hasRegisterAck())
         assertEquals(1, hub.sessionsReplacedOf(own))
+    }
+
+    // --- JWT credentials (P5b, ADR 0019) ---
+
+    /** An unsigned token shaped like a client-credentials access token: the hub double reads `azp` and `exp`, never the signature. */
+    private fun jwt(azp: String, expiresInSeconds: Long = 300) = listOf(
+        """{"alg":"RS256","typ":"JWT"}""",
+        """{"azp":"$azp","exp":${System.currentTimeMillis() / 1000 + expiresInSeconds}}""",
+    ).joinToString(".", postfix = ".sig") { java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(it.toByteArray()) }
+
+    private val jwtServices = listOf(AclEntry("billing-service", handle = listOf("billing.*"), send = listOf("orders.*")))
+
+    @Test fun `enforce accepts a jwt whose azp is the service name and that service has an ACL entry, and records it`() = runBlocking {
+        hub.auth = HubAuth.enforce(acl, jwtServices)
+        val token = jwt("billing-service")
+        val raw = Raw().also { it.register("billing-service", "i-jwt", jwt = token, commands = listOf("billing.Charge")) }
+        assertTrue(raw.next().hasRegisterAck())
+        assertEquals(listOf(token), hub.jwtsSeenFrom("i-jwt"))
+        assertEquals(listOf<String?>(null), hub.tokensSeenFrom("i-jwt"))
+        assertTrue(hub.authViolations().isEmpty())
+        // the rights come from the service's entry: send is orders.*
+        raw.request("secret.Get", RequestMode.UNARY)
+        assertEquals(ErrorCode.PERMISSION_DENIED, raw.next().error.code)
+    }
+
+    @Test fun `enforce refuses a jwt of another service with PERMISSION_DENIED, a service without an entry too, and a hub with no jwt setup with UNAUTHENTICATED`() = runBlocking {
+        hub.auth = HubAuth.enforce(acl, jwtServices)
+        val wrongAzp = Raw().also { it.register("billing-service", "i-1", jwt = jwt("orders-service")) }
+        val status = wrongAzp.status()
+        assertEquals(Status.Code.PERMISSION_DENIED, status.code)
+        assertTrue("orders-service" in status.description!!, status.toString())
+        val noEntry = Raw().also { it.register("files-service", "i-2", jwt = jwt("files-service")) }
+        assertEquals(Status.Code.PERMISSION_DENIED, noEntry.status().code)
+        val garbage = Raw().also { it.register("billing-service", "i-3", jwt = "not-a-jwt") }
+        assertEquals(Status.Code.UNAUTHENTICATED, garbage.status().code)
+
+        hub.auth = HubAuth.enforce(acl) // no [[service]] tables: jwt is not configured
+        val off = Raw().also { it.register("billing-service", "i-4", jwt = jwt("billing-service")) }
+        val notConfigured = off.status()
+        assertEquals(Status.Code.UNAUTHENTICATED, notConfigured.code)
+        assertTrue("not configured" in notConfigured.description!!, notConfigured.toString())
+    }
+
+    @Test fun `the ack offers credentials-refresh to a client that declared it, and ClientMessage credentials are recorded`() = runBlocking {
+        hub.auth = HubAuth.enforce(acl, jwtServices)
+        val first = jwt("billing-service")
+        val raw = Raw().also { it.register("billing-service", "i-1", jwt = first) }
+        assertTrue("credentials-refresh" in raw.next().registerAck.capabilitiesList)
+        val second = jwt("billing-service")
+        raw.refresh(jwt = second)
+        withTimeout(5_000) { while (hub.credentialsSeenFrom("i-1").isEmpty()) kotlinx.coroutines.delay(5) }
+        assertEquals(listOf(second), hub.credentialsSeenFrom("i-1"))
+        assertEquals(1, hub.sessionsOf("i-1"))
+        // a client that did not declare the capability is not offered it
+        val plain = Raw()
+        plain.out.trySend(
+            ClientMessage.newBuilder().setRegister(Register.newBuilder().setServiceName("billing-service").setInstanceId("i-2").setProtocolVersion(2)
+                .setCredentials(Credentials.newBuilder().setJwt(jwt("billing-service")))).build(),
+        )
+        assertEquals(emptyList(), plain.next().registerAck.capabilitiesList)
+    }
+
+    @Test fun `enforce closes the stream when a refresh names another service, or is not a valid credential`() = runBlocking {
+        hub.auth = HubAuth.enforce(acl, jwtServices)
+        val other = Raw().also { it.register("billing-service", "i-1", jwt = jwt("billing-service")) }
+        assertTrue(other.next().hasRegisterAck())
+        other.refresh(jwt = jwt("orders-service"))
+        assertEquals(Status.Code.PERMISSION_DENIED, other.status().code)
+        val bad = Raw().also { it.register("billing-service", "i-2", jwt = jwt("billing-service")) }
+        assertTrue(bad.next().hasRegisterAck())
+        bad.refresh(jwt = "junk")
+        assertEquals(Status.Code.UNAUTHENTICATED, bad.status().code)
+    }
+
+    @Test fun `a static-token session may refresh with a token of its own service`() = runBlocking {
+        hub.auth = HubAuth.enforce(acl)
+        val raw = Raw().also { it.register("billing-service", "i-1", token = billing) }
+        assertTrue(raw.next().hasRegisterAck())
+        val rotated = "rotated-" + UUID.randomUUID()
+        hub.auth = HubAuth.enforce(acl + (rotated to AclEntry("billing-service", handle = listOf("billing.*"), send = listOf("orders.*"))))
+        raw.refresh(token = rotated)
+        withTimeout(5_000) { while (hub.credentialsSeenFrom("i-1").isEmpty()) kotlinx.coroutines.delay(5) }
+        assertEquals(listOf(rotated), hub.credentialsSeenFrom("i-1"))
+        assertEquals(1, hub.sessionsOf("i-1"))
     }
 }

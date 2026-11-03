@@ -1,6 +1,7 @@
 package io.damoreira.kraken.messaging.test
 
 import io.damoreira.kraken.hub.v1.Cancel
+import io.damoreira.kraken.hub.v1.Credentials
 import io.damoreira.kraken.hub.v1.ClientMessage
 import io.damoreira.kraken.hub.v1.Error
 import io.damoreira.kraken.hub.v1.ErrorCode
@@ -141,6 +142,15 @@ import java.util.concurrent.TimeUnit
  * `permissive` (the owner is untouched; with [auth] off the older stream is replaced as usual). [authViolations] lists them all and [tokensSeenFrom] the token of every
  * `Register` received, rejected ones included.
  *
+ * JWT credentials (P5b, ADR 0019): with [HubAuth.services] set (the `[[service]]` tables) a `jwt` credential whose `azp` names the
+ * registering service and that has such an entry is accepted, with the entry's rights; another `azp` is `PERMISSION_DENIED`, a
+ * service without an entry too, a token that is not three segments with an `azp` is `UNAUTHENTICATED`, and without `services` the
+ * hub answers "jwt credentials are not configured on this hub" like a hub with no issuer. The signature and `exp` are **not**
+ * checked (the double does not know the issuer's keys): the real hub image covers them. A registrant that declares
+ * `credentials-refresh` gets it in the ack ([credentialsRefresh] false emulates a hub without it); a `ClientMessage.credentials`
+ * is recorded ([credentialsSeenFrom]) and judged like a `Register`'s against the session's own service (an invalid one or one for
+ * another service closes the stream in `enforce`); [jwtsSeenFrom] lists the JWTs of the `Register`s.
+ *
  * It does not implement consistent hashing on `routing_key`, metrics, or the real hub's owner grace period and
  * heartbeat expiry.
  */
@@ -211,6 +221,10 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
     /** Bound on a streaming query's whole life (`KRAKEN_HUB_MAX_STREAM_DURATION`): `ReplyEnd{CANCELLED}` and a cancel. */
     @Volatile
     var maxStreamDuration: Duration = Duration.ofMinutes(10)
+
+    /** Set false to emulate a hub without `credentials-refresh` (a pre-P5b hub): the ack never lists it. */
+    @Volatile
+    var credentialsRefresh: Boolean = true
 
     /** Set false to emulate the P4b hub: no `subscription` capability in the ack, `SUBSCRIPTION` requests are `UNSUPPORTED`. */
     @Volatile
@@ -301,8 +315,12 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
         var credentialsJudged = false
         /** The token the stream's first `Register` carried; null without a token (or with `jwt`). */
         @Volatile var token: String? = null
+        /** The service a `jwt` credential named (its `azp`) and [auth] has an entry for; null for a token session. */
+        @Volatile var jwtService: String? = null
         /** True once the token is one [auth] knew at the first `Register`: the session is judged per request. */
         @Volatile var authenticated = false
+        /** Negotiated `credentials-refresh` (fixed by the stream's first Register). */
+        @Volatile var credentialsRefresh = false
         /** Shares `flow-control` with this hub (fixed by the stream's first Register). */
         @Volatile var flowControl = false
         /** Negotiated `instance-status` (fixed by the stream's first Register). */
@@ -393,6 +411,8 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
     private val streamsOpened = ConcurrentHashMap<String, Int>()
     private val streamsReplaced = ConcurrentHashMap<String, Int>()
     private val tokensSeen = ConcurrentHashMap<String, CopyOnWriteArrayList<String?>>()
+    private val jwtsSeen = ConcurrentHashMap<String, CopyOnWriteArrayList<String>>()
+    private val credentialsSeen = ConcurrentHashMap<String, CopyOnWriteArrayList<String>>()
     private val violations = CopyOnWriteArrayList<AuthViolation>()
     private var seq = 0L
     @Volatile private var lastRequest: Request? = null
@@ -452,6 +472,12 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
      * hub refused; one entry per `Register`, so one per stream plus one per later registration change.
      */
     fun tokensSeenFrom(instanceId: String): List<String?> = tokensSeen[instanceId]?.toList().orEmpty()
+
+    /** The `jwt` of every `Register` [instanceId] sent that carried one, in order (refused ones included). */
+    fun jwtsSeenFrom(instanceId: String): List<String> = jwtsSeen[instanceId]?.toList().orEmpty()
+
+    /** The `jwt` or `token` of every `ClientMessage.credentials` (credential refresh) [instanceId] sent, in order, whatever the hub did with it. */
+    fun credentialsSeenFrom(instanceId: String): List<String> = credentialsSeen[instanceId]?.toList().orEmpty()
 
     /** Every access-control violation so far (refused in `enforce`, allowed in `permissive`), in order. */
     fun authViolations(): List<AuthViolation> = violations.toList()
@@ -521,6 +547,7 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
                 SCATTER_GATHER.takeIf { scatterGather && it in capabilities },
                 STREAMING.takeIf { streaming && it in capabilities },
                 SUBSCRIPTION.takeIf { subscription && it in capabilities },
+                CREDENTIALS_REFRESH.takeIf { credentialsRefresh && it in capabilities },
             ),
         )
         .setHubId(hubId)
@@ -581,6 +608,7 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
             msg.hasEnd() -> relayEnd(session, msg.end)
             msg.hasFlow() -> relayFlow(session, msg.flow)
             msg.hasCancel() -> onCancel(session, msg.cancel)
+            msg.hasCredentials() -> refreshCredentials(session, msg.credentials)
             msg.hasStatus() -> {
                 statusMessages.merge(session.instanceId, 1, Int::plus)
                 if (session.instanceStatus) lastStatuses[session.instanceId] = msg.status
@@ -647,6 +675,7 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
                 session.scatterGather = !legacy && scatterGather && reg.protocolVersion >= 2 && SCATTER_GATHER in reg.capabilitiesList
                 session.streaming = !legacy && streaming && reg.protocolVersion >= 2 && STREAMING in reg.capabilitiesList
                 session.subscription = !legacy && subscription && reg.protocolVersion >= 2 && SUBSCRIPTION in reg.capabilitiesList
+                session.credentialsRefresh = !legacy && credentialsRefresh && reg.protocolVersion >= 2 && CREDENTIALS_REFRESH in reg.capabilitiesList
                 session.protocolVersion = if (legacy) 0 else reg.protocolVersion
             }
             session.serviceName = reg.serviceName
@@ -686,8 +715,13 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
 
     /** The first reason [session] is no longer allowed by [acl] (an `enforce` ACL), as the real hub's `recheck`, or null. */
     private fun recheck(session: Session, acl: HubAuth): Pair<Status.Code, String>? {
-        val token = session.token ?: return Status.Code.UNAUTHENTICATED to "credentials required"
-        val entry = acl.tokens[token] ?: return Status.Code.UNAUTHENTICATED to "token no longer accepted"
+        val jwtService = session.jwtService
+        val entry = if (jwtService != null) {
+            acl.service(jwtService) ?: return Status.Code.PERMISSION_DENIED to "no ACL entry for service $jwtService"
+        } else {
+            val token = session.token ?: return Status.Code.UNAUTHENTICATED to "credentials required"
+            acl.tokens[token] ?: return Status.Code.UNAUTHENTICATED to "token no longer accepted"
+        }
         if (entry.service != session.serviceName) {
             return Status.Code.PERMISSION_DENIED to "token is not allowed to register as service ${session.serviceName}"
         }
@@ -702,14 +736,15 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
         val acl = auth
         session.instanceId = reg.instanceId // so a violation names the instance; only a registered session is ever looked up by it
         val token = if (reg.hasCredentials() && reg.credentials.hasToken()) reg.credentials.token else null
+        val jwt = if (reg.hasCredentials() && reg.credentials.hasJwt()) reg.credentials.jwt else null
         tokensSeen.computeIfAbsent(reg.instanceId) { CopyOnWriteArrayList() }.add(token)
+        if (jwt != null) jwtsSeen.computeIfAbsent(reg.instanceId) { CopyOnWriteArrayList() }.add(jwt)
         if (acl.mode == AuthMode.OFF) return
         if (!session.credentialsJudged) {
             session.credentialsJudged = true
             session.token = token
             val entry = when {
-                reg.hasCredentials() && reg.credentials.hasJwt() ->
-                    return violate(acl, session, Status.Code.UNAUTHENTICATED, "jwt credentials are not supported by this hub yet")
+                jwt != null -> judgeJwt(acl, session, jwt, reg.serviceName) ?: return
                 token.isNullOrEmpty() ->
                     return violate(acl, session, Status.Code.UNAUTHENTICATED, "no credentials: a token is required")
                 else -> acl.tokens[token]
@@ -720,13 +755,59 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
                 violate(acl, session, Status.Code.PERMISSION_DENIED, "token may not register as service ${reg.serviceName}")
             }
         }
-        val entry = session.token?.let { acl.tokens[it] }
+        val entry = entryOf(session, acl)
         if (!session.authenticated) return // permissive without a valid token: allowed, nothing more to judge
         if (entry == null) return violate(acl, session, Status.Code.UNAUTHENTICATED, "token is no longer known")
         val denied = (reg.commandTypesList + reg.queryTypesList + reg.sharedQueryTypesList).filterNot { HubAuth.matches(entry.handle, it) }
         if (denied.isNotEmpty()) {
             val more = if (denied.size > 1) " (and ${denied.size - 1} more)" else ""
             violate(acl, session, Status.Code.PERMISSION_DENIED, "token may not handle type ${denied.first()}$more")
+        }
+    }
+
+    /** The ACL entry [session] is judged by: its `jwt` service's, else its token's. */
+    private fun entryOf(session: Session, acl: HubAuth): AclEntry? =
+        session.jwtService?.let { acl.service(it) } ?: session.token?.let { acl.tokens[it] }
+
+    /**
+     * The entry of [service] when [jwt] is a credential the real hub would accept from it, else null after [violate] (which throws
+     * in `enforce`): not configured, not a token with an `azp`, another service's, or a service with no entry.
+     */
+    private fun judgeJwt(acl: HubAuth, session: Session, jwt: String, service: String): AclEntry? {
+        if (!acl.jwtEnabled) return violate(acl, session, Status.Code.UNAUTHENTICATED, "jwt credentials are not configured on this hub").let { null }
+        val claims = UnverifiedJwt.parse(jwt) ?: return violate(acl, session, Status.Code.UNAUTHENTICATED, "malformed jwt").let { null }
+        if (claims.azp != service) {
+            return violate(acl, session, Status.Code.PERMISSION_DENIED, "token azp ${claims.azp.take(128)} is not service ${service.take(128)}").let { null }
+        }
+        val entry = acl.service(claims.azp)
+            ?: return violate(acl, session, Status.Code.PERMISSION_DENIED, "no ACL entry for service ${claims.azp.take(128)}").let { null }
+        session.jwtService = claims.azp
+        return entry
+    }
+
+    /**
+     * A `ClientMessage.credentials`: recorded, then judged like a `Register`'s credential against the session's own service. A
+     * valid one replaces the session's token or jwt; an invalid one, or one for another service, closes the stream in `enforce`
+     * (`permissive` records it and keeps the old credential). The real hub's one-second throttle is not emulated.
+     */
+    private fun refreshCredentials(session: Session, credentials: Credentials) {
+        val value = if (credentials.hasJwt()) credentials.jwt else credentials.token
+        credentialsSeen.computeIfAbsent(session.instanceId) { CopyOnWriteArrayList() }.add(value)
+        val acl = auth
+        if (acl.mode == AuthMode.OFF) return
+        if (credentials.hasJwt()) {
+            judgeJwt(acl, session, value, session.serviceName) ?: return
+            session.token = null
+            session.authenticated = true
+        } else {
+            val entry = acl.tokens[value]
+                ?: return violate(acl, session, Status.Code.UNAUTHENTICATED, "unknown token")
+            if (entry.service != session.serviceName) {
+                return violate(acl, session, Status.Code.PERMISSION_DENIED, "token may not register as service ${session.serviceName}")
+            }
+            session.token = value
+            session.jwtService = null
+            session.authenticated = true
         }
     }
 
@@ -741,7 +822,7 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
     private fun maySend(sender: Session, req: Request): Boolean {
         val acl = auth
         if (acl.mode == AuthMode.OFF || !sender.authenticated) return true
-        val entry = sender.token?.let { acl.tokens[it] }
+        val entry = entryOf(sender, acl)
         val (code, message) = when {
             entry == null -> ErrorCode.UNAUTHENTICATED to "token is no longer known"
             !HubAuth.matches(entry.send, req.type) -> ErrorCode.PERMISSION_DENIED to "token may not send type ${req.type}"
@@ -1386,6 +1467,7 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
         const val SCATTER_GATHER = "scatter-gather"
         const val STREAMING = "streaming"
         const val SUBSCRIPTION = "subscription"
+        const val CREDENTIALS_REFRESH = "credentials-refresh"
     }
 
     private fun error(requestId: String, code: ErrorCode, message: String): Error =
@@ -1413,14 +1495,24 @@ enum class AuthMode { OFF, PERMISSIVE, ENFORCE }
  */
 data class AclEntry(val service: String, val handle: List<String> = emptyList(), val send: List<String> = emptyList())
 
-/** The access control of an [InProcessHub]: [mode] and the [tokens] (plain token -> entry; the real hub keys by SHA-256). */
-class HubAuth(val mode: AuthMode, val tokens: Map<String, AclEntry> = emptyMap()) {
+/**
+ * The access control of an [InProcessHub]: [mode], the [tokens] (plain token -> entry; the real hub keys by SHA-256) and the
+ * [services] (`[[service]]` tables, P5b: the rights of a service that authenticates with a `jwt` whose `azp` is its name).
+ */
+class HubAuth(val mode: AuthMode, val tokens: Map<String, AclEntry> = emptyMap(), val services: List<AclEntry> = emptyList()) {
+    /** True when the hub has `[[service]]` tables, the double's stand-in for "a JWT issuer is configured" (ADR 0019). */
+    val jwtEnabled: Boolean get() = services.isNotEmpty()
+
+    /** The `[[service]]` entry named [name] (the `azp` of a JWT), or null. */
+    internal fun service(name: String): AclEntry? = services.firstOrNull { it.service == name }
+
     companion object {
         val OFF = HubAuth(AuthMode.OFF)
 
-        fun enforce(tokens: Map<String, AclEntry>) = HubAuth(AuthMode.ENFORCE, tokens)
+        /** [services] are the `[[service]]` tables: the rights of a service that registers with a `jwt`. */
+        fun enforce(tokens: Map<String, AclEntry>, services: List<AclEntry> = emptyList()) = HubAuth(AuthMode.ENFORCE, tokens, services)
 
-        fun permissive(tokens: Map<String, AclEntry>) = HubAuth(AuthMode.PERMISSIVE, tokens)
+        fun permissive(tokens: Map<String, AclEntry>, services: List<AclEntry> = emptyList()) = HubAuth(AuthMode.PERMISSIVE, tokens, services)
 
         internal fun matches(patterns: List<String>, type: String): Boolean = patterns.any {
             // `prefix.*` needs something after the dot, as the real hub's strict parsing: it does not match `prefix.` itself.
