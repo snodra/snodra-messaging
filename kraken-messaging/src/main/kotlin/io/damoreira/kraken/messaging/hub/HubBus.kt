@@ -8,6 +8,7 @@ import io.damoreira.kraken.messaging.CommandBus
 import io.damoreira.kraken.messaging.InvalidMessageException
 import io.damoreira.kraken.messaging.MessageContext
 import io.damoreira.kraken.messaging.MessageKind
+import io.damoreira.kraken.messaging.NoHandlerException
 import io.damoreira.kraken.messaging.MessagingException
 import io.damoreira.kraken.messaging.QueryBus
 import io.damoreira.kraken.messaging.RemoteHandlerException
@@ -135,7 +136,7 @@ class HubBus(
      * and JSON [payload]. A handler in this instance is invoked directly, otherwise the request goes to the hub, with
      * [options] (routing key, headers, timeout, retry) and the correlation id of the calling coroutine. It carries **no
      * caller**: no bearer token and no identity, whoever is signed in on the thread (a saga's triggering event is not a
-     * caller). The reply is not decoded; a failure is returned classified, see [io.damoreira.kraken.messaging.saga.RawFailures].
+     * caller). The reply is not decoded; a failure is returned classified, see [io.damoreira.kraken.messaging.saga.RawFailures], except that the hub's `NO_HANDLER` is transient here.
      */
     override suspend fun sendRaw(type: String, payload: ByteArray, options: SendOptions): RawOutcome {
         if (registry.commandHandler(type) != null) return localRaw.sendRaw(type, payload, options)
@@ -146,7 +147,9 @@ class HubBus(
             }
             RawOutcome.Success
         } catch (e: MessagingException) {
-            RawFailures.classify(e)
+            // Through the hub "no handler" is a rolling redeploy of the target service as likely as a mistake: transient
+            // (backoff up to EXHAUSTED). Through the local sender, which has no hub to wait for, it stays permanent.
+            if (e is NoHandlerException) RawOutcome.Transient(e.message ?: "no handler registered for '$type'") else RawFailures.classify(e)
         }
     }
 

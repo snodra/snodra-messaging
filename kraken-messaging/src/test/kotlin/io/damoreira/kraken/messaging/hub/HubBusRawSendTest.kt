@@ -9,6 +9,7 @@ import io.damoreira.kraken.messaging.handler.CommandHandler
 import io.damoreira.kraken.messaging.handler.HandlerInvoker
 import io.damoreira.kraken.messaging.handler.HandlerRegistry
 import io.damoreira.kraken.messaging.handler.RequiresAuthentication
+import io.damoreira.kraken.messaging.saga.LocalRawCommandSender
 import io.damoreira.kraken.messaging.saga.RawOutcome
 import io.damoreira.kraken.messaging.saga.SagaCommandFailed.Reason
 import io.damoreira.kraken.messaging.security.ForwardedIdentityResolver
@@ -128,10 +129,19 @@ class HubBusRawSendTest {
         assertEquals(Reason.DENIED, assertIs<RawOutcome.Permanent>(denied).reason)
     }
 
-    @Test fun `a type nobody handles is NO_HANDLER`() = runBlocking {
+    @Test fun `a type no service handles is transient through the hub (a rolling redeploy of the target)`() = runBlocking {
         val callerBus = remoteOwner(ContextCapturingHandlers())
 
         val outcome = callerBus.sendRaw("test.Nobody", payload, SendOptions())
+
+        val transient = assertIs<RawOutcome.Transient>(outcome, "the relay retries it with backoff until EXHAUSTED")
+        assertTrue("test.Nobody" in transient.message, transient.message)
+    }
+
+    @Test fun `a type this service does not handle is NO_HANDLER through the local sender (no hub to wait for)`() = runBlocking {
+        val registry = HandlerRegistry(resolver).also { it.register(ContextCapturingHandlers()) }
+
+        val outcome = LocalRawCommandSender(HandlerInvoker(registry, codec)).sendRaw("test.Nobody", payload, SendOptions())
 
         assertEquals(Reason.NO_HANDLER, assertIs<RawOutcome.Permanent>(outcome).reason)
     }
