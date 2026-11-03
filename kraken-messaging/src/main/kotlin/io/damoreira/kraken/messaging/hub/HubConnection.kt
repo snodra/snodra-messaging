@@ -88,6 +88,11 @@ data class HubSettings(
      * is redacted too.
      */
     val tokenProvider: HubTokenProvider? = null,
+    /**
+     * The client certificate this service presents in the TLS handshake (P5c, ADR 0020): when set, no credentials are ever sent (the hub reads the
+     * identity from the certificate, ignores a `ClientMessage.credentials` on such a session and refuses a stale token next to it).
+     */
+    val clientCertificate: HubClientCertificate? = null,
 ) {
     /** [requestTimeout] when the caller chose one; zero (or negative) counts as unset, never as an instant deadline. */
     val chosenRequestTimeout: Duration? get() = requestTimeout?.takeIf { !it.isZero && !it.isNegative }
@@ -307,6 +312,8 @@ class HubConnection(
         val handshakeReached = CompletableDeferred<Unit>()
         /** Completed once the connect loop is done with this stream (the hub finished it, or it failed) and cleaned up. */
         val closed = CompletableDeferred<Unit>()
+        /** A rollover (P5c) told the hub this instance is stopping: every `Register` of the stream carries no types from now on. */
+        @Volatile var draining = false
     }
 
     private val lock = Any() // guards registration, generation and current
@@ -314,6 +321,17 @@ class HubConnection(
     private val generation = MutableStateFlow(0L) // bumped by every register(...)
     private val acknowledged = MutableStateFlow(-1L) // generation confirmed by the hub on the current stream
     @Volatile private var current: Stream? = null
+    /** The channel of [current]'s attempt, for a rollover that has to cut a hub that does not end its side. */
+    @Volatile private var liveChannel: ManagedChannel? = null
+    /** The stream a rollover is replacing: its end is the start of the next attempt, with no back-off. */
+    @Volatile private var rollingStream: Stream? = null
+    /**
+     * The generation of [HubClientCertificate] read just before the channel of the current attempt was built: a pair adopted after it is
+     * not presented by this stream, so [HubConnections] rolls the stream over. -1 before the first attempt.
+     */
+    @Volatile internal var certificateGeneration = -1L
+    /** [HubConnections] is rolling this connection over: it takes no new work from this instance's senders (see [HubConnections]). */
+    @Volatile internal var rolling = false
     @Volatile private var loop: Job? = null
     @Volatile private var renewals: Job? = null
     /** [stop] was called: the connect loop ends with its current stream instead of opening another. */
@@ -380,6 +398,52 @@ class HubConnection(
             )
         }
         return outcome == true
+    }
+
+    /**
+     * Moves this hub's session onto the pair [HubSettings.clientCertificate] holds now (P5c, ADR 0020), without failing a request that was
+     * accepted: a TLS session cannot change its certificate, so the stream is replaced.
+     *
+     *  1. Tells the hub the instance is stopping: a `Register` with no types (the shutdown path's), so it routes new work to other instances or
+     *     other hubs. What the connection registers on its next stream is untouched.
+     *  2. Waits up to [drainTimeout] for the work in flight on the stream (requests this instance sent and has no answer for, requests it is handling).
+     *  3. Closes it gracefully, as [stop] does: the request side is half-closed after its last message and the hub's end awaited for
+     *     [STOP_CLOSE_TIMEOUT] at most, then the channel is shut down.
+     *  4. Reconnects at once (no back-off) with the pair the files hold, and waits up to [reconnectTimeout] for the new stream's registration.
+     *
+     * Requests queued and not yet written when the stream closes fail with [HubUnavailableException] (never reached the hub: a caller may send
+     * them again), the ones written fail as for any lost stream. Returns true when the connection has a stream registered again, or had none
+     * to replace (it presents the current pair when it connects); false when [stop] came first or the new stream did not register in time.
+     */
+    internal suspend fun rollOver(drainTimeout: Duration, reconnectTimeout: Duration): Boolean {
+        val stream = synchronized(lock) { if (stopping) null else current } ?: return true
+        if (stream.handshake == null) return true // not registered yet: it is ahead of nothing, and its generation tells the next tick to roll it
+        log.info("Rolling the hub stream of {} ({}) to {} over to the renewed client certificate", serviceName, instanceId, target)
+        synchronized(lock) {
+            stream.draining = true
+            announce(stream)
+        }
+        val drained = withTimeoutOrNull(drainTimeout.toMillis()) {
+            while (!idle) delay(20)
+            true
+        } == true
+        if (!drained) {
+            log.warn("{} request(s) still in flight on the hub stream to {} after {}; rolling it over anyway", pending.size + inFlight.value, target, drainTimeout)
+        }
+        synchronized(lock) {
+            rollingStream = stream
+            if (current === stream) stream.out.close() // half-close after the last queued message
+        }
+        if (withTimeoutOrNull(STOP_CLOSE_TIMEOUT.toMillis()) { stream.closed.await() } == null) {
+            liveChannel?.shutdownNow() // the hub did not finish its side
+            withTimeoutOrNull(STOP_CLOSE_TIMEOUT.toMillis()) { stream.closed.await() }
+        }
+        if (stopping) return false
+        return try {
+            awaitRegistered(reconnectTimeout)
+        } catch (e: HubRegistrationRejectedException) {
+            false
+        }
     }
 
     /** True once no incoming request is being handled, false if [timeout] passes first. */
@@ -795,6 +859,7 @@ class HubConnection(
 
     /** What a new stream's `Register` carries: the access token (P5b) or the static token (P5a), or nothing. */
     private suspend fun initialCredentials(): Credentials? {
+        if (settings.clientCertificate != null) return null // the TLS handshake is the credential (ADR 0020 ruling 6)
         val provider = settings.tokenProvider
         return if (provider != null) Credentials.newBuilder().setJwt(provider.token().value).build() else staticCredentials()
     }
@@ -819,8 +884,14 @@ class HubConnection(
                     rejection.value = null
                     lastLoggedRejection = null
                 }
+                // The files are read again for every attempt; what this stream presents is at least this generation.
+                settings.clientCertificate?.let {
+                    it.refresh()
+                    certificateGeneration = it.generation
+                }
                 // Inside the try: a factory that throws (e.g. an unparsable address) is a failed attempt, not the end of the loop.
                 channel = channelFactory()
+                liveChannel = channel
                 openAndCollect(channel, stream)
                 status = Status.UNAVAILABLE.withDescription("hub closed the stream")
             } catch (e: CancellationException) {
@@ -855,6 +926,14 @@ class HubConnection(
                 stream.closed.complete(Unit)
             }
             if (stopping) break
+            if (rollingStream === stream) {
+                // A rollover closed this stream on purpose (P5c): reconnect at once with the pair the files hold, nothing failed.
+                rollingStream = null
+                backoff = settings.backoffMin
+                failures = 0
+                hintLogged = false
+                continue
+            }
             // The hub does not accept the token this stream presented: the next stream must not present it again.
             if (noToken == null && status.code == Status.Code.UNAUTHENTICATED) {
                 val provider = settings.tokenProvider
@@ -884,6 +963,16 @@ class HubConnection(
                 } else {
                     log.debug(text, serviceName, instanceId, noToken.message, target, retry)
                 }
+                retry
+            } else if (reachedHandshake && settings.clientCertificate != null && status.code == Status.Code.UNAUTHENTICATED &&
+                status.description?.contains("certificate expired") == true
+            ) {
+                // The hub closes a certificate session at notAfter, with no grace (ADR 0020 ruling 7): the files are read again, so a renewed pair is presented.
+                val retry = ReconnectBackoff.jittered(settings.backoffMin, settings.backoffMax)
+                log.info(
+                    "The hub closed the session of {} ({}) because its client certificate ended; reconnecting in {} with the pair the files hold now",
+                    serviceName, instanceId, retry,
+                )
                 retry
             } else if (isRegistrationRejection(status)) {
                 rejection.value = status
@@ -956,6 +1045,7 @@ class HubConnection(
     /** Writes the current registration followed by a heartbeat whose echo confirms it. Caller holds [lock]. */
     private fun announce(stream: Stream) {
         val register = registration.toBuilder().setInitialPermits(stream.initialPermits)
+            .apply { if (stream.draining) clearCommandTypes().clearQueryTypes().clearSharedQueryTypes() }
             // Every Register of the stream carries the stream's token (the hub reads it from the first one only).
             .apply { synchronized(stream) { stream.credentials }?.let { credentials = it } }
             .build()
@@ -1100,7 +1190,7 @@ class HubConnection(
      * reconnecting). A stream without the capability gets nothing; its next reconnect presents the new credential.
      */
     private fun refreshCredentials(stream: Stream) {
-        if (current !== stream) return
+        if (current !== stream || settings.clientCertificate != null) return
         val ack = (stream.handshake as? HubHandshake.V2)?.ack ?: return
         if (HubProtocol.CREDENTIALS_REFRESH !in ack.capabilitiesList) return
         val provider = settings.tokenProvider

@@ -434,9 +434,12 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
     fun connectedInstances(): Set<String> = sessions.filter { it.registered }.mapTo(HashSet()) { it.instanceId }
 
     /** Ends the stream of [instanceId] as if its process crashed; the client sees the stream fail with UNAVAILABLE. */
-    fun dropInstance(instanceId: String) {
+    fun dropInstance(instanceId: String) = dropInstance(instanceId, Status.UNAVAILABLE.withDescription("instance $instanceId dropped by test"))
+
+    /** Ends the stream of [instanceId] with [status], as the hub does for a refusal or a session limit (for example `UNAUTHENTICATED` "certificate expired"). */
+    fun dropInstance(instanceId: String, status: Status) {
         sessions.filter { it.registered && it.instanceId == instanceId }.forEach {
-            it.out.close(Status.UNAVAILABLE.withDescription("instance $instanceId dropped by test").asException())
+            it.out.close(status.asException())
             it.collector.cancel()
         }
     }
