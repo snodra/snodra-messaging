@@ -57,6 +57,15 @@ object HubProtocol {
     /** How often a `dns:///` hub address is resolved again. */
     val DNS_REFRESH: Duration = Duration.ofSeconds(30)
 
+    /** How often the client certificate files are read (P5c): the heartbeat period a v2 hub announces. */
+    val CERTIFICATE_CHECK_INTERVAL: Duration = Duration.ofSeconds(3)
+
+    /** The longest a rollover waits for the work in flight on a stream before it closes it (P5c; shared with the Rust library). */
+    val ROLLOVER_DRAIN_TIMEOUT: Duration = Duration.ofSeconds(10)
+
+    /** The longest a rollover waits for the new stream to register (P5c). */
+    val ROLLOVER_RECONNECT_TIMEOUT: Duration = Duration.ofSeconds(10)
+
     /**
      * `Register.initial_permits` for one hub when the instance is connected to [hubs] hubs: `ceil(max / hubs)`, the
      * whole budget when [hubs] is 0 or 1. Permits granted this way are never revoked when the number of hubs changes.

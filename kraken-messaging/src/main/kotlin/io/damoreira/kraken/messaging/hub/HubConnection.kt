@@ -419,11 +419,14 @@ class HubConnection(
         val stream = synchronized(lock) { if (stopping) null else current } ?: return true
         if (stream.handshake == null) return true // not registered yet: it is ahead of nothing, and its generation tells the next tick to roll it
         log.info("Rolling the hub stream of {} ({}) to {} over to the renewed client certificate", serviceName, instanceId, target)
-        synchronized(lock) {
+        val probe = synchronized(lock) {
             stream.draining = true
             announce(stream)
         }
         val drained = withTimeoutOrNull(drainTimeout.toMillis()) {
+            // The hub reads a stream in order: once it echoes the heartbeat that follows the empty Register, no request it forwarded before
+            // reading that Register is still on its way, so what is in flight now is all there will be.
+            while (stream.probes.containsKey(probe)) delay(10)
             while (!idle) delay(20)
             true
         } == true
@@ -1042,8 +1045,8 @@ class HubConnection(
         .putAllTags(tags)
         .build()
 
-    /** Writes the current registration followed by a heartbeat whose echo confirms it. Caller holds [lock]. */
-    private fun announce(stream: Stream) {
+    /** Writes the current registration followed by a heartbeat whose echo confirms it; returns that heartbeat's `sent_at_ms`. Caller holds [lock]. */
+    private fun announce(stream: Stream): Long {
         val register = registration.toBuilder().setInitialPermits(stream.initialPermits)
             .apply { if (stream.draining) clearCommandTypes().clearQueryTypes().clearSharedQueryTypes() }
             // Every Register of the stream carries the stream's token (the hub reads it from the first one only).
@@ -1051,7 +1054,7 @@ class HubConnection(
             .build()
         stream.out.trySend(ClientMessage.newBuilder().setRegister(register).build())
         stream.registeredGeneration = generation.value
-        heartbeat(stream)
+        return heartbeat(stream)
     }
 
     /**
@@ -1094,13 +1097,14 @@ class HubConnection(
     /** `InstanceStatus` reports written to this hub over all of its streams. */
     val statusReportsWritten: Long get() = statusReports.get()
 
-    private fun heartbeat(stream: Stream) {
+    private fun heartbeat(stream: Stream): Long {
         val sentAt = synchronized(lock) {
             // Strictly increasing so each echo identifies its heartbeat; stays within a few ms of the wall clock.
             maxOf(System.currentTimeMillis(), lastHeartbeatAt + 1).also { lastHeartbeatAt = it }
         }
         stream.probes[sentAt] = stream.registeredGeneration
         stream.out.trySend(ClientMessage.newBuilder().setHeartbeat(Heartbeat.newBuilder().setSentAtMs(sentAt)).build())
+        return sentAt
     }
 
     private fun handle(stream: Stream, message: ServerMessage) {
