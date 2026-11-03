@@ -89,6 +89,13 @@ POM also imports the Spring Boot BOM, so consumers do not need to manage them. B
 
 ## Upgrading
 
+**To JWT authentication (P5b).** Nothing breaks: a service that sets no `hub.oauth2.token-uri` behaves as before (static token or
+none). `Register` now declares the capability `credentials-refresh` (a hub that does not know it ignores it); with a static
+token file the new token is also sent on live streams when the file changes. To switch a service to Keycloak, remove its
+`hub.token`/`token-file` and set `hub.oauth2.*` (both together fail the startup). `InProcessHub` changes: `HubAuth.enforce` and
+`permissive` take an optional `services` list; a `jwt` credential is now accepted when `services` is set (before, every `jwt` was
+refused), and the ack lists `credentials-refresh` for a registrant that declared it. `HubSettings` gained `tokenProvider`.
+
 **To hub access control and TLS (P5a).** Nothing breaks while the hub runs with `KRAKEN_HUB_AUTH_MODE=off` (the
 default) or `permissive`, and without TLS: configuration and behaviour are as before. New settings (all optional):
 `hub.token`, `hub.token-file`, `hub.tls.enabled`, `hub.tls.ca-file` and `hub.tls.server-name`; the environment forms are
@@ -232,6 +239,12 @@ All keys (`kraken.messaging.*`; durations accept `200ms`, `5s`, `7d`; relaxed bi
 | `hub.tls.enabled` | `false` | Talk TLS to the hub, for every `hub.address` form (a list of targets and `dns:///`). Off: plain text, as before. The hub must serve TLS on that port (`KRAKEN_HUB_TLS_CERT` / `KRAKEN_HUB_TLS_KEY`). |
 | `hub.tls.ca-file` | JVM system roots | PEM file with the CA certificate(s) that signed the hub's certificate (a self-signed hub certificate is its own CA). Read on every connection attempt; a file that cannot be used fails the startup. Set without `hub.tls.enabled` it is ignored with a warning. |
 | `hub.tls.server-name` | the address's host | Name to verify the hub's certificate against, for when the address is an IP or an alias the certificate does not list. |
+| `hub.oauth2.token-uri` | none | Setting it turns Keycloak client-credentials authentication on (P5b, [JWT](#authenticating-with-a-jwt-keycloak-client-credentials)): the token endpoint, for example `https://keycloak/realms/kraken/protocol/openid-connect/token`. `http` is allowed and warns once unless the host is loopback or a single-label name. Cannot be combined with `hub.token` or `hub.token-file` (the startup fails naming both). Environment: `KRAKEN_MESSAGING_HUB_OAUTH2_TOKEN_URI`, or `KRAKEN_HUB_OAUTH2_TOKEN_URI` when this key is unset. |
+| `hub.oauth2.client-id` | `kraken.messaging.service-name` | The confidential client's id; it is the token's `azp`, which the hub requires to equal the service name. Environment: `KRAKEN_HUB_OAUTH2_CLIENT_ID`. |
+| `hub.oauth2.client-secret` | none | The client secret (sent as HTTP Basic, `client_secret_basic`). Never logged, redacted in `toString` and in the actuator's `configprops` and `env`. Prefer the file. Environment: `KRAKEN_MESSAGING_HUB_OAUTH2_CLIENT_SECRET`, or `KRAKEN_HUB_OAUTH2_CLIENT_SECRET`. |
+| `hub.oauth2.client-secret-file` | none | File holding the client secret: read at startup (an unreadable or empty file fails it, naming the file) and **again on every token fetch**, so a rotated secret applies without a restart. Wins over `client-secret`. Environment: `KRAKEN_MESSAGING_HUB_OAUTH2_CLIENT_SECRET_FILE`, or `KRAKEN_HUB_OAUTH2_CLIENT_SECRET_FILE`. A token URI with neither secret fails the startup. |
+| `hub.oauth2.scope` | none | `scope` of the token request, sent as written (space-separated). Environment: `KRAKEN_HUB_OAUTH2_SCOPE`. |
+| `hub.oauth2.ca-file` | platform roots | PEM CA certificate(s) trusted **on top of** the platform roots for an `https` token URI (not the hub's CA, which is `hub.tls.ca-file`). A file that cannot be used fails the startup. Environment: `KRAKEN_HUB_OAUTH2_CA`. |
 | `hub.max-concurrent-handlers` | `256` | Incoming hub requests handled concurrently by this instance, over all hubs (at least 1, else the startup fails); further requests wait for a free slot. Also announced as `initial_permits` to a hub with flow control (split over N hubs: `ceil(max / N)` each), which then queues the excess on its side. |
 | `hub.load-factor` | `100` | Relative capacity of this instance (`Register.load_factor`); weights its share of the hub's routing (keyed ring and load score). A negative value fails the startup; 0 is allowed (the hub reads it as 100). |
 | `hub.tags.<name>` | none | Labels announced in `Register.tags`, for example `hub.tags.zone=eu-1`; unkeyed requests prefer instances whose tags match the sender's. |
@@ -358,7 +371,7 @@ file still means no token. A file that disappears later likewise keeps the last 
 
 | Hub (`enforce`) | Stream or request | In the client |
 |---|---|---|
-| no token, an empty token, an unknown token (or a JWT, until P5b) | the hub closes the stream with `UNAUTHENTICATED` | registration rejection |
+| no token, an empty token, an unknown token (a JWT on a hub with no issuer: "jwt credentials are not configured") | the hub closes the stream with `UNAUTHENTICATED` | registration rejection |
 | `service-name` the token does not grant, or a handled type outside its `handle` | the hub closes the stream with `PERMISSION_DENIED` (naming the type) | registration rejection |
 | a `Register` naming the instance id of a live session of **another service** (`enforce` and `permissive`; `off` keeps replacing it) | the hub closes the stream with `PERMISSION_DENIED` (`instance id … belongs to another service`); the owner's session is untouched | registration rejection |
 | a request whose type is outside `send` (unary, scatter-gather, streaming, subscription) | an immediate `Error{PERMISSION_DENIED}`, nothing routed | `AccessDeniedException`, **never retried** |
@@ -395,6 +408,62 @@ token (and the CA, if the hub serves TLS); (3) watch `kraken_hub_auth_violations
 it stays flat; (4) switch the hub to `enforce`; (5) turn on TLS before tokens cross an untrusted network. A service
 whose token is missing or wrong in `enforce` fails visibly (`HubRegistrationRejectedException`, an `ERROR` line) instead of
 reconnecting in a tight loop.
+
+### Authenticating with a JWT (Keycloak client credentials)
+
+Since P5b a service can present a short-lived Keycloak access token instead of a static token (decision record: umbrella
+`docs/adr/0019-hub-jwt-authentication.md`). The hub validates it against the realm's keys (`KRAKEN_HUB_JWT_ISSUER`, ...), requires
+its `azp` to equal the service name and takes the rights from the `[[service]]` table of that name in its ACL file.
+
+**Keycloak, in two lines.** One confidential client per service with *service accounts enabled and nothing else* (no standard
+flow, no direct access grants), its **client id = the service name**; add an audience mapper and set the hub's
+`KRAKEN_HUB_JWT_AUDIENCE`. Never give a `[[service]]` table to the gateway or frontend client.
+
+```yaml
+kraken:
+  messaging:
+    hub:
+      oauth2:
+        token-uri: https://keycloak.example/realms/kraken/protocol/openid-connect/token
+        client-secret-file: /run/secrets/kraken-client-secret   # client-id defaults to kraken.messaging.service-name
+```
+
+The environment forms are `KRAKEN_HUB_OAUTH2_TOKEN_URI`, `_CLIENT_ID`, `_CLIENT_SECRET`, `_CLIENT_SECRET_FILE`, `_SCOPE` and `_CA`
+(relaxed binding also gives `KRAKEN_MESSAGING_HUB_OAUTH2_*`); the properties win. A token URI together with a static `hub.token`
+or `hub.token-file`, or without any secret, fails the startup.
+
+**How it behaves.**
+
+- The `client_credentials` grant is a `POST` to the token URI (`application/x-www-form-urlencoded`, 10 s, answer capped at 1 MiB,
+  redirects never followed), the client authenticated with HTTP Basic (id and secret form-urlencoded first, RFC 6749 2.3.1). The
+  answer needs `access_token`; `expires_in` missing means 60 s (one `WARN`); a `token_type` other than `Bearer` is refused.
+- **One token per process**, shared by every hub connection (N hubs, one fetch), fetched single-flight: connections that start
+  together wait for the same request. Each new stream (connect, reconnect) gets a token before it sends `Register`.
+- A cached token is used while more than its refresh margin is left; the provider **renews it in the background** at that
+  point: margin = 20 % of the lifetime, at least 5 s, and at most half of it (see "Divergences"). The renewal goes to every live
+  stream as `ClientMessage.credentials`, when the stream's ack lists `credentials-refresh` (every `Register` declares it, static
+  token sessions too). The hub closes a JWT session at `exp` plus `KRAKEN_HUB_JWT_EXPIRY_GRACE` (30 s) without one. A stream
+  whose ack lacks the capability gets nothing: its next reconnect uses the new token.
+- A renewal that fails keeps the current token and retries with a back-off from 1 s to 30 s (one `WARN` per distinct error).
+- **No token, no stream.** When the endpoint cannot give a token (401 `invalid_client`, down, TLS, an unusable answer) the stream is
+  not opened: the attempt fails locally, `HubConnection.lastRejection` holds `UNAUTHENTICATED` and `awaitRegistered` throws
+  `HubRegistrationRejectedException` ("no access token for ...: invalid_client: ..." with the endpoint's `error` and
+  `error_description`, clipped to 200 characters), the connection retries with the normal reconnect back-off, logs `ERROR` once
+  per distinct error and then `DEBUG`, and recovers by itself when the endpoint does. A hub that is not ready (`UNAVAILABLE`
+  "jwks not loaded yet") is an ordinary reconnect.
+- With a static `hub.token-file` the same capability rotates the token without a reconnect: when the file's content changes the new
+  token is sent as `ClientMessage.credentials` on streams that acked the capability (checked once per heartbeat).
+- The client secret and the access tokens never appear in logs, exception messages, `toString()` or the actuator's `configprops`
+  and `env` (the starter's `SanitizingFunction` masks `hub.oauth2.client-secret` and `KRAKEN_HUB_OAUTH2_CLIENT_SECRET`).
+
+**What you can read.** `HubConnections.authStatus()` returns `kind` (`NONE`, `TOKEN`, `JWT`), the current token's `tokenExpiresAt`, the
+`lastTokenError` (null once a fetch worked), `tokenFetches` by result and `credentialsRefreshesSent`: wire it into your own
+health indicator. With Micrometer on the classpath the starter binds `kraken_messaging_hub_token_fetches_total{result}`
+(`ok`, `http_error`, `oauth_error`, `io_error`, `bad_response`) and `kraken_messaging_hub_credentials_refreshes_sent_total`.
+
+**Divergences from the Rust library** (same design, ecosystem differences): the Kotlin starter reports through
+`HubConnections.authStatus()` and Micrometer counters where Rust has an accessor. The refresh margin is capped at half the lifetime (a 6 s token is renewed after 3 s); with
+lifetimes of 10 s or more it is exactly "20 %, at least 5 s".
 
 ### Handlers
 
@@ -898,8 +967,8 @@ result.updates.collect { change -> render(change) }   // completes when the hand
   `subscriptionCreditOf(requestId)` and `bufferedUpdatesOf(requestId)` observe it.
 - `InProcessHub.auth` (P5a): `HubAuth.enforce(tokens)`, `HubAuth.permissive(tokens)` or `HubAuth.OFF` (default), with `tokens` a
   map from the plain test token to `AclEntry(service, handle, send)` (patterns: exact, `prefix.*`, `*`), answers like the real
-  hub: in `enforce` the first `Register` is closed with `UNAUTHENTICATED` (no credentials, an empty token, `jwt`, an unknown
-  token) or `PERMISSION_DENIED` (another service name, a command, query or shared query outside `handle`), a later `Register`
+  hub: in `enforce` the first `Register` is closed with `UNAUTHENTICATED` (no credentials, an empty token, a `jwt` on a hub
+  without `services`, an unknown token) or `PERMISSION_DENIED` (another service name, a command, query or shared query outside `handle`), a later `Register`
   adding a forbidden type likewise, and a request outside `send` gets an immediate `Error{PERMISSION_DENIED}` in every
   request mode (`UNAUTHENTICATED` if the token left `auth` meanwhile). `prefix.*` needs something after the dot (it does not
   match `prefix.` itself). `auth` may be replaced at runtime and, like the real hub on an ACL reload, replacing it in `enforce`
@@ -907,6 +976,15 @@ result.updates.collect { change -> render(change) }   // completes when the hand
   service name or handled type it no longer grants; their in-flight requests fail as on any disconnect); set
   `closeSessionsOnAuthChange = false` to keep them and test the per-request refusal instead. Like the real hub (unless `auth` is `OFF`), a `Register` naming the instance id of a live session of another service is closed with `PERMISSION_DENIED` (`instance id … belongs to another service`) and the owner is left alone. `permissive` allows and records. `authViolations()` lists every violation (code, message, enforced, a monotonic timestamp, so tests can assert
   the spacing of reconnects) and `tokensSeenFrom(instanceId)` the token of every `Register` received, refused ones included.
+- `InProcessHub` and JWT credentials (P5b): `HubAuth.enforce(tokens, services)` / `permissive(tokens, services)` take the `[[service]]`
+  tables as `AclEntry(service, handle, send)`. A `jwt` credential whose `azp` is the registering service and that has such an
+  entry is accepted with its rights; another `azp` or a service without an entry is `PERMISSION_DENIED`, a token that is not three
+  segments with an `azp` is `UNAUTHENTICATED`, and without `services` the hub answers "jwt credentials are not configured". The
+  signature and `exp` are **not** checked (use the real hub image for that). The ack offers `credentials-refresh` to a registrant
+  that declared it (`credentialsRefresh = false` emulates a hub without it); `jwtsSeenFrom(instanceId)` lists the JWTs of the
+  `Register`s and `credentialsSeenFrom(instanceId)` the `jwt` or `token` of every `ClientMessage.credentials`, and a refresh is judged
+  like a `Register`'s against the session's own service. `KrakenContainers.hubJwt(...)` starts the hub image under test with JWT
+  authentication (issuer, JWKS URI, `[[service]]` ACL file, leeway 0 s, expiry grace 2 s).
 - `TestCertificates.generate(dir, names)`: a throwaway self-signed certificate made at test time with the JDK's `keytool`
   (PEM certificate, also the CA a client trusts, and PKCS#8 key; valid for `localhost` and `127.0.0.1` by default).
 - `KrakenContainers`: unstarted Testcontainers definitions. `kafka()`, `mongo()` (single-node replica set, needed for
@@ -947,9 +1025,9 @@ Docker Compose from local builds together with the real `kraken-hub` image, Kafk
 
 ## Known limitations
 
-- Hub authentication is a static token per service (P5a). Keycloak client-credentials JWTs (P5b) and client certificates
-  (P5c, mTLS) are not built: a hub in `enforce` refuses `jwt` credentials, and `DefaultHubChannelFactory.customizeTls` is an
-  empty hook. The token is a long-lived secret: rotate it through `hub.token-file`.
+- Hub authentication is a static token per service (P5a) or a Keycloak client-credentials JWT (P5b). Client certificates (P5c,
+  mTLS) are not built: `DefaultHubChannelFactory.customizeTls` is an empty hook. A static token is a long-lived secret: rotate it
+  through `hub.token-file`. An access token that Keycloak revokes keeps working until it expires (minutes).
 - No dead-letter topic: poison records are logged and skipped.
 - No leader election for the outbox publisher; with several instances delivery is at-least-once and ordering is per
   publishing instance.
@@ -957,7 +1035,7 @@ Docker Compose from local builds together with the real `kraken-hub` image, Kafk
   (`HANDLER_DISCONNECTED`), and the library never resumes it. A subscription's update targets are fixed when it opens
   (at-most-once updates): an instance that starts later is never added and the library never resubscribes, so a
   subscriber that must hear every instance resubscribes itself (opt-in auto-resubscribe is future work).
-- Library metrics are not exported yet; OpenTelemetry comes from the application.
+- Library metrics are not exported yet, except the credential counters of P5b (Micrometer, optional); OpenTelemetry comes from the application.
 - Configuration metadata is hand-maintained in `META-INF/spring-configuration-metadata.json`.
 - `TraceHeaders` is only active with Micrometer Tracing on the classpath.
 - Trace context is injected on outbound messages (hub requests, outbox events) but not yet extracted on inbound hub
