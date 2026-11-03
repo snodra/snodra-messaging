@@ -287,7 +287,8 @@ class HubMutualTlsEndToEndTest {
         val short = files("orders-service", validFor = Duration.ofSeconds(18), notBefore = Instant.now().minusSeconds(10)) // ends about 8 s from now
         val owner = startOwner(hub, certificate(short, "orders-service"))
         assertTrue(owner.awaitRegistered(wait))
-        assertEquals(short.third.fingerprint, fingerprintOn(hub, "orders-service", owner.instanceId))
+        // The ack can reach the client before the hub's topology view (read over HTTP) lists the new session.
+        await atMost Duration.ofSeconds(10) until { runBlocking { fingerprintOn(hub, "orders-service", owner.instanceId) } == short.third.fingerprint }
         val renewed = ca.issue("orders-service").also { it.writeTo(short.first, short.second) } // the platform renewed the files
 
         await atMost Duration.ofSeconds(40) until { runBlocking { fingerprintOn(hub, "orders-service", owner.instanceId) } == renewed.fingerprint }
