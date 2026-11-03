@@ -37,9 +37,10 @@ data class ExternalCallSettings(val lease: Duration = Duration.ofMinutes(5)) {
  *    [RetryableExternalException] (come back later). Past its lease the outcome is unknown: without `externalIdempotent`
  *    it becomes `UNKNOWN` (never called again automatically) and the call throws [ExternalCallUnknownOutcomeException],
  *    with it the call takes the record over (`attempts + 1`) and runs the body.
- * 3. After the body: `SUCCEEDED` with the reply as JSON; a [RetryableExternalException] deletes the record (the next call
- *    starts afresh, the relay owns the backoff); any other failure is `FAILED` with `{"code","message"}` and is thrown
- *    as it is.
+ * 3. After the body: `SUCCEEDED` with the reply as JSON (when that write fails the call is an unknown outcome, never a
+ *    failed one: see [unrecorded]); a [RetryableExternalException] deletes the record (the next call starts afresh, the relay
+ *    owns the backoff); an [ExternalCallUnknownOutcomeException] thrown by the adapter itself leaves the record `UNKNOWN`
+ *    and is thrown as it is; any other failure is `FAILED` with `{"code","message"}` and is thrown as it is.
  *
  * Every write of the record is its own short transaction (REQUIRES_NEW when [txManager] is given), so the external call
  * never runs inside a Mongo transaction of this interceptor and a rollback of the caller's transaction (an event handler
@@ -84,7 +85,11 @@ class IdempotencyInterceptor(
             settleFailure(key, e, label)
             throw e
         }
-        short { mongo.updateFirst(byId(key), Update().set("status", ExternalCallStatus.SUCCEEDED).set("reply", String(codec.encode(result ?: Unit), Charsets.UTF_8)).set("updatedAt", clock.instant()).unset("leaseUntil").unset("error"), ExternalCallDocument::class.java) }
+        try {
+            short { mongo.updateFirst(byId(key), Update().set("status", ExternalCallStatus.SUCCEEDED).set("reply", String(codec.encode(result ?: Unit), Charsets.UTF_8)).set("updatedAt", clock.instant()).unset("leaseUntil").unset("error"), ExternalCallDocument::class.java) }
+        } catch (e: Exception) {
+            throw unrecorded(key, label, idempotency.externalIdempotent, e)
+        }
         metrics.externalCall(label, ExternalOutcome.SUCCEEDED)
         return result
     }
@@ -140,12 +145,41 @@ class IdempotencyInterceptor(
         return ExternalCallUnknownOutcomeException("The outcome of the call with key '$key' is unknown: an earlier call of handler $label did not finish and the external system may have acted")
     }
 
+    /**
+     * The body returned but its `SUCCEEDED` could not be written (the store is unreachable): the external system acted and the
+     * record cannot say so, which is an unknown outcome and never a failed call. With `externalIdempotent` the partner
+     * de-duplicates a repeat, so it is retryable (the record stays `IN_PROGRESS`, its lease settles it); otherwise the record
+     * is moved to `UNKNOWN` (best effort: if even that fails the lease does it later) and the call reports the unknown outcome.
+     */
+    private fun unrecorded(key: String, label: String, externalIdempotent: Boolean, cause: Exception): RuntimeException {
+        log.error("The call with key '{}' (handler {}) ran but its outcome could not be recorded: {}", key, label, cause.toString())
+        if (externalIdempotent) {
+            metrics.externalCall(label, ExternalOutcome.RETRYABLE)
+            return RetryableExternalException("The call with key '$key' (handler $label) ran but its outcome could not be recorded; a repeat is safe because the partner de-duplicates by the key: $cause")
+        }
+        markUnknown(key)
+        return unknown(key, label)
+    }
+
+    private fun markUnknown(key: String) {
+        try {
+            short { mongo.updateFirst(byId(key), Update().set("status", ExternalCallStatus.UNKNOWN).set("updatedAt", clock.instant()).unset("leaseUntil"), ExternalCallDocument::class.java) }
+        } catch (bookkeeping: Exception) {
+            log.warn("Could not mark the call with key '{}' UNKNOWN (its lease will): {}", key, bookkeeping.toString())
+        }
+    }
+
     /** The record after the body failed: reset for a retryable failure, FAILED with the error for any other. Never masks the failure. */
     private fun settleFailure(key: String, e: Throwable, label: String) {
         try {
             if (e is RetryableExternalException) {
                 short { mongo.remove(byId(key), ExternalCallDocument::class.java) }
                 metrics.externalCall(label, ExternalOutcome.RETRYABLE)
+            } else if (e is ExternalCallUnknownOutcomeException) {
+                // The adapter itself cannot tell whether the partner acted (a connection broke after the request went out):
+                // not FAILED (a redelivery would report a plain failure and a person would think it safe to call again).
+                markUnknown(key)
+                metrics.externalCall(label, ExternalOutcome.UNKNOWN)
             } else {
                 val error = String(codec.encode(mapOf("code" to "HANDLER_ERROR", "message" to describe(e))), Charsets.UTF_8)
                 short {

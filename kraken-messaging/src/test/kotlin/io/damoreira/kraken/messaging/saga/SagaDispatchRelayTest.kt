@@ -199,7 +199,13 @@ private class RelayMetrics : SagaMetrics {
 internal class MarkFailingTemplate(factory: SimpleMongoClientDatabaseFactory) : MongoTemplate(factory) {
     val failNextMark = AtomicBoolean()
 
+    /** The next write of an `external_calls` record as SUCCEEDED fails: the store goes away right after the external call returned. */
+    val failNextSucceededWrite = AtomicBoolean()
+
     override fun updateFirst(query: Query, update: UpdateDefinition, entityClass: Class<*>): UpdateResult {
+        if (entityClass == io.damoreira.kraken.messaging.external.ExternalCallDocument::class.java && "SUCCEEDED" in update.updateObject.toString() && failNextSucceededWrite.getAndSet(false)) {
+            throw org.springframework.dao.DataAccessResourceFailureException("the store went away after the external call returned")
+        }
         if (entityClass == SagaDispatchDocument::class.java && "dispatchedAt" in update.updateObject.toString() && failNextMark.getAndSet(false)) {
             throw IllegalStateException("crashed before marking the entry dispatched")
         }

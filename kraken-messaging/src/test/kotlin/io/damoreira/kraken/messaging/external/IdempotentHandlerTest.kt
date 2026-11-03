@@ -248,6 +248,43 @@ class IdempotentHandlerTest {
     }
 
     @Test
+    fun `an adapter that reports an unknown outcome itself leaves the record UNKNOWN, so a redelivery reports UNKNOWN_OUTCOME too`() {
+        adapter.behaviour = { throw ExternalCallUnknownOutcomeException("the connection broke after the request went out") }
+
+        val first = failure(print())
+
+        assertTrue(ExternalFailureMarkers.isUnknownOutcome(first.details), first.message)
+        assertEquals(ExternalCallStatus.UNKNOWN, record("job-1")!!.status, "not FAILED: the external system may have acted")
+        val again = failure(print())
+        assertTrue(ExternalFailureMarkers.isUnknownOutcome(again.details), "the redelivery: ${again.message}")
+        assertEquals(1, adapter.bodies.get(), "never called again automatically")
+    }
+
+    @Test
+    fun `a failure to write SUCCEEDED after the body succeeded surfaces as an unknown outcome, never as a failed call`() {
+        mongo.failNextSucceededWrite.set(true)
+
+        val first = failure(print())
+
+        assertTrue(ExternalFailureMarkers.isUnknownOutcome(first.details), "the call happened but its record could not say so: ${first.message}")
+        assertEquals(1, adapter.bodies.get())
+        assertEquals(ExternalCallStatus.UNKNOWN, record("job-1")!!.status, "never FAILED")
+        val again = failure(print())
+        assertTrue(ExternalFailureMarkers.isUnknownOutcome(again.details))
+        assertEquals(1, adapter.bodies.get())
+    }
+
+    @Test
+    fun `with externalIdempotent a failure to write SUCCEEDED is retryable, the partner de-duplicates the repeat`() {
+        mongo.failNextSucceededWrite.set(true)
+
+        val first = failure(call("ex.PrintSafe", """{"jobId":"j1"}"""))
+
+        assertTrue(ExternalFailureMarkers.isRetryable(first.details), first.message)
+        assertEquals(ExternalCallStatus.IN_PROGRESS, record("job-1")!!.status, "left for its lease to settle: never FAILED")
+    }
+
+    @Test
     fun `an in-progress record past its lease becomes UNKNOWN and the call fails with UNKNOWN_OUTCOME`() {
         mongo.insert(ExternalCallDocument("job-1", ExternalCallStatus.IN_PROGRESS, attempts = 1, updatedAt = start, leaseUntil = start.plus(lease)))
         clock.now = start.plus(lease).plusSeconds(1) // the first call crashed mid-way, a lease ago
