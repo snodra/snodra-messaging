@@ -27,6 +27,7 @@ import java.net.URI
 import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Duration
+import java.time.Instant
 import java.util.UUID
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -98,6 +99,20 @@ class TokenEndpointTest {
         assertEquals(Duration.ofSeconds(60), endpoint.fetch().lifetime)
         endpoint.fetch()
         assertEquals(1, appender.list.count { it.level == Level.WARN && "expires_in" in it.formattedMessage }, appender.list.toString())
+    }
+
+    @Test fun `a huge expires_in is capped at 10 years, so expiresAt and refreshAt never overflow`() = runBlocking {
+        val tenYears = Duration.ofSeconds(10 * 365 * 24 * 3600L)
+        for (huge in listOf("9223372036854775807", "32000000000000000", "1e30", "123456789012345678901234567890")) {
+            server.responder = { TokenResponse(200, """{"access_token":"a.b.c","token_type":"Bearer","expires_in":$huge}""") }
+            val token = endpoint().fetch()
+            assertEquals(tenYears, token.lifetime, huge)
+            assertTrue(token.expiresAt > token.issuedAt, huge)
+            assertTrue(token.refreshAt < token.expiresAt, huge)
+        }
+        val direct = AccessToken("t", Instant.now(), Duration.ofSeconds(Long.MAX_VALUE))
+        assertEquals(tenYears, direct.lifetime)
+        assertTrue(direct.expiresAt > direct.issuedAt)
     }
 
     @Test fun `a token_type other than Bearer is a bad response, bearer in any case is fine, a missing one too`() = runBlocking {

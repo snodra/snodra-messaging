@@ -7,6 +7,7 @@ import org.slf4j.LoggerFactory
 import tools.jackson.databind.JsonNode
 import tools.jackson.databind.json.JsonMapper
 import java.io.IOException
+import java.math.BigDecimal
 import java.net.URI
 import java.net.URLEncoder
 import java.net.http.HttpClient
@@ -91,10 +92,13 @@ class HubTokenException(val result: TokenFetchResult, message: String, cause: Th
 
 /**
  * An access token and when it was issued. It is fresh for most of its life: [refreshAt] is [refreshMargin] before [expiresAt], where
- * the margin is 20 % of [lifetime], at least 5 s, and never more than half of the lifetime (a 6 s token is renewed after 3 s,
+ * the margin is 20 % of [lifetime] (capped at 10 years), at least 5 s, and never more than half of the lifetime (a 6 s token is renewed after 3 s,
  * not after 1 s, which would renew it every second). [toString] never shows [value].
  */
-class AccessToken(val value: String, val issuedAt: Instant, val lifetime: Duration) {
+class AccessToken(val value: String, val issuedAt: Instant, lifetime: Duration) {
+    /** The lifetime the endpoint announced, capped at [MAX_LIFETIME] (10 years): a larger one overflows [Instant] arithmetic. */
+    val lifetime: Duration = if (lifetime > MAX_LIFETIME) MAX_LIFETIME else lifetime
+
     val expiresAt: Instant get() = issuedAt.plus(lifetime)
     val refreshMargin: Duration = lifetime.dividedBy(5).coerceAtLeast(Duration.ofSeconds(5)).coerceAtMost(lifetime.dividedBy(2))
     val refreshAt: Instant get() = expiresAt.minus(refreshMargin)
@@ -103,6 +107,11 @@ class AccessToken(val value: String, val issuedAt: Instant, val lifetime: Durati
     private fun Duration.coerceAtMost(max: Duration) = if (this > max) max else this
 
     override fun toString() = "AccessToken(****, expiresAt=$expiresAt)"
+
+    companion object {
+        /** The longest lifetime a token is given, whatever `expires_in` says. */
+        val MAX_LIFETIME: Duration = Duration.ofSeconds(10 * 365 * 24 * 3600L)
+    }
 }
 
 /**
@@ -191,6 +200,8 @@ class TokenEndpoint(private val oauth2: HubOAuth2, private val clock: Clock = Cl
                 if (expiresInWarned.compareAndSet(false, true)) log.warn("The token endpoint {} sent no expires_in: assuming {} s", oauth2.tokenUri.host, DEFAULT_LIFETIME.seconds)
                 DEFAULT_LIFETIME
             }
+            // Any number the endpoint sends: one beyond the cap (even past Long) is the cap, never an overflow later on.
+            expiresIn.isNumber && expiresIn.decimalValue() >= BigDecimal(AccessToken.MAX_LIFETIME.seconds) -> AccessToken.MAX_LIFETIME
             expiresIn.isNumber && expiresIn.asLong() > 0 -> Duration.ofSeconds(expiresIn.asLong())
             else -> bad("expires_in is not a positive number")
         }
