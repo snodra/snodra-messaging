@@ -176,13 +176,13 @@ class RlDeafSaga {
 
 /** A sender the test scripts: every call is recorded, the outcome comes from [script]. */
 private class ScriptedSender : RawCommandSender {
-    class Call(val type: String, val payload: String, val headers: Map<String, String>, val correlationId: String?)
+    class Call(val type: String, val payload: String, val headers: Map<String, String>, val correlationId: String?, val retry: RetryPolicy? = null)
 
     val calls = CopyOnWriteArrayList<Call>()
     @Volatile var script: (Call) -> RawOutcome = { RawOutcome.Success }
 
     override suspend fun sendRaw(type: String, payload: ByteArray, options: SendOptions): RawOutcome {
-        val call = Call(type, String(payload, Charsets.UTF_8), options.headers, currentCoroutineContext()[CorrelationContext]?.correlationId)
+        val call = Call(type, String(payload, Charsets.UTF_8), options.headers, currentCoroutineContext()[CorrelationContext]?.correlationId, options.retry)
         calls += call
         return script(call)
     }
@@ -306,6 +306,15 @@ class SagaDispatchRelayTest {
 
         assertEquals(listOf("s1:1000", "s1:2000", "s1:3000"), sender.keys())
         assertTrue(entries("s1").all { it.dispatchedAt != null })
+    }
+
+    @Test
+    fun `the relay sends with RetryPolicy NONE so the bus's own retry never stacks under the relay's`() {
+        record("s1", 1000)
+
+        relay().pollOnce()
+
+        assertEquals(RetryPolicy.NONE, sender.calls.single().retry)
     }
 
     @Test

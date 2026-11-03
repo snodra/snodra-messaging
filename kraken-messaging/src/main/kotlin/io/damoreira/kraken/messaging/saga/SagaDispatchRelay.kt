@@ -65,7 +65,8 @@ data class RelaySettings(
  * through its entries in `seq` order; different sagas go in parallel. An ended saga's entries are dispatched like any.
  *
  * - An EVENT entry is inserted into the outbox and marked dispatched **in one transaction**: exactly once.
- * - A COMMAND entry is sent as raw bytes by wire type name ([RawCommandSender]) with the headers `idempotency-key` =
+ * - A COMMAND entry is sent as raw bytes by wire type name ([RawCommandSender]) with `retry = RetryPolicy.NONE` (the bus's
+ *   own retry, when configured, must never stack under the relay's) and the headers `idempotency-key` =
  *   `<sagaId>:<seq>` (the entry's id) and `saga-id`, the entry's routing key and the correlation id of the message that
  *   caused it, outside any caller identity. It is marked dispatched after the reply, so a crash in between re-sends it
  *   with the same key (an `@IdempotentHandler` adapter then runs its body once).
@@ -176,7 +177,7 @@ class SagaDispatchRelay(
         val headers = entry.headers.filterKeys { it != DISPATCH_CORRELATION_HEADER } + mapOf("idempotency-key" to entry.id, "saga-id" to entry.sagaId)
         val outcome = try {
             runBlocking(CorrelationContext(correlationId)) {
-                commands.sendRaw(entry.type, entry.payload.toByteArray(Charsets.UTF_8), SendOptions(routingKey = entry.routingKey, headers = headers))
+                commands.sendRaw(entry.type, entry.payload.toByteArray(Charsets.UTF_8), SendOptions(routingKey = entry.routingKey, retry = RetryPolicy.NONE, headers = headers))
             }
         } catch (e: Exception) {
             if (e is InterruptedException) Thread.currentThread().interrupt()
