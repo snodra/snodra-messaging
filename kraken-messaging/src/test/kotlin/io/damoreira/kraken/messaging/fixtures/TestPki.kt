@@ -33,7 +33,9 @@ import javax.security.auth.x500.X500Principal
 object TestPki {
     private var serial = System.nanoTime()
 
-    private fun keyPair(): KeyPair = KeyPairGenerator.getInstance("EC").apply { initialize(ECGenParameterSpec("secp256r1")) }.generateKeyPair()
+    private fun keyPair(rsa: Boolean = false): KeyPair =
+        if (rsa) KeyPairGenerator.getInstance("RSA").apply { initialize(2048) }.generateKeyPair()
+        else KeyPairGenerator.getInstance("EC").apply { initialize(ECGenParameterSpec("secp256r1")) }.generateKeyPair()
 
     private fun nextSerial(): BigInteger = BigInteger.valueOf(synchronized(this) { ++serial })
 
@@ -41,7 +43,8 @@ object TestPki {
     class Ca internal constructor(val certificate: X509Certificate, internal val key: PrivateKey, val pem: Path) {
         /**
          * A certificate signed by this CA. [uris] are the URI SANs (default the one `kraken://service/<service>`), [dns] the DNS SANs, [ips] the
-         * IP SANs. [validFor] counts from [notBefore] (default one minute ago, so a clock a little behind still accepts it).
+         * IP SANs. [rsa] makes an RSA key (the hub's own pair: ring, which the hub's rustls uses, reads a PKCS#8 EC key only with its public key
+         * included, which the JDK leaves out; an EC key is fine for a client). [validFor] counts from [notBefore] (default one minute ago, so a clock a little behind still accepts it).
          */
         fun issue(
             service: String? = null,
@@ -52,8 +55,9 @@ object TestPki {
             notBefore: Instant = Instant.now().minusSeconds(60),
             clientAuth: Boolean = true,
             serverAuth: Boolean = false,
+            rsa: Boolean = false,
         ): Issued {
-            val pair = keyPair()
+            val pair = keyPair(rsa)
             val names = uris.map { GeneralName(GeneralName.uniformResourceIdentifier, it) } +
                 dns.map { GeneralName(GeneralName.dNSName, it) } + ips.map { GeneralName(GeneralName.iPAddress, it) }
             val builder = JcaX509v3CertificateBuilder(
@@ -106,7 +110,7 @@ object TestPki {
     /** The files of a hub's server pair issued by [ca] with both usages (a `required` hub probes itself with it), valid for `localhost` and `127.0.0.1`. */
     fun hubPair(ca: Ca, directory: Path): Pair<Path, Path> {
         Files.createDirectories(directory)
-        val issued = ca.issue(dns = listOf("localhost"), ips = listOf("127.0.0.1"), clientAuth = true, serverAuth = true, validFor = Duration.ofDays(2))
+        val issued = ca.issue(dns = listOf("localhost"), ips = listOf("127.0.0.1"), clientAuth = true, serverAuth = true, validFor = Duration.ofDays(2), rsa = true)
         return issued.writeTo(directory.resolve("hub-cert.pem"), directory.resolve("hub-key.pem"))
     }
 

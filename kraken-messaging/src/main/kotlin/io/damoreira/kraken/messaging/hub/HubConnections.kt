@@ -1,5 +1,6 @@
 package io.damoreira.kraken.messaging.hub
 
+import io.damoreira.kraken.hub.v1.ErrorCode
 import io.damoreira.kraken.hub.v1.Reply
 import io.damoreira.kraken.hub.v1.ReplyPart
 import io.damoreira.kraken.hub.v1.Request
@@ -256,7 +257,9 @@ class HubConnections(
      * `Reply` or `Error`, with [HubConnection.send]'s exceptions.
      */
     override suspend fun send(request: Request): ServerMessage =
-        route(request, eligible = { true }) { connection, outgoing -> connection.send(outgoing, awaitStream = false) }
+        route(request, eligible = { true }, declined = { it.hasError() && it.error.code == ErrorCode.NO_HANDLER }) { connection, outgoing ->
+            connection.send(outgoing, awaitStream = false)
+        }
 
     /**
      * Sends [request] as a scatter-gather through one live hub that supports it (see the class comment), with
@@ -296,13 +299,16 @@ class HubConnections(
      * The hub choice and failover of [send], [gather], [stream] and [subscribe], restricted to the hubs that are [eligible] for
      * [feature]. A positive `timeout_ms` is one deadline for the whole call: a hub wait or a hub that did not take the
      * request uses some of it and the request is sent with what is left, unless [keepTimeout] (a stream: `timeout_ms`
-     * is its idle timeout, sent whole; the deadline bounds only the hub wait and the retries).
+     * is its idle timeout, sent whole; the deadline bounds only the hub wait and the retries). A hub whose answer is [declined]
+     * (`NO_HANDLER` for a unary request) is skipped like one that could not take the request; when every live hub declined, the
+     * last answer is returned at once.
      */
     private suspend fun <T> route(
         request: Request,
         eligible: (HubConnection) -> Boolean,
         feature: String = HubProtocol.SCATTER_GATHER,
         keepTimeout: Boolean = false,
+        declined: (T) -> Boolean = { false },
         call: suspend (HubConnection, Request) -> T,
     ): T {
         // One deadline for the whole call: the caller's timeout (timeout_ms), else request-timeout, else 5 s.
@@ -311,6 +317,7 @@ class HubConnections(
         val deadline = System.nanoTime() + wait.toNanos()
         val tried = HashSet<HubConnection>()
         var waited = false
+        var lastDeclined: T? = null
         while (true) {
             val hubs = live.value
             val capable = hubs.filter(eligible)
@@ -321,6 +328,8 @@ class HubConnections(
                 )
             }
             val connection = choose(request, capable.filter { it !in tried })
+            // Every live hub answered that it has no handler (see [declined]): that is the answer, not a reason to wait for a hub to appear.
+            if (connection == null && lastDeclined != null) return lastDeclined
             val leftMs = (deadline - System.nanoTime()) / 1_000_000
             if (connection == null || leftMs <= 0) {
                 val changed = connection == null && leftMs > 0 && withTimeoutOrNull(leftMs) { live.first { it != hubs } } != null
@@ -342,7 +351,13 @@ class HubConnections(
                 request
             }
             try {
-                return call(connection, outgoing)
+                val result = call(connection, outgoing)
+                if (!declined(result)) return result
+                // This hub has no owner of the type right now (the owner is connected to another hub only, or is being rolled over onto a
+                // renewed client certificate here); nothing was delivered, so another hub may still have one.
+                log.debug("Hub {} has no handler for request {}; trying another hub", connection.target, request.id)
+                lastDeclined = result
+                tried += connection
             } catch (e: HubUnavailableException) {
                 // Only the hub not taking the request: a collector's HubUnavailableException arrives wrapped in a
                 // StreamCollectorException (the request was written; it is never re-sent).

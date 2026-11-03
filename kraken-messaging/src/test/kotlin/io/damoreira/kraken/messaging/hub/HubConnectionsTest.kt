@@ -347,6 +347,31 @@ class HubConnectionsTest {
 
     // --- failover ---
 
+    @Test fun `a NO_HANDLER from one hub goes to another hub that has the handler (the owner is on one hub only, as while a roll is under way)`() = runBlocking {
+        val a = hub()
+        val b = hub()
+        handler(listOf(b.name))
+        val sender = client(listOf(a.name, b.name), "a")
+        sender.start()
+        assertTrue(sender.awaitRegistered(wait))
+        repeat(10) { // round-robin: half of them pick the hub without the handler first
+            val answer = sender.send(request())
+            assertTrue(answer.hasReply() && !answer.reply.hasError(), answer.toString())
+        }
+    }
+
+    @Test fun `a NO_HANDLER from every hub is the answer at once, not after waiting for the hubs to change`() = runBlocking {
+        val a = hub()
+        val b = hub()
+        val sender = client(listOf(a.name, b.name), "a")
+        sender.start()
+        assertTrue(sender.awaitRegistered(wait))
+        val started = System.nanoTime()
+        val answer = sender.send(request(timeoutMs = 4000))
+        assertEquals(ErrorCode.NO_HANDLER, answer.error.code, answer.toString())
+        assertTrue((System.nanoTime() - started) / 1_000_000 < 1500, "took ${(System.nanoTime() - started) / 1_000_000} ms")
+    }
+
     @Test fun `a request whose hub drops before it is written goes to another hub`() = runBlocking {
         val a = hub()
         val b = hub()

@@ -132,6 +132,37 @@ object KrakenContainers {
             .withEnv(env)
     }
 
+    /**
+     * The hub image under test (`KRAKEN_HUB_IMAGE`, default `kraken-hub:dev`) with client certificates (mutual TLS, P5c, ADR 0020), mode
+     * `enforce`: [services] become the ACL file's `[[service]]` tables (the rights of the service a certificate's `kraken://service/<name>`
+     * SAN names), [serverCertificate] and [serverKey] are the hub's own pair (PEM files), [clientCa] the PEM bundle of the CAs whose client
+     * certificates it accepts and [clientAuth] `required` or `optional`. Under `required` the image's own health check presents the hub's pair
+     * as a client certificate (ADR 0020 ruling 14), so issue the server certificate from [clientCa] with both the server and the client usage;
+     * the wait strategy is the log line, which does not depend on it. Further `KRAKEN_HUB_*` settings go in [env]. Exposes gRPC 7000 and HTTP
+     * 7001; OTLP export is disabled.
+     */
+    fun hubMtls(
+        directory: Path,
+        services: List<AclEntry>,
+        serverCertificate: Path,
+        serverKey: Path,
+        clientCa: Path,
+        clientAuth: String = "required",
+        env: Map<String, String> = emptyMap(),
+    ): GenericContainer<*> {
+        val file = directory.resolve("acl.toml")
+        Files.writeString(file, serviceToml(services))
+        return hub(hubImage).withExposedPorts(7000, 7001).withEnv("KRAKEN_HUB_OTLP_ENDPOINT", "")
+            .withCopyFileToContainer(MountableFile.forHostPath(file, 0b110_100_100), HUB_ACL_PATH)
+            .withCopyFileToContainer(MountableFile.forHostPath(serverCertificate, 0b110_100_100), HUB_TLS_CERT_PATH)
+            .withCopyFileToContainer(MountableFile.forHostPath(serverKey, 0b110_100_100), HUB_TLS_KEY_PATH)
+            .withCopyFileToContainer(MountableFile.forHostPath(clientCa, 0b110_100_100), HUB_TLS_CLIENT_CA_PATH)
+            .withEnv("KRAKEN_HUB_AUTH_MODE", "enforce").withEnv("KRAKEN_HUB_ACL_FILE", HUB_ACL_PATH)
+            .withEnv("KRAKEN_HUB_TLS_CERT", HUB_TLS_CERT_PATH).withEnv("KRAKEN_HUB_TLS_KEY", HUB_TLS_KEY_PATH)
+            .withEnv("KRAKEN_HUB_TLS_CLIENT_CA", HUB_TLS_CLIENT_CA_PATH).withEnv("KRAKEN_HUB_TLS_CLIENT_AUTH", clientAuth)
+            .withEnv(env)
+    }
+
     /** The ACL file of the hub for JWT services: one `[[service]]` per entry ([AclEntry.service] is the `name`). */
     fun serviceToml(services: List<AclEntry>): String = services.joinToString("\n") { entry ->
         fun list(items: List<String>) = items.joinToString(", ", "[", "]") { "\"$it\"" }
@@ -150,6 +181,7 @@ object KrakenContainers {
     private const val HUB_ACL_PATH = "/etc/kraken-hub/acl.toml"
     private const val HUB_TLS_CERT_PATH = "/etc/kraken-hub/tls/cert.pem"
     private const val HUB_TLS_KEY_PATH = "/etc/kraken-hub/tls/key.pem"
+    private const val HUB_TLS_CLIENT_CA_PATH = "/etc/kraken-hub/tls/client-ca.pem"
 
     /**
      * The hub under test with extra `KRAKEN_HUB_*` settings (for example `KRAKEN_HUB_QUEUE_CAPACITY_PER_INSTANCE` or
