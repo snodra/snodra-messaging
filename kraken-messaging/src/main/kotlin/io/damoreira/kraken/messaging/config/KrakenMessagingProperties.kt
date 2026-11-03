@@ -3,6 +3,7 @@ package io.damoreira.kraken.messaging.config
 import io.damoreira.kraken.messaging.RetryPolicy
 import io.damoreira.kraken.messaging.hub.HubTargets
 import org.springframework.boot.context.properties.ConfigurationProperties
+import java.net.URI
 import java.nio.file.Path
 import java.time.Duration
 
@@ -87,13 +88,19 @@ data class KrakenMessagingProperties(
         val tokenFile: Path? = null,
         /** TLS towards the hub (P5a): off by default (plain text, as before). */
         val tls: Tls = Tls(),
+        /**
+         * Keycloak client-credentials authentication (P5b, ADR 0019): the service gets an access token from [OAuth2.tokenUri] and
+         * registers with it as a `jwt` credential, renewing it before it expires. Off unless a token URI is set (here or as
+         * `KRAKEN_HUB_OAUTH2_TOKEN_URI`); cannot be combined with [token] or [tokenFile].
+         */
+        val oauth2: OAuth2 = OAuth2(),
     ) {
         /** The token never appears: every other field as the data class prints it. */
         override fun toString(): String = "Hub(enabled=$enabled, address=$address, statusInterval=$statusInterval, " +
             "requestTimeout=$requestTimeout, heartbeatInterval=$heartbeatInterval, reconnectBackoff=$reconnectBackoff, " +
             "maxConcurrentHandlers=$maxConcurrentHandlers, loadFactor=$loadFactor, tags=$tags, priorities=$priorities, " +
             "retry=$retry, streamCreditTimeout=$streamCreditTimeout, maxSubscriptions=$maxSubscriptions, " +
-            "token=${if (token.isNullOrEmpty()) token else "****"}, tokenFile=$tokenFile, tls=$tls)"
+            "token=${if (token.isNullOrEmpty()) token else "****"}, tokenFile=$tokenFile, tls=$tls, oauth2=$oauth2)"
 
         init {
             // Checked at binding, so a bad value fails the startup even while the hub is disabled.
@@ -132,6 +139,30 @@ data class KrakenMessagingProperties(
         /** Name to verify the hub's certificate against instead of the address's host (for example an IP or a service alias). */
         val serverName: String? = null,
     )
+
+    /**
+     * `hub.oauth2.*` (P5b, ADR 0019). Every setting also reads the plain environment variable `KRAKEN_HUB_OAUTH2_<NAME>` (`TOKEN_URI`,
+     * `CLIENT_ID`, `CLIENT_SECRET`, `CLIENT_SECRET_FILE`, `SCOPE`, and `CA` for [caFile]) when its property is unset; relaxed binding
+     * gives `KRAKEN_MESSAGING_HUB_OAUTH2_*` as well.
+     */
+    data class OAuth2(
+        /** The token endpoint (Keycloak: `https://<host>/realms/<realm>/protocol/openid-connect/token`). `http` is allowed (a compose network) and warns unless the host is loopback or a single-label name. */
+        val tokenUri: URI? = null,
+        /** The confidential client's id, which is the `azp` of its tokens and so must be the service name; defaults to `kraken.messaging.service-name`. */
+        val clientId: String? = null,
+        /** The client secret. Never logged, redacted in [toString] and in the actuator's `configprops` and `env`. Prefer [clientSecretFile]. */
+        val clientSecret: String? = null,
+        /** File holding the client secret: read at startup (an unreadable file fails it) and again on every token fetch, so a rotated secret applies without a restart. Wins over [clientSecret]. */
+        val clientSecretFile: Path? = null,
+        /** `scope` of the token request, as sent (space-separated); none by default. */
+        val scope: String? = null,
+        /** PEM file with CA certificates to trust on top of the platform roots for an `https` [tokenUri] (not the hub's CA: that is `hub.tls.ca-file`). */
+        val caFile: Path? = null,
+    ) {
+        /** The secret never appears: every other field as the data class prints it. */
+        override fun toString(): String = "OAuth2(tokenUri=$tokenUri, clientId=$clientId, " +
+            "clientSecret=${if (clientSecret.isNullOrEmpty()) clientSecret else "****"}, clientSecretFile=$clientSecretFile, scope=$scope, caFile=$caFile)"
+    }
 
     /** `hub.retry.*`: validated by [RetryPolicy]'s rules at startup, also while [enabled] is false. */
     data class Retry(

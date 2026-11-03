@@ -87,7 +87,7 @@ class KrakenMessagingAutoConfiguration {
     }
 
     /**
-     * Masks the hub token in the actuator's `configprops` and `env` output whatever `show-values` is, and whichever
+     * Masks the hub token and the OAuth2 client secret in the actuator's `configprops` and `env` output whatever `show-values` is, and whichever
      * sanitization rules the application set (Spring Boot 4 has no `keys-to-sanitize`: a [SanitizingFunction] bean is the way).
      */
     @Configuration(proxyBeanMethods = false)
@@ -121,10 +121,17 @@ class RemovedPropertiesGuard(environment: Environment) {
     }
 }
 
-/** The names the hub token goes by: the property, its relaxed environment forms and the plain `KRAKEN_HUB_TOKEN`. */
+/**
+ * The names the hub token and the OAuth2 client secret go by: the properties, their relaxed environment forms and the plain
+ * `KRAKEN_HUB_TOKEN` / `KRAKEN_HUB_OAUTH2_CLIENT_SECRET` (the secret's file is a path, not a secret, and stays visible).
+ */
 internal object HubTokenKeys {
-    fun matches(key: String?): Boolean {
-        val normalised = key?.lowercase()?.replace('_', '.')?.replace('-', '.') ?: return false
-        return normalised == "kraken.messaging.hub.token" || normalised == "kraken.hub.token"
-    }
+    // Separators are dropped before comparing: the property is `client-secret`, the environment variable `CLIENT_SECRET` and the
+    // configprops report says `clientSecret`.
+    private val secrets = setOf(
+        "krakenmessaginghubtoken", "krakenhubtoken",
+        "krakenmessaginghuboauth2clientsecret", "krakenhuboauth2clientsecret",
+    )
+
+    fun matches(key: String?): Boolean = key?.lowercase()?.filter { it.isLetterOrDigit() } in secrets
 }

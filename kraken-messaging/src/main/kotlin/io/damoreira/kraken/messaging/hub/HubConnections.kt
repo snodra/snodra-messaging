@@ -138,6 +138,28 @@ class HubConnections(
     /** Ids of the live hubs, in target order. */
     fun liveHubIds(): List<String> = live.value.mapNotNull { it.hubId }
 
+    /**
+     * How this instance authenticates to the hubs (P5a/P5b) and the health of its credential: the kind, a JWT's expiry, the last
+     * token fetch error, fetch counts by result and refreshes sent. Read-only and cheap; safe to call from a health indicator.
+     */
+    fun authStatus(): HubAuthStatus {
+        val provider = settings.tokenProvider
+        val kind = when {
+            provider != null -> HubAuthKind.JWT
+            settings.token.current() != null -> HubAuthKind.TOKEN
+            else -> HubAuthKind.NONE
+        }
+        return HubAuthStatus(
+            kind = kind,
+            tokenExpiresAt = provider?.current?.value?.expiresAt,
+            lastTokenError = provider?.lastError?.value,
+            tokenFetches = provider?.let { p -> TokenFetchResult.entries.associate { it.label to p.fetches(it) } }.orEmpty(),
+            credentialsRefreshesSent = connections().sumOf { it.credentialsRefreshesSent },
+        )
+    }
+
+    internal fun credentialsRefreshesSent(): Double = connections().sumOf { it.credentialsRefreshesSent }.toDouble()
+
     /** The kept connections (live or reconnecting), in target order; duplicates and drained targets excluded. */
     fun connections(): List<HubConnection> = synchronized(lock) { active.values.map { it.connection } }
 
@@ -523,3 +545,20 @@ class HubConnections(
         connection.stop()
     }
 }
+
+/** The credential a service presents to the hub: nothing, a static token (P5a) or a Keycloak access token (P5b). */
+enum class HubAuthKind { NONE, TOKEN, JWT }
+
+/**
+ * [HubConnections.authStatus]: [kind]; for a JWT the [tokenExpiresAt] of the current access token (null before the first fetch), the
+ * [lastTokenError] (null when the last fetch worked), [tokenFetches] by result (`ok`, `http_error`, `oauth_error`, `io_error`,
+ * `bad_response`: the `result` label of `kraken_messaging_hub_token_fetches_total`) and [credentialsRefreshesSent]
+ * (`kraken_messaging_hub_credentials_refreshes_sent_total`). Holds no token.
+ */
+data class HubAuthStatus(
+    val kind: HubAuthKind,
+    val tokenExpiresAt: java.time.Instant?,
+    val lastTokenError: String?,
+    val tokenFetches: Map<String, Long>,
+    val credentialsRefreshesSent: Long,
+)

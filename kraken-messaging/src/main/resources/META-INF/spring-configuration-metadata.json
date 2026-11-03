@@ -24,6 +24,12 @@
       "sourceMethod": "getRetry()"
     },
     {
+      "name": "kraken.messaging.hub.oauth2",
+      "type": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$OAuth2",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Hub",
+      "sourceMethod": "getOauth2()"
+    },
+    {
       "name": "kraken.messaging.hub.tls",
       "type": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Tls",
       "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties",
@@ -146,6 +152,42 @@
       "type": "java.nio.file.Path",
       "description": "File holding the hub token (a container secret): read at startup, where an unreadable file fails the startup, and again on every reconnect. Wins over kraken.messaging.hub.token when both are set. Environment variable KRAKEN_MESSAGING_HUB_TOKEN_FILE, or KRAKEN_HUB_TOKEN_FILE when this property is unset.",
       "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Hub"
+    },
+    {
+      "name": "kraken.messaging.hub.oauth2.token-uri",
+      "type": "java.net.URI",
+      "description": "OAuth2 token endpoint (Keycloak: https://<host>/realms/<realm>/protocol/openid-connect/token). Setting it turns Keycloak client-credentials authentication on (P5b, ADR 0019): the service registers with the access token as a jwt credential and renews it before it expires. http is allowed and warns unless the host is loopback or a single-label name. Cannot be combined with hub.token or hub.token-file. Environment variable KRAKEN_MESSAGING_HUB_OAUTH2_TOKEN_URI, or KRAKEN_HUB_OAUTH2_TOKEN_URI when this property is unset.",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$OAuth2"
+    },
+    {
+      "name": "kraken.messaging.hub.oauth2.client-id",
+      "type": "java.lang.String",
+      "description": "The confidential client's id, which is the azp of its tokens and must be the service name. Defaults to kraken.messaging.service-name. Environment variable KRAKEN_HUB_OAUTH2_CLIENT_ID when this property is unset.",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$OAuth2"
+    },
+    {
+      "name": "kraken.messaging.hub.oauth2.client-secret",
+      "type": "java.lang.String",
+      "description": "The client secret. Never logged and redacted in toString and in the actuator configprops and env output; prefer client-secret-file. Environment variable KRAKEN_MESSAGING_HUB_OAUTH2_CLIENT_SECRET, or KRAKEN_HUB_OAUTH2_CLIENT_SECRET when this property is unset.",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$OAuth2"
+    },
+    {
+      "name": "kraken.messaging.hub.oauth2.client-secret-file",
+      "type": "java.nio.file.Path",
+      "description": "File holding the client secret (a container secret): read at startup, where an unreadable file fails the startup, and again on every token fetch, so a rotated secret applies without a restart. Wins over client-secret. Environment variable KRAKEN_MESSAGING_HUB_OAUTH2_CLIENT_SECRET_FILE, or KRAKEN_HUB_OAUTH2_CLIENT_SECRET_FILE when this property is unset.",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$OAuth2"
+    },
+    {
+      "name": "kraken.messaging.hub.oauth2.scope",
+      "type": "java.lang.String",
+      "description": "scope of the token request, as sent (space-separated); none by default. Environment variable KRAKEN_HUB_OAUTH2_SCOPE when this property is unset.",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$OAuth2"
+    },
+    {
+      "name": "kraken.messaging.hub.oauth2.ca-file",
+      "type": "java.nio.file.Path",
+      "description": "PEM file with CA certificates to trust on top of the platform roots for an https token-uri (not the hub's CA: that is hub.tls.ca-file). Environment variable KRAKEN_HUB_OAUTH2_CA when this property is unset.",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$OAuth2"
     },
     {
       "name": "kraken.messaging.hub.tls.enabled",

@@ -6,12 +6,16 @@ import io.damoreira.kraken.messaging.codec.JsonCodec
 import io.damoreira.kraken.messaging.codec.MessageTypeResolver
 import io.damoreira.kraken.messaging.handler.HandlerInvoker
 import io.damoreira.kraken.messaging.handler.HandlerRegistry
+import io.damoreira.kraken.messaging.hub.HubAuthMetrics
 import io.damoreira.kraken.messaging.hub.HubBus
 import io.damoreira.kraken.messaging.hub.DefaultHubChannelFactory
 import io.damoreira.kraken.messaging.hub.HubChannelFactory
 import io.damoreira.kraken.messaging.hub.HubTls
 import io.damoreira.kraken.messaging.hub.HubToken
 import io.damoreira.kraken.messaging.hub.HubConnections
+import io.damoreira.kraken.messaging.hub.HubOAuth2
+import io.damoreira.kraken.messaging.hub.HubTokenProvider
+import io.damoreira.kraken.messaging.hub.TokenEndpoint
 import io.damoreira.kraken.messaging.hub.HubSettings
 import io.damoreira.kraken.messaging.hub.HubTargets
 import io.damoreira.kraken.messaging.hub.InboundRequestDispatcher
@@ -29,14 +33,17 @@ import kotlinx.coroutines.runBlocking
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Qualifier
 import org.springframework.boot.autoconfigure.AutoConfiguration
+import org.springframework.boot.autoconfigure.condition.ConditionalOnClass
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
 import org.springframework.context.SmartLifecycle
 import org.springframework.context.annotation.Bean
+import org.springframework.context.annotation.Configuration
 import org.springframework.core.env.Environment
 import java.time.Duration
 import java.util.UUID
 import java.util.concurrent.Executors
+import java.net.URI
 import java.nio.file.Path
 
 /**
@@ -80,13 +87,19 @@ class HubAutoConfiguration {
         val hub = properties.hub
         // The connect loop, stream collector and heartbeats stay on Default; handlers get virtual threads (see HubConnection).
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default + CoroutineName("kraken-hub"))
+        val token = hubToken(hub, environment)
+        // One provider for every hub connection: N hubs, one access token (a failure here is a startup error, before any thread runs).
+        val provider = hubOAuth2(properties, environment, token)?.let { HubTokenProvider(TokenEndpoint(it), scope) }
+        val settings = HubSettings(
+            hub.requestTimeout, hub.heartbeatInterval, hub.reconnectBackoff.min, hub.reconnectBackoff.max, hub.streamCreditTimeout, token, provider,
+        )
         val handlerDispatcher = Executors.newVirtualThreadPerTaskExecutor().asCoroutineDispatcher()
         val connections = HubConnections(
             targets = HubTargets.parse(hub.address),
             channelFactory = channelFactory,
             serviceName = properties.serviceName,
             instanceId = UUID.randomUUID().toString(),
-            settings = HubSettings(hub.requestTimeout, hub.heartbeatInterval, hub.reconnectBackoff.min, hub.reconnectBackoff.max, hub.streamCreditTimeout, hubToken(hub, environment)),
+            settings = settings,
             inbound = dispatcher::dispatch,
             scope = scope,
             handlerDispatcher = handlerDispatcher,
@@ -133,6 +146,15 @@ class HubAutoConfiguration {
     @ConditionalOnMissingBean(QueryBus::class)
     fun queryBus(@Qualifier("hubBus") hubBus: HubBus): QueryBus = object : QueryBus by hubBus {}
 
+    /** Counters of the hub credential, when Micrometer's `MeterBinder` is on the classpath (Boot binds the bean to its registry). */
+    @Configuration(proxyBeanMethods = false)
+    @ConditionalOnClass(name = ["io.micrometer.core.instrument.binder.MeterBinder"])
+    class HubAuthMetricsConfiguration {
+        @Bean
+        @ConditionalOnMissingBean
+        fun krakenHubAuthMetrics(connections: HubConnections): HubAuthMetrics = HubAuthMetrics(connections)
+    }
+
     private val log = LoggerFactory.getLogger(HubAutoConfiguration::class.java)
 
     /**
@@ -149,10 +171,69 @@ class HubAutoConfiguration {
         return HubToken.of(inline, file)
     }
 
+    /**
+     * The Keycloak client-credentials settings (P5b): `hub.oauth2.*`, each falling back to the plain `KRAKEN_HUB_OAUTH2_*` variable
+     * when its property is unset; null when no token URI is set. Checked here so a mistake fails the startup naming the setting:
+     * a static token as well, no secret, a secret file that cannot be read, a CA file that cannot be used, a URI that is not http(s).
+     */
+    private fun hubOAuth2(properties: KrakenMessagingProperties, environment: Environment, token: HubToken): HubOAuth2? {
+        val o = properties.hub.oauth2
+        fun env(name: String) = environment.getProperty(name)?.takeIf { it.isNotBlank() }
+        val tokenUri = o.tokenUri ?: env(OAUTH2_TOKEN_URI_ENV)?.let {
+            try { URI.create(it.trim()) } catch (e: IllegalArgumentException) { throw IllegalStateException("$OAUTH2_TOKEN_URI_ENV is not a URI: ${e.message}", e) }
+        }
+        val secret = o.clientSecret?.takeIf { it.isNotBlank() } ?: env(OAUTH2_CLIENT_SECRET_ENV)
+        val secretFile = o.clientSecretFile ?: env(OAUTH2_CLIENT_SECRET_FILE_ENV)?.let { Path.of(it.trim()) }
+        if (tokenUri == null) {
+            if (secret != null || secretFile != null) {
+                log.warn("kraken.messaging.hub.oauth2.client-secret(-file) is set but kraken.messaging.hub.oauth2.token-uri is not: no OAuth2 authentication")
+            }
+            return null
+        }
+        if (token !== HubToken.NONE) {
+            throw IllegalStateException(
+                "kraken.messaging.hub.oauth2.token-uri and a static hub token (kraken.messaging.hub.token / token-file, " +
+                    "KRAKEN_HUB_TOKEN / KRAKEN_HUB_TOKEN_FILE) are both set: a service authenticates with one of them, remove one",
+            )
+        }
+        if (secret == null && secretFile == null) {
+            throw IllegalStateException("kraken.messaging.hub.oauth2.token-uri is set but neither kraken.messaging.hub.oauth2.client-secret nor client-secret-file is")
+        }
+        val source = HubOAuth2.secretSource(secret, secretFile)
+        try {
+            source() // an unreadable or empty secret file fails the startup, not every token fetch
+        } catch (e: java.io.IOException) {
+            throw IllegalStateException("kraken.messaging.hub.oauth2.client-secret-file: ${e.message}", e)
+        }
+        val oauth2 = try {
+            HubOAuth2(tokenUri, o.clientId ?: env(OAUTH2_CLIENT_ID_ENV) ?: properties.serviceName, source, o.scope ?: env(OAUTH2_SCOPE_ENV),
+                o.caFile ?: env(OAUTH2_CA_ENV)?.let { Path.of(it.trim()) })
+        } catch (e: IllegalArgumentException) {
+            throw IllegalStateException("kraken.messaging.hub.oauth2: ${e.message}", e)
+        }
+        if (tokenUri.scheme == "http" && !isLocalName(tokenUri.host)) {
+            log.warn(
+                "The OAuth2 token endpoint {} is plain http over a routed name: the client secret and the access token cross the network in the clear. Use https unless this is a trusted compose network",
+                "http://${tokenUri.host}",
+            )
+        }
+        return oauth2
+    }
+
+    /** Loopback or a single-label name (a compose service): no dot in it, or `localhost`, `127.x`, `::1`. */
+    private fun isLocalName(host: String): Boolean =
+        '.' !in host && ':' !in host || host == "localhost" || host.startsWith("127.") || host == "::1" || host == "[::1]"
+
     companion object {
         const val CHANNEL_FACTORY = "krakenHubChannelFactory"
         const val TOKEN_ENV = "KRAKEN_HUB_TOKEN"
         const val TOKEN_FILE_ENV = "KRAKEN_HUB_TOKEN_FILE"
+        const val OAUTH2_TOKEN_URI_ENV = "KRAKEN_HUB_OAUTH2_TOKEN_URI"
+        const val OAUTH2_CLIENT_ID_ENV = "KRAKEN_HUB_OAUTH2_CLIENT_ID"
+        const val OAUTH2_CLIENT_SECRET_ENV = "KRAKEN_HUB_OAUTH2_CLIENT_SECRET"
+        const val OAUTH2_CLIENT_SECRET_FILE_ENV = "KRAKEN_HUB_OAUTH2_CLIENT_SECRET_FILE"
+        const val OAUTH2_SCOPE_ENV = "KRAKEN_HUB_OAUTH2_SCOPE"
+        const val OAUTH2_CA_ENV = "KRAKEN_HUB_OAUTH2_CA"
     }
 }
 
