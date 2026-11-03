@@ -1,5 +1,6 @@
 package io.damoreira.kraken.messaging.external
 
+import io.damoreira.kraken.messaging.saga.stateDoc
 import com.mongodb.client.MongoClients
 import io.damoreira.kraken.messaging.RetryPolicy
 import io.damoreira.kraken.messaging.api.Event
@@ -104,7 +105,7 @@ class WebhookIngressTest {
         ingress = ExternalEventIngress(LocalEventDispatcher(registry, HandlerInvoker(registry, codec), tx, mongo, runtime), mongo, codec, resolver)
     }
 
-    private fun sagaOf(jobId: String) = mongo.findAll(SagaDocument::class.java).singleOrNull { it.state.getString("jobId") == jobId }
+    private fun sagaOf(jobId: String) = mongo.findAll(SagaDocument::class.java).singleOrNull { it.stateDoc.getString("jobId") == jobId }
 
     @Test
     fun `an accepted webhook event reaches a saga`() {
@@ -112,7 +113,7 @@ class WebhookIngressTest {
 
         // synchronous: the saga and the ordinary handler have run by the time accept returned
         assertEquals(ExternalEventIngress.Result.ACCEPTED, result)
-        assertEquals(1, sagaOf("j1")?.state?.getInteger("hooks"))
+        assertEquals(1, sagaOf("j1")?.stateDoc?.getInteger("hooks"))
         assertEquals(listOf("j1"), handlers.seen.toList())
         assertTrue(mongo.exists(Query(Criteria.where("_id").`is`("printer:evt-1")), "processed_events"), "the dedupe id is <source>:<dedupeKey>")
         assertTrue(mongo.exists(Query(Criteria.where("_id").`is`("saga:wh.Job:printer:evt-1")), "processed_events"))
@@ -126,7 +127,7 @@ class WebhookIngressTest {
         // the same key of another source is another event
         assertEquals(ExternalEventIngress.Result.ACCEPTED, ingress.accept("carrier", "evt-2", WhHook("j2", "other")))
 
-        assertEquals(3, sagaOf("j2")?.state?.getInteger("hooks"))
+        assertEquals(3, sagaOf("j2")?.stateDoc?.getInteger("hooks"))
         assertEquals(listOf("j2", "j2", "j2"), handlers.seen.toList())
     }
 
@@ -137,7 +138,7 @@ class WebhookIngressTest {
         assertFailsWith<IllegalStateException> { ingress.accept("printer", "evt-4", WhHook("j4", "done")) }
         assertEquals(null, sagaOf("j4"), "stage 1 failed: the saga stage did not run")
         assertEquals(ExternalEventIngress.Result.ACCEPTED, ingress.accept("printer", "evt-4", WhHook("j4", "done")), "a failed call is not a duplicate")
-        assertEquals(1, sagaOf("j4")?.state?.getInteger("hooks"))
+        assertEquals(1, sagaOf("j4")?.stateDoc?.getInteger("hooks"))
     }
 
     private fun hmac(secret: String, body: ByteArray): String =

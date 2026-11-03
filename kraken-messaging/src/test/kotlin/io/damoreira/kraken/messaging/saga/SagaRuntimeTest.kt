@@ -19,6 +19,7 @@ import org.springframework.data.mongodb.core.SimpleMongoClientDatabaseFactory
 import org.springframework.data.mongodb.core.query.Criteria
 import org.springframework.data.mongodb.core.query.Query
 import org.springframework.transaction.support.TransactionTemplate
+import java.math.BigDecimal
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
@@ -97,12 +98,31 @@ class SagaRuntimeTest {
     }
 
     private fun sagas(type: String = "rt.Order") = mongo.find(Query(Criteria.where("type").`is`(type)), SagaDocument::class.java)
-    private fun saga(orderId: String) = sagas().single { it.state.getString("orderId") == orderId }
+    private fun saga(orderId: String) = sagas().single { it.stateDoc.getString("orderId") == orderId }
     private fun dispatch(sagaId: String) =
         mongo.find(Query(Criteria.where("sagaId").`is`(sagaId)).with(Sort.by("seq")), SagaDispatchDocument::class.java)
     private fun deadlines() = mongo.findAll(DeadlineDocument::class.java)
-    private fun log(doc: SagaDocument): List<String> = doc.state.getList("log", String::class.java) ?: emptyList()
+    private fun log(doc: SagaDocument): List<String> = doc.stateDoc.getList("log", String::class.java) ?: emptyList()
     private fun marker(id: String) = mongo.exists(Query(Criteria.where("_id").`is`(id)), "processed_events")
+
+    @Test
+    fun `state and dispatched payloads keep BigDecimal scale and map keys with dots or a leading dollar exactly`() {
+        val priced = runtime(RtPriceSaga::class)
+        val tags = mapOf("a.b" to "x", "\$c" to "y")
+        deliver(RtPriced("p1", BigDecimal("12.30"), tags), on = priced)
+        deliver(RtPriceCheck("p1"), on = priced)
+
+        val doc = sagas("rt.Price").single()
+        val sent = dispatch(doc.id).map { it.payload }
+        assertEquals(2, sent.size)
+        sent.forEach {
+            assertTrue("12.30" in it, "the amount keeps its scale in the dispatched command: $it")
+            assertTrue("\"a.b\"" in it && "\"\$c\"" in it, "the map keys survive in the dispatched command: $it")
+        }
+        val state = codec.decode(doc.state.toByteArray(), RtPriceSaga::class)
+        assertEquals(BigDecimal("12.30"), state.amount)
+        assertEquals(tags, state.tags)
+    }
 
     @Test
     fun `a start event creates an instance with its association and state`() {
@@ -111,7 +131,7 @@ class SagaRuntimeTest {
         val doc = saga("o1")
         assertEquals("rt.Order|orderId=o1", doc.startKey)
         assertEquals(setOf(Association("orderId", "o1"), Association("paymentRef", "pay-o1")), doc.associations.toSet())
-        assertEquals(1, doc.state.getInteger("placed"))
+        assertEquals(1, doc.stateDoc.getInteger("placed"))
         assertEquals(false, doc.ended)
         assertEquals(0L, doc.version)
         assertEquals(now, doc.createdAt)
@@ -137,7 +157,7 @@ class SagaRuntimeTest {
 
         val doc = saga("o3")
         assertEquals(1, sagas().size, "no second instance")
-        assertEquals(2, doc.state.getInteger("placed"), "the existing instance handled the second start event, once")
+        assertEquals(2, doc.stateDoc.getInteger("placed"), "the existing instance handled the second start event, once")
         assertEquals(1, metrics.started.size)
     }
 
@@ -149,7 +169,7 @@ class SagaRuntimeTest {
         val all = sagas()
         assertEquals(2, all.size)
         assertTrue(all.all { it.startKey == null })
-        assertEquals(3, all.sumOf { it.state.getInteger("forced") }, "the first instance handled both, the second only its own")
+        assertEquals(3, all.sumOf { it.stateDoc.getInteger("forced") }, "the first instance handled both, the second only its own")
     }
 
     @Test
@@ -159,7 +179,7 @@ class SagaRuntimeTest {
 
         val doc = saga("o5")
         assertEquals(1, sagas().size)
-        assertEquals(2, doc.state.getInteger("placed"))
+        assertEquals(2, doc.stateDoc.getInteger("placed"))
         assertTrue(metrics.count("rt.Order", SagaMetrics.Outcome.CONFLICT) >= 1, "the loser conflicted and retried")
         assertEquals(0, mongo.count(Query(), "saga_failures"))
         assertEquals(1, metrics.started.size)
@@ -176,7 +196,7 @@ class SagaRuntimeTest {
         assertEquals(2, log(doc).size, "neither lost nor applied twice")
         assertEquals(2L, doc.version)
         assertTrue(metrics.count("rt.Order", SagaMetrics.Outcome.CONFLICT) >= 1)
-        assertEquals(2, dispatch(doc.id).count { it.type == "rt.DoIt" && it.payload.getString("orderId") != "o6" }, "one command per applied bump")
+        assertEquals(2, dispatch(doc.id).count { it.type == "rt.DoIt" && it.payloadDoc.getString("orderId") != "o6" }, "one command per applied bump")
     }
 
     @Test
@@ -227,9 +247,9 @@ class SagaRuntimeTest {
         assertEquals(listOf(0L, 1L, 1000L), entries.map { it.seq })
         assertEquals(listOf(DispatchKind.COMMAND, DispatchKind.EVENT, DispatchKind.COMMAND), entries.map { it.kind })
         assertEquals(listOf("rt.DoIt", "rt.Done", "rt.DoIt"), entries.map { it.type })
-        assertEquals("o10", entries[0].payload.getString("orderId"))
+        assertEquals("o10", entries[0].payloadDoc.getString("orderId"))
         assertEquals("k-o10", entries[1].routingKey)
-        assertEquals("o10-a", entries[2].payload.getString("orderId"))
+        assertEquals("o10-a", entries[2].payloadDoc.getString("orderId"))
         assertTrue(entries.all { it.dispatchedAt == null && it.failedAt == null && it.attempts == 0 && it.createdAt == now })
         assertEquals("corr-e-10", entries[0].headers["correlation-id"])
     }
@@ -260,7 +280,7 @@ class SagaRuntimeTest {
 
         val doc = saga("o12")
         assertEquals(1, sagas().size)
-        assertEquals(1, doc.state.getInteger("placed"))
+        assertEquals(1, doc.stateDoc.getInteger("placed"))
         assertEquals(listOf("rt.DoIt", "rt.Done"), dispatch(doc.id).map { it.type }, "the failed attempt left no entries")
         assertEquals(2, deadlines().size, "nor deadlines")
         assertEquals(0, mongo.count(Query(), "saga_failures"))
@@ -304,7 +324,7 @@ class SagaRuntimeTest {
         assertEquals("rt.Broken", failure.sagaType)
         assertEquals("e-14", failure.eventId)
         assertEquals("rt.OrderPlaced", failure.eventType)
-        assertEquals("o14", failure.payload.getString("orderId"))
+        assertEquals("o14", failure.payloadDoc.getString("orderId"))
         assertEquals("u-1", failure.headers["userId"])
         assertEquals("corr-e-14", failure.headers["correlationId"])
         assertEquals(5, failure.attempts)
@@ -317,7 +337,7 @@ class SagaRuntimeTest {
 
         deliver(RtOrderPlaced("o14"), id = "e-14", on = both) // redelivered: both markers hold
         assertEquals(1, mongo.count(Query(), "saga_failures"))
-        assertEquals(1, saga("o14").state.getInteger("placed"))
+        assertEquals(1, saga("o14").stateDoc.getInteger("placed"))
     }
 
     @Test
@@ -325,9 +345,9 @@ class SagaRuntimeTest {
         deliver(RtOrderPlaced("o15"), id = "e-15")
 
         val doc = saga("o15")
-        assertEquals(doc.id, doc.state.getString("sawSagaId"))
-        assertEquals("e-15", doc.state.getString("sawMessageId"))
-        assertEquals("the-bean", doc.state.getString("sawBean"))
+        assertEquals(doc.id, doc.stateDoc.getString("sawSagaId"))
+        assertEquals("e-15", doc.stateDoc.getString("sawMessageId"))
+        assertEquals("the-bean", doc.stateDoc.getString("sawBean"))
         assertEquals(2, dispatch(doc.id).size, "commands recorded")
         assertEquals(2, deadlines().size, "deadlines recorded")
     }
@@ -337,9 +357,9 @@ class SagaRuntimeTest {
         deliver(RtOrderPlaced("o16"), id = "e-16")
 
         val doc = saga("o16")
-        assertEquals("rt.Order", doc.state.getString("mdcSagaType"))
-        assertEquals(doc.id, doc.state.getString("mdcSagaId"))
-        assertEquals("corr-e-16", doc.state.getString("mdcCorrelationId"))
+        assertEquals("rt.Order", doc.stateDoc.getString("mdcSagaType"))
+        assertEquals(doc.id, doc.stateDoc.getString("mdcSagaId"))
+        assertEquals("corr-e-16", doc.stateDoc.getString("mdcCorrelationId"))
         assertNull(org.slf4j.MDC.get("sagaType"), "and not after")
     }
 
@@ -352,7 +372,7 @@ class SagaRuntimeTest {
 
         val docs = sagas("rt.Header").sortedBy { it.startKey }
         assertEquals(listOf("rt.Header|x-order=h1", "rt.Header|x-order=h2"), docs.map { it.startKey })
-        assertEquals(listOf(2, 1), docs.map { it.state.getInteger("notes") })
+        assertEquals(listOf(2, 1), docs.map { it.stateDoc.getInteger("notes") })
         assertEquals(listOf(Association("x-order", "h1")), docs[0].associations)
         assertEquals(1, metrics.count("rt.Header", SagaMetrics.Outcome.NO_MATCH))
     }

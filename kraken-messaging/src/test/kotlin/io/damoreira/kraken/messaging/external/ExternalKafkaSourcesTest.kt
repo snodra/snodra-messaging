@@ -1,5 +1,6 @@
 package io.damoreira.kraken.messaging.external
 
+import io.damoreira.kraken.messaging.saga.stateDoc
 import com.mongodb.client.MongoClients
 import io.damoreira.kraken.messaging.MessageContext
 import io.damoreira.kraken.messaging.RetryPolicy
@@ -174,9 +175,9 @@ class ExternalKafkaSourcesTest {
         kafka.send(record).get()
     }
 
-    private fun sagaOf(jobId: String) = mongo.findAll(SagaDocument::class.java).singleOrNull { it.state.getString("jobId") == jobId }
+    private fun sagaOf(jobId: String) = mongo.findAll(SagaDocument::class.java).singleOrNull { it.stateDoc.getString("jobId") == jobId }
     private fun awaitSaga(jobId: String, replies: Int = 1) = await().atMost(Duration.ofSeconds(20)).untilAsserted {
-        assertEquals(replies, sagaOf(jobId)?.state?.getInteger("replies"), "saga $jobId")
+        assertEquals(replies, sagaOf(jobId)?.stateDoc?.getInteger("replies"), "saga $jobId")
     }
 
     @Test

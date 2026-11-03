@@ -105,7 +105,7 @@ class SagaRuntime(
             parkAgain(failure, "Saga type '${failure.sagaType}' does not exist in this service", 0)
             return false
         }
-        return deliver(sagaType, failure.eventType, org.bson.Document(failure.payload).toJson().toByteArray(Charsets.UTF_8), contextOf(failure), failure)
+        return deliver(sagaType, failure.eventType, failure.payload.toByteArray(Charsets.UTF_8), contextOf(failure), failure)
     }
 
     // ---- events ------------------------------------------------------------------------------------------------
@@ -284,7 +284,7 @@ class SagaRuntime(
 
         fun plan(saga: Any, doc: SagaDocument?, startKey: String?): Planned {
             val ended = lifecycle.endRequested
-            val state = org.bson.Document.parse(String(codec.encode(saga), Charsets.UTF_8))
+            val state = String(codec.encode(saga), Charsets.UTF_8)
             val next = doc?.copy(
                 state = state, associations = lifecycle.associations.toList(), ended = ended, endedAt = if (ended) now else null,
                 version = version, updatedAt = now,
@@ -323,7 +323,7 @@ class SagaRuntime(
     }
 
     @Suppress("UNCHECKED_CAST")
-    private fun SagaType.decodeState(doc: SagaDocument): Any = codec.decode(doc.state.toJson().toByteArray(Charsets.UTF_8), klass as KClass<Any>)
+    private fun SagaType.decodeState(doc: SagaDocument): Any = codec.decode(doc.state.toByteArray(Charsets.UTF_8), klass as KClass<Any>)
 
     private fun withMdc(sagaType: String, sagaId: String, correlationId: String, block: () -> Unit) {
         val keys = listOf("sagaType" to sagaType, "sagaId" to sagaId, "correlationId" to correlationId)
@@ -350,7 +350,7 @@ class SagaRuntime(
                 ports.failures.save(
                     SagaFailureDocument(
                         id = "${sagaType.name}:${ctx.messageId}", sagaType = sagaType.name, eventId = ctx.messageId, eventType = eventType,
-                        payload = org.bson.Document.parse(String(payload, Charsets.UTF_8)),
+                        payload = String(payload, Charsets.UTF_8),
                         headers = failureHeaders(ctx), error = error, attempts = retry.maxAttempts, firstFailedAt = now, lastFailedAt = now,
                     ),
                 )

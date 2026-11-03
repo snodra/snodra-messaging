@@ -124,13 +124,15 @@ class SagaModelScanner(private val typeResolver: MessageTypeResolver, private va
         return DeadlineHandlerMethod(fn, annotation.deadlineName, fn.findAnnotation<EndSaga>() != null, payloadClass, params)
     }
 
+    /** The stored form (the codec's exact JSON text of a fresh instance) must be an object that decodes and encodes to the same text. */
     private fun checkRoundTrip(label: String, type: SagaType) {
         try {
-            val first = codec.encode(type.newInstance())
-            val second = codec.encode(codec.decode(first, type.klass))
-            if (codec.decodeTree(first) != codec.decodeTree(second)) throw IllegalStateException("encoding it again gave a different document")
+            val stored = String(codec.encode(type.newInstance()), Charsets.UTF_8)
+            if (!codec.decodeTree(stored.toByteArray(Charsets.UTF_8)).isObject) throw IllegalStateException("it is not a JSON object: $stored")
+            val again = String(codec.encode(codec.decode(stored.toByteArray(Charsets.UTF_8), type.klass)), Charsets.UTF_8)
+            if (again != stored) throw IllegalStateException("encoding it again gave a different document: $stored then $again")
         } catch (e: Exception) {
-            throw IllegalStateException("Saga $label does not round-trip through the library's JSON codec (its state is persisted as JSON): ${e.message}", e)
+            throw IllegalStateException("Saga $label does not round-trip through the library's JSON codec (its state is stored as that JSON text): ${e.message}", e)
         }
     }
 }

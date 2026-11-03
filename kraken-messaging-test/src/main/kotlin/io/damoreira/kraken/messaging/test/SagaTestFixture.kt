@@ -126,8 +126,8 @@ class SagaTestFixture<S : Any>(type: KClass<S>, vararg beans: Any, typePrefix: S
     fun whenCommandFailed(command: Command<*>, reason: SagaCommandFailed.Reason, message: String = ""): SagaTestFixture<S> {
         val type = resolver.typeNameOf(command::class)
         val payload = codec.mapper.readTree(codec.encode(command))
-        val sent = store.dispatch.lastOrNull { it.kind == DispatchKind.COMMAND && it.type == type && codec.mapper.readTree(it.payload.toJson()) == payload }
-            ?: throw IllegalStateException("$sagaName: no saga sent $type $payload, so it cannot have failed; the commands sent are ${show(store.dispatch.filter { it.kind == DispatchKind.COMMAND }.map { it.type to codec.mapper.readTree(it.payload.toJson()) })}")
+        val sent = store.dispatch.lastOrNull { it.kind == DispatchKind.COMMAND && it.type == type && codec.mapper.readTree(it.payload) == payload }
+            ?: throw IllegalStateException("$sagaName: no saga sent $type $payload, so it cannot have failed; the commands sent are ${show(store.dispatch.filter { it.kind == DispatchKind.COMMAND }.map { it.type to codec.mapper.readTree(it.payload) })}")
         deliver(SagaCommandFailed(sent.sagaId, sent.type, sent.id, reason, message), emptyMap(), messageId = "failed:${sent.id}")
         return this
     }
@@ -216,7 +216,7 @@ class SagaTestFixture<S : Any>(type: KClass<S>, vararg beans: Any, typePrefix: S
     }
 
     private fun expectDispatched(kind: DispatchKind, label: String, expected: List<Any>): SagaTestFixture<S> {
-        val found = store.dispatch.drop(observedFrom).filter { it.kind == kind }.map { it.type to codec.mapper.readTree(it.payload.toJson()) }
+        val found = store.dispatch.drop(observedFrom).filter { it.kind == kind }.map { it.type to codec.mapper.readTree(it.payload) }
         val wanted = expected.map { resolver.typeNameOf(it::class) to codec.mapper.readTree(codec.encode(it)) }
         if (found != wanted) {
             fail(if (wanted.isEmpty()) "expected no $label but found ${show(found)}" else "expected $label ${show(wanted)} but found ${show(found)}")

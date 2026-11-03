@@ -66,7 +66,7 @@ internal class RecordingSagaCommands(
             seq = seq,
             kind = kind,
             type = typeResolver.typeNameOf(message::class),
-            payload = org.bson.Document.parse(String(codec.encode(message), Charsets.UTF_8)),
+            payload = String(codec.encode(message), Charsets.UTF_8),
             headers = mapOf(DISPATCH_CORRELATION_HEADER to correlationId),
             routingKey = routingKey,
             createdAt = now,

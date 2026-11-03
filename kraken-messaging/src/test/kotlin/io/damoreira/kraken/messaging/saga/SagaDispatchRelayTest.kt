@@ -231,17 +231,17 @@ class SagaDispatchRelayTest {
         runtime.process(type, codec.encode(event), MessageContext(id, type, correlationId, null, emptySet(), null, mapOf("id" to id, "type" to type)))
     }
 
-    private fun sagaOf(orderId: String) = mongo.findAll(SagaDocument::class.java).single { it.state.getString("orderId") == orderId }
+    private fun sagaOf(orderId: String) = mongo.findAll(SagaDocument::class.java).single { it.stateDoc.getString("orderId") == orderId }
     private fun entries(sagaId: String) = mongo.find(Query(Criteria.where("sagaId").`is`(sagaId)).with(Sort.by("seq")), SagaDispatchDocument::class.java)
     private fun entry(id: String) = mongo.findById(id, SagaDispatchDocument::class.java)!!
-    private fun failuresOf(orderId: String): List<String> = sagaOf(orderId).state.getList("failures", String::class.java) ?: emptyList()
+    private fun failuresOf(orderId: String): List<String> = sagaOf(orderId).stateDoc.getList("failures", String::class.java) ?: emptyList()
 
     /** Records an entry as a saga transaction would have; [seq] decides its place in the saga's order. */
     private fun record(
         sagaId: String, seq: Long, type: String = "rl.Charge", payload: String = """{"ref":"r$seq"}""",
         kind: DispatchKind = DispatchKind.COMMAND, routingKey: String? = null,
     ): SagaDispatchDocument = SagaDispatchDocument(
-        id = "$sagaId:$seq", sagaId = sagaId, seq = seq, kind = kind, type = type, payload = org.bson.Document.parse(payload),
+        id = "$sagaId:$seq", sagaId = sagaId, seq = seq, kind = kind, type = type, payload = payload,
         headers = mapOf("correlation-id" to "corr-$sagaId"), routingKey = routingKey, createdAt = clock.now,
     ).also { mongo.insert(it) }
 

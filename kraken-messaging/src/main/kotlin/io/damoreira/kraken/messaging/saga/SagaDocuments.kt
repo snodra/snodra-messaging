@@ -5,7 +5,8 @@ import org.springframework.data.mongodb.core.mapping.Document
 import java.time.Instant
 
 /**
- * One saga instance in the `sagas` collection. [state] is the saga object as JSON (Jackson, the library's codec),
+ * One saga instance in the `sagas` collection. [state] is the saga object as JSON **text** (Jackson, the library's codec: its
+ * exact output, so a `BigDecimal` keeps its scale and a map key may hold a dot or start with `$`),
  * [version] the optimistic version every write checks. While [ended] is false the instance is live: its [associations]
  * route events to it and its [startKey] (`"<type>|<key>=<value>"`, absent for `forceNew` instances) is unique. Ended
  * instances expire through the TTL index on [endedAt].
@@ -14,7 +15,7 @@ import java.time.Instant
 data class SagaDocument(
     @Id val id: String,
     val type: String,
-    val state: org.bson.Document,
+    val state: String,
     val associations: List<Association> = emptyList(),
     val startKey: String? = null,
     val ended: Boolean = false,
@@ -42,7 +43,7 @@ data class SagaDispatchDocument(
     val seq: Long,
     val kind: DispatchKind,
     val type: String,
-    val payload: org.bson.Document,
+    val payload: String,
     val headers: Map<String, String> = emptyMap(),
     val routingKey: String? = null,
     val createdAt: Instant,
@@ -98,7 +99,7 @@ data class SagaFailureDocument(
     val sagaType: String,
     val eventId: String,
     val eventType: String,
-    val payload: org.bson.Document,
+    val payload: String,
     val headers: Map<String, String> = emptyMap(),
     val error: String,
     val attempts: Int,

@@ -1,5 +1,6 @@
 package io.damoreira.kraken.messaging.external
 
+import io.damoreira.kraken.messaging.saga.stateDoc
 import com.mongodb.client.MongoClient
 import com.mongodb.client.MongoClients
 import io.damoreira.kraken.hub.v1.ErrorCode
@@ -405,7 +406,7 @@ class IdempotentHandlerTest {
         h.relay.pollOnce()
 
         val saga = mongo.findAll(SagaDocument::class.java).single()
-        assertEquals(listOf("rl.Charge:UNKNOWN_OUTCOME"), saga.state.getList("failures", String::class.java))
+        assertEquals(listOf("rl.Charge:UNKNOWN_OUTCOME"), saga.stateDoc.getList("failures", String::class.java))
         assertEquals(0, h.charge.bodies.get(), "an unknown outcome is not called again")
         assertNotNull(dispatchEntry().failedAt)
         assertEquals(0, mongo.count(Query(Criteria.where("failedAt").`is`(null).and("dispatchedAt").`is`(null)), "saga_dispatch"), "nothing left pending")

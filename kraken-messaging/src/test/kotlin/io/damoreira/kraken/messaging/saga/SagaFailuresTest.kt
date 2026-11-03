@@ -101,17 +101,17 @@ class SagaFailuresTest {
     fun `retry applies a parked event once and removes the failure`() {
         deliver(RtOrderPlaced("f1"), "e-f1")
         assertEquals(listOf("rt.Flaky:e-f1"), failures.list("rt.Flaky").map { it.id })
-        assertEquals(1, sagas("rt.Order").single().state.getInteger("placed"), "the healthy type handled it at once")
+        assertEquals(1, sagas("rt.Order").single().stateDoc.getInteger("placed"), "the healthy type handled it at once")
         FlakySwitch.broken.set(false)
 
         assertTrue(failures.retry("rt.Flaky:e-f1"))
 
         val saga = sagas("rt.Flaky").single()
-        assertEquals(1, saga.state.getInteger("placed"))
+        assertEquals(1, saga.stateDoc.getInteger("placed"))
         assertEquals("rt.Flaky|orderId=f1", saga.startKey)
         assertEquals(emptyList(), failures.list())
         assertEquals(1, mongo.count(Query(Criteria.where("sagaId").`is`(saga.id)), "saga_dispatch"), "its command was recorded for the relay")
-        assertEquals(1, sagas("rt.Order").single().state.getInteger("placed"), "the other saga type was not re-applied")
+        assertEquals(1, sagas("rt.Order").single().stateDoc.getInteger("placed"), "the other saga type was not re-applied")
         assertTrue(marker("saga:rt.Flaky:e-f1"), "the marker of the parking stays")
         assertFalse(failures.retry("rt.Flaky:e-f1"), "applied once: a second retry finds nothing")
         assertEquals(1, sagas("rt.Flaky").size)

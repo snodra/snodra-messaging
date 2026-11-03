@@ -1,5 +1,7 @@
 package io.damoreira.kraken.messaging.deadline
 
+import io.damoreira.kraken.messaging.saga.payloadDoc
+import io.damoreira.kraken.messaging.saga.stateDoc
 import com.mongodb.client.MongoClient
 import com.mongodb.client.MongoClients
 import io.damoreira.kraken.messaging.MessageContext
@@ -188,11 +190,11 @@ class DeadlineSchedulerTest {
         clock.now = clock.now.plusSeconds(seconds)
     }
 
-    private fun saga(orderId: String) = mongo.findAll(SagaDocument::class.java).single { it.state.getString("orderId") == orderId }
+    private fun saga(orderId: String) = mongo.findAll(SagaDocument::class.java).single { it.stateDoc.getString("orderId") == orderId }
     private fun deadlines(sagaId: String? = null) = mongo.find(
         if (sagaId == null) Query() else Query(Criteria.where("sagaId").`is`(sagaId)), DeadlineDocument::class.java,
     )
-    private fun fired(orderId: String) = saga(orderId).state.getInteger("fired")
+    private fun fired(orderId: String) = saga(orderId).stateDoc.getInteger("fired")
 
     @Test
     fun `a due deadline fires its handler once with its payload`() {
@@ -207,7 +209,7 @@ class DeadlineSchedulerTest {
         scheduler.pollOnce()
 
         assertEquals(1, fired("o1"))
-        assertEquals(listOf("no payment"), saga("o1").state.getList("reasons", String::class.java))
+        assertEquals(listOf("no payment"), saga("o1").stateDoc.getList("reasons", String::class.java))
         val deadline = deadlines().single()
         assertEquals(DeadlineStatus.FIRED, deadline.status)
         assertEquals(clock.now, deadline.finishedAt)
@@ -342,7 +344,7 @@ class DeadlineSchedulerTest {
         val entry = mongo.find(Query(Criteria.where("sagaId").`is`(sagaId)), SagaDispatchDocument::class.java).single()
         assertEquals(DispatchKind.COMMAND, entry.kind)
         assertEquals("dl.CancelCharge", entry.type)
-        assertEquals("ref-o1", entry.payload.getString("ref"))
+        assertEquals("ref-o1", entry.payloadDoc.getString("ref"))
         assertEquals("$sagaId:${entry.seq}", entry.id)
         assertEquals((saga("o1").version) * 1000, entry.seq, "seq follows the saga's new version")
         assertNull(entry.dispatchedAt, "recorded, not sent: the relay sends it")

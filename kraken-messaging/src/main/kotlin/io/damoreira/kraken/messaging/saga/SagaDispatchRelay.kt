@@ -155,7 +155,7 @@ class SagaDispatchRelay(
     private fun dispatch(entry: SagaDispatchDocument): Boolean = when (entry.kind) {
         DispatchKind.EVENT -> {
             tx.executeWithoutResult {
-                events.publishRaw(entry.type, entry.routingKey, entry.payload, entry.headers[DISPATCH_CORRELATION_HEADER] ?: entry.id)
+                events.publishRaw(entry.type, entry.routingKey, org.bson.Document.parse(entry.payload), entry.headers[DISPATCH_CORRELATION_HEADER] ?: entry.id)
                 markDispatched(entry)
             }
             true
@@ -168,7 +168,7 @@ class SagaDispatchRelay(
         val headers = entry.headers.filterKeys { it != DISPATCH_CORRELATION_HEADER } + mapOf("idempotency-key" to entry.id, "saga-id" to entry.sagaId)
         val outcome = try {
             runBlocking(CorrelationContext(correlationId)) {
-                commands.sendRaw(entry.type, entry.payload.toJson().toByteArray(Charsets.UTF_8), SendOptions(routingKey = entry.routingKey, headers = headers))
+                commands.sendRaw(entry.type, entry.payload.toByteArray(Charsets.UTF_8), SendOptions(routingKey = entry.routingKey, headers = headers))
             }
         } catch (e: Exception) {
             if (e is InterruptedException) Thread.currentThread().interrupt()

@@ -5,6 +5,7 @@ import io.damoreira.kraken.messaging.api.Command
 import io.damoreira.kraken.messaging.api.Event
 import io.damoreira.kraken.messaging.api.MessageType
 import org.slf4j.MDC
+import java.math.BigDecimal
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
@@ -169,3 +170,44 @@ internal class SettableClock(@Volatile var now: Instant) : Clock() {
     override fun withZone(zone: ZoneId?): Clock = this
     override fun instant(): Instant = now
 }
+
+
+@MessageType("rt.Priced")
+data class RtPriced(val orderId: String, val amount: BigDecimal, val tags: Map<String, String>) : Event
+
+@MessageType("rt.PriceCheck")
+data class RtPriceCheck(val orderId: String) : Event
+
+@MessageType("rt.ChargeAmount")
+data class RtChargeAmount(val amount: BigDecimal, val tags: Map<String, String>) : Command<Unit>
+
+/** Keeps a `BigDecimal` and a map with awkward keys (`a.b`, `$c`) in its state and sends them in commands. */
+@Saga(name = "rt.Price")
+class RtPriceSaga {
+    var orderId: String? = null
+    var amount: BigDecimal = BigDecimal.ZERO
+    var tags: Map<String, String> = emptyMap()
+
+    @StartSaga
+    @SagaEventHandler(associationProperty = "orderId")
+    fun on(e: RtPriced, commands: SagaCommands) {
+        orderId = e.orderId
+        amount = e.amount
+        tags = e.tags
+        commands.send(RtChargeAmount(amount, tags))
+    }
+
+    @SagaEventHandler(associationProperty = "orderId")
+    fun on(e: RtPriceCheck, commands: SagaCommands) {
+        commands.send(RtChargeAmount(amount, tags))
+    }
+}
+
+/** The saga state as a BSON document, for assertions (it is stored as JSON text). */
+internal val SagaDocument.stateDoc: org.bson.Document get() = org.bson.Document.parse(state)
+
+/** The payload of a dispatch entry as a BSON document, for assertions (it is stored as JSON text). */
+internal val SagaDispatchDocument.payloadDoc: org.bson.Document get() = org.bson.Document.parse(payload)
+
+/** The payload of a parked event as a BSON document, for assertions (it is stored as JSON text). */
+internal val SagaFailureDocument.payloadDoc: org.bson.Document get() = org.bson.Document.parse(payload)

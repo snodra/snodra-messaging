@@ -50,7 +50,7 @@ class SagaIndexesTest {
     }
 
     private fun saga(id: String, startKey: String?, ended: Boolean) =
-        SagaDocument(id, "PaymentSaga", org.bson.Document(), startKey = startKey, ended = ended, endedAt = if (ended) now else null, createdAt = now, updatedAt = now)
+        SagaDocument(id, "PaymentSaga", "{}", startKey = startKey, ended = ended, endedAt = if (ended) now else null, createdAt = now, updatedAt = now)
 
     @Test
     fun `the indexes of the spec's storage table exist`() {

@@ -1,5 +1,6 @@
 package io.damoreira.kraken.messaging.config
 
+import io.damoreira.kraken.messaging.saga.stateDoc
 import com.mongodb.client.MongoClients
 import io.damoreira.kraken.messaging.MessageContext
 import io.damoreira.kraken.messaging.config.e2escan.E2eCounter
@@ -84,7 +85,7 @@ class SagaAutoConfigurationMongoTest {
 
                 await().atMost(Duration.ofSeconds(20)).untilAsserted {
                     val saga = mongo.findAll(SagaDocument::class.java).single()
-                    assertEquals(true, saga.state.getBoolean("timedOut"), "the deadline fired")
+                    assertEquals(true, saga.stateDoc.getBoolean("timedOut"), "the deadline fired")
                     assertEquals(1, counter.prints.get(), "the adapter's body ran once")
                     val entry = mongo.findAll(SagaDispatchDocument::class.java).single()
                     assertNotNull(entry.dispatchedAt, "the relay marked the command dispatched")
