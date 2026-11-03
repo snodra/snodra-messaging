@@ -15,6 +15,9 @@ interface SagaMetrics {
     /** A deadline of [name] ran its handler. */
     fun deadlineFired(name: String) = Unit
 
+    /** The SCHEDULED deadlines past their due time after a scheduler poll, per deadline name (empty when none): `kraken_deadlines_due{name}`. */
+    fun deadlinesOverdue(byName: Map<String, Long>) = Unit
+
     /** A `SagaCommandFailed` for [commandType] reached no saga or handler: logged at error, `kraken_saga_command_failures_total`. */
     fun commandFailureUnhandled(commandType: String, reason: SagaCommandFailed.Reason) = Unit
 }
