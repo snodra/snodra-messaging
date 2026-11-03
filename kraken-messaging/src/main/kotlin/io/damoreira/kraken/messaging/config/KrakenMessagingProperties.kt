@@ -22,6 +22,7 @@ data class KrakenMessagingProperties(
     val outbox: Outbox = Outbox(),
     val idempotency: Idempotency = Idempotency(),
     val security: Security = Security(),
+    val external: External = External(),
 ) {
     data class Hub(
         /** Connect to the hub and expose the hub-backed `CommandBus`/`QueryBus` (addition beyond the spec table). */
@@ -252,4 +253,33 @@ data class KrakenMessagingProperties(
         /** Put the current request's bearer token in the hub request's `authorization` header. */
         val forwardJwt: Boolean = true,
     )
+
+    /** `external.*`: the integration toolkit's inbound edge (S1 plan, Tasks 10 and 13). */
+    data class External(
+        val kafka: ExternalKafka = ExternalKafka(),
+    )
+
+    data class ExternalKafka(
+        /**
+         * Partner Kafka topics consumed into local events, by source name. Each source needs an `ExternalRecordTranslator` bean
+         * named like it (a missing one fails the startup naming the source).
+         */
+        val sources: Map<String, Source> = emptyMap(),
+    )
+
+    /** One partner topic, `external.kafka.sources.<name>`. */
+    data class Source(
+        /** Bootstrap servers of the partner's cluster; defaults to `kafka.bootstrap-servers`. */
+        val bootstrapServers: String? = null,
+        /** The partner's topic. */
+        val topic: String,
+        /** Consumer group; defaults to `<service-name>.external.<name>`. */
+        val groupId: String? = null,
+        /** Extra consumer properties (for example `security.protocol`); bootstrap servers, group id, deserializers and auto-commit are not overridable. */
+        val properties: Map<String, String> = emptyMap(),
+    ) {
+        init {
+            require(topic.isNotBlank()) { "the topic of an external Kafka source must not be blank" }
+        }
+    }
 }
