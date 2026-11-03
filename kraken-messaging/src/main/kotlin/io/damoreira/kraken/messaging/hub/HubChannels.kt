@@ -4,6 +4,7 @@ import io.grpc.Grpc
 import io.grpc.ManagedChannel
 import io.grpc.ManagedChannelBuilder
 import io.grpc.TlsChannelCredentials
+import java.io.ByteArrayInputStream
 import java.io.IOException
 import java.nio.file.Path
 import java.util.concurrent.TimeUnit
@@ -11,9 +12,18 @@ import java.util.concurrent.TimeUnit
 /**
  * TLS towards the hub (P5a, ADR 0018). [enabled] false is plain text; [caFile] is the PEM CA that signed the hub's
  * certificate (the JVM's system roots when null); [serverName] is the name the certificate is verified against instead
- * of the address's host. mTLS (a client certificate) is P5c: see [DefaultHubChannelFactory.customizeTls].
+ * of the address's host. [clientCertificate] (P5c, ADR 0020) is the pair every TLS channel presents to the hub: it implies TLS ([tls]), and is
+ * read again for each new channel ([HubClientCertificate.refresh]), so a rotated pair needs no restart.
  */
-data class HubTls(val enabled: Boolean = false, val caFile: Path? = null, val serverName: String? = null)
+data class HubTls(
+    val enabled: Boolean = false,
+    val caFile: Path? = null,
+    val serverName: String? = null,
+    val clientCertificate: HubClientCertificate? = null,
+) {
+    /** True when the channel talks TLS: [enabled], or a client certificate is configured (it can only be presented over TLS). */
+    val tls: Boolean get() = enabled || clientCertificate != null
+}
 
 /**
  * The [HubChannelFactory] of the starter: one channel per connection attempt, plain text or TLS by [tls], for every
@@ -24,7 +34,7 @@ data class HubTls(val enabled: Boolean = false, val caFile: Path? = null, val se
 open class DefaultHubChannelFactory(private val tls: HubTls = HubTls()) : HubChannelFactory {
     override fun channel(target: String): ManagedChannel = try {
         val builder: ManagedChannelBuilder<*> =
-            if (tls.enabled) Grpc.newChannelBuilder(target, credentials()) else ManagedChannelBuilder.forTarget(target).usePlaintext()
+            if (tls.tls) Grpc.newChannelBuilder(target, credentials()) else ManagedChannelBuilder.forTarget(target).usePlaintext()
         tls.serverName?.let { builder.overrideAuthority(it) }
         builder
             .keepAliveTime(10, TimeUnit.SECONDS)
@@ -33,13 +43,13 @@ open class DefaultHubChannelFactory(private val tls: HubTls = HubTls()) : HubCha
             .build()
     } catch (e: RuntimeException) {
         // gRPC reads the CA certificates while building: say which setting is wrong instead of a bare parser message.
-        if (!tls.enabled || e is IllegalStateException) throw e
+        if (!tls.tls || e is IllegalStateException) throw e
         throw IllegalStateException("${if (tls.caFile != null) "kraken.messaging.hub.tls.ca-file ${tls.caFile}" else "kraken.messaging.hub.tls"} cannot be used: ${e.message}", e)
     }
 
     /** Builds a channel (it does not connect) and drops it: a bad CA file fails the startup, not every attempt. */
     fun validate() {
-        if (tls.enabled) channel("localhost:1").shutdownNow()
+        if (tls.tls) channel("localhost:1").shutdownNow()
     }
 
     private fun credentials(): io.grpc.ChannelCredentials {
@@ -51,13 +61,24 @@ open class DefaultHubChannelFactory(private val tls: HubTls = HubTls()) : HubCha
         } catch (e: java.security.GeneralSecurityException) {
             throw IllegalStateException("kraken.messaging.hub.tls.ca-file ${tls.caFile} cannot be used: ${e.message}", e)
         }
+        tls.clientCertificate?.let { source ->
+            // The files are read again for every channel: a rotated pair is presented by the next connection attempt.
+            val certificate = source.refresh()
+            try {
+                builder.keyManager(ByteArrayInputStream(certificate.chainPem), ByteArrayInputStream(certificate.keyPem))
+            } catch (e: IOException) {
+                throw IllegalStateException("kraken.messaging.hub.tls.client-cert-file / client-key-file cannot be used: ${e.message}", e)
+            } catch (e: java.security.GeneralSecurityException) {
+                throw IllegalStateException("kraken.messaging.hub.tls.client-cert-file / client-key-file cannot be used: ${e.message}", e)
+            }
+        }
         customizeTls(builder)
         return builder.build()
     }
 
     /**
-     * The hook for mTLS (P5c): called with the credentials builder of every TLS channel, where a client certificate
-     * (`keyManager(...)`) will be set. Not implemented in P5a: it does nothing.
+     * A hook for a subclass: called with the credentials builder of every TLS channel, after the CA and the client certificate
+     * ([HubTls.clientCertificate]) were set. The starter's own channel factory does nothing here.
      */
     protected open fun customizeTls(credentials: TlsChannelCredentials.Builder) = Unit
 }
