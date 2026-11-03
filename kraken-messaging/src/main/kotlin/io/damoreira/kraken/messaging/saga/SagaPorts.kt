@@ -64,6 +64,13 @@ interface SagaFailureStore {
     /** Deletes the failure; false when there was none. */
     fun delete(id: String): Boolean
 
+    /**
+     * Records that a retry of the failure [id] failed again: `attempts` grows by [attempts], `error` and `lastFailedAt` are
+     * replaced. **Never inserts**: false when the failure no longer exists (a `discard` or a concurrent retry got there first),
+     * so the bookkeeping of a failed retry cannot bring a discarded failure back.
+     */
+    fun failedAgain(id: String, error: String, attempts: Int, now: Instant): Boolean
+
     /** The failures of [sagaType] (every type when null), oldest `lastFailedAt` first. */
     fun list(sagaType: String? = null): List<SagaFailureDocument>
 }
@@ -156,6 +163,12 @@ class MongoSagaFailureStore(private val mongo: MongoTemplate) : SagaFailureStore
 
     override fun delete(id: String): Boolean =
         mongo.remove(Query(Criteria.where("_id").`is`(id)), SagaFailureDocument::class.java).deletedCount == 1L
+
+    override fun failedAgain(id: String, error: String, attempts: Int, now: Instant): Boolean = mongo.updateFirst(
+        Query(Criteria.where("_id").`is`(id)),
+        Update().inc("attempts", attempts).set("error", error).set("lastFailedAt", now),
+        SagaFailureDocument::class.java,
+    ).matchedCount == 1L
 
     override fun list(sagaType: String?): List<SagaFailureDocument> = mongo.find(
         Query(sagaType?.let { Criteria.where("sagaType").`is`(it) } ?: Criteria()).with(Sort.by("lastFailedAt")),

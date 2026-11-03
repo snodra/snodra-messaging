@@ -346,6 +346,12 @@ private class InMemorySagaStore : TransactionOperations {
 
             override fun delete(id: String) = failures.remove(id) != null
 
+            override fun failedAgain(id: String, error: String, attempts: Int, now: Instant): Boolean {
+                val failure = failures[id] ?: return false
+                failures[id] = failure.copy(attempts = failure.attempts + attempts, error = error, lastFailedAt = now)
+                return true
+            }
+
             override fun list(sagaType: String?) = failures.values.filter { sagaType == null || it.sagaType == sagaType }.sortedBy { it.lastFailedAt }
         },
         markers = object : SagaMarkerStore {

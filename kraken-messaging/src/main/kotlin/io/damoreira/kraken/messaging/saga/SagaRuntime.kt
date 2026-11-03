@@ -98,7 +98,7 @@ class SagaRuntime(
      * Re-delivers a parked event ([failure], from `SagaFailures`) to its saga type, ignoring the marker (it exists by
      * design): in one transaction the failure is deleted and the event applied, with the retries of R4. Returns true
      * when it was applied (or no longer matches anything), false when it failed again (the failure stays with `attempts`
-     * increased and the new error) or was no longer parked (a concurrent retry or discard).
+     * increased and the new error) or was no longer parked (a concurrent retry or discard: it is then not brought back).
      */
     fun reapply(failure: SagaFailureDocument): Boolean {
         val sagaType = byName[failure.sagaType]
@@ -409,10 +409,12 @@ class SagaRuntime(
     /** A reapplied failure failed again: it stays, with the attempts of this try added and the new error. */
     private fun parkAgain(failure: SagaFailureDocument, error: String, attempts: Int) {
         val now = clock.instant()
-        tx.executeWithoutResult {
-            ports.failures.save(failure.copy(attempts = failure.attempts + attempts, error = error, lastFailedAt = now))
+        val stillParked = tx.execute { ports.failures.failedAgain(failure.id, error, attempts, now) } == true
+        if (stillParked) {
+            log.error("Saga type {} failed again on parked event {}: {}", failure.sagaType, failure.eventId, error)
+        } else {
+            log.warn("Saga type {} failed again on parked event {}, which was discarded or retried meanwhile: {}", failure.sagaType, failure.eventId, error)
         }
-        log.error("Saga type {} failed again on parked event {}: {}", failure.sagaType, failure.eventId, error)
     }
 
     /** The headers kept with a parked event: enough to rebuild its [MessageContext] ([contextOf]). */

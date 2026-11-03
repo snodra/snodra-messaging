@@ -17,11 +17,14 @@ import org.springframework.data.mongodb.core.MongoTemplate
 import org.springframework.data.mongodb.core.SimpleMongoClientDatabaseFactory
 import org.springframework.data.mongodb.core.query.Criteria
 import org.springframework.data.mongodb.core.query.Query
+import org.springframework.transaction.support.TransactionSynchronization
+import org.springframework.transaction.support.TransactionSynchronizationManager
 import org.springframework.transaction.support.TransactionTemplate
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
@@ -45,8 +48,31 @@ class RtFlakySaga {
     }
 }
 
+/**
+ * A failure store that plays a `discard` committed by someone else right after the [after]th rolled-back attempt of a
+ * retry, i.e. between the last failed attempt and the bookkeeping that records it.
+ */
+private class DiscardAfterRollbacks(private val inner: SagaFailureStore, private val plain: MongoTemplate, private val after: Int) : SagaFailureStore by inner {
+    val rollbacks = AtomicInteger()
+
+    override fun delete(id: String): Boolean {
+        val deleted = inner.delete(id)
+        if (deleted) {
+            TransactionSynchronizationManager.registerSynchronization(object : TransactionSynchronization {
+                override fun afterCompletion(status: Int) {
+                    if (status == TransactionSynchronization.STATUS_ROLLED_BACK && rollbacks.incrementAndGet() == after) {
+                        plain.remove(Query(Criteria.where("_id").`is`(id)), SagaFailureDocument::class.java)
+                    }
+                }
+            })
+        }
+        return deleted
+    }
+}
+
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class SagaFailuresTest {
+    private lateinit var plain: MongoTemplate
     private val mongoContainer = KrakenContainers.mongo()
     private lateinit var mongo: MongoTemplate
     private lateinit var tx: TransactionTemplate
@@ -62,6 +88,7 @@ class SagaFailuresTest {
         mongoContainer.start()
         val factory = SimpleMongoClientDatabaseFactory(MongoClients.create(mongoContainer.connectionString + "/?directConnection=true"), "saga_failures_test")
         mongo = MongoTemplate(factory)
+        plain = MongoTemplate(SimpleMongoClientDatabaseFactory(MongoClients.create(mongoContainer.connectionString + "/?directConnection=true"), "saga_failures_test"))
         tx = TransactionTemplate(MongoTransactionManager(factory))
         SagaIndexes(mongo, Duration.ofDays(30), Duration.ofDays(7), Duration.ofDays(7)).afterPropertiesSet()
         listOf("processed_events", "saga_failures").forEach { if (!mongo.collectionExists(it)) mongo.createCollection(it) }
@@ -133,6 +160,27 @@ class SagaFailuresTest {
         assertTrue("flaky on f2" in after.error, after.error)
         assertEquals(0, sagas("rt.Flaky").size)
         assertEquals(before.payload, after.payload)
+    }
+
+    @Test
+    fun `a discard that lands during a failing retry is not undone by the retry's bookkeeping`() {
+        val discarding = DiscardAfterRollbacks(MongoSagaFailureStore(mongo), plain, after = 2)
+        val ports = SagaPorts.mongo(mongo).let { SagaPorts(it.sagas, it.dispatch, it.deadlines, discarding, it.markers) }
+        val racing = SagaRuntime(
+            types = SagaModelScanner(resolver, codec).scan(listOf(RtFlakySaga::class)), ports = ports, tx = tx, codec = codec, typeResolver = resolver,
+            beans = { RtBean("the-bean") }, clock = clock,
+            retry = SagaRetry(RetryPolicy(maxAttempts = 3, initialBackoff = Duration.ofMillis(5), multiplier = 1.0, maxBackoff = Duration.ofMillis(20))),
+        )
+        val admin = SagaFailures(MongoSagaFailureStore(mongo), racing)
+        val type = resolver.typeNameOf(RtOrderPlaced::class)
+        racing.process(type, codec.encode(RtOrderPlaced("f9")), MessageContext("e-f9", type, "corr-e-f9", null, emptySet(), null, mapOf("id" to "e-f9", "type" to type)))
+        assertEquals(1, admin.list().size)
+        discarding.rollbacks.set(0)
+
+        assertFalse(admin.retry("rt.Flaky:e-f9"), "it failed again")
+
+        assertEquals(2, discarding.rollbacks.get(), "both attempts of the retry rolled back, the discard landed after the last one")
+        assertEquals(emptyList(), admin.list(), "the discarded failure stays discarded")
     }
 
     @Test
