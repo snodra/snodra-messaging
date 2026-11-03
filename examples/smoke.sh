@@ -8,6 +8,8 @@
 #        SKIP_STREAM=1 skips the streaming-query steps, ONLY_STREAM=1 runs only them;
 #        SKIP_SUBSCRIBE=1 skips the subscription-query steps, ONLY_SUBSCRIBE=1 runs only them, B=http://localhost:8092 is
 #        service-b's HTTP address;
+#        SKIP_POSTCARD=1 skips the saga steps 24-24e (the postcard printer), ONLY_POSTCARD=1 runs only them, PRINTER=http://localhost:8093
+#        is the fake printer's address;
 #        SECURE=1 runs against the secure sandbox (kraken/infra/compose.secure.yaml, secrets from
 #        kraken/infra/scripts/dev-hub-pki.sh): the hub calls are https with the dev CA and carry the dashboard token, every
 #        other step runs unchanged, and the security steps 21 and 21b are added; SKIP_SECURE=1 skips those two, ONLY_SECURE=1
@@ -671,6 +673,82 @@ subscribe_steps() {
   echo "   $body"
 }
 
+# S1 (sagas, ADR 0021): service-b's GreetingDeliverySaga gets every delivered greeting printed by the fake printer
+# (kraken/infra, localhost:8093), which answers by the greeting name's prefix. Each step greets with a name of its
+# kind through service-a, then reads `GET $B/postcards/<id>` (service-b's projection of PostcardPrinted/PostcardFailed,
+# 404 while the postcard is in flight) until it is printed or failed. Step 24: webhook-* (the printer posts a signed
+# webhook; replaying it is a 200 no-op and a wrong secret is a 401). 24b: topic-* (the printer produces to printer.events).
+# 24c: poll-* (the saga polls the printer every 2 s). 24d: silent-* (the printer never answers: PostcardFailed TIMEOUT after
+# the saga's 30 s). 24e: crash-* (the printer accepts and dies before replying: PostcardFailed UNKNOWN_OUTCOME, and compose
+# brings the printer back). The shared webhook secret is the sandbox's dev-only value. SKIP_POSTCARD=1 skips these steps,
+# ONLY_POSTCARD=1 runs only them; PRINTER=http://localhost:8093 is the printer's address, PRINTER_WEBHOOK_SECRET its secret.
+PRINTER=${PRINTER:-http://localhost:8093}
+PRINTER_WEBHOOK_SECRET=${PRINTER_WEBHOOK_SECRET:-dev-only-printer-webhook-secret}
+
+# Sends a greeting named <name> through service-a and prints the id (the job id of its postcard).
+greet() { # <name>
+  local body
+  body=$(curl -fsS -X POST "$A/greetings" -H 'content-type: application/json' -d "{\"name\":\"$1\"}") || fail "POST /greetings for '$1' failed"
+  echo "$body" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p'
+}
+
+# Waits until the postcard <id> has an outcome and prints it; fails when it is not <status> (with <reason> when given) within
+# <seconds>. The elapsed seconds are left in POSTCARD_SECONDS.
+await_postcard() { # <id> <PRINTED|FAILED> <reason or -> <seconds>
+  local id=$1 status=$2 reason=$3 limit=$4 body="" start=$SECONDS
+  while [ $((SECONDS - start)) -lt "$limit" ]; do
+    body=$(curl -sS "$B/postcards/$id" 2>/dev/null || true)
+    if echo "$body" | grep -q '"jobId"'; then break; fi
+    sleep 1
+  done
+  POSTCARD_SECONDS=$((SECONDS - start))
+  echo "$body" | grep -q "\"status\":\"$status\"" || fail "postcard $id: expected $status within ${limit}s, got '${body:-nothing}'"
+  [ "$reason" = "-" ] || echo "$body" | grep -q "\"reason\":\"$reason\"" || fail "postcard $id: expected reason $reason, got: $body"
+  echo "   postcard $id: $body (after ${POSTCARD_SECONDS}s)"
+}
+
+postcard_steps() {
+  local run id body code
+  run=$(date +%s)
+
+  echo "24. webhook-$run: the printer posts a signed webhook to service-b; a replay is a no-op, a wrong secret is refused ..."
+  id=$(greet "webhook-$run"); [ -n "$id" ] || fail "no id in the greeting reply"
+  await_postcard "$id" PRINTED - 90
+  body="{\"deliveryId\":\"printed-$id\",\"jobId\":\"$id\",\"name\":\"webhook-$run\"}"
+  code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$B/printer/webhook" -H 'content-type: application/json' \
+    -H "X-Kraken-Webhook-Secret: $PRINTER_WEBHOOK_SECRET" -d "$body") || fail "replaying the webhook failed"
+  [ "$code" = "200" ] || fail "a replayed webhook delivery should be answered 200, got $code"
+  code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$B/printer/webhook" -H 'content-type: application/json' \
+    -H 'X-Kraken-Webhook-Secret: not-the-secret' -d "$body") || fail "posting a webhook with a wrong secret failed"
+  [ "$code" = "401" ] || fail "a webhook with a wrong secret should be answered 401, got $code"
+  echo "   replay -> 200, wrong secret -> 401"
+
+  echo "24b. topic-$run: the printer produces to printer.events, service-b translates the record ..."
+  id=$(greet "topic-$run"); [ -n "$id" ] || fail "no id in the greeting reply"
+  await_postcard "$id" PRINTED - 60
+
+  echo "24c. poll-$run: nobody tells service-b; its saga polls the printer every 2 s until the job is done ..."
+  id=$(greet "poll-$run"); [ -n "$id" ] || fail "no id in the greeting reply"
+  await_postcard "$id" PRINTED - 60
+  curl -fsS "$PRINTER/jobs/$id" | grep -q '"status":"DONE"' || fail "the printer's job $id should be DONE after the saga polled it"
+
+  echo "24d. silent-$run: the printer never answers, the saga's 30 s timeout publishes PostcardFailed TIMEOUT ..."
+  id=$(greet "silent-$run"); [ -n "$id" ] || fail "no id in the greeting reply"
+  await_postcard "$id" FAILED TIMEOUT 60
+  [ "$POSTCARD_SECONDS" -ge 25 ] || fail "the timeout fired after ${POSTCARD_SECONDS}s, before the 30 s the saga gives the printer"
+
+  echo "24e. crash-$run: the printer accepts and dies before replying, the outcome is unknown: PostcardFailed UNKNOWN_OUTCOME ..."
+  id=$(greet "crash-$run"); [ -n "$id" ] || fail "no id in the greeting reply"
+  await_postcard "$id" FAILED UNKNOWN_OUTCOME 60
+  [ "$POSTCARD_SECONDS" -lt 25 ] || fail "the unknown outcome took ${POSTCARD_SECONDS}s: it should be reported at once, not by the 30 s timeout"
+  echo "   waiting for compose to bring the printer back ..."
+  for i in $(seq 1 60); do
+    curl -fsS "$PRINTER/actuator/health" 2>/dev/null | grep -q '"status":"UP"' && break
+    [ "$i" -eq 60 ] && fail "the printer did not come back within 60s after crashing"
+    sleep 1
+  done
+}
+
 # P5a (ADR 0018), only with SECURE=1 against the secure sandbox (kraken/infra/compose.secure.yaml). Step 21: a service
 # with a token the ACL does not know, and one with a valid token that grants only another service name, are refused by
 # both hubs and logged by the client as a registration rejection (ERROR once per hub), and never listed on /topology; a
@@ -1046,6 +1124,12 @@ if [ "${ONLY_SUBSCRIBE:-0}" = "1" ]; then
   exit 0
 fi
 
+if [ "${ONLY_POSTCARD:-0}" = "1" ]; then
+  postcard_steps
+  echo "SMOKE OK (postcard steps only)"
+  exit 0
+fi
+
 if [ "${ONLY_SECURE:-0}" = "1" ]; then
   [ "$SECURE" = "1" ] || fail "ONLY_SECURE=1 needs SECURE=1"
   secure_steps
@@ -1151,6 +1235,7 @@ echo "   delivered: $TEXTS"
 [ "${SKIP_SCATTER:-0}" = "1" ] || scatter_steps
 [ "${SKIP_STREAM:-0}" = "1" ] || stream_steps
 [ "${SKIP_SUBSCRIBE:-0}" = "1" ] || subscribe_steps
+[ "${SKIP_POSTCARD:-0}" = "1" ] || postcard_steps
 if [ "$SECURE" = "1" ] && [ "${SKIP_SECURE:-0}" != "1" ]; then secure_steps; fi
 if [ "$JWT" = "1" ] && [ "${SKIP_JWT:-0}" != "1" ]; then jwt_steps; fi
 if [ "$MTLS" = "1" ] && [ "${SKIP_MTLS:-0}" != "1" ]; then mtls_steps; fi
