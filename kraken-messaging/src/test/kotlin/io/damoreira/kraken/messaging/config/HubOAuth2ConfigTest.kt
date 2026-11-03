@@ -201,6 +201,31 @@ class HubOAuth2ConfigTest {
         assertTrue(missing.toString() in unreadable, unreadable)
     }
 
+    @Test fun `any oauth2 setting without a token uri fails the startup naming it, like the Rust library does`(@TempDir dir: Path) {
+        val file = dir.resolve("s").also { Files.writeString(it, "x") }
+        val strays = mapOf(
+            "kraken.messaging.hub.oauth2.client-id=orders" to "kraken.messaging.hub.oauth2.client-id",
+            "kraken.messaging.hub.oauth2.client-secret=$secret" to "kraken.messaging.hub.oauth2.client-secret",
+            "kraken.messaging.hub.oauth2.client-secret-file=$file" to "kraken.messaging.hub.oauth2.client-secret-file",
+            "kraken.messaging.hub.oauth2.scope=kraken" to "kraken.messaging.hub.oauth2.scope",
+            "kraken.messaging.hub.oauth2.ca-file=$file" to "kraken.messaging.hub.oauth2.ca-file",
+        )
+        for ((property, name) in strays) {
+            val message = failure(starter().withPropertyValues(property))
+            assertTrue(name in message && "token-uri" in message, message)
+            assertFalse(secret in message, "the secret never goes into the message")
+        }
+        val envStrays = listOf(
+            "KRAKEN_HUB_OAUTH2_CLIENT_ID" to "orders", "KRAKEN_HUB_OAUTH2_CLIENT_SECRET" to secret,
+            "KRAKEN_HUB_OAUTH2_CLIENT_SECRET_FILE" to file.toString(), "KRAKEN_HUB_OAUTH2_SCOPE" to "kraken", "KRAKEN_HUB_OAUTH2_CA" to file.toString(),
+        )
+        for ((variable, value) in envStrays) {
+            val message = failure(starter().withEnv(variable to value))
+            assertTrue(variable in message && "KRAKEN_HUB_OAUTH2_TOKEN_URI" in message, message)
+            assertFalse(secret in message)
+        }
+    }
+
     @Test fun `a token uri that is not http or https fails the startup`() {
         val chain = failure(starter().withPropertyValues("kraken.messaging.hub.oauth2.token-uri=ftp://kc/token", "kraken.messaging.hub.oauth2.client-secret=$secret"))
         assertTrue("kraken.messaging.hub.oauth2" in chain && "http" in chain, chain)

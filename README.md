@@ -430,7 +430,8 @@ kraken:
 
 The environment forms are `KRAKEN_HUB_OAUTH2_TOKEN_URI`, `_CLIENT_ID`, `_CLIENT_SECRET`, `_CLIENT_SECRET_FILE`, `_SCOPE` and `_CA`
 (relaxed binding also gives `KRAKEN_MESSAGING_HUB_OAUTH2_*`); the properties win. A token URI together with a static `hub.token`
-or `hub.token-file`, or without any secret, fails the startup.
+or `hub.token-file`, or without any secret, fails the startup. So does any `hub.oauth2.*` setting (or `KRAKEN_HUB_OAUTH2_*` variable)
+without a token URI: a stray client id or secret would otherwise leave the service silently unauthenticated.
 
 **How it behaves.**
 
@@ -440,11 +441,17 @@ or `hub.token-file`, or without any secret, fails the startup.
 - **One token per process**, shared by every hub connection (N hubs, one fetch), fetched single-flight: connections that start
   together wait for the same request. Each new stream (connect, reconnect) gets a token before it sends `Register`.
 - A cached token is used while more than its refresh margin is left; the provider **renews it in the background** at that
-  point: margin = 20 % of the lifetime, at least 5 s, and at most half of it (see "Divergences"). The renewal goes to every live
+  point: margin = 20 % of the lifetime, at least 5 s, and at most half of it (a 6 s token is renewed after 3 s; the Rust library
+  uses the same rule). A lifetime over 10 years (a huge `expires_in`) is cut to 10 years. The renewer looks at the wall clock at
+  least every 5 s, so a clock that jumped ahead while the machine slept does not postpone the renewal. The renewal goes to every live
   stream as `ClientMessage.credentials`, when the stream's ack lists `credentials-refresh` (every `Register` declares it, static
   token sessions too). The hub closes a JWT session at `exp` plus `KRAKEN_HUB_JWT_EXPIRY_GRACE` (30 s) without one. A stream
   whose ack lacks the capability gets nothing: its next reconnect uses the new token.
 - A renewal that fails keeps the current token and retries with a back-off from 1 s to 30 s (one `WARN` per distinct error).
+- A stream the hub closes (or a `Register` it refuses) with `UNAUTHENTICATED` ("token expired", "unknown signing key",
+  "credentials expired", a refused refresh) drops the cached token: the reconnect fetches a new one instead of presenting the
+  same one until its margin runs out. `PERMISSION_DENIED` (wrong `azp`, no `[[service]]` entry) keeps it: a new token would not help
+  and the identity provider is not asked again for every retry.
 - **No token, no stream.** When the endpoint cannot give a token (401 `invalid_client`, down, TLS, an unusable answer) the stream is
   not opened: the attempt fails locally, `HubConnection.lastRejection` holds `UNAUTHENTICATED` and `awaitRegistered` throws
   `HubRegistrationRejectedException` ("no access token for ...: invalid_client: ..." with the endpoint's `error` and
@@ -457,13 +464,13 @@ or `hub.token-file`, or without any secret, fails the startup.
   and `env` (the starter's `SanitizingFunction` masks `hub.oauth2.client-secret` and `KRAKEN_HUB_OAUTH2_CLIENT_SECRET`).
 
 **What you can read.** `HubConnections.authStatus()` returns `kind` (`NONE`, `TOKEN`, `JWT`), the current token's `tokenExpiresAt`, the
-`lastTokenError` (null once a fetch worked), `tokenFetches` by result and `credentialsRefreshesSent`: wire it into your own
+`lastTokenError` (null once a fetch worked), `tokenFetches` by result and `credentialsRefreshesSent` (one process-wide counter: it never drops when a hub connection goes away): wire it into your own
 health indicator. With Micrometer on the classpath the starter binds `kraken_messaging_hub_token_fetches_total{result}`
 (`ok`, `http_error`, `oauth_error`, `io_error`, `bad_response`) and `kraken_messaging_hub_credentials_refreshes_sent_total`.
 
 **Divergences from the Rust library** (same design, ecosystem differences): the Kotlin starter reports through
-`HubConnections.authStatus()` and Micrometer counters where Rust has an accessor. The refresh margin is capped at half the lifetime (a 6 s token is renewed after 3 s); with
-lifetimes of 10 s or more it is exactly "20 %, at least 5 s".
+`HubConnections.authStatus()` and Micrometer counters where Rust has an accessor. A token URI host with an underscore in
+its name is refused by the JDK's URI parser (the host would be null), so it fails the startup here; the Rust library accepts it.
 
 ### Handlers
 

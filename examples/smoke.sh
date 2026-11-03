@@ -810,19 +810,21 @@ await_auth_kind() { # <hub url> <service> <kind>
   fail "$2 does not show authKind $3 on $1/topology within 60s (last: '$sess')"
 }
 
-# How many lines of <container>'s log contain <pattern>.
-log_count() { # <container> <pattern>
-  { docker logs "$1" 2>&1 | grep -c -- "$2"; } || true
+# How many lines of <container>'s log contain <pattern>; with <since> (an RFC 3339 time) only the lines logged from then on.
+log_count() { # <container> <pattern> [<since>]
+  { docker logs ${3:+--since "$3"} "$1" 2>&1 | grep -c -- "$2"; } || true
 }
 
 jwt_steps() {
   local h1=${HUB_CONTAINER:-kraken-hub} h2=${HUB2_CONTAINER:-kraken-hub-2} c=${C_CONTAINER:-kraken-example-c}
-  local h svc sess id since kind exp i k advanced registered_before registered_after expired
+  local h svc sess id since kind exp i k advanced registered_before registered_after expired jwt_started
   local ids=() sinces=() exps=()    # per (hub, service), in the order of the loops below (no associative arrays: macOS bash 3.2)
   command -v docker >/dev/null || fail "docker CLI needed for the JWT steps (or set SKIP_JWT=1)"
   docker inspect "$h1" >/dev/null 2>&1 || fail "container $h1 not found (set HUB_CONTAINER, or SKIP_JWT=1)"
   docker inspect "$h2" >/dev/null 2>&1 || fail "container $h2 not found (set HUB2_CONTAINER, or SKIP_JWT=1)"
   docker inspect "$c" >/dev/null 2>&1 || fail "container $c not found (set C_CONTAINER, or SKIP_JWT=1)"
+  # The hubs' logs keep the history of earlier runs: "credentials expired" is only looked for from here on.
+  jwt_started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
   echo "22. both hubs show service-b (Kotlin) and service-c (Rust) with authKind jwt and an expiresAt, service-a with token ..."
   for h in "$HUB" "$HUB2"; do
@@ -869,9 +871,9 @@ jwt_steps() {
   [ "$registered_before" = "$registered_after" ] \
     || fail "service-c logged $((registered_after - registered_before)) new 'registered with the hub' line(s) while its token was renewed"
   echo "   service-c's log has no new 'registered with the hub' line ($registered_after, as before)"
-  expired=$(( $(log_count "$h1" 'credentials expired') + $(log_count "$h2" 'credentials expired') ))
-  [ "$expired" -eq 0 ] || fail "the hubs logged 'credentials expired' $expired time(s)"
-  echo "   neither hub logged 'credentials expired'"
+  expired=$(( $(log_count "$h1" 'credentials expired' "$jwt_started") + $(log_count "$h2" 'credentials expired' "$jwt_started") ))
+  [ "$expired" -eq 0 ] || fail "the hubs logged 'credentials expired' $expired time(s) since $jwt_started"
+  echo "   neither hub logged 'credentials expired' since $jwt_started"
 }
 
 echo "1. waiting for service-a at $A ..."

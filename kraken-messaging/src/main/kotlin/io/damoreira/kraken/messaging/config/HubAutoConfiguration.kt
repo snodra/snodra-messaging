@@ -174,7 +174,7 @@ class HubAutoConfiguration {
     /**
      * The Keycloak client-credentials settings (P5b): `hub.oauth2.*`, each falling back to the plain `KRAKEN_HUB_OAUTH2_*` variable
      * when its property is unset; null when no token URI is set. Checked here so a mistake fails the startup naming the setting:
-     * a static token as well, no secret, a secret file that cannot be read, a CA file that cannot be used, a URI that is not http(s).
+     * a static token as well, an OAuth2 setting without a token URI, no secret, a secret file that cannot be read, a CA file that cannot be used, a URI that is not http(s).
      */
     private fun hubOAuth2(properties: KrakenMessagingProperties, environment: Environment, token: HubToken): HubOAuth2? {
         val o = properties.hub.oauth2
@@ -185,8 +185,24 @@ class HubAutoConfiguration {
         val secret = o.clientSecret?.takeIf { it.isNotBlank() } ?: env(OAUTH2_CLIENT_SECRET_ENV)
         val secretFile = o.clientSecretFile ?: env(OAUTH2_CLIENT_SECRET_FILE_ENV)?.let { Path.of(it.trim()) }
         if (tokenUri == null) {
-            if (secret != null || secretFile != null) {
-                log.warn("kraken.messaging.hub.oauth2.client-secret(-file) is set but kraken.messaging.hub.oauth2.token-uri is not: no OAuth2 authentication")
+            // As the Rust library: a stray setting is a misconfigured service that would run unauthenticated, so it fails the startup.
+            val stray = listOfNotNull(
+                "kraken.messaging.hub.oauth2.client-id".takeIf { !o.clientId.isNullOrBlank() },
+                "kraken.messaging.hub.oauth2.client-secret".takeIf { !o.clientSecret.isNullOrBlank() },
+                "kraken.messaging.hub.oauth2.client-secret-file".takeIf { o.clientSecretFile != null },
+                "kraken.messaging.hub.oauth2.scope".takeIf { !o.scope.isNullOrBlank() },
+                "kraken.messaging.hub.oauth2.ca-file".takeIf { o.caFile != null },
+                OAUTH2_CLIENT_ID_ENV.takeIf { env(it) != null },
+                OAUTH2_CLIENT_SECRET_ENV.takeIf { env(it) != null },
+                OAUTH2_CLIENT_SECRET_FILE_ENV.takeIf { env(it) != null },
+                OAUTH2_SCOPE_ENV.takeIf { env(it) != null },
+                OAUTH2_CA_ENV.takeIf { env(it) != null },
+            )
+            if (stray.isNotEmpty()) {
+                throw IllegalStateException(
+                    "${stray.joinToString(", ")} set but neither kraken.messaging.hub.oauth2.token-uri nor $OAUTH2_TOKEN_URI_ENV is: " +
+                        "set the token URI to authenticate with a JWT, or remove the OAuth2 settings",
+                )
             }
             return null
         }
