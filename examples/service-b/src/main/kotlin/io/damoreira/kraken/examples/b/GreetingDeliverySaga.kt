@@ -39,7 +39,7 @@ class GreetingDeliverySaga {
     fun on(e: GreetingDelivered, saga: SagaLifecycle, commands: SagaCommands, deadlines: DeadlineManager) {
         jobId = e.id
         name = e.name
-        saga.associateWith("sagaId", saga.sagaId) // routes the SagaCommandFailed of this saga's commands back to it
+        saga.associateWith("sagaId", saga.sagaId) // optional since the runtime routes SagaCommandFailed by sagaId; kept as harmless documentation
         commands.send(PrintPostcard(e.id, e.name))
         deadlines.schedule(TIMEOUT, TIMEOUT_DEADLINE)
         if (e.name.startsWith(POLL_PREFIX)) deadlines.schedule(POLL_EVERY, POLL_DEADLINE)
