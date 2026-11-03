@@ -154,11 +154,17 @@ class HubConnections(
             tokenExpiresAt = provider?.current?.value?.expiresAt,
             lastTokenError = provider?.lastError?.value,
             tokenFetches = provider?.let { p -> TokenFetchResult.entries.associate { it.label to p.fetches(it) } }.orEmpty(),
-            credentialsRefreshesSent = connections().sumOf { it.credentialsRefreshesSent },
+            credentialsRefreshesSent = refreshesSent.get(),
         )
     }
 
-    internal fun credentialsRefreshesSent(): Double = connections().sumOf { it.credentialsRefreshesSent }.toDouble()
+    /**
+     * `ClientMessage.credentials` written since this client started, over every connection it ever had. One shared counter, not a sum
+     * over the live connections: a connection that goes away must not make the Prometheus counter drop.
+     */
+    private val refreshesSent = java.util.concurrent.atomic.AtomicLong()
+
+    internal fun credentialsRefreshesSent(): Double = refreshesSent.get().toDouble()
 
     /** The kept connections (live or reconnecting), in target order; duplicates and drained targets excluded. */
     fun connections(): List<HubConnection> = synchronized(lock) { active.values.map { it.connection } }
@@ -385,6 +391,7 @@ class HubConnections(
                     inboundStream = inboundStream,
                     subscriptions = subscriptions,
                     inboundSubscription = inboundSubscription,
+                    onCredentialsRefreshSent = { refreshesSent.incrementAndGet() },
                 )
                 self = connection
                 types?.let { connection.register(it.commands, it.queries, it.shared) }

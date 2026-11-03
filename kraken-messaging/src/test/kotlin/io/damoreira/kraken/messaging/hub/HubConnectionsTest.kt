@@ -8,6 +8,8 @@ import io.damoreira.kraken.hub.v1.Request
 import io.damoreira.kraken.hub.v1.RequestKind
 import io.damoreira.kraken.messaging.HubConnectionLostException
 import io.damoreira.kraken.messaging.HubUnavailableException
+import io.damoreira.kraken.messaging.test.AclEntry
+import io.damoreira.kraken.messaging.test.HubAuth
 import io.damoreira.kraken.messaging.test.InProcessHub
 import io.grpc.inprocess.InProcessChannelBuilder
 import kotlinx.coroutines.CoroutineScope
@@ -22,6 +24,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.io.TempDir
 import java.net.InetAddress
 import java.time.Duration
 import java.util.UUID
@@ -513,6 +516,38 @@ class HubConnectionsTest {
         assertTrue(x.awaitRegistered(wait))
         eventually(2_000) { "test.Ping" in a.registeredTypes() }
         assertEquals(setOf(a.hubId, b.hubId), x.liveHubIds().toSet())
+    }
+
+    @Test fun `the credential refreshes counter is monotonic, it never drops when a hub connection goes away`(@TempDir dir: java.nio.file.Path) = runBlocking {
+        val first = "first-" + UUID.randomUUID()
+        val second = "second-" + UUID.randomUUID()
+        val a = hub { heartbeatInterval = Duration.ofMillis(100) }
+        val b = hub { heartbeatInterval = Duration.ofMillis(100) }
+        for (hub in listOf(a, b)) {
+            hub.auth = HubAuth.enforce(listOf(first, second).associateWith { AclEntry("svc-x", handle = listOf("test.*"), send = listOf("*")) })
+        }
+        routes["10.0.0.1:7000"] = a.name
+        routes["10.0.0.2:7000"] = b.name
+        val answer = AtomicReference(listOf("10.0.0.1", "10.0.0.2"))
+        val file = dir.resolve("hub-token")
+        java.nio.file.Files.writeString(file, first)
+        val conns = client(
+            emptyList(), "x",
+            settings = fast.copy(heartbeatInterval = Duration.ofMillis(100), token = HubToken.of(null, file)),
+            dnsTarget = HubTargets.Dns("kraken-hub", 7000),
+            resolver = { answer.get().map(InetAddress::getByName) },
+        )
+        conns.start()
+        eventually(5_000) { conns.liveHubIds().toSet() == setOf(a.hubId, b.hubId) }
+
+        java.nio.file.Files.writeString(file, second) // one refresh per live stream, on its next heartbeat
+        eventually(5_000) { conns.authStatus().credentialsRefreshesSent == 2L }
+
+        answer.set(listOf("10.0.0.2")) // hub A's connection goes away, with the refresh it sent
+        eventually(5_000) { conns.connections().map { it.target } == listOf("10.0.0.2:7000") }
+        delay(300)
+        assertEquals(2L, conns.authStatus().credentialsRefreshesSent, "a counter that went down breaks rate()")
+        assertEquals(2.0, conns.credentialsRefreshesSent())
     }
 
     // --- helpers ---

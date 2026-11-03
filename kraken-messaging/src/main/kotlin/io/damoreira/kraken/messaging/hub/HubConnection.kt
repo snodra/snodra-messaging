@@ -227,6 +227,8 @@ class HubConnection(
     private val subscriptions: SubscriptionRegistry = SubscriptionRegistry(),
     /** Admits `mode = SUBSCRIPTION` requests (P4c); without subscription handlers every one ends with `INVALID_REQUEST`. */
     private val inboundSubscription: SubscriptionInbound = NO_SUBSCRIPTION_HANDLERS,
+    /** Called for every `ClientMessage.credentials` this connection writes ([HubConnections] keeps the process-wide, monotonic total). */
+    private val onCredentialsRefreshSent: () -> Unit = {},
 ) : HubTransport {
     private val log = LoggerFactory.getLogger(HubConnection::class.java)
 
@@ -1106,6 +1108,7 @@ class HubConnection(
         val changed = synchronized(stream) { (wanted != stream.credentials).also { if (it) stream.credentials = wanted } }
         if (changed && stream.out.trySend(ClientMessage.newBuilder().setCredentials(wanted).build()).isSuccess) {
             refreshes.incrementAndGet()
+            onCredentialsRefreshSent()
             log.debug("Credentials refreshed on the stream of {} ({}) to {}", serviceName, instanceId, target)
         }
     }
