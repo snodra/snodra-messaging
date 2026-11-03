@@ -1094,7 +1094,6 @@ class PaymentSaga {
         orderId = e.orderId
         paymentRef = "pay-${e.orderId}"
         saga.associateWith("paymentRef", paymentRef!!)             // later events are routed here by paymentRef
-        saga.associateWith("sagaId", saga.sagaId)                   // this saga hears about its failed commands
         commands.send(RequestCharge(paymentRef!!, e.amount))       // recorded now, sent after the commit
         timeoutDeadline = deadlines.schedule(Duration.ofMinutes(15), "charge-timeout")
     }
@@ -1180,10 +1179,12 @@ class PaymentAdapter(private val gateway: PaymentGateway) {
 
 A command that failed for good comes back to the saga as the event `SagaCommandFailed(sagaId, commandType, idempotencyKey, reason,
 message)`, delivered locally (never published to `kraken.events`). `reason` is `NO_HANDLER`, `DENIED`, `INVALID`, `FAILED`,
-`UNKNOWN_OUTCOME` or `EXHAUSTED` (transient failures that outlasted `sagas.relay.max-attempts`). The saga must **associate itself
-with its own id** to receive it, as in the saga above (`saga.associateWith("sagaId", saga.sagaId)` and
-`@SagaEventHandler(associationProperty = "sagaId")`); the runtime does not do that for you. Unhandled, it is logged at error and
-counted in `kraken.saga.command.failures`. A permanently failed step does not hold back the saga's later steps.
+`UNKNOWN_OUTCOME` or `EXHAUSTED` (transient failures that outlasted `sagas.relay.max-attempts`). The runtime delivers it to the
+saga instance that sent the command **by its id**: the saga needs no association, only a handler
+(`@SagaEventHandler(associationProperty = "sagaId")`, the name of the event's property; a saga that also associated itself with
+`sagaId` keeps working). When the saga type has no handler for it, or the saga has ended, and no ordinary `@EventHandler` took
+it either, it is logged at error and counted in `kraken.saga.command.failures`. A permanently failed step does not hold back
+the saga's later steps.
 
 ### Hearing from the partner: a topic of its own
 
@@ -1338,7 +1339,6 @@ adapter against a fake of the partner, the controller with a mock request and a 
   topic first (the examples have a one-shot `printer-topic-init` for `printer.events`).
 - **Use the library's `JsonCodec` bean** to read a webhook body or a partner record. It is the codec that writes your messages and
   your saga's state, with the same conventions; an `ObjectMapper` of your own may read the same JSON differently.
-- **Associate the saga with its own id** (`saga.associateWith("sagaId", saga.sagaId)`) if it handles `SagaCommandFailed`.
 - **A saga only sees events consumed after it is deployed.** There is no replay of past events into a new saga type.
 - **Ordinary `@EventHandler`s run first, and a failing one does not hide the event from the sagas.** The saga stage runs even
   when an ordinary handler failed, and the failure is then thrown, so the consumer retries and then skips the record as it

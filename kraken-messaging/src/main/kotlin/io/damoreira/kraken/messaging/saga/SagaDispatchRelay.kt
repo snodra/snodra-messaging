@@ -211,9 +211,9 @@ class SagaDispatchRelay(
             headers = mapOf("id" to dedupeId, "type" to type, "correlationId" to correlationId),
         )
         val outcome = local.dispatch(dedupeId, type, codec.encode(failed), ctx)
-        if (outcome == LocalEventDispatcher.Outcome.NO_INTEREST) {
+        if (outcome == LocalEventDispatcher.Outcome.NO_INTEREST || outcome == LocalEventDispatcher.Outcome.UNCLAIMED) {
             metrics.commandFailureUnhandled(entry.type, reason)
-            log.error("Saga {} command {} ({}) failed with {} and no saga or handler handles SagaCommandFailed: {}", entry.sagaId, entry.id, entry.type, reason, message)
+            log.error("Saga {} command {} ({}) failed with {} and no live saga with a SagaCommandFailed handler and no ordinary handler took it: {}", entry.sagaId, entry.id, entry.type, reason, message)
         } else {
             log.warn("Saga {} command {} ({}) failed with {}: {}", entry.sagaId, entry.id, entry.type, reason, message)
         }

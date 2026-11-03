@@ -82,7 +82,6 @@ class FxFailureSaga {
     @SagaEventHandler(associationProperty = "orderId")
     fun on(e: FxOrderPlaced, saga: SagaLifecycle, commands: SagaCommands) {
         orderId = e.orderId
-        saga.associateWith("sagaId", saga.sagaId)
         commands.send(FxRequestCharge("pay-${e.orderId}", e.amount))
     }
 

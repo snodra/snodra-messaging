@@ -45,6 +45,9 @@ class LocalEventDispatcher(
 
         /** No ordinary handler and no saga wants the type: nothing was done and no marker written. */
         NO_INTEREST,
+
+        /** No ordinary handler, and the saga stage is interested in the type but applied the event to no saga instance. */
+        UNCLAIMED,
     }
 
     /** Whether any ordinary handler or saga type wants events of [type]. */
@@ -79,9 +82,10 @@ class LocalEventDispatcher(
                 stage1Failure = e
             }
         }
+        var applied = false
         if (saga) {
             try {
-                sagaStage.process(type, payload, ctx)
+                applied = sagaStage.process(type, payload, ctx)
             } catch (e: Exception) {
                 val first = stage1Failure
                 if (first == null) throw e
@@ -89,7 +93,11 @@ class LocalEventDispatcher(
             }
         }
         stage1Failure?.let { throw it }
-        return if (duplicate && !saga) Outcome.DUPLICATE else Outcome.HANDLED
+        return when {
+            duplicate && !saga -> Outcome.DUPLICATE
+            !ordinary && !applied -> Outcome.UNCLAIMED
+            else -> Outcome.HANDLED
+        }
     }
 
     /** Thrown inside the transaction when the idempotency marker already exists; rolls it back and skips the stage. */

@@ -59,14 +59,20 @@ class SagaRuntime(
     ) : this(types, SagaPorts.mongo(mongo), tx, codec, typeResolver, beans, clock, retry, metrics)
 
     private val log = LoggerFactory.getLogger(SagaRuntime::class.java)
+    private val commandFailedType: String = typeResolver.typeNameOf(SagaCommandFailed::class)
     private val byName: Map<String, SagaType> = types.associateBy { it.name }
     private val byEvent: Map<String, List<SagaType>> =
         types.flatMap { t -> t.eventHandlers.keys.map { it to t } }.groupBy({ it.first }, { it.second })
 
     override fun interested(type: String): Boolean = type in byEvent
 
-    override fun process(type: String, payload: ByteArray, ctx: MessageContext) {
-        for (sagaType in byEvent[type].orEmpty()) deliver(sagaType, type, payload, ctx, null)
+    override fun process(type: String, payload: ByteArray, ctx: MessageContext): Boolean {
+        var applied = false
+        for (sagaType in byEvent[type].orEmpty()) {
+            val kind = deliverKind(sagaType, type, payload, ctx, null)
+            if (kind == Kind.HANDLED || kind == Kind.DUPLICATE) applied = true
+        }
+        return applied
     }
 
     /**
@@ -114,14 +120,18 @@ class SagaRuntime(
     private class Result(val kind: Kind, val started: Int = 0, val ended: Int = 0)
 
     /** Runs the attempts for one saga type; true when applied (or skipped as a duplicate), false when parked or gone. */
-    private fun deliver(sagaType: SagaType, eventType: String, payload: ByteArray, ctx: MessageContext, retryOf: SagaFailureDocument?): Boolean {
+    private fun deliver(sagaType: SagaType, eventType: String, payload: ByteArray, ctx: MessageContext, retryOf: SagaFailureDocument?): Boolean =
+        deliverKind(sagaType, eventType, payload, ctx, retryOf).let { it != null && it != Kind.GONE }
+
+    /** As [deliver], but says what happened: null when the event was parked (or parked again). */
+    private fun deliverKind(sagaType: SagaType, eventType: String, payload: ByteArray, ctx: MessageContext, retryOf: SagaFailureDocument?): Kind? {
         var last: Exception? = null
         for (attempt in 1..retry.maxAttempts) {
             if (attempt > 1) retry.pauseBefore(attempt)
             try {
                 val result = tx.execute { applyEvent(sagaType, eventType, payload, ctx, retryOf) }
                 report(sagaType, result)
-                return result.kind != Kind.GONE
+                return result.kind
             } catch (e: Exception) {
                 last = e
                 if (isConflict(e)) metrics.event(sagaType.name, SagaMetrics.Outcome.CONFLICT)
@@ -130,10 +140,10 @@ class SagaRuntime(
         }
         if (retryOf != null) {
             parkAgain(retryOf, describe(last!!), retry.maxAttempts)
-            return false
+            return null
         }
         park(sagaType, eventType, payload, ctx, describe(last!!))
-        return false
+        return null
     }
 
     private fun report(sagaType: SagaType, result: Result) {
@@ -175,6 +185,13 @@ class SagaRuntime(
             for (doc in ports.sagas.findLive(sagaType.name, handler.keyName, value)) {
                 matched.putIfAbsent(doc.id, doc)
                 handledBy.getOrPut(doc.id) { mutableSetOf() } += handler
+            }
+        }
+        // A SagaCommandFailed also reaches the saga that sent the command, by its id: no association needed (ruling 27).
+        if (eventType == commandFailedType) {
+            ports.sagas.findById((event as SagaCommandFailed).sagaId)?.takeIf { it.type == sagaType.name && !it.ended }?.let { owner ->
+                matched.putIfAbsent(owner.id, owner)
+                handledBy.getOrPut(owner.id) { mutableSetOf() } += handlers
             }
         }
         val planned = mutableListOf<Planned>()

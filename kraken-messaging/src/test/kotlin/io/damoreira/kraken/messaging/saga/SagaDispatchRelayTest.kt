@@ -125,6 +125,42 @@ class RlSaga {
     }
 }
 
+@MessageType("rl.QuietStart")
+data class RlQuietStart(val orderId: String) : Event
+
+@MessageType("rl.DeafStart")
+data class RlDeafStart(val orderId: String) : Event
+
+/** Handles `SagaCommandFailed` by `sagaId` but never associates itself with its own id: the runtime routes the notice by id. */
+@Saga(name = "rl.Quiet")
+class RlQuietSaga {
+    var orderId: String? = null
+    var failures: MutableList<String> = mutableListOf()
+
+    @StartSaga
+    @SagaEventHandler(associationProperty = "orderId")
+    fun on(e: RlQuietStart) {
+        orderId = e.orderId
+    }
+
+    @SagaEventHandler(associationProperty = "sagaId")
+    fun on(e: SagaCommandFailed) {
+        failures += "${e.commandType}:${e.reason}"
+    }
+}
+
+/** A saga type with no handler for `SagaCommandFailed`. */
+@Saga(name = "rl.Deaf")
+class RlDeafSaga {
+    var orderId: String? = null
+
+    @StartSaga
+    @SagaEventHandler(associationProperty = "orderId")
+    fun on(e: RlDeafStart) {
+        orderId = e.orderId
+    }
+}
+
 /** A sender the test scripts: every call is recorded, the outcome comes from [script]. */
 private class ScriptedSender : RawCommandSender {
     class Call(val type: String, val payload: String, val headers: Map<String, String>, val correlationId: String?)
@@ -203,7 +239,7 @@ class SagaDispatchRelayTest {
         adapter = RlAdapter()
         registry = HandlerRegistry(resolver).also { it.register(adapter) }
         runtime = SagaRuntime(
-            types = SagaModelScanner(resolver, codec).scan(listOf(RlSaga::class)), mongo = mongo, tx = tx, codec = codec, typeResolver = resolver,
+            types = SagaModelScanner(resolver, codec).scan(listOf(RlSaga::class, RlQuietSaga::class, RlDeafSaga::class)), mongo = mongo, tx = tx, codec = codec, typeResolver = resolver,
             beans = { error("no beans") }, clock = clock, retry = SagaRetry(RetryPolicy(maxAttempts = 2, initialBackoff = Duration.ofMillis(1), multiplier = 1.0, maxBackoff = Duration.ofMillis(1))),
         )
         sender = ScriptedSender()
@@ -437,6 +473,45 @@ class SagaDispatchRelayTest {
         val error = appender.list.single { it.level == Level.ERROR }
         assertTrue("lost:1000" in error.formattedMessage && "NO_HANDLER" in error.formattedMessage, error.formattedMessage)
         assertNotNull(entry("lost:1000").failedAt)
+    }
+
+    @Test
+    fun `SagaCommandFailed reaches a saga that handles it by sagaId without associating itself with its own id`() {
+        deliver(RlQuietStart("q1"), "e-q1")
+        val sagaId = sagaOf("q1").id
+        assertEquals(setOf(Association("orderId", "q1")), mongo.findById(sagaId, SagaDocument::class.java)!!.associations.toSet(), "the saga never associated with its own id")
+        record(sagaId, 9001, type = "rl.Nobody", payload = """{"ref":"n"}""")
+
+        relay(commands = LocalRawCommandSender(HandlerInvoker(registry, codec))).pollOnce()
+
+        assertEquals(listOf("rl.Nobody:NO_HANDLER"), failuresOf("q1"))
+        assertEquals(emptyList(), metrics.unhandled)
+    }
+
+    @Test
+    fun `SagaCommandFailed for a saga that has ended, or whose type has no handler, is logged at error and counted`() {
+        deliver(RlStartAndEnd("o9"), "e-9")
+        val ended = sagaOf("o9")
+        assertTrue(ended.ended)
+        deliver(RlDeafStart("d1"), "e-d1")
+        val deaf = sagaOf("d1")
+        record(ended.id, 9001, type = "rl.Nobody", payload = """{"ref":"n"}""")
+        record(deaf.id, 9001, type = "rl.Nobody", payload = """{"ref":"n"}""")
+        val log = LoggerFactory.getLogger(SagaDispatchRelay::class.java) as Logger
+        val appender = ListAppender<ILoggingEvent>().also { it.start(); log.addAppender(it) }
+        val relay = relay(commands = LocalRawCommandSender(HandlerInvoker(registry, codec)))
+
+        try {
+            relay.pollOnce()
+        } finally {
+            log.detachAppender(appender)
+        }
+
+        assertEquals(listOf("rl.Nobody" to Reason.NO_HANDLER, "rl.Nobody" to Reason.NO_HANDLER), metrics.unhandled)
+        val errors = appender.list.filter { it.level == Level.ERROR }.map { it.formattedMessage }
+        assertEquals(2, errors.size, errors.toString())
+        assertTrue(errors.any { "${ended.id}:9001" in it } && errors.any { "${deaf.id}:9001" in it }, errors.toString())
+        assertNotNull(entry("${ended.id}:9001").failedAt)
     }
 
     @Test
