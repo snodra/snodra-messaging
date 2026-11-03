@@ -1177,6 +1177,21 @@ class PaymentAdapter(private val gateway: PaymentGateway) {
 - A saga command carries **no user token**: it only reaches handlers without `@RequiresAuthentication` (the same limit as events
   published from handlers, see [Known limitations](#known-limitations)); otherwise the saga hears `SagaCommandFailed(DENIED)`.
 
+### Every handler of a saga command must be idempotent
+
+The relay retries after a timeout or a lost connection (the command may or may not have run, and a saga command carries an
+`idempotency-key`, so a retry is safe for an idempotent target), and re-sends after a crash between sending and marking it sent.
+**A handler of a saga command that is neither an `@IdempotentHandler` nor naturally idempotent can run twice** for one command.
+Use `@IdempotentHandler`, or make the effect idempotent on `headers['idempotency-key']` yourself.
+
+Two more things about the adapter:
+
+- The body of an `@IdempotentHandler` **`@EventHandler`** runs inside the ordinary handlers' stage-1 Mongo transaction, so a slow
+  call there holds that transaction open (MongoDB's lifetime limit, 60 s by default, applies). The `@CommandHandler` adapter the
+  relay calls runs in no Mongo transaction: prefer it for anything slow.
+- `idempotency-key` is just a header that any sender of the command can set, a hub client that is not a saga included. Keep
+  adapters internal: do not expose their command types to services or clients you do not trust.
+
 ### Failed commands: `SagaCommandFailed`
 
 A command that failed for good comes back to the saga as the event `SagaCommandFailed(sagaId, commandType, idempotencyKey, reason,
@@ -1345,6 +1360,13 @@ adapter against a fake of the partner, the controller with a mock request and a 
 - **Ordinary `@EventHandler`s run first, and a failing one does not hide the event from the sagas.** The saga stage runs even
   when an ordinary handler failed, and the failure is then thrown, so the consumer retries and then skips the record as it
   always did; the sagas have applied the event once by then (their own markers make the redeliveries safe).
+- **A step that must not run after the step before it failed** is sent from the handler of the event that says the previous step
+  succeeded, not recorded in the same handling: the relay sends a saga's later steps after a permanently failed one.
+- **Leases need synchronised clocks.** The relay, deadline and `external_calls` leases are timestamps compared across instances;
+  keep the clocks in step (NTP).
+- **A partner that recreates its topic needs a `dedupeKey`.** Without one the dedupe id is `<name>:<partition>:<offset>`; a recreated
+  topic starts again at offset 0 and its records collide with the markers of the old ones for up to `idempotency.retention` (30
+  days) and are skipped silently.
 - **A saga sends through `SagaCommands` only.** A handler parameter of type `CommandBus`, `QueryBus`, `EventBus`, `RawCommandSender`,
   `RawEventPublisher` or `HubBus` (or a subclass or implementation of one) fails the startup: it would send at once, outside the
   saga's transaction, with no relay ordering, retry or idempotency key.
@@ -1482,6 +1504,9 @@ Docker Compose from local builds together with the real `kraken-hub` image, Kafk
   only reach handlers without `@RequiresAuthentication` (a `kraken-system` client-credentials token is future work).
 - Sagas: Kotlin only (the Rust crate follows, S2); a new saga type does not see events from before its deployment (no replay);
   parked saga events are retried by a person through `SagaFailures`; a saga belongs to one service.
+- Sagas, reviewed and left as they are: `saga_dispatch` entries that failed for good and `saga_failures` documents have no TTL; a
+  `startKey` is `"<type>|<key>=<value>"`, so an association key that contains `=` can make two pairs share one live instance
+  (avoid `=` in keys); the smoke test does not check that a restart replays nothing twice (the tests do).
 
 
 ## CI/CD pipeline

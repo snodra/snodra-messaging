@@ -42,9 +42,10 @@ data class ExternalCallSettings(val lease: Duration = Duration.ofMinutes(5)) {
  *    owns the backoff); an [ExternalCallUnknownOutcomeException] thrown by the adapter itself leaves the record `UNKNOWN`
  *    and is thrown as it is; any other failure is `FAILED` with `{"code","message"}` and is thrown as it is.
  *
- * Every write of the record is its own short transaction (REQUIRES_NEW when [txManager] is given), so the external call
- * never runs inside a Mongo transaction of this interceptor and a rollback of the caller's transaction (an event handler
- * runs inside one) does not forget a call that happened.
+ * Every write of the record is its own short transaction (REQUIRES_NEW when [txManager] is given), so a rollback of the
+ * caller's transaction (an event handler runs inside one) does not forget a call that happened. The body itself runs in
+ * whatever transaction the caller has: an `@EventHandler`'s inside the dispatcher's stage-1 transaction, a `@CommandHandler`'s
+ * (what the saga relay calls) in none.
  */
 class IdempotencyInterceptor(
     private val mongo: MongoTemplate,
