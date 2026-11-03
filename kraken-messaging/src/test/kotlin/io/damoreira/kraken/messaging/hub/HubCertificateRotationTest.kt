@@ -6,9 +6,11 @@ import ch.qos.logback.classic.spi.ILoggingEvent
 import ch.qos.logback.core.read.ListAppender
 import com.google.protobuf.ByteString
 import io.damoreira.kraken.hub.v1.ClientMessage
+import io.damoreira.kraken.hub.v1.ErrorCode
 import io.damoreira.kraken.hub.v1.Reply
 import io.damoreira.kraken.hub.v1.Request
 import io.damoreira.kraken.hub.v1.RequestKind
+import io.damoreira.kraken.hub.v1.ServerMessage
 import io.damoreira.kraken.messaging.fixtures.TestPki
 import io.damoreira.kraken.messaging.test.InProcessHub
 import io.grpc.CallOptions
@@ -213,8 +215,9 @@ class HubCertificateRotationTest {
         val trickle: Job = scope.launch {
             while (isActive) {
                 try {
-                    sender.send(ping())
-                    sent.incrementAndGet()
+                    // A NO_HANDLER (or any other error) comes back as a message, not as an exception: look at the answer itself.
+                    val answer = sender.send(ping())
+                    if (answer.hasError() || !answer.hasReply() || answer.reply.payload.toStringUtf8() != "{}") failures += "not a reply: $answer" else sent.incrementAndGet()
                 } catch (e: Exception) {
                     failures += e.toString()
                 }
@@ -230,17 +233,16 @@ class HubCertificateRotationTest {
         assertTrue(sent.get() > 50, "the trickle ran: ${sent.get()}")
     }
 
-    @Test fun `with one hub the roll leaves a short gap that a sender's request rides out`() = runBlocking {
+    @Test fun `with one hub the roll leaves a short gap in which other services get NO_HANDLER, and nothing else fails`() = runBlocking {
         val handler = handler(listOf(a), certificate())
         val sender = sender(listOf(a))
         assertTrue(handler.awaitRegistered(wait) && sender.awaitRegistered(wait))
         val failures = CopyOnWriteArrayList<String>()
-        val sent = AtomicInteger()
+        val answers = CopyOnWriteArrayList<ServerMessage>()
         val trickle: Job = scope.launch {
             while (isActive) {
                 try {
-                    sender.send(ping())
-                    sent.incrementAndGet()
+                    answers += sender.send(ping())
                 } catch (e: Exception) {
                     failures += e.toString()
                 }
@@ -253,7 +255,11 @@ class HubCertificateRotationTest {
         delay(300)
         trickle.cancel()
         assertEquals(emptyList(), failures.toList())
-        assertTrue(sent.get() > 50, "the trickle ran: ${sent.get()}")
+        // The documented gap: the hub has no owner of the type between the empty Register and the new stream's, and says so at once. Nothing else.
+        val unexpected = answers.filterNot { (it.hasReply() && it.reply.payload.toStringUtf8() == "{}") || (it.hasError() && it.error.code == ErrorCode.NO_HANDLER) }
+        assertEquals(emptyList(), unexpected)
+        assertTrue(answers.count { it.hasReply() } > 50, "the trickle ran: ${answers.size} answers")
+        assertTrue(answers.last().hasReply(), "the new stream serves again: ${answers.last()}")
     }
 
     @Test fun `a request being handled is finished on the old stream before the roll closes it`() = runBlocking {
