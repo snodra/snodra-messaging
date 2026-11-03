@@ -107,6 +107,37 @@ object KrakenContainers {
         return container.withEnv(env)
     }
 
+    /**
+     * The hub image under test (`KRAKEN_HUB_IMAGE`, default `kraken-hub:dev`) with JWT authentication (P5b, ADR 0019), mode
+     * `enforce`: [services] become the ACL file's `[[service]]` tables (the rights of a service whose token's `azp` is its name),
+     * [issuer] is the exact `iss` a token must carry and [jwksUri] where the hub fetches the signing keys (a test server on the
+     * host is `http://host.testcontainers.internal:<port>/...` after `Testcontainers.exposeHostPorts(port)`). The leeway is 0 s
+     * and the expiry grace 2 s unless [env] says otherwise, so a token's `exp` matters to the second. Exposes gRPC 7000 and HTTP
+     * 7001; OTLP export is disabled.
+     */
+    fun hubJwt(
+        directory: Path,
+        services: List<AclEntry>,
+        issuer: String,
+        jwksUri: String,
+        env: Map<String, String> = emptyMap(),
+    ): GenericContainer<*> {
+        val file = directory.resolve("acl.toml")
+        Files.writeString(file, serviceToml(services))
+        return hub(hubImage).withExposedPorts(7000, 7001).withEnv("KRAKEN_HUB_OTLP_ENDPOINT", "")
+            .withCopyFileToContainer(MountableFile.forHostPath(file, 0b110_100_100), HUB_ACL_PATH)
+            .withEnv("KRAKEN_HUB_AUTH_MODE", "enforce").withEnv("KRAKEN_HUB_ACL_FILE", HUB_ACL_PATH)
+            .withEnv("KRAKEN_HUB_JWT_ISSUER", issuer).withEnv("KRAKEN_HUB_JWT_JWKS_URI", jwksUri)
+            .withEnv("KRAKEN_HUB_JWT_LEEWAY", "0s").withEnv("KRAKEN_HUB_JWT_EXPIRY_GRACE", "2s")
+            .withEnv(env)
+    }
+
+    /** The ACL file of the hub for JWT services: one `[[service]]` per entry ([AclEntry.service] is the `name`). */
+    fun serviceToml(services: List<AclEntry>): String = services.joinToString("\n") { entry ->
+        fun list(items: List<String>) = items.joinToString(", ", "[", "]") { "\"$it\"" }
+        "[[service]]\nname = \"${entry.service}\"\nhandle = ${list(entry.handle)}\nsend = ${list(entry.send)}\n"
+    }
+
     /** The ACL file of the hub: one `[[token]]` per entry, keyed by the SHA-256 of the token (the hub never sees it). */
     fun aclToml(acl: Map<String, AclEntry>): String = acl.entries.joinToString("\n") { (token, entry) ->
         fun list(items: List<String>) = items.joinToString(", ", "[", "]") { "\"$it\"" }

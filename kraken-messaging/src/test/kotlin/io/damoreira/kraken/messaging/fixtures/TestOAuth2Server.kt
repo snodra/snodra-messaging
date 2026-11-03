@@ -102,7 +102,7 @@ class TestOAuth2Server : AutoCloseable {
         val claims = JWTClaimsSet.Builder()
             .issuer(issuer).subject("service-account-$azp").claim("azp", azp)
             .jwtID(UUID.randomUUID().toString())
-            .issueTime(Date(now)).expirationTime(Date(now + expiresInSeconds * 1000L))
+            .issueTime(Date(now - 10_000)).expirationTime(Date(now + expiresInSeconds * 1000L))
             .apply {
                 typ?.let { claim("typ", it) }
                 this@TestOAuth2Server.audience?.let { audience(it) }
