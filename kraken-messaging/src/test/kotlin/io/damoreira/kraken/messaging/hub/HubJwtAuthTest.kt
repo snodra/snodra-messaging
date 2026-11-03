@@ -27,6 +27,8 @@ import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.slf4j.LoggerFactory
 import java.time.Duration
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
@@ -194,6 +196,41 @@ class HubJwtAuthTest {
         assertTrue(conn.awaitRegistered(wait))
         assertNull(conn.lastRejection.value)
         assertEquals(1, hubA.streamsOpenedBy("i-1"))
+    }
+
+    // --- a credential the hub refused (I1) ---
+
+    /** A 200 token response whose access token the hub cannot parse (`malformed jwt`, UNAUTHENTICATED), good for an hour. */
+    private fun garbageToken() = TokenResponse(200, """{"access_token":"not-a-jwt","token_type":"Bearer","expires_in":3600}""")
+
+    @Test fun `a Register refused with UNAUTHENTICATED drops the cached token, so the next attempt fetches a new one`() {
+        val garbage = AtomicBoolean(true)
+        oauth.responder = { if (garbage.getAndSet(false)) garbageToken() else null }
+        val conn = connection(hubA, "i-1", settings(provider())).also { it.start() }
+        await atMost wait until { conn.connected.value } // awaitRegistered would throw at the first refusal
+        assertEquals(2, oauth.requests.size, "one fetch per refused token, no more")
+        assertEquals(listOf("not-a-jwt", oauth.tokens.single()), hubA.jwtsSeenFrom("i-1"))
+    }
+
+    @Test fun `a credentials refresh the hub refuses with UNAUTHENTICATED drops that token, so the reconnect fetches a new one`() {
+        oauth.expiresIn = 2 // renewed after 1 s
+        val renewals = AtomicInteger()
+        oauth.responder = { if (renewals.getAndIncrement() == 1) garbageToken() else null } // the renewal is the garbage one, valid for an hour
+        val conn = connection(hubA, "i-1", settings(provider())).also { it.start() }
+        runBlocking { assertTrue(conn.awaitRegistered(wait)) }
+        await atMost wait until { hubA.streamsOpenedBy("i-1") >= 2 } // the refused refresh closed the stream
+        await atMost wait until { hubA.jwtsSeenFrom("i-1").size >= 2 }
+        assertTrue("not-a-jwt" !in hubA.jwtsSeenFrom("i-1").drop(1), "the reconnect does not present the token the hub refused: ${hubA.jwtsSeenFrom("i-1")}")
+        assertTrue(oauth.requests.size >= 3, "a third fetch: ${oauth.requests.size}")
+    }
+
+    @Test fun `a Register refused with PERMISSION_DENIED keeps the cached token and does not ask the endpoint again`() {
+        hubA.auth = HubAuth.enforce(emptyMap(), listOf(AclEntry("other-service", handle = listOf("test.*")))) // no entry for this service: PERMISSION_DENIED
+        val conn = connection(hubA, "i-1", settings(provider())).also { it.start() }
+        await atMost wait until { hubA.jwtsSeenFrom("i-1").size >= 4 } // refused attempts count: the Register is recorded before it is judged
+        assertEquals(Status.Code.PERMISSION_DENIED, conn.lastRejection.value?.code)
+        assertEquals(1, oauth.requests.size, "a new token would not help: one fetch for all attempts")
+        assertEquals(1, hubA.jwtsSeenFrom("i-1").distinct().size)
     }
 
     // --- secrecy ---

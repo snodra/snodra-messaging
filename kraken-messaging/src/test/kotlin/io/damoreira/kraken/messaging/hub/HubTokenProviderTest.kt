@@ -20,8 +20,11 @@ import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.slf4j.LoggerFactory
+import java.time.Clock
 import java.time.Duration
 import java.time.Instant
+import java.time.ZoneId
+import java.time.ZoneOffset
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNotEquals
@@ -121,6 +124,27 @@ class HubTokenProviderTest {
         await atMost wait until { provider.current.value?.value != first.value }
         assertTrue(server.requests.size >= 2)
         assertTrue(provider.current.value!!.expiresAt > first.expiresAt)
+    }
+
+    /** A wall clock that can jump forward, as after the machine slept (the monotonic delay of the renewer does not see it). */
+    private class JumpingClock : Clock() {
+        @Volatile var offset: Duration = Duration.ZERO
+        override fun getZone(): ZoneId = ZoneOffset.UTC
+        override fun withZone(zone: ZoneId): Clock = this
+        override fun instant(): Instant = Instant.now().plus(offset)
+    }
+
+    @Test fun `the renewer follows the wall clock, so a jump after the machine slept renews the token at once`() {
+        server.expiresIn = 3600 // due after 48 minutes: a monotonic sleep of that length would not notice the jump
+        val clock = JumpingClock()
+        val provider = HubTokenProvider(
+            TokenEndpoint(HubOAuth2(server.tokenUri, "billing-service", { "secret" }), clock), scope, clock,
+            retryMin = Duration.ofMillis(50), retryMax = Duration.ofMillis(200),
+        )
+        val first = runBlocking { provider.token() }
+        clock.offset = Duration.ofSeconds(3500) // the laptop slept: past the refresh point, 100 s from expiry
+        await atMost Duration.ofSeconds(8) until { provider.current.value?.value != first.value }
+        assertEquals(2, server.requests.size)
     }
 
     @Test fun `a failing renewal keeps the current token, retries with a back-off and recovers`() {

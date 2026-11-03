@@ -60,8 +60,20 @@ class HubTokenProvider(
      * @throws HubTokenException when the endpoint cannot give one
      */
     suspend fun token(): AccessToken {
-        currentState.value?.takeIf { clock.instant() < it.refreshAt }?.let { return it }
+        currentState.value?.takeIf { it.value != refused && clock.instant() < it.refreshAt }?.let { return it }
         return fetchShared().await()
+    }
+
+    /** The value of the latest token a hub refused with `UNAUTHENTICATED` (see [invalidate]); never handed out again. */
+    @Volatile private var refused: String? = null
+
+    /**
+     * The hub refused [value] with `UNAUTHENTICATED` (a Register refusal or a later close: expired, unknown signing key, ...): the
+     * cached token is not handed out again, so the next [token] call fetches a new one. A token that is no longer the current
+     * one (another stream already got a newer token) changes nothing. Not for `PERMISSION_DENIED`: a new token would not help.
+     */
+    fun invalidate(value: String) {
+        if (currentState.value?.value == value) refused = value
     }
 
     private fun fetchShared(): Deferred<AccessToken> = synchronized(lock) {
@@ -106,8 +118,10 @@ class HubTokenProvider(
             val token = currentState.value ?: return
             val wait = Duration.between(clock.instant(), token.refreshAt)
             if (wait.isPositive) {
-                delay(wait.toMillis().coerceAtLeast(1))
-                continue // somebody may have renewed meanwhile: look again
+                // One slice at a time: `delay` counts monotonic time, which stops while the machine sleeps, so after a suspend the wall
+                // clock (which decides freshness) is ahead of it. Looking at the wall clock every slice bounds the overrun to one slice.
+                delay((if (wait > MAX_SLICE) MAX_SLICE else wait).toMillis().coerceAtLeast(1))
+                continue // somebody may have renewed meanwhile, or the clock jumped: look again
             }
             try {
                 fetchShared().await()
@@ -129,4 +143,8 @@ class HubTokenProvider(
     }
 
     override fun toString() = "HubTokenProvider($endpoint)"
+
+    private companion object {
+        val MAX_SLICE: Duration = Duration.ofSeconds(5)
+    }
 }

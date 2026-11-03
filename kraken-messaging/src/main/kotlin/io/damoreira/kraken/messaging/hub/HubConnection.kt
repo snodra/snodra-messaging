@@ -853,6 +853,12 @@ class HubConnection(
                 stream.closed.complete(Unit)
             }
             if (stopping) break
+            // The hub does not accept the token this stream presented: the next stream must not present it again.
+            if (noToken == null && status.code == Status.Code.UNAUTHENTICATED) {
+                val provider = settings.tokenProvider
+                val jwt = synchronized(stream) { stream.credentials }?.takeIf { it.hasJwt() }?.jwt
+                if (provider != null && jwt != null) provider.invalidate(jwt)
+            }
             // A stream the hub answered (ack or echo) proves the hub is back: start again from the floor.
             if (reachedHandshake) {
                 backoff = settings.backoffMin
