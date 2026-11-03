@@ -1,6 +1,8 @@
 # Sagas, deadlines and the external-integration toolkit: design
 
 Status: agreed in conversation with the project owner on 2026-10-31; builder calls marked.
+**Approved by the owner on 2026-11-03** for implementation: roadmap phase S1 (Kotlin) after P5c,
+then S2 (Rust), in `kraken/docs/superpowers/specs/2026-10-31-hub-axon-parity-design.md`.
 
 ## Intent
 
