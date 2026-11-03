@@ -6,9 +6,11 @@ import io.damoreira.kraken.messaging.codec.MessageTypeResolver
 import io.damoreira.kraken.messaging.handler.HandlerInvoker
 import io.damoreira.kraken.messaging.handler.HandlerRegistry
 import io.damoreira.kraken.messaging.kafka.EventConsumer
+import io.damoreira.kraken.messaging.kafka.LocalEventDispatcher
 import io.damoreira.kraken.messaging.kafka.MessagingIndexes
 import io.damoreira.kraken.messaging.kafka.OutboxEventBus
 import io.damoreira.kraken.messaging.kafka.OutboxPublisher
+import io.damoreira.kraken.messaging.saga.SagaStage
 import io.damoreira.kraken.messaging.tracing.TraceHeaders
 import org.apache.kafka.clients.consumer.ConsumerConfig
 import org.apache.kafka.clients.producer.ProducerConfig
@@ -16,6 +18,7 @@ import org.apache.kafka.common.serialization.ByteArrayDeserializer
 import org.apache.kafka.common.serialization.ByteArraySerializer
 import org.apache.kafka.common.serialization.StringDeserializer
 import org.apache.kafka.common.serialization.StringSerializer
+import org.springframework.beans.factory.ObjectProvider
 import org.springframework.beans.factory.annotation.Qualifier
 import org.springframework.boot.autoconfigure.AutoConfiguration
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean
@@ -124,6 +127,17 @@ class KafkaEventsAutoConfiguration {
         maxAttempts = properties.outbox.maxAttempts,
     )
 
+    /** Runs an event's ordinary handlers, then the saga stage when the saga runtime provides one (none: [SagaStage.NONE]). */
+    @Bean
+    @ConditionalOnMissingBean
+    fun localEventDispatcher(
+        registry: HandlerRegistry,
+        invoker: HandlerInvoker,
+        tx: TransactionTemplate,
+        mongo: MongoTemplate,
+        sagaStage: ObjectProvider<SagaStage>,
+    ) = LocalEventDispatcher(registry, invoker, tx, mongo, sagaStage.getIfAvailable { SagaStage.NONE })
+
     @Bean
     @ConditionalOnMissingBean
     @ConditionalOnProperty(prefix = "kraken.messaging.kafka.consumer", name = ["enabled"], havingValue = "true", matchIfMissing = true)
@@ -134,6 +148,7 @@ class KafkaEventsAutoConfiguration {
         tx: TransactionTemplate,
         mongo: MongoTemplate,
         codec: JsonCodec,
+        dispatcher: LocalEventDispatcher,
         properties: KrakenMessagingProperties,
     ) = EventConsumer(
         consumerFactory,
@@ -145,6 +160,7 @@ class KafkaEventsAutoConfiguration {
         mongo = mongo,
         maxAttempts = properties.kafka.consumer.maxAttempts,
         codec = codec,
+        dispatcher = dispatcher,
     )
 
     @Bean

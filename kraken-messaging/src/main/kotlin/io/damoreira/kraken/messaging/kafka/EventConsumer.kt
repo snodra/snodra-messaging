@@ -5,12 +5,9 @@ import io.damoreira.kraken.messaging.MessageContext
 import io.damoreira.kraken.messaging.codec.JsonCodec
 import io.damoreira.kraken.messaging.handler.HandlerInvoker
 import io.damoreira.kraken.messaging.handler.HandlerRegistry
-import io.damoreira.kraken.messaging.tracing.CorrelationContext
-import kotlinx.coroutines.runBlocking
 import org.apache.kafka.clients.consumer.ConsumerRecord
 import org.slf4j.LoggerFactory
 import org.springframework.context.SmartLifecycle
-import org.springframework.dao.DuplicateKeyException
 import org.springframework.data.mongodb.core.MongoTemplate
 import org.springframework.kafka.core.ConsumerFactory
 import org.springframework.kafka.listener.AcknowledgingMessageListener
@@ -20,15 +17,16 @@ import org.springframework.kafka.listener.DefaultErrorHandler
 import org.springframework.kafka.support.Acknowledgment
 import org.springframework.util.backoff.FixedBackOff
 import org.springframework.transaction.support.TransactionTemplate
-import java.time.Instant
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Consumes one event topic with at-least-once delivery and exactly-once handler effects.
  *
- * Per record: the idempotency marker ([ProcessedEventDocument], keyed by the `id` header) is inserted and the handlers
- * run inside one Mongo transaction; the offset is acknowledged only after the transaction committed. A duplicate id
- * (`DuplicateKeyException` from the marker insert only) is acknowledged and skipped. A handler failure, including a
+ * Per record the [LocalEventDispatcher] runs the ordinary handlers, then the saga stage (when sagas exist). For the
+ * handlers: the idempotency marker ([ProcessedEventDocument], keyed by the `id` header) is inserted and the handlers
+ * run inside one Mongo transaction; the offset is acknowledged only after the transaction committed (and the saga stage
+ * ran, which parks a failing saga event instead of throwing). A duplicate id (`DuplicateKeyException` from the marker
+ * insert only) is acknowledged and skipped. A handler failure, including a
  * `DuplicateKeyException` from the handler's own writes, rolls the marker back and the record is redelivered by a
  * [DefaultErrorHandler] up to [maxAttempts] invocations in total, then logged (never the payload) and skipped with its
  * offset committed. An [InvalidMessageException] (payload does not fit the handler's message class) is not retried.
@@ -39,22 +37,24 @@ import java.util.concurrent.atomic.AtomicBoolean
  * Handlers run via `runBlocking` on the listener thread so the thread-bound Mongo transaction wraps them; handlers
  * that switch threads (other dispatchers, `withContext`) lose the transaction and their writes are not rolled back.
  *
- * Records without a `type` header, without a registered handler, or with a payload that is not a JSON object are
- * acknowledged and skipped (they cannot become valid by retrying).
+ * Records without a `type` header, without a registered handler or interested saga, or with a payload that is not a
+ * JSON object are acknowledged and skipped (they cannot become valid by retrying).
  *
- * [backOffMs] is the delay between redeliveries (default 1000 ms; lowered in tests).
+ * [backOffMs] is the delay between redeliveries (default 1000 ms; lowered in tests). [dispatcher] defaults to one over
+ * [registry], [invoker], [tx] and [mongo] without a saga stage; the auto-configuration passes the shared one.
  */
 class EventConsumer(
     consumerFactory: ConsumerFactory<String, ByteArray>,
     private val topic: String,
     private val groupId: String,
     private val registry: HandlerRegistry,
-    private val invoker: HandlerInvoker,
-    private val tx: TransactionTemplate,
-    private val mongo: MongoTemplate,
+    invoker: HandlerInvoker,
+    tx: TransactionTemplate,
+    mongo: MongoTemplate,
     private val maxAttempts: Int,
     private val backOffMs: Long = 1000L,
     private val codec: JsonCodec = JsonCodec(),
+    private val dispatcher: LocalEventDispatcher = LocalEventDispatcher(registry, invoker, tx, mongo),
 ) : SmartLifecycle {
     private val log = LoggerFactory.getLogger(EventConsumer::class.java)
     private val factory = consumerFactory
@@ -111,7 +111,7 @@ class EventConsumer(
             log.warn("Skipping record without type header at {}-{}@{}", record.topic(), record.partition(), record.offset())
             ack.acknowledge(); return
         }
-        if (registry.eventHandlers(type).isEmpty()) {
+        if (!dispatcher.interested(type)) {
             ack.acknowledge(); return
         }
         val id = headers[EventHeaders.ID]?.takeIf { it.isNotBlank() } ?: "${record.topic()}-${record.partition()}-${record.offset()}".also {
@@ -132,24 +132,8 @@ class EventConsumer(
             authorization = null,
             headers = headers,
         )
-        try {
-            tx.executeWithoutResult {
-                try {
-                    mongo.insert(ProcessedEventDocument(id, type, Instant.now()))
-                } catch (_: DuplicateKeyException) {
-                    throw AlreadyProcessed // only the marker's duplicate means "seen before"; a handler's is a failure
-                }
-                runBlocking(CorrelationContext(ctx.correlationId)) { invoker.invokeEvent(type, payload, ctx) }
-            }
-        } catch (_: AlreadyProcessed) {
-            log.debug("Event {} of type {} already processed, skipping", id, type)
-        }
+        dispatcher.dispatch(id, type, payload, ctx)
         ack.acknowledge()
-    }
-
-    /** Thrown inside the transaction when the idempotency marker already exists; rolls it back and skips the record. */
-    private object AlreadyProcessed : RuntimeException("event already processed", null, false, false) {
-        private fun readResolve(): Any = AlreadyProcessed
     }
 
     companion object {
