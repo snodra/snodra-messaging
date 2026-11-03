@@ -19,6 +19,8 @@ A disposable sandbox that shows cross-service messaging on the real `kraken-hub`
    are the changes of both), collects the initial result and N updates, cancels and returns them. The updates come from
    `POST /counters/{name}/increment` on service-b and from the command `examples.IncrementCounter` that service-a sends
    to service-c (which has no HTTP); both push through a `QueryUpdateEmitter`.
+9. **service-b** runs a saga (S1, [The postcard saga](#the-postcard-saga)): every `GreetingDelivered` gets a postcard printed
+   by an external printer, **fake-printer**, which answers over a webhook, its own Kafka topic or a poll, never, or by dying.
 
 Everything is anonymous, nothing is persisted by the apps (MongoDB is only there because the starter's outbox and
 idempotent consumer need it), and the modules are never published. They build against the starter as a project
@@ -28,7 +30,8 @@ dependency, so they always exercise the current library. Wire classes live in `e
 |---|---|---|
 | `examples/examples-api` | `SendGreeting`, `GreetingAccepted`, `GreetingDelivered`, `CountGreetings`, `GreetingCount`; the texts types; the shared `Inventory` / `InventoryLevel`; the streaming `Rows` / `Row`; the subscription `WatchCounter` / `Counter` / `CounterChanged`, the command `IncrementCounter` and the shared query `OpenSubscriptions` / `SubscriptionCount` | – |
 | `examples/service-a` | REST caller + event listener; `GET /forbidden-send` sends a type outside its ACL on purpose ([Secure sandbox](#secure-sandbox)) | 8091 |
-| `examples/service-b` | owner of the greetings command and query, co-owner of the shared `Inventory`, the streaming `Rows`, the subscription `WatchCounter` and `OpenSubscriptions`; logs the text events | 8092 (`POST /counters/{name}/increment` and actuator) |
+| `examples/service-b` | the postcard saga, its printer adapter, webhook and topic translator (`GET /postcards/{jobId}`); owner of the greetings command and query, co-owner of the shared `Inventory`, the streaming `Rows`, the subscription `WatchCounter` and `OpenSubscriptions`; logs the text events | 8092 (`POST /counters/{name}/increment` and actuator) |
+| `examples/fake-printer` | a partner, not a kraken service: the fake postcard printer of [the postcard saga](#the-postcard-saga) (`POST /jobs`, `GET /jobs/{id}`) | 8093 |
 | `kraken-messaging-rs/examples/service-c` | Rust: owner of `Shout`, `Reverse` and `IncrementCounter`, co-owner of the shared `Inventory`, `Rows`, `WatchCounter` and `OpenSubscriptions`, publishes the text events, logs `GreetingDelivered` | – (no HTTP) |
 
 ## Prerequisites
@@ -42,7 +45,7 @@ dependency, so they always exercise the current library. Wire classes live in `e
 From `kraken/infra`:
 
 ```bash
-docker compose -f compose.yaml -f compose.local.yaml --profile examples up --build -d service-a service-b service-c
+docker compose -f compose.yaml -f compose.local.yaml --profile examples up --build -d service-a service-b service-c fake-printer
 ```
 
 This builds `kraken-hub:dev`, `kraken-examples-service-a:dev`, `kraken-examples-service-b:dev` and
@@ -410,6 +413,37 @@ service-b and service-c with the mTLS overlay as well) and adds, last:
 | an owner at its subscription limit, or the subscriber's buffer overflowed | 503 | `{"error":"HandlerBusyException", ...}` |
 | any other messaging failure | 502 | `{"error":"<exception>", ...}` |
 | blank `name` | 400 | RFC 9457 problem detail: `{"type":"about:blank","title":"Bad Request","status":400,"detail":"name must not be blank",...}` |
+
+## The postcard saga
+
+`GreetingDeliverySaga` in service-b (the first saga of the sandbox, see `docs/02-messaging.md`, "Sagas and deadlines") gets
+the postcard of every delivered greeting printed by an external printer. The saga starts on `GreetingDelivered` (the
+greeting id is the job id), sends `PrintPostcard` and gives the printer 30 s. It speaks only kraken messages: the HTTP call
+to the printer is made by the adapter, `PrinterAdapter`, an ordinary command handler made idempotent by `@IdempotentHandler`
+(the command's `idempotency-key` header goes to the printer as `Idempotency-Key`, and the printer prints once per key).
+
+The fake printer answers by the greeting name's prefix, one prefix per way a real partner talks back:
+
+| Name | The printer | The saga learns it by | Ends |
+|---|---|---|---|
+| `webhook-*` (and any name without a known prefix) | posts a signed webhook to `POST service-b:8080/printer/webhook` | `PrinterWebhookController`: `WebhookSignatureVerifier` + `ExternalEventIngress`, the five-line controller | `PostcardPrinted` |
+| `topic-*` | produces a record to its own topic `printer.events` | the `printer` `ExternalRecordTranslator` (`kraken.messaging.external.kafka.sources.printer.topic`) | `PostcardPrinted` |
+| `poll-*` | says nothing; `GET /jobs/{id}` is `PENDING` for 5 s, then `DONE` | a polling deadline every 2 s sends `PollPrintJob`; the adapter publishes `PostcardPrinted` when the job is done | `PostcardPrinted` |
+| `silent-*` | accepts and never answers | the 30 s deadline | `PostcardFailed` `TIMEOUT` |
+| `crash-*` | accepts, then exits before replying (compose restarts it) | the adapter's connection broke after the request went out: `SagaCommandFailed` `UNKNOWN_OUTCOME` | `PostcardFailed` `UNKNOWN_OUTCOME` |
+
+```bash
+curl -s -X POST localhost:8091/greetings -H 'content-type: application/json' -d '{"name":"poll-ada"}'   # {"id":"<uuid>","name":"poll-ada"}
+curl -s localhost:8092/postcards/<uuid>      # 404 while in flight, then {"jobId":"<uuid>","status":"PRINTED"} or {...,"status":"FAILED","reason":"TIMEOUT"}
+curl -s localhost:8093/jobs/<uuid>           # the printer's own view of the job
+```
+
+`GET /postcards/{jobId}` reads an in-memory projection of `PostcardPrinted` and `PostcardFailed` (lost on restart, like the
+greeting counts). The printer's webhook secret is a dev-only value (`dev-only-printer-webhook-secret`, set for both sides in
+`compose.local.yaml`), not a secret. The topic is created by the one-shot `printer-topic-init` (Kafka does not auto-create
+topics here); on a sandbox that already exists, run it once: `docker compose -f compose.yaml -f compose.local.yaml --profile
+examples up --no-deps printer-topic-init`. Smoke steps 24 to 24e drive all five (`SKIP_POSTCARD=1` skips them,
+`ONLY_POSTCARD=1` runs only them); step 24 also replays the webhook (200, applied once) and sends a wrong secret (401).
 
 ## Tear down
 

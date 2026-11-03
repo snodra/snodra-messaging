@@ -1,0 +1,19 @@
+# The fake postcard printer of the sandbox (a partner, not a kraken service). compose.local.yaml sets these in-network.
+server:
+  port: ${SERVER_PORT:8093}
+spring:
+  application:
+    name: fake-printer
+printer:
+  webhook-url: ${PRINTER_WEBHOOK_URL:http://localhost:8092/printer/webhook}
+  # Dev-only value shared with service-b (compose.local.yaml sets both); not a secret.
+  webhook-secret: ${PRINTER_WEBHOOK_SECRET:dev-only-printer-webhook-secret}
+  topic: ${PRINTER_TOPIC:printer.events}
+  kafka-bootstrap: ${KAFKA_BOOTSTRAP:localhost:9092}
+  print-delay: ${PRINTER_PRINT_DELAY:1s}
+  poll-delay: ${PRINTER_POLL_DELAY:5s}
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health

@@ -8,6 +8,16 @@ kraken:
       address: ${KRAKEN_HUB_ADDRESS:static://localhost:7002}
     kafka:
       bootstrap-servers: ${KRAKEN_KAFKA_BOOTSTRAP:localhost:9092}
+    external:
+      kafka:
+        sources:
+          printer:                                  # the fake printer's own topic (created by compose.local.yaml); the bean `printer` translates it
+            topic: ${PRINTER_TOPIC:printer.events}
+examples:
+  printer:
+    url: ${PRINTER_URL:http://localhost:8093}
+    # Dev-only value shared with the fake printer (compose.local.yaml sets both); not a secret.
+    webhook-secret: ${PRINTER_WEBHOOK_SECRET:dev-only-printer-webhook-secret}
 spring:
   application:
     name: ${KRAKEN_SERVICE_NAME:service-b}

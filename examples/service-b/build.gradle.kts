@@ -25,6 +25,7 @@ dependencies {
     testImplementation(libs.spring.boot.starter.test)
     testImplementation("org.springframework.boot:spring-boot-starter-webmvc-test") // @WebMvcTest + MockMvcTester (Boot 4 slice starter)
     testImplementation(libs.kotlin.test.junit5)
+    testImplementation(libs.mockk) // PrinterWebhookControllerTest: the ExternalEventIngress (a final class over Mongo)
     testImplementation(project(":kraken-messaging-test"))
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
