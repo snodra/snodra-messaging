@@ -147,7 +147,7 @@ private class RelayMetrics : SagaMetrics {
 }
 
 /** A template whose next update that sets `dispatchedAt` fails: the crash between sending (or publishing) and marking. */
-private class MarkFailingTemplate(factory: SimpleMongoClientDatabaseFactory) : MongoTemplate(factory) {
+internal class MarkFailingTemplate(factory: SimpleMongoClientDatabaseFactory) : MongoTemplate(factory) {
     val failNextMark = AtomicBoolean()
 
     override fun updateFirst(query: Query, update: UpdateDefinition, entityClass: Class<*>): UpdateResult {

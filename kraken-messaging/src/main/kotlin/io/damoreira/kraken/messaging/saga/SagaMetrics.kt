@@ -18,6 +18,26 @@ interface SagaMetrics {
     /** The SCHEDULED deadlines past their due time after a scheduler poll, per deadline name (empty when none): `kraken_deadlines_due{name}`. */
     fun deadlinesOverdue(byName: Map<String, Long>) = Unit
 
+    /** How one call of an `@IdempotentHandler` ended, `kraken_external_calls_total{handler,outcome}`. */
+    enum class ExternalOutcome {
+        /** The body ran and succeeded. */
+        SUCCEEDED,
+
+        /** The stored reply of an earlier success was returned. */
+        REPLAYED,
+
+        /** The body failed for good (stored; later calls fail the same way), or a stored failure was re-thrown. */
+        FAILED,
+
+        /** The body asked for a later attempt, or another call of the same key was in flight. */
+        RETRYABLE,
+
+        /** An earlier call crashed and its outcome is unknown. */
+        UNKNOWN,
+    }
+
+    fun externalCall(handler: String, outcome: ExternalOutcome) = Unit
+
     /** A `SagaCommandFailed` for [commandType] reached no saga or handler: logged at error, `kraken_saga_command_failures_total`. */
     fun commandFailureUnhandled(commandType: String, reason: SagaCommandFailed.Reason) = Unit
 }

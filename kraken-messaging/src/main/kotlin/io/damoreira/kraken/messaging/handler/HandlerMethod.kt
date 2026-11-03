@@ -1,6 +1,7 @@
 package io.damoreira.kraken.messaging.handler
 
 import io.damoreira.kraken.messaging.MessageContext
+import io.damoreira.kraken.messaging.external.CompiledIdempotency
 import java.lang.reflect.InvocationTargetException
 import kotlin.reflect.KClass
 import kotlin.reflect.KFunction
@@ -28,6 +29,8 @@ class HandlerMethod(
      * (the hub's `<id>#0` request); the updates come from the `QueryUpdateEmitter`.
      */
     val subscription: Boolean = false,
+    /** Compiled `@IdempotentHandler`, or null: the invoker runs the handler through the idempotency interceptor. */
+    val idempotency: CompiledIdempotency? = null,
 ) {
     init {
         function.isAccessible = true

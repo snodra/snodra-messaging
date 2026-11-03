@@ -5,6 +5,8 @@ import io.damoreira.kraken.messaging.MessageContext
 import io.damoreira.kraken.messaging.api.StreamingQuery
 import io.damoreira.kraken.messaging.api.SubscriptionQuery
 import io.damoreira.kraken.messaging.codec.MessageTypeResolver
+import io.damoreira.kraken.messaging.external.IdempotentHandler
+import io.damoreira.kraken.messaging.external.IdempotentHandlers
 import kotlinx.coroutines.flow.Flow
 import org.slf4j.LoggerFactory
 import org.springframework.aop.support.AopUtils
@@ -137,7 +139,16 @@ class HandlerRegistry(private val typeResolver: MessageTypeResolver) {
             // A Flow is no reply: it would be JSON-encoded as an empty object. Only a streaming query is served part by part.
             throw IllegalStateException("Handler ${labelOf(klass, fn)} returns a Flow: its query must implement StreamingQuery<R>")
         }
-        return HandlerMethod(bean, fn, kind, messageClass, typeResolver.typeNameOf(messageClass), wantsContext, authorization, shared, streaming, subscription)
+        val idempotency = fn.findAnnotation<IdempotentHandler>()?.let {
+            if (kind == HandlerKind.QUERY) {
+                throw IllegalStateException("Handler ${labelOf(klass, fn)}: @IdempotentHandler is for command and event handlers, not queries")
+            }
+            if (fn.isSuspend) {
+                throw IllegalStateException("Handler ${labelOf(klass, fn)}: an @IdempotentHandler must not be suspend (its bookkeeping runs in transactions that are bound to the thread)")
+            }
+            IdempotentHandlers.compile(it, labelOf(klass, fn))
+        }
+        return HandlerMethod(bean, fn, kind, messageClass, typeResolver.typeNameOf(messageClass), wantsContext, authorization, shared, streaming, subscription, idempotency)
     }
 
     private fun add(handler: HandlerMethod) {

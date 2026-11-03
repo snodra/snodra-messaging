@@ -6,7 +6,10 @@ import io.damoreira.kraken.messaging.InvalidMessageException
 import io.damoreira.kraken.messaging.MessageContext
 import io.damoreira.kraken.messaging.UnauthenticatedException
 import io.damoreira.kraken.messaging.codec.JsonCodec
+import io.damoreira.kraken.messaging.external.ExternalCallFailedException
+import io.damoreira.kraken.messaging.external.ExternalCallUnknownOutcomeException
 import io.damoreira.kraken.messaging.external.ExternalFailureMarkers
+import io.damoreira.kraken.messaging.external.IdempotencyInterceptor
 import io.damoreira.kraken.messaging.external.RetryableExternalException
 import io.damoreira.kraken.messaging.security.Identity
 import jakarta.validation.ConstraintViolationException
@@ -49,7 +52,12 @@ sealed interface SubscriptionAdmission {
  * subscription request itself (`mode = SUBSCRIPTION`) and hands back the decoded query, which the connection keeps to
  * match the emitter's updates against.
  */
-class HandlerInvoker(private val registry: HandlerRegistry, private val codec: JsonCodec) {
+class HandlerInvoker(
+    private val registry: HandlerRegistry,
+    private val codec: JsonCodec,
+    /** Runs the handlers annotated with `@IdempotentHandler`; without one such a handler fails when called. */
+    private val idempotency: IdempotencyInterceptor? = null,
+) {
     private val log = LoggerFactory.getLogger(HandlerInvoker::class.java)
 
     /** [identity] is the resolved caller (null = anonymous); it is checked against the handler's `@RequiresAuthentication`. */
@@ -90,7 +98,7 @@ class HandlerInvoker(private val registry: HandlerRegistry, private val codec: J
         var first: Throwable? = null
         for (handler in registry.eventHandlers(type)) {
             try {
-                handler.invoke(codec.decode(payload, handler.messageClass), ctx)
+                call(handler, codec.decode(payload, handler.messageClass), ctx)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Throwable) {
@@ -132,6 +140,15 @@ class HandlerInvoker(private val registry: HandlerRegistry, private val codec: J
                 failureOf(e)
             }
         }
+    }
+
+    /** Runs [handler], through the idempotency interceptor when it is an `@IdempotentHandler`. */
+    private suspend fun call(handler: HandlerMethod, message: Any, ctx: MessageContext): Any? {
+        if (handler.idempotency == null) return handler.invoke(message, ctx)
+        val interceptor = idempotency ?: throw IllegalStateException(
+            "Handler ${handler.label} is an @IdempotentHandler but this service has no idempotency support (no IdempotencyInterceptor); it is not run",
+        )
+        return interceptor.execute(handler, message, ctx) { handler.invoke(message, ctx) }
     }
 
     private sealed interface Prepared {
@@ -177,7 +194,7 @@ class HandlerInvoker(private val registry: HandlerRegistry, private val codec: J
             is Prepared.Ready -> prepared.message
         }
         return try {
-            InvocationResult.Success(codec.encode(handler!!.invoke(message, ctx) ?: Unit))
+            InvocationResult.Success(codec.encode(call(handler!!, message, ctx) ?: Unit))
         } catch (e: CancellationException) {
             throw e
         } catch (e: Throwable) {
@@ -193,6 +210,8 @@ class HandlerInvoker(private val registry: HandlerRegistry, private val codec: J
         is org.springframework.security.core.AuthenticationException -> InvocationResult.Failure(ErrorCode.UNAUTHENTICATED, e.message ?: "unauthenticated")
         // An adapter asks for a later attempt: the marker in the details tells the saga relay (also across the hub).
         is RetryableExternalException -> InvocationResult.Failure(ErrorCode.HANDLER_ERROR, describe(e), ExternalFailureMarkers.RETRYABLE)
+        is ExternalCallUnknownOutcomeException -> InvocationResult.Failure(ErrorCode.HANDLER_ERROR, e.message ?: "unknown outcome", ExternalFailureMarkers.UNKNOWN_OUTCOME)
+        is ExternalCallFailedException -> InvocationResult.Failure(ErrorCode.HANDLER_ERROR, e.message ?: "failed earlier")
         is IllegalArgumentException -> InvocationResult.Failure(ErrorCode.HANDLER_ERROR, e.message ?: e::class.simpleName.orEmpty(), violations(e))
         else -> when {
             isConstraintViolation(e) -> InvocationResult.Failure(ErrorCode.HANDLER_ERROR, e.message ?: e::class.simpleName.orEmpty(), violations(e))
