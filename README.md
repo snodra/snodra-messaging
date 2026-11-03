@@ -89,6 +89,16 @@ POM also imports the Spring Boot BOM, so consumers do not need to manage them. B
 
 ## Upgrading
 
+**To client certificates (P5c).** Nothing breaks: a service that sets no `hub.tls.client-cert-file` behaves as before. New settings (both
+or neither): `kraken.messaging.hub.tls.client-cert-file`, `kraken.messaging.hub.tls.client-key-file`; a client certificate implies TLS
+and cannot be combined with a static token or OAuth2 (the startup fails naming both). `HubConnections.authStatus()` gained the kind
+`CERTIFICATE` (an exhaustive `when` over `HubAuthKind` needs the new branch) and the fields `certificateFingerprint`,
+`certificateExpiresAt`, `certificateRotations` (with defaults, so constructing `HubAuthStatus` still compiles). `HubTls` and `HubSettings`
+gained `clientCertificate`; `HubConnections` three optional timing parameters. **Behaviour change for every service:** a unary send that
+gets `NO_HANDLER` from one hub now tries the other live hubs before answering `NO_HANDLER` (when no hub has a handler the answer is the
+same and as fast as before). `InProcessHub.dropInstance(instanceId, status)` ends a stream with a given status, and
+`KrakenContainers.hubMtls(...)` starts the hub image with a client CA.
+
 **To JWT authentication (P5b).** Nothing breaks: a service that sets no `hub.oauth2.token-uri` behaves as before (static token or
 none). `Register` now declares the capability `credentials-refresh` (a hub that does not know it ignores it); with a static
 token file the new token is also sent on live streams when the file changes. To switch a service to Keycloak, remove its
@@ -399,8 +409,8 @@ absent) and, if the address is not a name on the certificate, `hub.tls.server-na
 Plain text against a TLS hub (or TLS against a plain-text one) never hangs: the stream fails at once as
 `UNAVAILABLE (io exception)` or `INTERNAL (http2 exception)` and the first `WARN` line that applies (not
 necessarily the very first attempt: a hub that was still starting is a plain refusal, which carries no hint) says to check
-`kraken.messaging.hub.tls.enabled` and `tls.ca-file`; later attempts log it at `DEBUG`. mTLS is P5c: `DefaultHubChannelFactory.customizeTls` is the (empty)
-hook where a client certificate will go.
+`kraken.messaging.hub.tls.enabled` and `tls.ca-file`; later attempts log it at `DEBUG`. A client certificate (mTLS, P5c) is
+[its own section](#authenticating-with-a-client-certificate-mtls); `DefaultHubChannelFactory.customizeTls` stays a hook for a subclass.
 
 **Rollout.** Hub first, clients second, `enforce` last (any order is safe because an older client or hub simply ignores
 the credentials): (1) run the hub with `KRAKEN_HUB_AUTH_MODE=permissive` and an ACL file; (2) give every service its
@@ -471,6 +481,83 @@ health indicator. With Micrometer on the classpath the starter binds `kraken_mes
 **Divergences from the Rust library** (same design, ecosystem differences): the Kotlin starter reports through
 `HubConnections.authStatus()` and Micrometer counters where Rust has an accessor. A token URI host with an underscore in
 its name is refused by the JDK's URI parser (the host would be null), so it fails the startup here; the Rust library accepts it.
+
+### Authenticating with a client certificate (mTLS)
+
+Since P5c the hub can take a **client certificate** as the service's credential (decision record: umbrella
+`docs/adr/0020-hub-mutual-tls.md`, issuing certificates and the hub's settings: `docs/06-security.md`, "mTLS mode"). The TLS handshake
+proves the service holds the key, the certificate names the service, and the rights are the hub's `[[service]]` table of that name, the
+same table a JWT uses. No secret crosses the wire and no identity provider is involved.
+
+```yaml
+kraken:
+  messaging:
+    service-name: billing-service
+    hub:
+      tls:
+        ca-file: /etc/kraken/hub-ca.pem                 # the CA that signed the hub's certificate (or the system roots)
+        client-cert-file: /etc/kraken/tls/client.pem    # certificate chain, leaf first
+        client-key-file: /etc/kraken/tls/client.key     # unencrypted PKCS#8 PEM
+```
+
+Environment names (relaxed binding): `KRAKEN_MESSAGING_HUB_TLS_CLIENT_CERT_FILE`, `KRAKEN_MESSAGING_HUB_TLS_CLIENT_KEY_FILE`.
+
+- **Both files or neither.** One alone fails the startup naming the missing one. A client certificate **implies TLS**: `hub.tls.enabled`
+  need not be set (the Rust library does the same with `KRAKEN_HUB_TLS_CLIENT_CERT`/`_KEY`).
+- **One credential kind per service.** A client certificate together with a static token (`hub.token`, `hub.token-file`,
+  `KRAKEN_HUB_TOKEN`, `KRAKEN_HUB_TOKEN_FILE`) or OAuth2 (`hub.oauth2.*`, `KRAKEN_HUB_OAUTH2_*`) fails the startup naming both: a stale
+  token next to a good certificate would be refused by the hub. With a certificate the library sends no credentials at all.
+- **The SAN rule.** The leaf must carry exactly one URI SAN `kraken://service/<name>` (the name is 1 to 128 characters of
+  `[A-Za-z0-9._-]`; DNS, IP and other URI SANs are ignored; two such SANs, even equal ones, are refused as the hub refuses them), and
+  `<name>` must be `kraken.messaging.service-name`. The hub would refuse anything else with `PERMISSION_DENIED` at `Register`; the
+  starter says so at startup instead. Also checked at startup: both files exist, are not empty and parse, and the key belongs to the
+  certificate. The key must be **PKCS#8 PEM** (`-----BEGIN PRIVATE KEY-----`); RSA (`BEGIN RSA PRIVATE KEY`), SEC1 (`BEGIN EC PRIVATE KEY`)
+  and encrypted keys are refused with the conversion hint (`openssl pkcs8 -topk8 -nocrypt`). The JDK reads RSA, EC and Ed25519 keys.
+- **How to issue one.** Follow `docs/06-security.md`, "mTLS mode" (`openssl`, or cert-manager with `uris:
+  [kraken://service/billing-service]` and `usages: [client auth]`). Issue short-lived certificates (hours to days): there is no
+  revocation list, so the lifetime is the revocation story.
+- **Failures at the handshake are transport errors.** With `KRAKEN_HUB_TLS_CLIENT_AUTH=required`, no certificate or one the hub does not
+  trust fails the TLS handshake, which TLS 1.3 shows when the stream opens: `UNAVAILABLE` ("ssl exception"), **not** a registration
+  rejection. The library retries with its normal back-off and logs one `WARN` that names the fingerprint and what to check (the hub's
+  `KRAKEN_HUB_TLS_CLIENT_CA`, the certificate's end, `hub.tls.ca-file`). A certificate that names no or several services, or another
+  service than `service-name`, is `PERMISSION_DENIED` at `Register`: a rejection (`HubRegistrationRejectedException`).
+
+**Rotation without a restart.** The files are read again on every (re)connect and once per check tick (3 s, the hub's heartbeat period).
+When the pair changed and is valid (the same checks as at startup, not expired, already valid), the hub connections **roll over to it
+one hub at a time**: (1) the hub is told this instance is stopping (a `Register` with no types, as at shutdown), so it routes new work
+to other instances; (2) the library waits up to 10 s for the work in flight on that stream (requests it sent and has no answer for,
+requests it is handling); (3) the stream is closed gracefully (half-close, the hub's end awaited for 2 s); (4) it reconnects at once
+with the new pair and registers again; only then the next hub is rolled. Write the key first and the certificate second, or both with
+one rename each: a pair that does not match (a half-written replacement) is not adopted, it is logged at `ERROR` once per distinct problem
+and the current connection stays; the next tick adopts it when it is complete.
+
+- *Failed requests.* Requests accepted before the roll finish on the old stream. A sender that picks a hub in the middle of its roll gets
+  `NO_HANDLER` from it when this instance was the only owner there, so a unary send **now fails over to another live hub that has a handler**
+  (every hub answering `NO_HANDLER` returns the answer at once). A hub being rolled takes no new request from this instance's own sends.
+- *One hub: a short gap.* With a single hub there is nobody to take over: for the roll (drain, close, reconnect: well under a second when
+  idle) the instance has no stream. Its own sends wait for the new stream within the call's deadline; requests other services send to
+  it meanwhile get `NO_HANDLER` from the hub (give such a service two instances, or two hubs).
+- *Streams and subscriptions.* A streaming handler counts as work in flight (it is waited for, up to 10 s, then cut like any lost stream).
+  A subscription this instance serves does not hold the roll: it ends with the old stream (the hub tells the subscriber
+  `HANDLER_DISCONNECTED`), as at any reconnect.
+- *Requests not yet written* when the stream closes follow the usual lost-stream rules (`HubUnavailableException`, sent again on another hub).
+- A roll that does not complete (the new stream does not register within 10 s) leaves the other hubs on the old pair until the next tick.
+
+**Expiry.** The hub closes a certificate session at `notAfter` with `UNAUTHENTICATED` "certificate expired" and no grace. A service whose
+files are renewed before that never meets it. Otherwise: with less than a tenth of its lifetime (24 hours at most) left and no renewed
+file, the library logs one `WARN` per certificate; when the hub closes the session at `notAfter` the library treats it as a normal
+reconnect (it is **not** a registration rejection: no back-off at the cap) and reads the files again; if they still hold the expired
+certificate, the handshake fails (a transport error, backing off) and one `ERROR` says the certificate expired.
+
+**What you can read.** `HubConnections.authStatus()` has `kind = CERTIFICATE`, `certificateFingerprint` (the first 8 hex characters of
+the leaf's SHA-256, the only form of the certificate that is logged or shown; the hub's topology shows the same value), `certificateExpiresAt`
+(`notAfter`) and `certificateRotations` (pairs adopted since start). With Micrometer the starter binds
+`kraken_messaging_hub_certificate_rotations_total`. Logs name a certificate only by that fingerprint and the service; no key material
+is ever logged, and `toString()` of the certificate objects shows neither key nor certificate.
+
+**Divergences from the Rust library** (same design, ecosystem differences): the Kotlin starter reports through `authStatus()` and a
+Micrometer counter where Rust has `hub_auth()`; the status fields are `certificate*` next to the existing `tokenExpiresAt`; the JDK's
+PKIX validation rules apply to the hub's certificate (the Rust library uses rustls).
 
 ### Handlers
 
@@ -944,7 +1031,12 @@ result.updates.collect { change -> render(change) }   // completes when the hand
   (`emit`, `complete`, `completeExceptionally`, filtered like the real one; `buses.openSubscriptions` counts the open
   ones): no credits, and an emit is delivered at once, not after the commit of a surrounding transaction. `maxResults`,
   `cancel()` and `take(n)` end it as against a hub.
-- `InProcessHub`: in-JVM stand-in for the hub (`start()`, `channel()`, `dropInstance(...)`, `lastRequestHeaders()`,
+- `KrakenContainers.hubMtls(directory, services, serverCertificate, serverKey, clientCa, clientAuth = "required")`: the hub image
+  (`KRAKEN_HUB_IMAGE`, default `kraken-hub:dev`) in mode `enforce` with `[[service]]` tables and a client CA (P5c). Issue the hub's own
+  pair from the client CA with both usages, so the image's health check (which presents it under `required`) passes. Generate the CA
+  and the certificates at test time; the starter's own tests use BouncyCastle in test scope for that (the JDK's `keytool` cannot give a
+  URI SAN and a seconds-long validity at once).
+- `InProcessHub`: in-JVM stand-in for the hub (`start()`, `channel()`, `dropInstance(...)` (also with a `Status`), `lastRequestHeaders()`,
   `lastRequest()`, `registrationsFrom(...)`, `lastRegisterFrom(...)`, `acksSentTo(...)`, `echoHeartbeats = false` to
   simulate a hub that stopped answering), for hub-client tests without a container. It speaks protocol v2 (a
   `RegisterAck` with `heartbeatInterval`, `heartbeatTimeout`, `replyTimeout` as default, `maxTimeout`, `typeTimeouts`);
@@ -1032,9 +1124,11 @@ Docker Compose from local builds together with the real `kraken-hub` image, Kafk
 
 ## Known limitations
 
-- Hub authentication is a static token per service (P5a) or a Keycloak client-credentials JWT (P5b). Client certificates (P5c,
-  mTLS) are not built: `DefaultHubChannelFactory.customizeTls` is an empty hook. A static token is a long-lived secret: rotate it
-  through `hub.token-file`. An access token that Keycloak revokes keeps working until it expires (minutes).
+- Hub authentication is a static token per service (P5a), a Keycloak client-credentials JWT (P5b) or a client certificate (P5c, mTLS).
+  A static token is a long-lived secret: rotate it through `hub.token-file`. An access token that Keycloak revokes keeps working until
+  it expires (minutes); a certificate until its `notAfter` or until the hub's `[[service]]` table is removed (no CRL, no OCSP: issue
+  short-lived certificates). A client key must be unencrypted PKCS#8 PEM. With a single hub, a certificate rotation leaves the instance
+  without a stream for a moment (see the rotation notes above).
 - No dead-letter topic: poison records are logged and skipped.
 - No leader election for the outbox publisher; with several instances delivery is at-least-once and ordering is per
   publishing instance.
