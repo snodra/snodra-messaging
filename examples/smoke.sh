@@ -902,7 +902,7 @@ jwt_steps() {
 # service-c with authKind certificate, the fingerprint of the certificate in the service's mounted directory and an
 # expiresAt, and service-b with token. Step 23b: the certificate of service-c (then of service-a) is replaced on disk by a new
 # one (new key; dev-hub-pki.sh --rotate) while a steady trickle of calls goes through service-a (alternating service-b and
-# service-c as the target): within ~30 s both hubs show the new fingerprint for the same instance (the libraries roll the
+# service-c as the target): within ~60 s both hubs show the new fingerprint (each instance first waits a random 0 to 30 s, so replicas do not roll together) for the same instance (the libraries roll the
 # connections over one hub at a time, no restart) and no call failed. SKIP_MTLS=1 skips them, ONLY_MTLS=1 runs only them.
 
 # The first 8 hex characters of the SHA-256 of the DER encoding of the certificate in <pem>: what the hub shows.
@@ -979,7 +979,7 @@ mtls_steps() {
     [ "$n" != "$fp" ] || { : > "$stop"; wait "$loop_pid" || true; fail "the rotation did not change $svc's certificate ($fp)"; }
     started=$(now_ms)
     for h in "$HUB" "$HUB2"; do
-      sess=$(await_cert "$h" "$svc" "$n" 45) || { : > "$stop"; wait "$loop_pid" || true; exit 1; }
+      sess=$(await_cert "$h" "$svc" "$n" 90) || { : > "$stop"; wait "$loop_pid" || true; exit 1; }
       waited=$(( ($(now_ms) - started) / 1000 ))
       read -r id since kind fp2 <<< "$sess"
       [ "$id" = "${ids[$k]}" ] || { : > "$stop"; wait "$loop_pid" || true; fail "$svc changed instance on $h during the rotation (${ids[$k]} -> $id)"; }
