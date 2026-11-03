@@ -1435,6 +1435,12 @@ class HubConnection(
             it is java.net.ConnectException || it is java.net.UnknownHostException || it is java.net.NoRouteToHostException || it is java.net.SocketTimeoutException
         }
         if (unreachable) return ""
+        settings.clientCertificate?.current?.let { certificate ->
+            // TLS is on already (a client certificate implies it): the other end of the handshake did not accept what this one presented, or the reverse.
+            return " (the TLS handshake failed before the hub answered: check that the hub's KRAKEN_HUB_TLS_CLIENT_CA trusts the issuer of the client certificate " +
+                "${certificate.fingerprint} of ${certificate.service} and that it has not ended (${certificate.notAfter}), and that kraken.messaging.hub.tls.ca-file " +
+                "trusts the hub's own certificate)"
+        }
         return " (the transport failed before the hub answered: if the hub serves TLS set kraken.messaging.hub.tls.enabled=true" +
             " and kraken.messaging.hub.tls.ca-file, if it serves plain text leave kraken.messaging.hub.tls.enabled off)"
     }

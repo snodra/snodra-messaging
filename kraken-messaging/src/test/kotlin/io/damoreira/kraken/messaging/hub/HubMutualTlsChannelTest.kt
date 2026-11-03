@@ -16,8 +16,11 @@ import io.grpc.ServerInterceptors
 import io.grpc.Status
 import io.grpc.StatusException
 import io.grpc.TlsServerCredentials
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import org.awaitility.kotlin.atMost
+import org.awaitility.kotlin.until
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -128,5 +131,30 @@ class HubMutualTlsChannelTest {
         Files.writeString(certFile, "garbage")
         assertEquals("mtls-test-hub", call(tls(source)))
         assertEquals(listOf(first.fingerprint), seen.toList())
+    }
+
+    @Test fun `a connection whose client certificate the hub refuses at the handshake retries and says what to check, with no rejection`() {
+        val otherCa = TestPki.ca(dir.resolve("other-ca"), "other-ca")
+        val issued = certificate(ca = otherCa)
+        val log = org.slf4j.LoggerFactory.getLogger(HubConnection::class.java) as ch.qos.logback.classic.Logger
+        val appender = ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>().also { it.start() }
+        log.addAppender(appender)
+        val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.Default)
+        val source = HubClientCertificate(certFile, keyFile, "billing-service")
+        val factory = DefaultHubChannelFactory(tls(source))
+        val settings = HubSettings(null, java.time.Duration.ofSeconds(10), java.time.Duration.ofMillis(20), java.time.Duration.ofMillis(100), clientCertificate = source)
+        val connection = HubConnection({ factory.channel("localhost:${server.port}") }, "billing-service", "i-1", settings, { error("no requests") }, scope)
+        try {
+            connection.start()
+            org.awaitility.kotlin.await atMost java.time.Duration.ofSeconds(10) until { appender.list.any { it.level == ch.qos.logback.classic.Level.WARN } }
+            val warning = appender.list.first { it.level == ch.qos.logback.classic.Level.WARN }.formattedMessage
+            assertTrue(issued.fingerprint in warning && "KRAKEN_HUB_TLS_CLIENT_CA" in warning, warning)
+            assertEquals(null, connection.lastRejection.value)
+            assertTrue(appender.list.none { it.level == ch.qos.logback.classic.Level.ERROR })
+        } finally {
+            log.detachAppender(appender)
+            runBlocking { connection.stop() }
+            scope.cancel()
+        }
     }
 }
