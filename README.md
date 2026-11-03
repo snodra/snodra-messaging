@@ -38,6 +38,7 @@ Repo conventions: `../kraken/docs/04-repositories.md`.
 - [Scatter-gather](#scatter-gather)
 - [Streaming queries](#streaming-queries)
 - [Subscription queries](#subscription-queries)
+- [Sagas](#sagas)
 - [Test helpers (`kraken-messaging-test`)](#test-helpers-kraken-messaging-test)
 - [Examples](#examples)
 - [Known limitations](#known-limitations)
@@ -50,8 +51,8 @@ Repo conventions: `../kraken/docs/04-repositories.md`.
 | Module | Coordinates | Purpose |
 |---|---|---|
 | `kraken-messaging-api` | `io.damoreira.kraken:kraken-messaging-api:0.1.0-SNAPSHOT` | `@MessageType`, `Event`, `Command<R>`, `Query<R>`, `StreamingQuery<R>`. No Spring. Depended on by every `*-api` module. |
-| `kraken-messaging` | `io.damoreira.kraken:kraken-messaging:0.1.0-SNAPSHOT` | Spring Boot starter: buses, handler annotations, hub client, outbox, Kafka consumer, auto-configuration. |
-| `kraken-messaging-test` | `io.damoreira.kraken:kraken-messaging-test:0.1.0-SNAPSHOT` | `InMemoryBuses`, `InProcessHub`, `KrakenContainers`, `KrakenTestKafka`. |
+| `kraken-messaging` | `io.damoreira.kraken:kraken-messaging:0.1.0-SNAPSHOT` | Spring Boot starter: buses, handler annotations, hub client, outbox, Kafka consumer, sagas, deadlines and the external-integration toolkit, auto-configuration. |
+| `kraken-messaging-test` | `io.damoreira.kraken:kraken-messaging-test:0.1.0-SNAPSHOT` | `InMemoryBuses`, `InProcessHub`, `KrakenContainers`, `KrakenTestKafka`, `SagaTestFixture`. |
 | `examples/examples-api`, `examples/service-a`, `examples/service-b` | not published | Two sample services talking through the hub; see [Examples](#examples). |
 
 ## Requirements
@@ -88,6 +89,16 @@ The published POM and Gradle module metadata carry resolved versions for every d
 POM also imports the Spring Boot BOM, so consumers do not need to manage them. Builder call.
 
 ## Upgrading
+
+**To sagas (S1).** Nothing breaks: a service with no `@Saga` class and no `@IdempotentHandler` method gets none of the new beans or
+collections. What changes: `EventConsumer` now runs events through a shared `LocalEventDispatcher` (ordinary handlers first, as
+before; then the saga stage); a record that no `@EventHandler` wants but a saga does is processed instead of skipped.
+`kraken-messaging` exposes `kafka-clients` as an `api` dependency (the translator signature), and `kraken-messaging-test` depends
+on spring-data-mongodb (`SagaTestFixture`). `SendOptions` gained `headers` (default empty; `authorization`, `traceparent`,
+`tracestate`, `correlation-id` and `correlationId` are reserved). New keys: `sagas.*`, `deadlines.*` and `external.*`. New
+collections, created on first start of a service that uses them: `sagas`, `saga_dispatch`, `saga_dispatch_leases`, `deadlines`,
+`saga_failures`, `external_calls`. A `HandlerInvoker` built by hand takes an optional `IdempotencyInterceptor`; the
+`EventConsumer` an optional `LocalEventDispatcher`.
 
 **To client certificates (P5c).** Nothing breaks: a service that sets no `hub.tls.client-cert-file` behaves as before. New settings (both
 or neither): `kraken.messaging.hub.tls.client-cert-file`, `kraken.messaging.hub.tls.client-key-file`; a client certificate implies TLS
@@ -275,6 +286,25 @@ All keys (`kraken.messaging.*`; durations accept `200ms`, `5s`, `7d`; relaxed bi
 | `outbox.max-attempts` | `10` | Send attempts per outbox document before it is marked failed (`failedAt`) and skipped. |
 | `idempotency.retention` | `30d` | `processed_events` documents older than this are deleted (TTL index). |
 | `security.forward-jwt` | `true` | Put the current request's bearer token in the hub request's `authorization` header. |
+| `sagas.enabled` | `true` | Switch for the saga runtime, the dispatch relay and the deadline scheduler. They exist only when the application has a `@Saga` class (found by scanning its packages) anyway. See [Sagas](#sagas). |
+| `sagas.max-attempts` | `5` | Attempts per saga event (first try included) for version conflicts, start-key duplicates and handler exceptions before the event is parked in `saga_failures`; also the bound for firing a deadline. Backoff 200 ms doubling to 5 s (not configurable). |
+| `sagas.ended-retention` | `30d` | Ended sagas are deleted this long after they ended (TTL index on `sagas.endedAt`). Must be positive. |
+| `sagas.dispatch-retention` | `7d` | Dispatched `saga_dispatch` entries are deleted this long after they were sent (TTL index on `dispatchedAt`). Must be positive. |
+| `sagas.relay.poll-interval` | `500ms` | How often the dispatch relay looks for entries that saga handlers recorded. Must be positive. |
+| `sagas.relay.lease` | `30s` | How long a relay instance holds one saga's dispatch order before another instance may take over (a crashed instance's lease expires); renewed before each entry. Must be positive. |
+| `sagas.relay.max-attempts` | `10` | Attempts per command for transient failures (first try included, at least 1) before it becomes `SagaCommandFailed(EXHAUSTED)`. |
+| `sagas.relay.initial-backoff` | `1s` | Wait before the second attempt of a command; doubles per attempt up to `max-backoff`. |
+| `sagas.relay.max-backoff` | `5m` | Upper bound of one wait between attempts of a command. |
+| `deadlines.poll-interval` | `1s` | How often the deadline scheduler looks for due deadlines. Must be positive. |
+| `deadlines.lease` | `30s` | How long a claimed deadline stays reserved for the instance that claimed it; an expired claim lets it fire again (at least once). Must be positive. |
+| `deadlines.retention` | `7d` | Fired and cancelled deadlines are deleted this long after (TTL index on `deadlines.finishedAt`). Must be positive. |
+| `external.calls.enabled` | unset | Whether the idempotency interceptor and the `external_calls` indexes exist. Unset: they exist when a class in the application's packages has an `@IdempotentHandler` method. `true` when the adapter lives outside those packages, `false` to switch it off. |
+| `external.calls.lease` | `5m` | How long an `IN_PROGRESS` external call may take before its outcome counts as unknown (a crash in the middle of the call). Must be positive. |
+| `external.calls.retention` | `30d` | `external_calls` documents older than this are deleted (TTL index on `updatedAt`). Must be positive. |
+| `external.kafka.sources.<name>.topic` | required | A partner's topic, consumed into local kraken events (never republished to `kraken.events`). Each source needs an `ExternalRecordTranslator` bean named `<name>`; a source without one fails the startup naming it. |
+| `external.kafka.sources.<name>.bootstrap-servers` | `kafka.bootstrap-servers` | The partner's cluster. |
+| `external.kafka.sources.<name>.group-id` | `<service-name>.external.<name>` | The source's consumer group. |
+| `external.kafka.sources.<name>.properties.*` | none | Extra consumer properties (for example `security.protocol`); bootstrap servers, group id, deserializers and auto-commit are fixed by the library. `auto.offset.reset` is `earliest` unless set here. Record retries use `kafka.consumer.max-attempts`. |
 
 ### Security
 
@@ -1035,6 +1065,291 @@ result.updates.collect { change -> render(change) }   // completes when the hand
   a rolling upgrade of an owner the old instances are simply never targets (owners with instances but none capable are
   `UnsupportedByHubException` for the caller).
 
+## Sagas
+
+A saga is a long-running process that reacts to events, keeps its own state, sends commands and events, waits for an answer and
+handles the answer that never comes. It is Axon's `@Saga` model (`@StartSaga`, `@SagaEventHandler` with association properties,
+`@EndSaga`, deadlines), built mainly to drive **integrations with external systems**. Sagas run inside your service, against its
+MongoDB and its Kafka consumer; the hub is not involved except to carry the commands a saga sends to another service.
+
+Everything starts and ends with kraken messages. A saga never calls an external system itself: it sends a command, an
+**adapter** in the same service (an ordinary `@CommandHandler` made idempotent) makes the call, and the external system's answer
+comes back as an ordinary kraken event through a partner topic, a webhook or polling. The full model, the delivery guarantees,
+the configuration and the metrics are in `../kraken/docs/02-messaging.md` ("Sagas and deadlines"); the decision and every
+builder ruling are in `../kraken/docs/adr/0021-sagas-in-the-library.md`; a working example with a fake partner is in
+[examples/README.md](examples/README.md) ("The postcard saga").
+
+### A minimal saga
+
+```kotlin
+@Saga
+class PaymentSaga {
+    var orderId: String? = null                 // state: plain properties, persisted as JSON after each handled message
+    var paymentRef: String? = null
+    var timeoutDeadline: String? = null
+
+    @StartSaga
+    @SagaEventHandler(associationProperty = "orderId")
+    fun on(e: OrderPlaced, saga: SagaLifecycle, commands: SagaCommands, deadlines: DeadlineManager) {
+        orderId = e.orderId
+        paymentRef = "pay-${e.orderId}"
+        saga.associateWith("paymentRef", paymentRef!!)             // later events are routed here by paymentRef
+        saga.associateWith("sagaId", saga.sagaId)                   // this saga hears about its failed commands
+        commands.send(RequestCharge(paymentRef!!, e.amount))       // recorded now, sent after the commit
+        timeoutDeadline = deadlines.schedule(Duration.ofMinutes(15), "charge-timeout")
+    }
+
+    @EndSaga
+    @SagaEventHandler(associationProperty = "paymentRef")
+    fun on(e: ChargeSucceeded, deadlines: DeadlineManager) {
+        timeoutDeadline?.let(deadlines::cancel)
+    }
+
+    @EndSaga
+    @SagaEventHandler(associationProperty = "sagaId")
+    fun on(e: SagaCommandFailed, commands: SagaCommands) {
+        commands.publish(OrderPaymentFailed(orderId!!, e.reason.name), key = orderId)
+    }
+
+    @EndSaga
+    @DeadlineHandler("charge-timeout")
+    fun timeout(commands: SagaCommands) {
+        commands.send(CancelCharge(paymentRef!!))
+    }
+}
+```
+
+- The class needs a no-argument constructor and is found by scanning the application's packages (the packages of your
+  `@SpringBootApplication` class). It is not a Spring bean. Put it in the service's own package, not in a library.
+- `@SagaEventHandler(associationProperty = "orderId")` looks the event's `orderId` up as the association `orderId = <value>` among
+  the live instances; every match handles the event. `keyName` renames the association, `associationHeader` routes by a message
+  header instead, `payloadType` narrows a handler declared on a supertype.
+- `@StartSaga` creates an instance when no live instance matched the event; with `forceNew = true` it always does. At most one live
+  instance exists per start association otherwise.
+- Handler parameters after the event: `SagaLifecycle`, `SagaCommands`, `DeadlineManager`, `MessageContext` and any Spring bean by
+  type, in any order. A `@DeadlineHandler`'s first parameter, when it is not one of those, receives the deadline's payload.
+- Handlers are plain (non-`suspend`) functions: they run inside the saga's thread-bound Mongo transaction. Several handlers of one
+  event type run in **method-name order**.
+- `commands.send` and `commands.publish` only record the message; it leaves **after** the transaction committed, in call order,
+  at least once, with the header `idempotency-key = <sagaId>:<seq>`. A saga does not wait for a reply.
+- State, associations, scheduled deadlines and recorded messages are written together, once, after the handlers returned. An
+  exception rolls all of it back and the event is retried (5 attempts), then parked (see [Operating sagas](#operating-sagas)).
+- The startup fails, naming the class and method, for a suspend handler, a saga without a `@StartSaga` handler, an association
+  property that does not exist on the event, a handler parameter nothing can fill, and a state the library's codec cannot write
+  and read back.
+
+### An idempotent adapter
+
+The saga's `RequestCharge` is handled by an adapter in the same service. `@IdempotentHandler` records the call in
+`external_calls` under the command's idempotency key, so a command the relay sends twice (a crash between sending and marking it
+sent) reaches the external system once:
+
+```kotlin
+@Component
+class PaymentAdapter(private val gateway: PaymentGateway) {
+
+    @CommandHandler
+    @IdempotentHandler                                             // key: the idempotency-key header (<sagaId>:<seq>)
+    fun charge(cmd: RequestCharge, ctx: MessageContext) {
+        val key = checkNotNull(ctx.headers["idempotency-key"])
+        try {
+            gateway.charge(cmd.paymentRef, cmd.amount, idempotencyKey = key)        // pass the key on when the partner takes one
+        } catch (e: GatewayUnavailable) {
+            throw RetryableExternalException("gateway down: ${e.message}", e)      // the relay backs off and calls again
+        }
+    }
+}
+```
+
+- Throw `RetryableExternalException` for a failure a later attempt may cure (a timeout, a 503, a 429). **Do not retry inside the
+  adapter**: the saga relay owns the backoff (`sagas.relay.*`), so retries never stack and no relay thread sleeps in your code.
+  Any other exception is permanent: it is stored, repeats of the key throw it again, and the saga hears `SagaCommandFailed(FAILED)`.
+- If the process dies in the middle of a call, the record stays `IN_PROGRESS`. After `external.calls.lease` (5 minutes) the
+  outcome is unknown. By default (`externalIdempotent = false`) the call becomes `UNKNOWN`, is never repeated on its own and the
+  saga hears `SagaCommandFailed(UNKNOWN_OUTCOME)`, so it decides (poll the partner, compensate, ask a person). If the partner
+  de-duplicates by the key you pass it, declare `@IdempotentHandler(externalIdempotent = true)` and the call is repeated. Throw
+  `ExternalCallUnknownOutcomeException` yourself when you see a connection break after the request went out.
+- `@IdempotentHandler(key = "'poll:' + message.jobId + ':' + message.attempt")` takes a SpEL key over `message` and `headers`.
+- The handler must not be `suspend`. Use `eventBus.publishBlocking(...)` to publish a result.
+- The interceptor and its collection exist when a class in the application's packages has an `@IdempotentHandler` method; set
+  `kraken.messaging.external.calls.enabled=true` for an adapter outside them.
+- A saga command carries **no user token**: it only reaches handlers without `@RequiresAuthentication` (the same limit as events
+  published from handlers, see [Known limitations](#known-limitations)); otherwise the saga hears `SagaCommandFailed(DENIED)`.
+
+### Failed commands: `SagaCommandFailed`
+
+A command that failed for good comes back to the saga as the event `SagaCommandFailed(sagaId, commandType, idempotencyKey, reason,
+message)`, delivered locally (never published to `kraken.events`). `reason` is `NO_HANDLER`, `DENIED`, `INVALID`, `FAILED`,
+`UNKNOWN_OUTCOME` or `EXHAUSTED` (transient failures that outlasted `sagas.relay.max-attempts`). The saga must **associate itself
+with its own id** to receive it, as in the saga above (`saga.associateWith("sagaId", saga.sagaId)` and
+`@SagaEventHandler(associationProperty = "sagaId")`); the runtime does not do that for you. Unhandled, it is logged at error and
+counted in `kraken.saga.command.failures`. A permanently failed step does not hold back the saga's later steps.
+
+### Hearing from the partner: a topic of its own
+
+When the partner produces to **its own Kafka topic** (not `kraken.events`):
+
+```yaml
+kraken:
+  messaging:
+    external:
+      kafka:
+        sources:
+          printer:                       # the source's name
+            topic: printer.events
+            # bootstrap-servers: partner-kafka:9092   # default: kraken.messaging.kafka.bootstrap-servers
+            # properties: { security.protocol: SSL }  # extra consumer properties
+```
+
+```kotlin
+@Component("printer")                    // the bean carries the source's name
+class PrinterTranslator(private val codec: JsonCodec) : ExternalRecordTranslator {
+    override fun translate(record: ConsumerRecord<String, ByteArray>): TranslatedEvent? {
+        val n = codec.decode(record.value(), PrinterNotification::class)
+        return TranslatedEvent(PostcardPrinted(n.jobId, n.name), dedupeKey = n.deliveryId)    // null ignores the record
+    }
+}
+```
+
+The library runs one consumer per source (group `<service-name>.external.<name>`, `earliest` for a new group), translates each
+record and dispatches the event **locally**: the service's `@EventHandler`s and sagas, never `kraken.events`. The `dedupeKey` (the
+partner's own id) makes two records for one event apply once; without it the key is `<name>:<partition>:<offset>`. A translator
+exception retries the record up to `kafka.consumer.max-attempts` times, then logs and skips it. `properties` cannot override the
+servers, the group id, the deserializers or auto-commit. `kafka-clients` is an `api` dependency of the starter, so the
+translator's `ConsumerRecord` compiles without declaring it.
+
+### Hearing from the partner: a webhook
+
+The library gives the verifier and the ingress; the service writes the endpoint (authentication, body shape and response codes
+differ per partner). The five-line controller:
+
+```kotlin
+@RestController
+class PartnerWebhook(private val verifier: WebhookSignatureVerifier, private val ingress: ExternalEventIngress,
+                     private val codec: JsonCodec, @Value("\${partner.webhook-secret}") private val secret: String) {
+    @PostMapping("/partner/webhook")
+    fun receive(@RequestBody body: ByteArray, @RequestHeader headers: HttpHeaders): ResponseEntity<Void> {
+        if (!verifier.verify(secret, null, headers.toSingleValueMap(), body)) return ResponseEntity.status(401).build()
+        val n = codec.decode(body, PartnerNotification::class)
+        ingress.accept("partner", n.deliveryId, PostcardPrinted(n.jobId, n.name))   // ACCEPTED or DUPLICATE: both are a 200
+        return ResponseEntity.ok().build()
+    }
+}
+```
+
+- `verify(secret, previousSecret, headers, body)` accepts the shared secret in `X-Kraken-Webhook-Secret` or the HMAC-SHA256 of the
+  **raw** body in `X-Kraken-Signature` (hex, or `sha256=<hex>`); the previous secret is accepted during a rotation; constant-time
+  comparison; an empty secret verifies nothing. Verify the raw bytes before parsing.
+- `accept(source, dedupeKey, event, headers = emptyMap())` dispatches locally and **synchronously** (handlers, then sagas) under
+  the id `<source>:<dedupeKey>`, so the partner's retries apply once (`DUPLICATE`). Use the partner's own delivery or event id as
+  `dedupeKey`. A failure is thrown: answer 5xx and let the partner retry. An event no handler or saga takes is `ACCEPTED` with a
+  warning. It blocks: call it from a request thread.
+
+### Hearing from the partner: long polling
+
+When the partner offers neither: the saga schedules a polling deadline, the deadline handler sends a poll command, the adapter
+asks the partner and publishes a result event when there is one, and the saga reschedules or ends. The adapter's key includes the
+poll attempt, so a poll sent twice asks once:
+
+```kotlin
+// in the saga
+@DeadlineHandler("poll-printer")
+fun poll(commands: SagaCommands, deadlines: DeadlineManager) {
+    commands.send(PollPrintJob(jobId!!, ++polls))
+    deadlines.schedule(Duration.ofSeconds(2), "poll-printer")
+}
+// in the adapter
+@CommandHandler
+@IdempotentHandler(key = "'poll:' + message.jobId + ':' + message.attempt")
+fun poll(cmd: PollPrintJob) {
+    val job = printer.status(cmd.jobId) ?: return
+    if (job.done) events.publishBlocking(PostcardPrinted(job.jobId, job.name), key = job.name)    // the saga ends on this event
+}
+```
+
+Give every waiting saga a timeout deadline of its own, so an answer that never comes ends it: the postcard saga does.
+
+### Testing a saga
+
+`SagaTestFixture` (in `kraken-messaging-test`, `testImplementation`) drives one saga with events and time, in memory: no Kafka,
+no MongoDB, no Spring context. It runs the library's own saga runtime over in-memory storage, so a saga that passes behaves the
+same on MongoDB; every step encodes and decodes the saga state as JSON, so state the codec cannot carry fails the test.
+
+```kotlin
+class PaymentSagaTest {
+    private val t0 = Instant.parse("2026-11-03T10:00:00Z")
+
+    @Test
+    fun `a charge that never succeeds is cancelled when the deadline falls due`() {
+        SagaTestFixture(PaymentSaga::class)                             // beans a handler asks for go after the class: SagaTestFixture(PaymentSaga::class, someBean)
+            .givenCurrentTime(t0)
+            .whenEvent(OrderPlaced("o1", 42))
+            .expectActiveSagas(1)
+            .expectAssociation("paymentRef", "pay-o1")
+            .expectDispatchedCommands(RequestCharge("pay-o1", 42))
+            .expectScheduledDeadline("charge-timeout", t0.plus(Duration.ofMinutes(15)))
+            .whenTimeElapses(Duration.ofMinutes(15))
+            .expectDispatchedCommands(RequestCharge("pay-o1", 42), CancelCharge("pay-o1"))   // everything sent since the last given…
+            .expectSagaEnded()
+    }
+
+    @Test
+    fun `a command that failed for good ends the saga and says so`() {
+        SagaTestFixture(PaymentSaga::class)
+            .whenEvent(OrderPlaced("o2", 10))
+            .whenCommandFailed(RequestCharge("pay-o2", 10), SagaCommandFailed.Reason.UNKNOWN_OUTCOME, "gateway crashed")
+            .expectPublishedEvents(OrderPaymentFailed("o2", "UNKNOWN_OUTCOME"))
+            .expectNoScheduledDeadlines()
+            .expectSagaEnded()
+    }
+}
+```
+
+Steps: `givenEvents(...)`, `givenCurrentTime(instant)`, `whenEvent(event, headers = emptyMap())`,
+`whenCommandFailed(command, reason, message = "")` (delivers the `SagaCommandFailed` the relay would for a command the saga sent),
+`whenTimeElapses(duration)` (fires every deadline that falls due on the way, each at its own due time, so a polling deadline fires
+once per interval). Expectations: `expectActiveSagas(n)`, `expectAssociation(key, value)`, `expectDispatchedCommands(...)`,
+`expectPublishedEvents(...)`, `expectScheduledDeadline(name, at)`, `expectNoScheduledDeadlines()`, `expectSagaEnded()`. The dispatch
+expectations cover what was sent since the last `given…` step, in order. A handler that throws fails the step with an
+`IllegalStateException`; a failed expectation is an `AssertionError`. The adapter and the controller are tested the usual way (an
+adapter against a fake of the partner, the controller with a mock request and a computed signature, which
+`WebhookSignatureVerifier.hmacHex(secret, body)` gives you); the example has both.
+
+### Operating sagas
+
+- **A parked event.** An event whose saga handler failed all its attempts is written to `saga_failures` (with its marker, so the
+  consumer moves on), counted in `kraken.saga.events{outcome="parked"}` and logged at error. Inject `SagaFailures` and call
+  `list(type?)`, `retry(id)`, `retryAll(type)` or `discard(id)` once the cause is fixed. Nothing retries a parked event by itself.
+- **Metrics** (Micrometer, with a `MeterRegistry` bean in a service that uses sagas or idempotent handlers): `kraken.sagas.started`,
+  `kraken.sagas.ended`, `kraken.sagas.active`, `kraken.saga.events{type,outcome}` (`handled`, `no_match`, `conflict`, `parked`),
+  `kraken.saga.dispatch.pending`, `kraken.saga.command.failures`, `kraken.deadlines.fired`, `kraken.deadlines.due`,
+  `kraken.external.calls{handler,outcome}`. A `no_match` count that grows means an association that does not line up. Logs carry
+  `sagaType`, `sagaId` and `correlationId` in the MDC while a saga handles a message.
+- **Deadlines** fire at least once, after their due time, from any instance of the service (a lease makes each fire on one), also
+  after a restart, and never for a cancelled deadline or an ended saga.
+- Configuration: the `sagas.*`, `deadlines.*` and `external.*` rows of the [configuration table](#configuration).
+
+### Gotchas
+
+- **The translator bean carries the source's name** (`@Component("printer")` or a `@Bean` method named `printer`). A source with
+  no such bean fails the startup naming it. For the same reason do not name another bean `printer` (the example's client bean is
+  called `printerClient`).
+- **Partner topics are not created by the library**, and the sandbox's Kafka does not auto-create topics: create the partner's
+  topic first (the examples have a one-shot `printer-topic-init` for `printer.events`).
+- **Use the library's `JsonCodec` bean** to read a webhook body or a partner record. It is the codec that writes your messages and
+  your saga's state, with the same conventions; an `ObjectMapper` of your own may read the same JSON differently.
+- **Associate the saga with its own id** (`saga.associateWith("sagaId", saga.sagaId)`) if it handles `SagaCommandFailed`.
+- **A saga only sees events consumed after it is deployed.** There is no replay of past events into a new saga type.
+- **Ordinary `@EventHandler`s run first.** If one of them keeps failing on an event, the consumer retries the record and then
+  skips it, and the sagas never see it. Keep handlers that sagas depend on from failing for good.
+- **Saga commands have no caller.** A target with `@RequiresAuthentication` refuses them (`DENIED`).
+- **Handlers of one event type run in method-name order**, not declaration order: name them so that order is the one you want.
+- **Saga state is JSON.** Use `var` properties with defaults (or nullable ones) and types the library's codec can write; the
+  startup check round-trips a fresh instance. Do not keep a Spring bean or a client in a saga: take it as a handler parameter.
+- **At most 999 messages** can be sent or published by one handling.
+- **A saga is for one service.** To talk to another service send it a command or publish an event; a saga never reads another
+  service's database.
+
 ## Test helpers (`kraken-messaging-test`)
 
 - `InMemoryBuses(typePrefix, userId)`: implements `EventBus`, `CommandBus` and `QueryBus` in memory for unit tests without
@@ -1115,6 +1430,7 @@ result.updates.collect { change -> render(change) }   // completes when the hand
   `hubP0ImageAvailable()` / `hubP2ImageAvailable()` / `hubP3ImageAvailable()` / `hubP4aImageAvailable()` /
   `hubP4bImageAvailable()` / `hubP4cImageAvailable()` / `hubP5aImageAvailable()`.
 - `KrakenTestKafka(bootstrap, typePrefix, topic).awaitEvent<T>()`: reads an event back from the topic.
+- `SagaTestFixture(SagaClass::class, beans…)`: drives one saga with events and time, in memory; see [Testing a saga](#testing-a-saga).
 
 ```kotlin
 val buses = InMemoryBuses(typePrefix = "workouts")
@@ -1134,7 +1450,8 @@ docker build -t kraken-hub:dev .
 `examples/` holds two tiny Spring Boot services built on this starter: service-a sends a command and a query over
 the hub and reacts to an event, service-b owns the command and the query and publishes the event. They run in
 Docker Compose from local builds together with the real `kraken-hub` image, Kafka and MongoDB, and are driven with
-`curl`. See [examples/README.md](examples/README.md).
+`curl`. service-b also runs a saga against a fake partner (the postcard printer) over all three inbound channels; see
+[Sagas](#sagas) and [examples/README.md](examples/README.md).
 
 ## Known limitations
 
@@ -1150,13 +1467,15 @@ Docker Compose from local builds together with the real `kraken-hub` image, Kafk
   (`HANDLER_DISCONNECTED`), and the library never resumes it. A subscription's update targets are fixed when it opens
   (at-most-once updates): an instance that starts later is never added and the library never resubscribes, so a
   subscriber that must hear every instance resubscribes itself (opt-in auto-resubscribe is future work).
-- Library metrics are not exported yet, except the credential counters of P5b (Micrometer, optional); OpenTelemetry comes from the application.
+- Library metrics are limited to the credential counters of P5b and the saga toolkit's (see [Sagas](#sagas)), both Micrometer and optional; there are no metrics for the buses, the outbox or the consumer yet. OpenTelemetry comes from the application.
 - Configuration metadata is hand-maintained in `META-INF/spring-configuration-metadata.json`.
 - `TraceHeaders` is only active with Micrometer Tracing on the classpath.
 - Trace context is injected on outbound messages (hub requests, outbox events) but not yet extracted on inbound hub
   requests or Kafka records, so a handler's spans do not join the caller's trace.
-- No service-to-service identity yet: commands sent from event handlers or scheduled jobs carry no token, so they can
+- No service-to-service identity yet: commands sent from event handlers, sagas or scheduled jobs carry no token, so they can
   only reach handlers without `@RequiresAuthentication` (a `kraken-system` client-credentials token is future work).
+- Sagas: Kotlin only (the Rust crate follows, S2); a new saga type does not see events from before its deployment (no replay);
+  parked saga events are retried by a person through `SagaFailures`; a saga belongs to one service.
 
 
 ## CI/CD pipeline
