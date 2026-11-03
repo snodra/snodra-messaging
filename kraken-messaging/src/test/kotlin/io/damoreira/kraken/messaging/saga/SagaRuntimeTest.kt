@@ -327,7 +327,7 @@ class SagaRuntimeTest {
         assertEquals("o14", failure.payloadDoc.getString("orderId"))
         assertEquals("u-1", failure.headers["userId"])
         assertEquals("corr-e-14", failure.headers["correlationId"])
-        assertEquals(5, failure.attempts)
+        assertEquals(2, failure.attempts, "a handler exception gets two quick attempts, not the conflict backoff")
         assertTrue("broken on o14" in failure.error, failure.error)
         assertEquals(now, failure.firstFailedAt)
         assertEquals(now, failure.lastFailedAt)
@@ -338,6 +338,22 @@ class SagaRuntimeTest {
         deliver(RtOrderPlaced("o14"), id = "e-14", on = both) // redelivered: both markers hold
         assertEquals(1, mongo.count(Query(), "saga_failures"))
         assertEquals(1, saga("o14").stateDoc.getInteger("placed"))
+    }
+
+    @Test
+    fun `a saga type whose handler always throws is parked within well under a second, after two attempts`() {
+        val broken = SagaRuntime(
+            types = SagaModelScanner(resolver, codec).scan(listOf(RtBrokenSaga::class)), mongo = mongo, tx = tx, codec = codec, typeResolver = resolver,
+            beans = { error("no beans") }, clock = clock, retry = SagaRetry(), // the real policy: 5 attempts, 200 ms doubling
+        )
+
+        val started = System.nanoTime()
+        deliver(RtOrderPlaced("o30"), id = "e-30", on = broken)
+        val tookMs = (System.nanoTime() - started) / 1_000_000
+
+        assertTrue(tookMs < 1000, "parking took $tookMs ms: a handler exception must not back off like a conflict")
+        assertEquals(2, RtGate.brokenCalls.get())
+        assertNotNull(mongo.findById("rt.Broken:e-30", SagaFailureDocument::class.java))
     }
 
     @Test

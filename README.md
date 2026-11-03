@@ -287,7 +287,7 @@ All keys (`kraken.messaging.*`; durations accept `200ms`, `5s`, `7d`; relaxed bi
 | `idempotency.retention` | `30d` | `processed_events` documents older than this are deleted (TTL index). |
 | `security.forward-jwt` | `true` | Put the current request's bearer token in the hub request's `authorization` header. |
 | `sagas.enabled` | `true` | Switch for the saga runtime, the dispatch relay and the deadline scheduler. They exist only when the application has a `@Saga` class (found by scanning its packages) anyway. See [Sagas](#sagas). |
-| `sagas.max-attempts` | `5` | Attempts per saga event (first try included) for version conflicts, start-key duplicates and handler exceptions before the event is parked in `saga_failures`; also the bound for firing a deadline. Backoff 200 ms doubling to 5 s (not configurable). |
+| `sagas.max-attempts` | `5` | Attempts per saga event (first try included) for **conflicts** (a version check, a start-key duplicate, a Mongo write conflict or transient transaction error) before the event is parked in `saga_failures`; also the bound for firing a deadline. Backoff 200 ms doubling to 5 s (not configurable). A **handler exception** is not cured by waiting: it gets two attempts in all, at most 50 ms apart, and the event is then parked. |
 | `sagas.ended-retention` | `30d` | Ended sagas are deleted this long after they ended (TTL index on `sagas.endedAt`). Must be positive. |
 | `sagas.dispatch-retention` | `7d` | Dispatched `saga_dispatch` entries are deleted this long after they were sent (TTL index on `dispatchedAt`). Must be positive. |
 | `sagas.relay.poll-interval` | `500ms` | How often the dispatch relay looks for entries that saga handlers recorded. Must be positive. |

@@ -85,18 +85,13 @@ class SagaRuntime(
     fun applyDeadline(deadline: DeadlineDocument) {
         val sagaType = byName[deadline.sagaType]
             ?: throw IllegalStateException("Deadline ${deadline.id} belongs to saga type '${deadline.sagaType}', which this service does not have")
-        var last: Exception? = null
-        for (attempt in 1..retry.maxAttempts) {
-            if (attempt > 1) retry.pauseBefore(attempt)
-            try {
+        try {
+            withRetries("Deadline ${deadline.id} of saga ${deadline.sagaId}", onConflict = {}) {
                 if (tx.execute { fireDeadline(sagaType, deadline) } == true) metrics.deadlineFired(deadline.name)
-                return
-            } catch (e: Exception) {
-                last = e
-                log.debug("Deadline {} of saga {} failed attempt {}: {}", deadline.id, deadline.sagaId, attempt, e.toString())
             }
+        } catch (e: GaveUp) {
+            throw e.last
         }
-        throw last!!
     }
 
     /**
@@ -125,25 +120,52 @@ class SagaRuntime(
 
     /** As [deliver], but says what happened: null when the event was parked (or parked again). */
     private fun deliverKind(sagaType: SagaType, eventType: String, payload: ByteArray, ctx: MessageContext, retryOf: SagaFailureDocument?): Kind? {
-        var last: Exception? = null
-        for (attempt in 1..retry.maxAttempts) {
-            if (attempt > 1) retry.pauseBefore(attempt)
-            try {
+        try {
+            return withRetries("Saga type ${sagaType.name} event ${ctx.messageId}", onConflict = { metrics.event(sagaType.name, SagaMetrics.Outcome.CONFLICT) }) {
                 val result = tx.execute { applyEvent(sagaType, eventType, payload, ctx, retryOf) }
                 report(sagaType, result)
-                return result.kind
-            } catch (e: Exception) {
-                last = e
-                if (isConflict(e)) metrics.event(sagaType.name, SagaMetrics.Outcome.CONFLICT)
-                log.debug("Saga type {} failed attempt {} of event {}: {}", sagaType.name, attempt, ctx.messageId, e.toString())
+                result.kind
             }
-        }
-        if (retryOf != null) {
-            parkAgain(retryOf, describe(last!!), retry.maxAttempts)
+        } catch (e: GaveUp) {
+            if (retryOf != null) {
+                parkAgain(retryOf, describe(e.last), e.attempts)
+            } else {
+                park(sagaType, eventType, payload, ctx, describe(e.last), e.attempts)
+            }
             return null
         }
-        park(sagaType, eventType, payload, ctx, describe(last!!))
-        return null
+    }
+
+    /** An attempt loop gave up after [attempts] attempts; [last] is the failure of the final one. */
+    private class GaveUp(val last: Exception, val attempts: Int) : RuntimeException(last.message, last, false, false)
+
+    /**
+     * Runs [block] (one attempt, in its own transaction) until it returns, with the retry rules of ruling 33: a conflict is
+     * retried up to `maxAttempts` attempts in all with the backoff of [SagaRetry.pauseBefore]; any other exception gets at
+     * most [SagaRetry.HANDLER_ATTEMPTS] attempts with only a quick pause between them (waiting does not cure a handler that
+     * throws). Throws [GaveUp] with the last failure and the attempts made.
+     */
+    private fun <T> withRetries(what: String, onConflict: () -> Unit, block: () -> T): T {
+        var conflicts = 0
+        var failures = 0
+        while (true) {
+            try {
+                return block()
+            } catch (e: Exception) {
+                val made = conflicts + failures + 1
+                log.debug("{} failed attempt {}: {}", what, made, e.toString())
+                if (isConflict(e)) {
+                    onConflict()
+                    conflicts++
+                    if (made >= retry.maxAttempts) throw GaveUp(e, made)
+                    retry.pauseBefore(conflicts + 1)
+                } else {
+                    failures++
+                    if (failures >= minOf(SagaRetry.HANDLER_ATTEMPTS, retry.maxAttempts)) throw GaveUp(e, made)
+                    retry.pauseBeforeHandlerRetry()
+                }
+            }
+        }
     }
 
     private fun report(sagaType: SagaType, result: Result) {
@@ -356,7 +378,7 @@ class SagaRuntime(
     // ---- parking -----------------------------------------------------------------------------------------------
 
     /** Parks the event for [sagaType] with its marker; skipped when the marker exists (another instance finished it). */
-    private fun park(sagaType: SagaType, eventType: String, payload: ByteArray, ctx: MessageContext, error: String) {
+    private fun park(sagaType: SagaType, eventType: String, payload: ByteArray, ctx: MessageContext, error: String, attempts: Int) {
         val now = clock.instant()
         val marker = markerId(sagaType, ctx.messageId)
         val parked = tx.execute {
@@ -368,7 +390,7 @@ class SagaRuntime(
                     SagaFailureDocument(
                         id = "${sagaType.name}:${ctx.messageId}", sagaType = sagaType.name, eventId = ctx.messageId, eventType = eventType,
                         payload = String(payload, Charsets.UTF_8),
-                        headers = failureHeaders(ctx), error = error, attempts = retry.maxAttempts, firstFailedAt = now, lastFailedAt = now,
+                        headers = failureHeaders(ctx), error = error, attempts = attempts, firstFailedAt = now, lastFailedAt = now,
                     ),
                 )
                 true
@@ -376,7 +398,7 @@ class SagaRuntime(
         }
         if (parked) {
             metrics.event(sagaType.name, SagaMetrics.Outcome.PARKED)
-            log.error("Saga type {} parked event {} of type {} after {} attempts: {}", sagaType.name, ctx.messageId, eventType, retry.maxAttempts, error)
+            log.error("Saga type {} parked event {} of type {} after {} attempts: {}", sagaType.name, ctx.messageId, eventType, attempts, error)
         } else {
             log.warn("Saga type {} gave up on event {} but it was applied or parked meanwhile", sagaType.name, ctx.messageId)
         }

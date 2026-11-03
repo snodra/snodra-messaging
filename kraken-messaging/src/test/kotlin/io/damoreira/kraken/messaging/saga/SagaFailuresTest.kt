@@ -121,13 +121,13 @@ class SagaFailuresTest {
     fun `a retry that fails again keeps it parked with attempts increased`() {
         deliver(RtOrderPlaced("f2"), "e-f2")
         val before = failures.list("rt.Flaky").single()
-        assertEquals(3, before.attempts)
+        assertEquals(2, before.attempts)
         clock.now = start.plusSeconds(60)
 
         assertFalse(failures.retry(before.id))
 
         val after = failures.list("rt.Flaky").single()
-        assertEquals(6, after.attempts)
+        assertEquals(4, after.attempts)
         assertEquals(start.plusSeconds(60), after.lastFailedAt)
         assertEquals(before.firstFailedAt, after.firstFailedAt)
         assertTrue("flaky on f2" in after.error, after.error)

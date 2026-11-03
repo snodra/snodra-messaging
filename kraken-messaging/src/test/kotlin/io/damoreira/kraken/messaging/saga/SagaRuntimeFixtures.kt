@@ -57,10 +57,14 @@ object RtGate {
     private val arrivals = AtomicInteger()
     val failFirst = AtomicInteger()
 
+    /** How often [RtBrokenSaga]'s handler ran. */
+    val brokenCalls = AtomicInteger()
+
     fun reset() {
         barrier = null
         arrivals.set(0)
         failFirst.set(0)
+        brokenCalls.set(0)
     }
 
     /** Waits for the other party, the first [CyclicBarrier.getParties] times only (retries pass through). */
@@ -148,6 +152,7 @@ class RtBrokenSaga {
     @StartSaga
     @SagaEventHandler(associationProperty = "orderId")
     fun on(e: RtOrderPlaced) {
+        RtGate.brokenCalls.incrementAndGet()
         throw IllegalStateException("broken on ${e.orderId}")
     }
 }
