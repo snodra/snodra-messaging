@@ -149,14 +149,17 @@ class HubJwtAuthTest {
         assertEquals(0, incapable.credentialsRefreshesSent)
     }
 
-    @Test fun `a token renewed before the ack arrives is sent as soon as the handshake completes`() {
-        oauth.expiresIn = 2
-        hubA.ackDelay = Duration.ofMillis(1500) // the renewal (after 1 s) falls between Register and RegisterAck
+    @Test fun `a token renewed before the ack arrives is sent as soon as the handshake completes, not at the next renewal`() {
+        oauth.expiresIn = 6 // renewed after 3 s, and again 3 s after that
+        hubA.ackDelay = Duration.ofMillis(3500) // the first renewal (3 s) falls between Register and RegisterAck, the second (6 s) after the ack
         val provider = provider()
         val conn = connection(hubA, "i-1", settings(provider)).also { it.start() }
         await atMost wait until { hubA.credentialsSeenFrom("i-1").isNotEmpty() }
         assertEquals(1, hubA.streamsOpenedBy("i-1"))
-        assertTrue(hubA.jwtsSeenFrom("i-1").single() != hubA.credentialsSeenFrom("i-1").first())
+        val tokens = oauth.tokens
+        assertEquals(tokens[0], hubA.jwtsSeenFrom("i-1").single())
+        // Only the ack-time refresh can have sent the second token first: without it the first refresh on the wire is the third token.
+        assertEquals(tokens[1], hubA.credentialsSeenFrom("i-1").first(), "the token renewed during the handshake, sent on the ack: $tokens")
         assertTrue(conn.connected.value)
     }
 
