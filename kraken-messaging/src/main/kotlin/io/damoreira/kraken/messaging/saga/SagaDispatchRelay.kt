@@ -70,10 +70,13 @@ data class RelaySettings(
  *   caused it, outside any caller identity. It is marked dispatched after the reply, so a crash in between re-sends it
  *   with the same key (an `@IdempotentHandler` adapter then runs its body once).
  * - A transient failure counts an attempt and delays the entry (`nextAttemptAt`), holding back that saga's later entries
- *   only; after [RelaySettings.maxAttempts] it becomes `EXHAUSTED`. A permanent failure becomes a [SagaCommandFailed]
- *   at once: dispatched locally (dedupe `failed:<entry id>`) first, then the entry is marked failed, so a crash in between
- *   re-sends the command and delivers the event again (skipped by its marker). Later entries of the saga continue after a
- *   failed one: the saga decides what the failure means. A [SagaCommandFailed] nobody handled is logged at error and counted.
+ *   only; after [RelaySettings.maxAttempts] it becomes `EXHAUSTED`. A permanent failure is a known outcome: it is
+ *   **persisted first** (`failedAt`, `failureReason`, `failureMessage` and `noticePending`), so the command is never sent
+ *   again, and then the [SagaCommandFailed] is dispatched locally (dedupe `failed:<entry id>`). A notice that cannot be
+ *   delivered (an ordinary handler throws, the store is down) is retried by the poll with its own bounded backoff
+ *   (`noticeAttempts`, `noticeNextAt`; [RelaySettings.maxAttempts] attempts, then logged at error and counted). Later
+ *   entries of the saga continue after a failed one: the saga decides what the failure means. A [SagaCommandFailed] that
+ *   no live saga with a handler and no ordinary handler took is logged at error and counted.
  * - An exception outside the send (the store is down, a mark fails) leaves the entry untouched: it is due again at the
  *   next poll.
  *
@@ -107,7 +110,12 @@ class SagaDispatchRelay(
      * published, failed or put back to wait). Never throws for one saga's trouble: it is logged and tried again next pass.
      */
     fun pollOnce(): Int {
+        val notices = deliverDueNotices()
         val sagas = dueSagas()
+        return notices + dispatchAll(sagas)
+    }
+
+    private fun dispatchAll(sagas: List<String>): Int {
         if (sagas.isEmpty()) return 0
         if (sagas.size == 1 || settings.parallelism == 1) return sagas.sumOf { dispatchSaga(it) }
         val futures = sagas.map { executor().submit(Callable { dispatchSaga(it) }) }
@@ -200,9 +208,57 @@ class SagaDispatchRelay(
         return false
     }
 
-    /** Tells the saga its command failed, then gives the entry up. */
+    /**
+     * Gives the entry up with a known outcome. The outcome is persisted first (`failedAt`, the reason and message, and a
+     * pending failure notice reserved for this instance), so nothing that goes wrong afterwards can make the command be sent
+     * again; the notice is then delivered, and retried on its own when that fails (see [deliverNotice]).
+     */
     private fun fail(entry: SagaDispatchDocument, reason: SagaCommandFailed.Reason, message: String, attempts: Int = entry.attempts) {
-        val failed = SagaCommandFailed(entry.sagaId, entry.type, entry.id, reason, message)
+        val now = clock.instant()
+        mongo.updateFirst(
+            byId(entry.id),
+            Update().set("attempts", attempts).set("failedAt", now).set("failureReason", reason).set("failureMessage", message)
+                .set("noticePending", true).set("noticeAttempts", 0).set("noticeNextAt", now.plus(settings.lease)),
+            SagaDispatchDocument::class.java,
+        )
+        log.warn("Saga {} command {} ({}) failed with {}: {}", entry.sagaId, entry.id, entry.type, reason, message)
+        deliverNotice(entry.copy(attempts = attempts, failedAt = now, failureReason = reason, failureMessage = message, noticePending = true, noticeAttempts = 0))
+    }
+
+    /** Delivers the pending failure notices that are due, each claimed first so that no other instance delivers it meanwhile; how many. */
+    private fun deliverDueNotices(): Int {
+        var delivered = 0
+        while (delivered < settings.batchSize && !stopRequested) {
+            val now = clock.instant()
+            val entry = mongo.findAndModify(
+                Query(
+                    Criteria.where("noticePending").`is`(true)
+                        .orOperator(Criteria.where("noticeNextAt").isNull, Criteria.where("noticeNextAt").lte(now)),
+                ).with(Sort.by("noticeNextAt")),
+                Update().set("noticeNextAt", now.plus(settings.lease)),
+                FindAndModifyOptions.options().returnNew(true),
+                SagaDispatchDocument::class.java,
+            ) ?: break
+            delivered++
+            try {
+                deliverNotice(entry)
+            } catch (e: Exception) {
+                log.warn("Delivering the failure notice of {} failed, trying again when its claim expires: {}", entry.id, e.toString())
+            }
+        }
+        return delivered
+    }
+
+    /**
+     * Tells the saga (and any ordinary handler) that the command of [entry] failed: a [SagaCommandFailed] dispatched
+     * locally under the dedupe id `failed:<entry id>`, never published. Done: the pending mark is removed. A failure of the
+     * delivery (an ordinary handler that throws, the store down) counts a notice attempt and sets `noticeNextAt` with the
+     * relay's backoff; after [RelaySettings.maxAttempts] the notice is given up (logged at error and counted). The
+     * dispatcher's markers make every repeat harmless.
+     */
+    private fun deliverNotice(entry: SagaDispatchDocument) {
+        val reason = entry.failureReason ?: return clearNotice(entry)
+        val failed = SagaCommandFailed(entry.sagaId, entry.type, entry.id, reason, entry.failureMessage.orEmpty())
         val type = typeResolver.typeNameOf(SagaCommandFailed::class)
         val correlationId = entry.headers[DISPATCH_CORRELATION_HEADER] ?: entry.id
         val dedupeId = "failed:${entry.id}"
@@ -210,14 +266,36 @@ class SagaDispatchRelay(
             messageId = dedupeId, type = type, correlationId = correlationId, userId = null, roles = emptySet(), authorization = null,
             headers = mapOf("id" to dedupeId, "type" to type, "correlationId" to correlationId),
         )
-        val outcome = local.dispatch(dedupeId, type, codec.encode(failed), ctx)
+        val outcome = try {
+            local.dispatch(dedupeId, type, codec.encode(failed), ctx)
+        } catch (e: Exception) {
+            return noticeFailed(entry, e)
+        }
         if (outcome == LocalEventDispatcher.Outcome.NO_INTEREST || outcome == LocalEventDispatcher.Outcome.UNCLAIMED) {
             metrics.commandFailureUnhandled(entry.type, reason)
-            log.error("Saga {} command {} ({}) failed with {} and no live saga with a SagaCommandFailed handler and no ordinary handler took it: {}", entry.sagaId, entry.id, entry.type, reason, message)
-        } else {
-            log.warn("Saga {} command {} ({}) failed with {}: {}", entry.sagaId, entry.id, entry.type, reason, message)
+            log.error("Saga {} command {} ({}) failed with {} and no live saga with a SagaCommandFailed handler and no ordinary handler took it: {}", entry.sagaId, entry.id, entry.type, reason, entry.failureMessage)
         }
-        mongo.updateFirst(byId(entry.id), Update().set("attempts", attempts).set("failedAt", clock.instant()), SagaDispatchDocument::class.java)
+        clearNotice(entry)
+    }
+
+    private fun clearNotice(entry: SagaDispatchDocument) {
+        mongo.updateFirst(byId(entry.id), Update().unset("noticePending").unset("noticeAttempts").unset("noticeNextAt"), SagaDispatchDocument::class.java)
+    }
+
+    private fun noticeFailed(entry: SagaDispatchDocument, error: Exception) {
+        val attempts = (entry.noticeAttempts ?: 0) + 1
+        if (attempts >= settings.maxAttempts) {
+            metrics.commandFailureUnhandled(entry.type, entry.failureReason!!)
+            log.error(
+                "Gave up delivering SagaCommandFailed for saga {} command {} ({}, {}) after {} attempts; the saga never heard of it: {}",
+                entry.sagaId, entry.id, entry.type, entry.failureReason, attempts, error.toString(),
+            )
+            clearNotice(entry)
+            return
+        }
+        val next = clock.instant().plus(settings.retryPolicy.jitteredBackoffBefore(attempts + 1))
+        mongo.updateFirst(byId(entry.id), Update().set("noticeAttempts", attempts).set("noticeNextAt", next), SagaDispatchDocument::class.java)
+        log.warn("Delivering SagaCommandFailed for command {} failed attempt {} of {}, next at {}: {}", entry.id, attempts, settings.maxAttempts, next, error.toString())
     }
 
     private fun markDispatched(entry: SagaDispatchDocument) {

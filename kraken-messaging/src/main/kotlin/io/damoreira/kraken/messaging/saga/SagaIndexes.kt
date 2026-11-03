@@ -40,6 +40,10 @@ class SagaIndexes(
             Index().on("dispatchedAt", Sort.Direction.ASC).on("nextAttemptAt", Sort.Direction.ASC).named("dispatchedAt_1_nextAttemptAt_1"),
         )
         mongo.indexOps("saga_dispatch").createIndex(Index().on("dispatchedAt", Sort.Direction.ASC).expire(dispatchRetention).named("dispatchedAt_ttl"))
+        mongo.indexOps("saga_dispatch").createIndex(
+            Index().on("noticeNextAt", Sort.Direction.ASC)
+                .partial(PartialIndexFilter.of(Criteria.where("noticePending").`is`(true))).named("noticePending_noticeNextAt"),
+        )
         mongo.indexOps("saga_dispatch_leases").createIndex(Index().on("until", Sort.Direction.ASC).expire(Duration.ZERO).named("until_ttl"))
 
         mongo.indexOps("deadlines").createIndex(

@@ -125,6 +125,19 @@ class RlSaga {
     }
 }
 
+/** An ordinary `@EventHandler` for the library's failure event that fails its first [failFirst] calls, as a handler with a bug or an outage does. */
+class RlFailureWatcher {
+    val calls = java.util.concurrent.atomic.AtomicInteger()
+    val seen = CopyOnWriteArrayList<String>()
+    @Volatile var failFirst = 0
+
+    @io.damoreira.kraken.messaging.handler.EventHandler
+    fun on(e: SagaCommandFailed) {
+        if (calls.incrementAndGet() <= failFirst) throw IllegalStateException("watcher is broken")
+        seen += "${e.commandType}:${e.reason}"
+    }
+}
+
 @MessageType("rl.QuietStart")
 data class RlQuietStart(val orderId: String) : Event
 
@@ -209,6 +222,7 @@ class SagaDispatchRelayTest {
         initialBackoff = Duration.ofSeconds(1), multiplier = 2.0, maxBackoff = Duration.ofMinutes(5),
     )
     private lateinit var adapter: RlAdapter
+    private lateinit var watcher: RlFailureWatcher
     private lateinit var registry: HandlerRegistry
     private lateinit var runtime: SagaRuntime
     private lateinit var sender: ScriptedSender
@@ -237,6 +251,7 @@ class SagaDispatchRelayTest {
         listOf("sagas", "saga_dispatch", "saga_dispatch_leases", "deadlines", "saga_failures", "processed_events", "outbox").forEach { mongo.remove(Query(), it) }
         clock.now = start
         adapter = RlAdapter()
+        watcher = RlFailureWatcher()
         registry = HandlerRegistry(resolver).also { it.register(adapter) }
         runtime = SagaRuntime(
             types = SagaModelScanner(resolver, codec).scan(listOf(RlSaga::class, RlQuietSaga::class, RlDeafSaga::class)), mongo = mongo, tx = tx, codec = codec, typeResolver = resolver,
@@ -454,6 +469,66 @@ class SagaDispatchRelayTest {
         relay.pollOnce()
         assertEquals(2, adapter.charged.size, "failed steps are not sent again")
         assertEquals(4, failuresOf("o1").size, "nor their failure events delivered again")
+    }
+
+    @Test
+    fun `a command whose outcome is known is never re-sent while its failure notice is retried`() {
+        deliver(RlStart("o1"), "e-1")
+        val saga = sagaOf("o1")
+        val key = "${saga.id}:${entries(saga.id).single().seq}"
+        sender.script = { RawOutcome.Permanent(Reason.FAILED, "printer on fire") }
+        watcher.failFirst = 2
+        registry.register(watcher)
+        val relay = relay()
+
+        relay.pollOnce()
+        assertEquals(1, sender.calls.size)
+        assertNotNull(entry(key).failedAt, "the permanent outcome is persisted before anything else can fail")
+        assertEquals(1, watcher.calls.get())
+
+        relay.pollOnce()
+        assertEquals(1, watcher.calls.get(), "the notice waits for its own backoff")
+        clock.now = clock.now.plus(Duration.ofHours(1))
+        relay.pollOnce()
+        assertEquals(2, watcher.calls.get(), "the notice is retried")
+        clock.now = clock.now.plus(Duration.ofHours(1))
+        relay.pollOnce()
+        assertEquals(3, watcher.calls.get())
+        assertEquals(listOf("rl.Charge:FAILED"), watcher.seen.toList(), "the ordinary handler finally got it")
+        assertEquals(listOf("rl.Charge:FAILED"), failuresOf("o1"), "the saga got it once, however often the notice was retried")
+
+        clock.now = clock.now.plus(Duration.ofHours(1))
+        relay.pollOnce()
+        assertEquals(1, sender.calls.size, "the command ran once: its outcome was known")
+        assertEquals(3, watcher.calls.get(), "the notice was delivered: nothing is pending")
+        assertEquals(0, mongo.count(Query(Criteria.where("noticePending").`is`(true)), "saga_dispatch"))
+    }
+
+    @Test
+    fun `a failure notice that keeps failing is given up after the relay's attempts, logged at error and counted`() {
+        deliver(RlStart("o1"), "e-1")
+        val saga = sagaOf("o1")
+        sender.script = { RawOutcome.Permanent(Reason.FAILED, "printer on fire") }
+        watcher.failFirst = Int.MAX_VALUE
+        registry.register(watcher)
+        val log = LoggerFactory.getLogger(SagaDispatchRelay::class.java) as Logger
+        val appender = ListAppender<ILoggingEvent>().also { it.start(); log.addAppender(it) }
+        val relay = relay()
+
+        try {
+            repeat(5) {
+                relay.pollOnce()
+                clock.now = clock.now.plus(Duration.ofHours(1))
+            }
+        } finally {
+            log.detachAppender(appender)
+        }
+
+        assertEquals(settings.maxAttempts, watcher.calls.get(), "bounded: 3 attempts in all")
+        assertEquals(1, sender.calls.size)
+        assertEquals(listOf("rl.Charge" to Reason.FAILED), metrics.unhandled)
+        assertTrue(appender.list.any { it.level == Level.ERROR && saga.id in it.formattedMessage }, "the give-up is logged at error")
+        assertEquals(0, mongo.count(Query(Criteria.where("noticePending").`is`(true)), "saga_dispatch"))
     }
 
     @Test

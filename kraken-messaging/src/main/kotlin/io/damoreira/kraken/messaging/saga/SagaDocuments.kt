@@ -35,6 +35,12 @@ enum class DispatchKind { COMMAND, EVENT }
  * One command or event a saga recorded in its transaction, waiting in the saga-side outbox `saga_dispatch`. [seq] orders
  * the entries of one saga (`version * 1000 + index`); [routingKey] is the command's routing key or the event's key.
  * [dispatchedAt] is set once sent, [failedAt] when given up on.
+ *
+ * A command given up on carries its outcome with it: [failureReason] and [failureMessage] (what the `SagaCommandFailed`
+ * says) are written in the same update as [failedAt], and [noticePending] is true until that event has been delivered
+ * locally (review amendment, ruling 28). A pending notice is retried by the relay with its own bounded backoff
+ * ([noticeAttempts], [noticeNextAt]; the next try is not before [noticeNextAt], which also reserves the delivery for the
+ * instance that claimed it) and never makes the relay send the command again. All of these are absent while unused.
  */
 @Document("saga_dispatch")
 data class SagaDispatchDocument(
@@ -51,6 +57,11 @@ data class SagaDispatchDocument(
     val attempts: Int = 0,
     val nextAttemptAt: Instant? = null,
     val failedAt: Instant? = null,
+    val failureReason: SagaCommandFailed.Reason? = null,
+    val failureMessage: String? = null,
+    val noticePending: Boolean? = null,
+    val noticeAttempts: Int? = null,
+    val noticeNextAt: Instant? = null,
 )
 
 /**
