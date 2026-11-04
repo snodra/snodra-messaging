@@ -31,6 +31,8 @@ class HandlerMethod(
     val subscription: Boolean = false,
     /** Compiled `@IdempotentHandler`, or null: the invoker runs the handler through the idempotency interceptor. */
     val idempotency: CompiledIdempotency? = null,
+    /** The event processor of an `@EventHandler` (its class's `@ProcessingGroup`, else `default`, ADR 0022); `default` for other kinds. */
+    val processor: String = Processors.DEFAULT,
 ) {
     init {
         function.isAccessible = true

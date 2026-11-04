@@ -43,7 +43,18 @@ class HandlerRegistry(private val typeResolver: MessageTypeResolver) {
     fun idempotentHandlers(): List<HandlerMethod> =
         (events.values.flatten() + commands.values + queries.values).filter { it.idempotency != null }
 
+    /** The event handlers of [type] in every processor. */
     fun eventHandlers(type: String): List<HandlerMethod> = events[type]?.toList().orEmpty()
+
+    /** The event handlers of [type] in [processor] (ADR 0022). */
+    fun eventHandlers(type: String, processor: String): List<HandlerMethod> = eventHandlers(type).filter { it.processor == processor }
+
+    /** The processors that have at least one event handler, `default` included when it has one. */
+    fun processors(): Set<String> = events.values.flatten().mapTo(sortedSetOf()) { it.processor }
+
+    /** The event types [processor] has handlers for. */
+    fun eventTypes(processor: String): Set<String> =
+        events.filterValues { handlers -> handlers.any { it.processor == processor } }.keys.toSet()
     fun commandHandler(type: String): HandlerMethod? = commands[type]
     fun queryHandler(type: String): HandlerMethod? = queries[type]
     fun commandTypes(): Set<String> = commands.keys.toSet()
@@ -66,11 +77,19 @@ class HandlerRegistry(private val typeResolver: MessageTypeResolver) {
 
     private fun scan(bean: Any): List<HandlerMethod> {
         val klass = AopUtils.getTargetClass(bean).kotlin
+        val processor = processorOf(klass)
         val found = mutableListOf<HandlerMethod>()
         val pending = mutableMapOf<String, HandlerMethod>() // "KIND:type" -> handler, for duplicates within this bean
         for (fn in klass.memberFunctions.sortedBy { it.name }) {
             val kind = kindOf(fn) ?: continue
-            val handler = toHandler(bean, klass, fn, kind)
+            if (kind == HandlerKind.EVENT && processor == null) {
+                val group = klass.findAnnotation<ProcessingGroup>()!!.value
+                throw IllegalStateException(
+                    "Handler ${labelOf(klass, fn)}: @ProcessingGroup(\"$group\") is not a valid processor name: it must match " +
+                        "^[a-z0-9][a-z0-9-]{0,47}$ and must not be '${Processors.DEFAULT}' (leave the annotation out for the default processor)",
+                )
+            }
+            val handler = toHandler(bean, klass, fn, kind, processor.takeIf { kind == HandlerKind.EVENT } ?: Processors.DEFAULT)
             val key = "$kind:${handler.typeName}"
             if (kind != HandlerKind.EVENT) {
                 val existing = pending[key] ?: existingHandler(kind, handler.typeName)
@@ -91,6 +110,12 @@ class HandlerRegistry(private val typeResolver: MessageTypeResolver) {
         return found
     }
 
+    /** The class's processor: its `@ProcessingGroup` name, `default` without one, null when the name is invalid. */
+    private fun processorOf(klass: KClass<*>): String? {
+        val group = klass.findAnnotation<ProcessingGroup>() ?: return Processors.DEFAULT
+        return group.value.takeIf { Processors.isValidName(it) }
+    }
+
     private fun labelOf(handler: HandlerMethod) =
         "${AopUtils.getTargetClass(handler.bean).kotlin.simpleName}.${handler.function.name}"
 
@@ -106,7 +131,7 @@ class HandlerRegistry(private val typeResolver: MessageTypeResolver) {
         else -> null
     }
 
-    private fun toHandler(bean: Any, klass: KClass<*>, fn: KFunction<*>, kind: HandlerKind): HandlerMethod {
+    private fun toHandler(bean: Any, klass: KClass<*>, fn: KFunction<*>, kind: HandlerKind, processor: String): HandlerMethod {
         val params = fn.parameters.drop(1) // drop the receiver
         val wantsContext = params.size == 2 && params[1].type.classifier == MessageContext::class
         val messageClass = params.firstOrNull()?.type?.classifier as? KClass<*>
@@ -152,7 +177,7 @@ class HandlerRegistry(private val typeResolver: MessageTypeResolver) {
             }
             IdempotentHandlers.compile(it, labelOf(klass, fn))
         }
-        return HandlerMethod(bean, fn, kind, messageClass, typeResolver.typeNameOf(messageClass), wantsContext, authorization, shared, streaming, subscription, idempotency)
+        return HandlerMethod(bean, fn, kind, messageClass, typeResolver.typeNameOf(messageClass), wantsContext, authorization, shared, streaming, subscription, idempotency, processor)
     }
 
     private fun add(handler: HandlerMethod) {

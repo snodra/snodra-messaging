@@ -67,6 +67,8 @@ class SagaRuntime(
 
     override fun interested(type: String): Boolean = type in byEvent
 
+    override fun eventTypes(): Set<String> = byEvent.keys
+
     override fun process(type: String, payload: ByteArray, ctx: MessageContext): Boolean {
         var applied = false
         for (sagaType in byEvent[type].orEmpty()) {

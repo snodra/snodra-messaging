@@ -113,10 +113,14 @@ class HandlerInvoker(
         }
     }
 
-    /** Calls every handler of [type] in order; a failing handler does not stop the others, the first failure is rethrown. */
-    suspend fun invokeEvent(type: String, payload: ByteArray, ctx: MessageContext) {
+    /**
+     * Calls every handler of [type] in order, only those of [processor] when it is given (ADR 0022); a failing handler does
+     * not stop the others, the first failure is rethrown.
+     */
+    suspend fun invokeEvent(type: String, payload: ByteArray, ctx: MessageContext, processor: String? = null) {
         var first: Throwable? = null
-        for (handler in registry.eventHandlers(type)) {
+        val handlers = if (processor == null) registry.eventHandlers(type) else registry.eventHandlers(type, processor)
+        for (handler in handlers) {
             try {
                 call(handler, codec.decode(payload, handler.messageClass), ctx)
             } catch (e: CancellationException) {

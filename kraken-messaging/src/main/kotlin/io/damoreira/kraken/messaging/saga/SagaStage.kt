@@ -14,6 +14,9 @@ interface SagaStage {
     fun interested(type: String): Boolean
     fun process(type: String, payload: ByteArray, ctx: MessageContext): Boolean
 
+    /** The event types some saga type reacts to (listed in the `default` processor's status, ADR 0022). */
+    fun eventTypes(): Set<String> = emptySet()
+
     companion object {
         /** No sagas: not interested in anything. */
         val NONE: SagaStage = object : SagaStage {
