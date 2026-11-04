@@ -1068,13 +1068,18 @@ class HubConnection(
                 if (settings.tokenProvider == null) refreshCredentials(stream) // a rotated token file reaches the hub without a reconnect
             }
         }
-        // One lane per stream for the control requests (P6b): in order, and never on the read loop below.
-        val controls = launch(handlerDispatcher) {
+        // One lane per stream for the control requests (P6b): in order, and never on the read loop below. In the connection's
+        // scope, so the end of the stream never waits for a control handler.
+        val controls = scope.launch(handlerDispatcher) {
             for (request in stream.controls) serveControl(stream, request)
         }
-        HubGrpcKt.HubCoroutineStub(channel).connect(stream.out.receiveAsFlow()).collect { message -> handle(stream, message) }
+        try {
+            HubGrpcKt.HubCoroutineStub(channel).connect(stream.out.receiveAsFlow()).collect { message -> handle(stream, message) }
+        } finally {
+            stream.controls.close()
+            controls.cancel()
+        }
         heartbeats.cancel()
-        controls.cancel()
     }
 
     /** Hands [request] to the control; its answer goes back on [stream] (dropped when the stream is gone by then: the hub failed it). */

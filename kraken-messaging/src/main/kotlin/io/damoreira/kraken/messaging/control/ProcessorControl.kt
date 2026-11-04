@@ -97,6 +97,7 @@ class ProcessorControl(
         val docs = if (consumers.isEmpty()) emptyMap() else store.read(consumers.map { it.processor })
         val attached = consumers.associate { it.processor to Slot(it) }
         val now = clock.instant()
+        leases = Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "kraken-control-lease").apply { isDaemon = true } }
         slots = attached
         try {
             for (slot in attached.values) converge(slot, docs[slot.consumer.processor], now, failFast = true)
@@ -104,7 +105,6 @@ class ProcessorControl(
             detach()
             throw e
         }
-        leases = Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "kraken-control-lease").apply { isDaemon = true } }
         poller = Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "kraken-control-poll").apply { isDaemon = true } }.also {
             it.scheduleWithFixedDelay(::poll, pollInterval.toMillis(), pollInterval.toMillis(), TimeUnit.MILLISECONDS)
         }

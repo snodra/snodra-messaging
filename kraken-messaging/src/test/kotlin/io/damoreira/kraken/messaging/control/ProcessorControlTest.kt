@@ -393,6 +393,29 @@ class ProcessorControlTest {
         await().atMost(Duration.ofSeconds(20)).until { "r-new" in once.seen && "r-new" in sagas.calls }
     }
 
+    @Test fun `a reset of a paused processor keeps the pause and reports its open replay ranges`() {
+        topic = support.newTopic("kraken.events.ctl", partitions = 2)
+        val a = instance(projection)
+        support.send(topic, "k-0", partition = 0)
+        support.send(topic, "k-1", partition = 0)
+        await().atMost(Duration.ofSeconds(30)).until { projection.seen.size == 2 && support.committed(group)[0] == 2L }
+        assertTrue(a.ask(pause()).hasOk())
+        assertTrue(a.ask(prepare("op-1")).hasOk())
+        assertTrue(a.ask(execute("op-1", earliest)).hasReset())
+        assertTrue(a.ask(finish("op-1")).hasOk())
+        await().atMost(Duration.ofSeconds(30)).until { a.status().partitionsCount == 2 }
+        val status = a.status()
+        assertEquals(ProcessorState.PROCESSOR_PAUSED, status.state, "finishing a reset keeps the pause")
+        assertEquals("", status.operationId)
+        assertTrue(status.replaying)
+        assertEquals(mapOf(0 to 2L, 1 to 0L), status.partitionsList.associate { it.partition to it.replayUntil })
+        Thread.sleep(1000)
+        assertEquals(2, projection.seen.size, "nothing replays while paused")
+        assertTrue(a.ask(resume()).hasOk())
+        await().atMost(Duration.ofSeconds(20)).until { projection.seen.size == 4 }
+        await().atMost(Duration.ofSeconds(10)).until { !a.status().replaying && control()!!.replay.isEmpty() }
+    }
+
     @Test fun `a timestamp or explicit offsets replay from there, latest makes no range, bad offsets are refused`() {
         topic = support.newTopic("kraken.events.ctl", partitions = 1)
         val a = instance(projection, resets)
