@@ -46,6 +46,7 @@ import org.springframework.data.mongodb.MongoTransactionManager
 import org.springframework.data.mongodb.core.SimpleMongoClientDatabaseFactory
 import org.springframework.data.mongodb.core.query.Criteria
 import org.springframework.data.mongodb.core.query.Query
+import org.springframework.data.mongodb.core.query.Update
 import org.springframework.transaction.support.TransactionTemplate
 import java.time.Duration
 import java.time.Instant
@@ -79,6 +80,9 @@ class ExPrinterAdapter {
     val stamps = AtomicInteger()
     @Volatile var behaviour: (ExPrint) -> ExReceipt = { ExReceipt(it.jobId, 1000 + bodies.get()) }
 
+    /** Runs inside the `externalIdempotent` body before it returns: what the partner does, or what happens meanwhile. */
+    @Volatile var safeBehaviour: (ExPrintSafe) -> Unit = {}
+
     @CommandHandler
     @IdempotentHandler
     fun handle(c: ExPrint): ExReceipt {
@@ -88,7 +92,11 @@ class ExPrinterAdapter {
 
     @CommandHandler
     @IdempotentHandler(externalIdempotent = true)
-    fun handle(c: ExPrintSafe): ExReceipt = ExReceipt(c.jobId, bodies.incrementAndGet())
+    fun handle(c: ExPrintSafe): ExReceipt {
+        val ticket = bodies.incrementAndGet()
+        safeBehaviour(c)
+        return ExReceipt(c.jobId, ticket)
+    }
 
     /** The key includes the poll attempt, as the long-polling pattern wants. */
     @CommandHandler
@@ -297,6 +305,108 @@ class IdempotentHandlerTest {
         val again = failure(print())
         assertTrue(ExternalFailureMarkers.isUnknownOutcome(again.details))
         assertEquals(0, adapter.bodies.get())
+    }
+
+    @Test
+    fun `a lapsed call that settles while its lease is given up is read again, so the caller gets its reply and not an unknown outcome`() {
+        mongo.insert(ExternalCallDocument("job-1", ExternalCallStatus.IN_PROGRESS, attempts = 1, updatedAt = start, leaseUntil = start.plus(lease)))
+        clock.now = start.plus(lease).plusSeconds(1)
+        // The slow first call writes SUCCEEDED between this call's read of the record and its change of it to UNKNOWN.
+        mongo.afterNextExternalCallRead.set {
+            mongo.updateFirst(
+                Query(Criteria.where("_id").`is`("job-1")),
+                Update().set("status", ExternalCallStatus.SUCCEEDED).set("reply", String(codec.encode(ExReceipt("j1", 42)), Charsets.UTF_8)).unset("leaseUntil"),
+                ExternalCallDocument::class.java,
+            )
+        }
+
+        val result = print()
+
+        assertEquals(ExReceipt("j1", 42), receipt(result), "the slow call's reply, read again")
+        assertEquals(0, adapter.bodies.get())
+        assertEquals(ExternalCallStatus.SUCCEEDED, record("job-1")!!.status, "not turned UNKNOWN over the success")
+        assertEquals(listOf("ExPrinterAdapter.handle" to SagaMetrics.ExternalOutcome.REPLAYED), metrics.calls)
+    }
+
+    /** Inside call A's body: A's lease runs out and call B takes the record over (attempt 2, a fresh lease), as begin does. */
+    private fun takenOverMeanwhile() {
+        clock.now = start.plus(lease).plusSeconds(1)
+        mongo.updateFirst(
+            Query(Criteria.where("_id").`is`("job-1")),
+            Update().inc("attempts", 1).set("leaseUntil", clock.now.plus(lease)).set("updatedAt", clock.now),
+            ExternalCallDocument::class.java,
+        )
+    }
+
+    private fun printSafe() = call("ex.PrintSafe", """{"jobId":"j1"}""")
+
+    private fun assertStillB() {
+        val stored = assertNotNull(record("job-1"), "call B's record is still there")
+        assertEquals(ExternalCallStatus.IN_PROGRESS, stored.status, "call B's record is left alone")
+        assertEquals(2, stored.attempts)
+        assertEquals(clock.now.plus(lease), stored.leaseUntil)
+    }
+
+    @Test
+    fun `a call whose lease was taken over does not overwrite the new owner's record with its success, nor report a success it cannot record`() {
+        adapter.safeBehaviour = { takenOverMeanwhile() }
+
+        val a = failure(printSafe())
+
+        assertTrue(ExternalFailureMarkers.isRetryable(a.details), "the partner de-duplicates, the redelivery finds B's outcome: ${a.message}")
+        assertStillB()
+        assertTrue(metrics.calls.none { it.second == SagaMetrics.ExternalOutcome.SUCCEEDED }, metrics.calls.toString())
+    }
+
+    @Test
+    fun `a call whose lease was taken over does not delete the new owner's record on a retryable failure, so no third call runs alongside it`() {
+        adapter.safeBehaviour = { takenOverMeanwhile(); throw RetryableExternalException("partner busy") }
+
+        val a = failure(printSafe())
+
+        assertTrue(ExternalFailureMarkers.isRetryable(a.details))
+        assertStillB()
+        adapter.safeBehaviour = {}
+        val c = failure(printSafe()) // B is still within its lease
+        assertTrue(ExternalFailureMarkers.isRetryable(c.details), "B is in flight: come back later")
+        assertEquals(1, adapter.bodies.get(), "the third call did not run its body alongside B")
+    }
+
+    @Test
+    fun `a call whose lease was taken over does not mark the new owner's record FAILED`() {
+        adapter.safeBehaviour = { takenOverMeanwhile(); throw IllegalStateException("printer refused") }
+
+        val a = failure(printSafe())
+
+        assertTrue("printer refused" in a.message, "the failure is still thrown: ${a.message}")
+        assertStillB()
+    }
+
+    @Test
+    fun `a call whose lease was taken over does not mark the new owner's record UNKNOWN when its adapter reports an unknown outcome`() {
+        adapter.safeBehaviour = { takenOverMeanwhile(); throw ExternalCallUnknownOutcomeException("the connection broke") }
+
+        val a = failure(printSafe())
+
+        assertTrue(ExternalFailureMarkers.isUnknownOutcome(a.details), a.message)
+        assertStillB()
+    }
+
+    @Test
+    fun `a call whose record another call turned UNKNOWN reports the unknown outcome, not a success it cannot record`() {
+        adapter.behaviour = {
+            mongo.updateFirst(
+                Query(Criteria.where("_id").`is`("job-1")),
+                Update().set("status", ExternalCallStatus.UNKNOWN).unset("leaseUntil"), ExternalCallDocument::class.java,
+            ) // A's lease ran out and call B gave it up as UNKNOWN (and told its caller so)
+            ExReceipt(it.jobId, 1)
+        }
+
+        val a = failure(print())
+
+        assertTrue(ExternalFailureMarkers.isUnknownOutcome(a.details), a.message)
+        assertEquals(ExternalCallStatus.UNKNOWN, record("job-1")!!.status, "B's verdict stays")
+        assertTrue(metrics.calls.none { it.second == SagaMetrics.ExternalOutcome.SUCCEEDED }, metrics.calls.toString())
     }
 
     @Test

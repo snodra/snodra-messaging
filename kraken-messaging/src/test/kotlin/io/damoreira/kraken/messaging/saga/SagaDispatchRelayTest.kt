@@ -202,6 +202,15 @@ internal class MarkFailingTemplate(factory: SimpleMongoClientDatabaseFactory) : 
     /** The next write of an `external_calls` record as SUCCEEDED fails: the store goes away right after the external call returned. */
     val failNextSucceededWrite = AtomicBoolean()
 
+    /** Runs once right after the next read of an `external_calls` record by id: another call writes between that read and what follows. */
+    val afterNextExternalCallRead = java.util.concurrent.atomic.AtomicReference<(() -> Unit)?>()
+
+    override fun <T : Any> findById(id: Any, entityClass: Class<T>): T? {
+        val found = super.findById(id, entityClass)
+        if (entityClass == io.damoreira.kraken.messaging.external.ExternalCallDocument::class.java) afterNextExternalCallRead.getAndSet(null)?.invoke()
+        return found
+    }
+
     override fun updateFirst(query: Query, update: UpdateDefinition, entityClass: Class<*>): UpdateResult {
         if (entityClass == io.damoreira.kraken.messaging.external.ExternalCallDocument::class.java && "SUCCEEDED" in update.updateObject.toString() && failNextSucceededWrite.getAndSet(false)) {
             throw org.springframework.dao.DataAccessResourceFailureException("the store went away after the external call returned")
