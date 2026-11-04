@@ -18,9 +18,11 @@ A disposable sandbox that shows cross-service messaging on the real `kraken-hub`
    in-memory counter per name: **service-a** subscribes (the initial result is one counter's current value, the updates
    are the changes of both), collects the initial result and N updates, cancels and returns them. The updates come from
    `POST /counters/{name}/increment` on service-b and from the command `examples.IncrementCounter` that service-a sends
-   to service-c (which has no HTTP); both push through a `QueryUpdateEmitter`.
+   to service-c (whose only HTTP is the banner saga's); both push through a `QueryUpdateEmitter`.
 9. **service-b** runs a saga (S1, [The postcard saga](#the-postcard-saga)): every `GreetingDelivered` gets a postcard printed
    by an external printer, **fake-printer**, which answers over a webhook, its own Kafka topic or a poll, never, or by dying.
+10. **service-c** runs the same story in Rust (S2, [The banner saga](#the-banner-saga)): every `TextShouted` gets a banner
+   printed by the same fake printer, which answers service-c where each job asks it to.
 
 Everything is anonymous, nothing is persisted by the apps (MongoDB is only there because the starter's outbox and
 idempotent consumer need it), and the modules are never published. They build against the starter as a project
@@ -31,8 +33,8 @@ dependency, so they always exercise the current library. Wire classes live in `e
 | `examples/examples-api` | `SendGreeting`, `GreetingAccepted`, `GreetingDelivered`, `CountGreetings`, `GreetingCount`; the texts types; the shared `Inventory` / `InventoryLevel`; the streaming `Rows` / `Row`; the subscription `WatchCounter` / `Counter` / `CounterChanged`, the command `IncrementCounter` and the shared query `OpenSubscriptions` / `SubscriptionCount` | – |
 | `examples/service-a` | REST caller + event listener; `GET /forbidden-send` sends a type outside its ACL on purpose ([Secure sandbox](#secure-sandbox)) | 8091 |
 | `examples/service-b` | the postcard saga, its printer adapter, webhook and topic translator (`GET /postcards/{jobId}`); owner of the greetings command and query, co-owner of the shared `Inventory`, the streaming `Rows`, the subscription `WatchCounter` and `OpenSubscriptions`; logs the text events | 8092 (`POST /counters/{name}/increment` and actuator) |
-| `examples/fake-printer` | a partner, not a kraken service: the fake postcard printer of [the postcard saga](#the-postcard-saga) (`POST /jobs`, `GET /jobs/{id}`) | 8093 |
-| `kraken-messaging-rs/examples/service-c` | Rust: owner of `Shout`, `Reverse` and `IncrementCounter`, co-owner of the shared `Inventory`, `Rows`, `WatchCounter` and `OpenSubscriptions`, publishes the text events, logs `GreetingDelivered` | – (no HTTP) |
+| `examples/fake-printer` | a partner, not a kraken service: the fake printer of [the postcard saga](#the-postcard-saga) and [the banner saga](#the-banner-saga) (`POST /jobs`, `GET /jobs/{id}`) | 8093 |
+| `kraken-messaging-rs/examples/service-c` | Rust: owner of `Shout`, `Reverse`, `IncrementCounter` and the banner saga's `PrintBanner` / `PollBannerJob`, co-owner of the shared `Inventory`, `Rows`, `WatchCounter` and `OpenSubscriptions`, publishes the text events, logs `GreetingDelivered`; the banner saga's webhook and `GET /banners/{jobId}` | 8094 |
 
 ## Prerequisites
 
@@ -265,8 +267,9 @@ docker compose -f compose.yaml -f compose.local.yaml -f compose.secure.yaml --pr
 Both hubs run `enforce` (`KRAKEN_HUB_AUTH_MODE=permissive` in the environment of the `up` shows what would be refused instead).
 The ACL gives each example exactly what it registers and sends: service-a handles nothing and sends `SendGreeting`,
 `CountGreetings`, `Shout`, `Reverse`, `Inventory`, `Rows`, `WatchCounter`, `IncrementCounter` and `OpenSubscriptions`;
-service-b handles `SendGreeting`, `CountGreetings`, `Inventory`, `Rows`, `WatchCounter` and `OpenSubscriptions` and sends
-nothing; service-c (Rust) handles `Shout`, `Reverse`, `IncrementCounter` and the same shared types and sends nothing; a
+service-b handles `SendGreeting`, `CountGreetings`, `Inventory`, `Rows`, `WatchCounter`, `OpenSubscriptions` and the
+postcard adapter's `PrintPostcard` and `PollPrintJob` and sends nothing; service-c (Rust) handles `Shout`, `Reverse`,
+`IncrementCounter`, the same shared types and the banner adapter's `PrintBanner` and `PollBannerJob` and sends nothing; a
 `smoke-intruder` token may register as `smoke-intruder` and do nothing. The services read their token from a file
 (`KRAKEN_MESSAGING_HUB_TOKEN_FILE` for the Kotlin ones, `KRAKEN_HUB_TOKEN_FILE` for service-c) and trust the dev CA
 (`KRAKEN_MESSAGING_HUB_TLS_ENABLED` / `KRAKEN_MESSAGING_HUB_TLS_CA_FILE`, `KRAKEN_HUB_TLS` / `KRAKEN_HUB_TLS_CA`). The hub ports are
@@ -444,6 +447,31 @@ greeting counts). The printer's webhook secret is a dev-only value (`dev-only-pr
 topics here); on a sandbox that already exists, run it once: `docker compose -f compose.yaml -f compose.local.yaml --profile
 examples up --no-deps printer-topic-init`. Smoke steps 24 to 24e drive all five (`SKIP_POSTCARD=1` skips them,
 `ONLY_POSTCARD=1` runs only them); step 24 also replays the webhook (200, applied once) and sends a wrong secret (401).
+
+A job may name its own reply target (`replyWebhook`, `replyTopic` in the `POST /jobs` body): the printer posts and produces
+there instead of to service-b's webhook and `printer.events`, signing with the same dev-only secret. Postcards send none.
+
+## The banner saga
+
+`examples.Banner` in service-c (Rust, sagas S2: `kraken-messaging-rs/examples/service-c/src/banner.rs`) is the postcard saga
+in Rust with service-c's own types (a command type has one owner): it starts on `TextShouted` (the job id is
+`banner-<text in lower case>`), sends `PrintBanner` to service-c's own idempotent adapter (`idempotent_command`; the saga relay
+delivers it locally) and gives the printer 30 s. The printer prints the text in lower case and answers by its prefix as for
+postcards, but where the job tells it: service-c's `POST service-c:8080/printer/webhook` (`external::webhook::verify` and
+`app.ingress()`) and the topic `printer.banner.events` (the external source `printer-banner`), so a banner never reaches
+service-b. A `poll-*` banner sends `PollBannerJob` every 2 s; `silent-*` ends with `BannerFailed` `TIMEOUT`, `crash-*` with
+`BannerFailed` `UNKNOWN_OUTCOME`.
+
+```bash
+curl -s -X POST localhost:8091/shouts -H 'content-type: application/json' -d '{"text":"poll-ada"}'   # {"text":"POLL-ADA"}
+curl -s localhost:8094/banners/banner-poll-ada   # 404 while in flight, then {"jobId":"banner-poll-ada","status":"PRINTED"}
+curl -s localhost:8093/jobs/banner-poll-ada      # the printer's own view of the job
+```
+
+Every shout prints a banner (the smoke's step 7 too); shouting a text again while its banner is in flight prints it once.
+`printer-topic-init` creates `printer.banner.events` next to `printer.events`. Smoke steps 25 to 25e drive the five paths
+through `POST /shouts` on service-a (`SKIP_BANNER=1` skips them, `ONLY_BANNER=1` runs only them; `C=http://localhost:8094`
+is service-c's HTTP address); step 25 also replays the webhook (200) and sends a wrong secret (401).
 
 ## Tear down
 

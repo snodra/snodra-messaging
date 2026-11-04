@@ -27,7 +27,10 @@ fun main(args: Array<String>) {
     runApplication<FakePrinterApplication>(*args)
 }
 
-/** Wires the printer to the real world: the webhook over HTTP (signed), the topic over Kafka, a thread pool for the printing time. */
+/**
+ * Wires the printer to the real world: the webhook over HTTP (signed with the one shared secret, whoever the customer), the
+ * topic over Kafka, a thread pool for the printing time. A job's own reply target replaces the configured one.
+ */
 @Configuration(proxyBeanMethods = false)
 class PrinterWiring {
     private val log = LoggerFactory.getLogger(PrinterWiring::class.java)
@@ -37,7 +40,7 @@ class PrinterWiring {
         mapper: JsonMapper,
         @Value("\${printer.webhook-url}") webhookUrl: String,
         @Value("\${printer.webhook-secret}") secret: String,
-        @Value("\${printer.topic}") topic: String,
+        @Value("\${printer.topic}") defaultTopic: String,
         @Value("\${printer.kafka-bootstrap}") bootstrap: String,
         @Value("\${printer.print-delay}") printDelay: Duration,
         @Value("\${printer.poll-delay}") pollDelay: Duration,
@@ -55,17 +58,17 @@ class PrinterWiring {
             )
         }
         val notifier = object : Notifier {
-            override fun webhook(n: Notification) = retrying("webhook of ${n.jobId}") {
+            override fun webhook(n: Notification, url: String?) = retrying("webhook of ${n.jobId}") {
                 val body = mapper.writeValueAsBytes(n)
-                val request = HttpRequest.newBuilder(URI.create(webhookUrl)).timeout(Duration.ofSeconds(5))
+                val request = HttpRequest.newBuilder(URI.create(url ?: webhookUrl)).timeout(Duration.ofSeconds(5))
                     .header("Content-Type", "application/json").header("X-Kraken-Signature", sign(secret, body))
                     .POST(HttpRequest.BodyPublishers.ofByteArray(body)).build()
                 val status = http.send(request, HttpResponse.BodyHandlers.discarding()).statusCode()
                 check(status in 200..299) { "the webhook answered $status" }
             }
 
-            override fun topic(n: Notification) = retrying("topic record of ${n.jobId}") {
-                producer.send(ProducerRecord(topic, n.jobId, mapper.writeValueAsString(n))).get(10, TimeUnit.SECONDS)
+            override fun topic(n: Notification, topic: String?) = retrying("topic record of ${n.jobId}") {
+                producer.send(ProducerRecord(topic ?: defaultTopic, n.jobId, mapper.writeValueAsString(n))).get(10, TimeUnit.SECONDS)
             }
         }
         return FakePrinter(

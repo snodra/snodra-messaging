@@ -10,6 +10,8 @@
 #        service-b's HTTP address;
 #        SKIP_POSTCARD=1 skips the saga steps 24-24e (the postcard printer), ONLY_POSTCARD=1 runs only them, PRINTER=http://localhost:8093
 #        is the fake printer's address;
+#        SKIP_BANNER=1 skips the Rust saga steps 25-25e (service-c's banner printer), ONLY_BANNER=1 runs only them,
+#        C=http://localhost:8094 is service-c's HTTP address;
 #        SECURE=1 runs against the secure sandbox (kraken/infra/compose.secure.yaml, secrets from
 #        kraken/infra/scripts/dev-hub-pki.sh): the hub calls are https with the dev CA and carry the dashboard token, every
 #        other step runs unchanged, and the security steps 21 and 21b are added; SKIP_SECURE=1 skips those two, ONLY_SECURE=1
@@ -749,6 +751,79 @@ postcard_steps() {
   done
 }
 
+# S2 (Rust sagas, ADR 0021): service-c's banner saga (examples.Banner) gets every shouted text printed as a banner by the
+# same fake printer, which answers service-c where each job asks it to (its own webhook and printer.banner.events, never
+# service-b). Each step shouts a text of its kind through service-a (`POST $A/shouts`, the command examples.Shout to
+# service-c, whose TextShouted starts the saga) and reads `GET $C/banners/banner-<text>` (service-c's projection of
+# BannerPrinted/BannerFailed, 404 while the banner is in flight) until it is printed or failed. Step 25: webhook-* (a
+# replay is a 200 no-op, a wrong secret a 401). 25b: topic-* (printer.banner.events, the external source printer-banner).
+# 25c: poll-* (the saga polls every 2 s). 25d: silent-* (BannerFailed TIMEOUT after 30 s). 25e: crash-* (BannerFailed
+# UNKNOWN_OUTCOME at once; compose brings the printer back). SKIP_BANNER=1 skips these steps, ONLY_BANNER=1 runs only them.
+C=${C:-http://localhost:8094}
+
+# Shouts <text> through service-a (service-c's TextShouted starts the banner saga); fails unless it is shouted back.
+shout() { # <text>
+  local body
+  body=$(curl -fsS -X POST "$A/shouts" -H 'content-type: application/json' -d "{\"text\":\"$1\"}") || fail "POST /shouts for '$1' failed"
+  echo "$body" | grep -q '"text"' || fail "no text in the shout reply: $body"
+}
+
+# Waits until the banner <job id> has an outcome; as await_postcard, the elapsed seconds are left in BANNER_SECONDS.
+await_banner() { # <job id> <PRINTED|FAILED> <reason or -> <seconds>
+  local id=$1 status=$2 reason=$3 limit=$4 body="" start=$SECONDS
+  while [ $((SECONDS - start)) -lt "$limit" ]; do
+    body=$(curl -sS "$C/banners/$id" 2>/dev/null || true)
+    if echo "$body" | grep -q '"jobId"'; then break; fi
+    sleep 1
+  done
+  BANNER_SECONDS=$((SECONDS - start))
+  echo "$body" | grep -q "\"status\":\"$status\"" || fail "banner $id: expected $status within ${limit}s, got '${body:-nothing}'"
+  [ "$reason" = "-" ] || echo "$body" | grep -q "\"reason\":\"$reason\"" || fail "banner $id: expected reason $reason, got: $body"
+  echo "   banner $id: $body (after ${BANNER_SECONDS}s)"
+}
+
+banner_steps() {
+  local run id body code
+  run=$(date +%s)
+
+  echo "25. webhook-$run: the printer posts a signed webhook to service-c (Rust); a replay is a no-op, a wrong secret is refused ..."
+  shout "webhook-$run"; id="banner-webhook-$run"
+  await_banner "$id" PRINTED - 90
+  body="{\"deliveryId\":\"printed-$id\",\"jobId\":\"$id\",\"name\":\"webhook-$run\"}"
+  code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$C/printer/webhook" -H 'content-type: application/json' \
+    -H "X-Kraken-Webhook-Secret: $PRINTER_WEBHOOK_SECRET" -d "$body") || fail "replaying the banner webhook failed"
+  [ "$code" = "200" ] || fail "a replayed banner webhook delivery should be answered 200, got $code"
+  code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$C/printer/webhook" -H 'content-type: application/json' \
+    -H 'X-Kraken-Webhook-Secret: not-the-secret' -d "$body") || fail "posting a banner webhook with a wrong secret failed"
+  [ "$code" = "401" ] || fail "a banner webhook with a wrong secret should be answered 401, got $code"
+  echo "   replay -> 200, wrong secret -> 401"
+
+  echo "25b. topic-$run: the printer produces to printer.banner.events, service-c's printer-banner source translates the record ..."
+  shout "topic-$run"; id="banner-topic-$run"
+  await_banner "$id" PRINTED - 60
+
+  echo "25c. poll-$run: nobody tells service-c; its saga polls the printer every 2 s until the job is done ..."
+  shout "poll-$run"; id="banner-poll-$run"
+  await_banner "$id" PRINTED - 60
+  curl -fsS "$PRINTER/jobs/$id" | grep -q '"status":"DONE"' || fail "the printer's job $id should be DONE after the saga polled it"
+
+  echo "25d. silent-$run: the printer never answers, the saga's 30 s timeout publishes BannerFailed TIMEOUT ..."
+  shout "silent-$run"; id="banner-silent-$run"
+  await_banner "$id" FAILED TIMEOUT 60
+  [ "$BANNER_SECONDS" -ge 25 ] || fail "the timeout fired after ${BANNER_SECONDS}s, before the 30 s the saga gives the printer"
+
+  echo "25e. crash-$run: the printer accepts and dies before replying, the outcome is unknown: BannerFailed UNKNOWN_OUTCOME ..."
+  shout "crash-$run"; id="banner-crash-$run"
+  await_banner "$id" FAILED UNKNOWN_OUTCOME 60
+  [ "$BANNER_SECONDS" -lt 25 ] || fail "the unknown outcome took ${BANNER_SECONDS}s: it should be reported at once, not by the 30 s timeout"
+  echo "   waiting for compose to bring the printer back ..."
+  for i in $(seq 1 60); do
+    curl -fsS "$PRINTER/actuator/health" 2>/dev/null | grep -q '"status":"UP"' && break
+    [ "$i" -eq 60 ] && fail "the printer did not come back within 60s after crashing"
+    sleep 1
+  done
+}
+
 # P5a (ADR 0018), only with SECURE=1 against the secure sandbox (kraken/infra/compose.secure.yaml). Step 21: a service
 # with a token the ACL does not know, and one with a valid token that grants only another service name, are refused by
 # both hubs and logged by the client as a registration rejection (ERROR once per hub), and never listed on /topology; a
@@ -1130,6 +1205,12 @@ if [ "${ONLY_POSTCARD:-0}" = "1" ]; then
   exit 0
 fi
 
+if [ "${ONLY_BANNER:-0}" = "1" ]; then
+  banner_steps
+  echo "SMOKE OK (banner steps only)"
+  exit 0
+fi
+
 if [ "${ONLY_SECURE:-0}" = "1" ]; then
   [ "$SECURE" = "1" ] || fail "ONLY_SECURE=1 needs SECURE=1"
   secure_steps
@@ -1236,6 +1317,7 @@ echo "   delivered: $TEXTS"
 [ "${SKIP_STREAM:-0}" = "1" ] || stream_steps
 [ "${SKIP_SUBSCRIBE:-0}" = "1" ] || subscribe_steps
 [ "${SKIP_POSTCARD:-0}" = "1" ] || postcard_steps
+[ "${SKIP_BANNER:-0}" = "1" ] || banner_steps
 if [ "$SECURE" = "1" ] && [ "${SKIP_SECURE:-0}" != "1" ]; then secure_steps; fi
 if [ "$JWT" = "1" ] && [ "${SKIP_JWT:-0}" != "1" ]; then jwt_steps; fi
 if [ "$MTLS" = "1" ] && [ "${SKIP_MTLS:-0}" != "1" ]; then mtls_steps; fi

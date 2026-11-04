@@ -7,8 +7,11 @@ import java.util.concurrent.ConcurrentHashMap
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
-/** A print job as the service asks for it. */
-data class JobRequest(val jobId: String, val name: String)
+/**
+ * A print job as the service asks for it. [replyWebhook] and [replyTopic] say where this customer wants its notification
+ * (service-c's banners); without them the printer answers its configured customer (service-b's postcards).
+ */
+data class JobRequest(val jobId: String, val name: String, val replyWebhook: String? = null, val replyTopic: String? = null)
 
 /** The answer to a submit; [duplicate] when the idempotency key was already seen (nothing printed again). */
 data class SubmitResult(val jobId: String, val status: String, val duplicate: Boolean)
@@ -19,17 +22,18 @@ data class JobStatus(val jobId: String, val name: String, val status: String)
 /** What the printer tells its customer when a postcard is printed (webhook body and topic record alike). */
 data class Notification(val deliveryId: String, val jobId: String, val name: String)
 
-/** How the printer reaches its customer: a signed webhook call, or a record on its own Kafka topic. */
+/** How the printer reaches its customer: a signed webhook call to [url], or a record on [topic]; null means the configured default. */
 interface Notifier {
-    fun webhook(n: Notification)
-    fun topic(n: Notification)
+    fun webhook(n: Notification, url: String?)
+    fun topic(n: Notification, topic: String?)
 }
 
 /**
  * A fake postcard printer for the sandbox. What a job does depends on the greeting name's prefix:
  *
- * - `webhook-*` (and any name with no known prefix): a moment after accepting it, posts the notification to the customer's webhook;
- * - `topic-*`: produces the notification to the printer's own topic;
+ * - `webhook-*` (and any name with no known prefix): a moment after accepting it, posts the notification to the customer's webhook
+ *   (the job's `replyWebhook`, else the configured one);
+ * - `topic-*`: produces the notification to the printer's topic (the job's `replyTopic`, else its own);
  * - `poll-*`: tells nobody; `GET /jobs/{id}` is `PENDING` for [pollDelay] after the job was accepted, then `DONE`;
  * - `silent-*`: accepts and never answers (the customer's timeout path);
  * - `crash-*`: accepts, then takes the process down before replying (the customer's unknown-outcome path; compose restarts it).
@@ -66,8 +70,8 @@ class FakePrinter(
                 log.warn("Printer: job {} accepted, crashing before the reply", job.jobId)
                 crash()
             }
-            job.name.startsWith("topic-") -> later(printDelay) { notifier.topic(notification) }
-            else -> later(printDelay) { notifier.webhook(notification) }
+            job.name.startsWith("topic-") -> later(printDelay) { notifier.topic(notification, job.replyTopic) }
+            else -> later(printDelay) { notifier.webhook(notification, job.replyWebhook) }
         }
         return SubmitResult(job.jobId, "ACCEPTED", duplicate = false)
     }

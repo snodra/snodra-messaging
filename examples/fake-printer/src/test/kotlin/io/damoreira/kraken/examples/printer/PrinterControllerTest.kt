@@ -20,8 +20,8 @@ class PrinterControllerTest {
         @Bean fun printer() = FakePrinter(
             clock = { java.time.Instant.parse("2026-11-03T10:00:00Z") },
             notifier = object : Notifier {
-                override fun webhook(n: Notification) = Unit
-                override fun topic(n: Notification) = Unit
+                override fun webhook(n: Notification, url: String?) = Unit
+                override fun topic(n: Notification, topic: String?) = Unit
             },
             later = { _, _ -> },
             crash = {},
@@ -36,6 +36,12 @@ class PrinterControllerTest {
 
         assertThat(post()).hasStatus(HttpStatus.OK).bodyJson().isLenientlyEqualTo("""{"jobId":"g1","status":"ACCEPTED","duplicate":false}""")
         assertThat(post()).hasStatus(HttpStatus.OK).bodyJson().isLenientlyEqualTo("""{"jobId":"g1","status":"ACCEPTED","duplicate":true}""")
+    }
+
+    @Test fun `POST jobs takes an optional reply target`() {
+        val body = """{"jobId":"g3","name":"poll-c","replyWebhook":"http://service-c:8080/printer/webhook","replyTopic":"printer.banner.events"}"""
+        assertThat(mvc.post().uri("/jobs").contentType(MediaType.APPLICATION_JSON).header("Idempotency-Key", "k3").content(body))
+            .hasStatus(HttpStatus.OK).bodyJson().isLenientlyEqualTo("""{"jobId":"g3","status":"ACCEPTED","duplicate":false}""")
     }
 
     @Test fun `POST jobs without an idempotency key is 400`() {
