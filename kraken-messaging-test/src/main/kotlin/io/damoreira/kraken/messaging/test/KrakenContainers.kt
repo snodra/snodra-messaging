@@ -51,6 +51,9 @@ object KrakenContainers {
     /** The P6a hub (event processor status, capability `processors`, `GET /api/v1/processors`). */
     private val hubP6aImage: String get() = System.getenv("KRAKEN_HUB_P6A_IMAGE") ?: "kraken-hub:p6a-hub"
 
+    /** The P6b hub (processor control, ADR 0023): `KRAKEN_HUB_P6B_IMAGE`, default `kraken-hub:p6b-hub`. */
+    private val hubP6bImage: String get() = System.getenv("KRAKEN_HUB_P6B_IMAGE") ?: "kraken-hub:p6b-hub"
+
     fun kafka(): KafkaContainer = KafkaContainer(DockerImageName.parse(KAFKA_IMAGE)).withReuse(true)
 
     fun mongo(): MongoDBContainer = MongoDBContainer(DockerImageName.parse(MONGO_IMAGE)).withReplicaSet().withReuse(true)
@@ -215,11 +218,16 @@ object KrakenContainers {
 
     fun hubP6aImageAvailable(): Boolean = imageAvailable(hubP6aImage)
 
+    fun hubP6bImageAvailable(): Boolean = imageAvailable(hubP6bImage)
+
     /** The P5c hub image: `KRAKEN_HUB_P5C_IMAGE`, default `kraken-hub:p5c`; gRPC 7000 and HTTP 7001 exposed. */
     fun hubP5c(): GenericContainer<*> = hub(hubP5cImage).withExposedPorts(7000, 7001)
 
     /** The P6a hub image: `KRAKEN_HUB_P6A_IMAGE`, default `kraken-hub:p6a-hub`; gRPC 7000 and HTTP 7001 exposed. */
     fun hubP6a(): GenericContainer<*> = hub(hubP6aImage).withExposedPorts(7000, 7001)
+
+    /** The P6b hub image: `KRAKEN_HUB_P6B_IMAGE`, default `kraken-hub:p6b-hub`; gRPC 7000 and HTTP 7001 exposed. */
+    fun hubP6b(): GenericContainer<*> = hub(hubP6bImage).withExposedPorts(7000, 7001)
 
     fun hubBaselineImageAvailable(): Boolean = imageAvailable(hubBaselineImage)
 
