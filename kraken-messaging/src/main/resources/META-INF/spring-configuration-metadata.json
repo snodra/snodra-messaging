@@ -48,6 +48,12 @@
       "sourceMethod": "getConsumer()"
     },
     {
+      "name": "kraken.messaging.kafka.dead-letter",
+      "type": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$DeadLetter",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Kafka",
+      "sourceMethod": "getDeadLetter()"
+    },
+    {
       "name": "kraken.messaging.outbox",
       "type": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Outbox",
       "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties",
@@ -332,6 +338,12 @@
       "defaultValue": "kraken.events"
     },
     {
+      "name": "kraken.messaging.kafka.group-id",
+      "type": "java.lang.String",
+      "description": "Consumer group of the default event processor; unset: the service name. A named processor (@ProcessingGroup) uses <this group>.<name>.",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Kafka"
+    },
+    {
       "name": "kraken.messaging.kafka.consumer.enabled",
       "type": "java.lang.Boolean",
       "description": "Consume the events topic; set false in tools that only publish.",
@@ -341,9 +353,23 @@
     {
       "name": "kraken.messaging.kafka.consumer.max-attempts",
       "type": "java.lang.Integer",
-      "description": "Handler invocations per record (first try included) before the record is logged and skipped.",
+      "description": "Handler invocations per record (first try included, 1 s apart) before the record goes to the dead letters (kafka.dead-letter.mode); shared by every event processor.",
       "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Consumer",
       "defaultValue": 5
+    },
+    {
+      "name": "kraken.messaging.kafka.dead-letter.mode",
+      "type": "io.damoreira.kraken.messaging.deadletter.DeadLetterMode",
+      "description": "What an event processor does with a record it cannot handle: collection (park it in dead_letters, the default), topic (produce it to <topic>.dlt) or log (log and skip).",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$DeadLetter",
+      "defaultValue": "collection"
+    },
+    {
+      "name": "kraken.messaging.kafka.dead-letter.retention",
+      "type": "java.time.Duration",
+      "description": "A dead letter is deleted this long after it was parked (TTL index on expireAt), which also unblocks its key; at least 1s.",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$DeadLetter",
+      "defaultValue": "30d"
     },
     {
       "name": "kraken.messaging.outbox.enabled",
@@ -503,6 +529,25 @@
       "type": "java.util.Map<java.lang.String,io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Source>",
       "description": "Partner Kafka topics consumed into local kraken events, by source name. Each source takes bootstrap-servers (default: kafka.bootstrap-servers), topic (required), group-id (default: <service-name>.external.<name>) and properties (extra consumer properties; servers, group id, deserializers and auto-commit are fixed). A bean named like the source implements ExternalRecordTranslator; a source without one fails the startup naming it. Records are dispatched locally (handlers and sagas), never republished to kraken.events.",
       "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$ExternalKafka"
+    }
+  ],
+  "hints": [
+    {
+      "name": "kraken.messaging.kafka.dead-letter.mode",
+      "values": [
+        {
+          "value": "collection",
+          "description": "Park in dead_letters, sequence the key, DeadLetters admin API."
+        },
+        {
+          "value": "topic",
+          "description": "Produce to <topic>.dlt."
+        },
+        {
+          "value": "log",
+          "description": "Log and skip (before P6a)."
+        }
+      ]
     }
   ]
 }

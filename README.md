@@ -38,6 +38,8 @@ Repo conventions: `../kraken/docs/04-repositories.md`.
 - [Scatter-gather](#scatter-gather)
 - [Streaming queries](#streaming-queries)
 - [Subscription queries](#subscription-queries)
+- [Event processors](#event-processors)
+- [Dead letters](#dead-letters)
 - [Sagas](#sagas)
 - [Test helpers (`kraken-messaging-test`)](#test-helpers-kraken-messaging-test)
 - [Examples](#examples)
@@ -89,6 +91,19 @@ The published POM and Gradle module metadata carry resolved versions for every d
 POM also imports the Spring Boot BOM, so consumers do not need to manage them. Builder call.
 
 ## Upgrading
+
+**To event processors and dead letters (P6a).** The unnamed processor keeps its consumer group and its markers, so an upgrade
+re-handles nothing. **Behaviour change:** a record that fails every attempt is now parked in `dead_letters` (mode `collection`, the
+default) instead of being logged and skipped, and **the later records of its Kafka key wait behind it** (parked `SEQUENCED`) until it
+is retried or discarded through the `DeadLetters` bean, or expires (`kafka.dead-letter.retention`, 30 days); a record without a `type`
+header or with a value that is not a JSON object is parked `INVALID` (it blocks nothing). Set `kraken.messaging.kafka.dead-letter.mode:
+log` for the old behaviour. A record is no longer acknowledged before its letter exists: with MongoDB down a failing record waits
+(it was skipped before). The `eventConsumer` bean is replaced by `eventProcessors` (`EventProcessors`, one `EventConsumer` per
+processor); a service with no `@EventHandler` and no saga starts no consumer. New: `@ProcessingGroup`, `DeadLetters`, the keys
+`kafka.group-id`, `kafka.dead-letter.mode` and `kafka.dead-letter.retention`, the collection `dead_letters` (created on first start
+in mode `collection`), the hub capability `processors` (status sent only to a P6a hub). External source names `processor`, `saga`,
+`ingress` and `failed` are refused. `HandlerInvoker.invokeEvent` takes an optional processor, `EventConsumer` an optional processor,
+`DeadLetterSink` and clock, `HubConnections` an optional processor status supplier.
 
 **To sagas (S1).** Nothing breaks: a service with no `@Saga` class and no `@IdempotentHandler` method gets none of the new beans or
 collections. What changes: `EventConsumer` now runs events through a shared `LocalEventDispatcher` (ordinary handlers first, as
@@ -278,7 +293,10 @@ All keys (`kraken.messaging.*`; durations accept `200ms`, `5s`, `7d`; relaxed bi
 | `kafka.bootstrap-servers` | `broker:19092` | Kafka bootstrap servers. |
 | `kafka.topic` | `kraken.events` | Events topic. |
 | `kafka.consumer.enabled` | `true` | Set `false` in tools that only publish. |
-| `kafka.consumer.max-attempts` | `5` | Handler invocations per record (first try included) before the record is logged and skipped. |
+| `kafka.group-id` | `service-name` | Consumer group of the `default` event processor; a named processor uses `<this>.<name>`. See [Event processors](#event-processors). |
+| `kafka.consumer.max-attempts` | `5` | Handler invocations per record (first try included, 1 s apart) before the record goes to the dead letters; shared by every processor. |
+| `kafka.dead-letter.mode` | `collection` | What a processor does with a record it cannot handle: `collection` (park it in `dead_letters`, sequence its key, `DeadLetters` admin API), `topic` (produce it to `<topic>.dlt`) or `log` (log and skip, as before P6a). Case-insensitive; anything else fails the startup. See [Dead letters](#dead-letters). |
+| `kafka.dead-letter.retention` | `30d` | A letter is deleted this long after it was parked (TTL index on `expireAt`), which also unblocks its key. At least `1s`. |
 | `outbox.enabled` | `true` | Run the outbox publisher that relays `outbox` documents to Kafka. |
 | `outbox.poll-interval` | `200ms` | Outbox poll period. |
 | `outbox.batch-size` | `100` | Documents per poll. |
@@ -681,8 +699,8 @@ val quick = queryBus.sendBlocking(GetWorkout(id), SendOptions(retry = RetryPolic
   moves on; other failures stop the batch and are retried on the next poll. Failed documents stay in `outbox` (the TTL
   only removes sent ones); clear `failedAt` and `attempts` to re-queue one.
 - **Consumer idempotency.** The consumer records processed event ids in `processed_events` and skips duplicates. A handler
-  gets up to `max-attempts` invocations with a 1 s back-off; a record that still fails is logged and skipped. A payload
-  that does not decode into the handler's class is skipped at once. There is no dead-letter topic.
+  gets up to `max-attempts` invocations with a 1 s back-off; a record that still fails becomes a dead letter (see
+  [Dead letters](#dead-letters)). A payload that does not decode into the handler's class is not retried.
 - **Transactions.** The library invokes `@EventHandler`s inside its own Mongo transaction (idempotency marker plus the
   handler's writes), on the Kafka listener thread via `runBlocking`; a handler that relies on it must not switch threads.
   The `MongoTransactionManager` is thread-bound: Spring only carries a transaction across suspensions for reactive
@@ -1064,6 +1082,142 @@ result.updates.collect { change -> render(change) }   // completes when the hand
   capability. Handlers must run this version: the hub subscribes only instances that negotiated `subscription`, so during
   a rolling upgrade of an owner the old instances are simply never targets (owners with instances but none capable are
   `UnsupportedByHubException` for the caller).
+
+## Event processors
+
+Every `@EventHandler` belongs to an **event processor** (P6a, ADR 0022 in the umbrella repo). A processor is its own Kafka
+consumer, in its own consumer group, on the events topic: its own position, its own failure domain, its own idempotency markers
+and dead letters. A slow projection in one processor never holds a notifier in another.
+
+```kotlin
+@Component
+@ProcessingGroup("orders")              // every @EventHandler of this class runs in processor "orders"
+class OrdersProjection(private val orders: OrderRepository) {
+    @EventHandler fun on(event: OrderPlaced) = orders.insert(event.toRow())
+    @EventHandler fun on(event: OrderShipped) = orders.markShipped(event.orderId)
+}
+
+@Component
+class Notifier {                         // no annotation: processor "default"
+    @EventHandler fun on(event: OrderPlaced) = mail.confirm(event)
+}
+```
+
+- **Names.** `@ProcessingGroup("name")` on a handler class; the name matches `^[a-z0-9][a-z0-9-]{0,47}$` and is not `default`. A
+  bad name fails the startup naming the handler. Classes without the annotation are in processor `default`. Command and query
+  handlers of an annotated class are not affected.
+- **Groups.** `default` keeps the group the service always had: `kraken.messaging.kafka.group-id`, else the service name. A named
+  processor uses `<that group>.<name>` (`orders-service.orders`), so it starts from the earliest offset the first time it runs.
+- **Markers.** `default` keeps `<eventId>` in `processed_events`; a named processor writes `processor:<name>:<eventId>`. So an
+  upgrade re-handles nothing in `default`, and one event type handled in two processors is handled by both, each exactly once.
+- **Sagas run only in `default`** (their stage 2 follows the default processor's stage 1, as before). A named processor runs
+  only its handlers.
+- **Which processors start.** At startup, one consumer per processor that has a handler; `default` also when sagas run. A
+  service with no `@EventHandler` and no saga starts no consumer.
+- **Attempts and back-off** (`kafka.consumer.max-attempts`, 1 s between attempts) are shared by all processors.
+- **External sources and webhooks** dispatch locally to the handlers of every processor, each in its own transaction under its
+  own marker (`processor:<name>:<dedupeId>`), and to the sagas once. Their records are never dead-lettered. The source names
+  `processor`, `saga`, `ingress` and `failed` are refused (a partner source at startup, a webhook at the call): their markers
+  would collide with the library's own.
+
+**Status at the hub.** Every status report (`hub.status-interval`, 5 s) carries one `ProcessorStatus` per started processor to
+every hub whose `RegisterAck` lists the capability `processors` (the P6a hub; an older hub is never sent the field): name, group,
+topic, state, the partitions assigned to this instance with position, committed offset, high watermark and lag, records processed
+and failed since start, the dead-letter count, the last error (message only, never a payload), the event types and the
+dead-letter mode. The hub shows them in `/topology`, `GET /api/v1/processors` and the dashboard's Processors page. The states:
+
+| State | When |
+|---|---|
+| `STARTING` | started, no assignment yet (an assignment of zero partitions counts: an idle group member is `RUNNING`), or between a revocation and the next assignment |
+| `RUNNING` | otherwise |
+| `FAILING` | for 60 s after a record exhausted its attempts, or a record could not be acknowledged (its letter could not be parked, the DLT could not be reached); wins over `STARTING` and `RUNNING` |
+| `STOPPED` | the processor is stopping or stopped |
+
+The report is built from memory and never waits: the assignment comes from the rebalance listener, the position from the last
+acknowledged record (`-1` until one), the committed offsets and high watermarks from one Kafka `Admin` client (same connection
+settings as the consumers) refreshed at most every 5 s on a background thread, and the dead-letter count from
+`countDocuments({processor})` every 30 s and after a park. Lag is `high watermark - committed` (`- position` without a commit),
+`-1` when unknown, never negative. `EventProcessors.processorStatuses()` (bean `ProcessorStatusSource`) gives the same list to an
+application that wants it.
+
+## Dead letters
+
+A record a processor cannot handle is no longer only logged: by default (`kraken.messaging.kafka.dead-letter.mode: collection`)
+it is **parked** in the service's MongoDB collection `dead_letters`, the later records of the same Kafka key wait behind it, and an
+operator retries or discards it through the `DeadLetters` bean.
+
+| Reason | What happened | Blocks its key | Retry |
+|---|---|---|---|
+| `HANDLER_FAILED` | stage 1 failed on every attempt (once for a payload the handler cannot decode, `InvalidMessageException`) | yes | yes |
+| `SEQUENCED` | an earlier letter of its key is parked in this processor: stage 1 did not run (**the sagas still saw it** in `default`) | yes | yes |
+| `INVALID` | no `type` header, or a value that is not a JSON object | no | no (discard) |
+
+A type the processor does not handle is skipped as before, not a letter. A record without a key is never sequenced. A record that
+only failed in the saga stage (stage 1 done, the saga store down on every attempt) is logged and skipped: stage 1 has nothing to
+retry, and parked saga events have their own `saga_failures`.
+
+**Never lost, parked once.** The letter is a single insert outside any transaction after the last attempt, `_id`
+`<processor>:<topic>:<partition>:<offset>`; the offset is acknowledged only once the letter exists. When MongoDB is down the record
+stays unacknowledged and is redelivered every second until the letter is written (the redelivery parks it, it does not run the
+handler again; after a rebalance the new owner may run it once more, which stage 1's marker makes harmless). A redelivery of a record
+already parked (a crash before the commit) finds its own letter and is acknowledged.
+
+**Sequencing.** Each processor keeps the keys of its letters on its assigned partitions in memory (loaded on assignment, added to
+on every park). A record whose key is in that set is checked against the collection: when the key still has a head letter (the
+lowest offset that is not `INVALID`), the record is parked `SEQUENCED`; otherwise (retried, discarded or expired, possibly on
+another instance) the key is forgotten and the record handled. **A letter that expires** (`dead-letter.retention`, 30 days)
+**unblocks its key.**
+
+```kotlin
+@RestController
+class DeadLetterAdmin(private val deadLetters: DeadLetters) {
+    @GetMapping("/admin/dead-letters") fun list(@RequestParam processor: String?) = deadLetters.list(processor, limit = 100)
+    @PostMapping("/admin/dead-letters/{id}/retry") fun retry(@PathVariable id: String) = deadLetters.retry(id).toString()
+    @PostMapping("/admin/dead-letters/retry-all") fun retryAll(@RequestParam processor: String) = deadLetters.retryAll(processor)
+    @DeleteMapping("/admin/dead-letters/{id}") fun discard(@PathVariable id: String) = deadLetters.discard(id)
+}
+```
+
+`DeadLetters` (blocking; call it from a request thread):
+
+| Call | Result |
+|---|---|
+| `list(processor: String? = null, limit: Int = 100): List<DeadLetter>` | sorted by `parkedAt`, then `_id` |
+| `get(id): DeadLetter?`, `count(processor: String? = null): Long` | |
+| `retry(id): RetryResult` | `Retried`, `Duplicate` (stage 1 had run: the letter is deleted), `Failed(message)` (the letter stays with `attempts + 1`, the new `error`, `lastAttemptAt`, reason `HANDLER_FAILED`), `Blocked(headId)` (retry the key's head first), `NotRetriable` (`INVALID`), `NotFound` |
+| `retryAll(processor): RetryAllResult(retried, failed, blocked, skipped)` | per key in offset order, a key stopping at its first failure (its later letters count as blocked); then the keyless letters; `INVALID` letters skipped |
+| `discard(id): Boolean` | deletes the letter; discarding a key's head makes the next letter of the key retriable |
+
+A retry runs the processor's stage 1 (all its handlers for the type) once, **in the marker transaction, together with the letter's
+deletion**: handled and deleted commit together or not at all, so a retry is exactly-once with respect to stage 1, also when two
+instances retry the same letter. The sagas are not run again. A key stays blocked for new records until all its letters are retried
+or discarded. Any instance of the service can serve the calls for the processors it runs; a processor it does not run (or a letter
+of one) is an `IllegalArgumentException` naming it. In modes `topic` and `log` every call is an `IllegalStateException` naming the
+mode.
+
+**Mode `topic`** produces the failed or `INVALID` record to `<topic>.dlt` (same key, value and headers, plus `kraken-dlt-processor`,
+`kraken-dlt-reason`, `kraken-dlt-error`, `kraken-dlt-original-topic`, `-partition` and `-offset`) and acknowledges it only after the
+broker did. Nothing is sequenced and there is no admin API: the topic belongs to your tooling. **The DLT must exist, or broker
+auto-creation must be on.** **Mode `log`** is the behaviour before P6a: log (never the payload) and skip.
+
+The document (the same from the Rust library; no `_class`, an absent field is absent):
+
+| Field | Type | |
+|---|---|---|
+| `_id` | string | `<processor>:<topic>:<partition>:<offset>` |
+| `processor`, `topic` | string | |
+| `partition` / `offset` | Int32 / Int64 | |
+| `key` | string | absent without a key |
+| `eventId`, `eventType` | string | the `id` and `type` headers, absent when missing |
+| `headers` | document | every record header (lossy UTF-8; a repeated name keeps its last value) |
+| `payload` / `payloadBinary` | string / BinData | the value as text when it is UTF-8, else binary; both absent for an empty value |
+| `reason` | string | `HANDLER_FAILED`, `SEQUENCED`, `INVALID` |
+| `error` | `{type, message}` | exception simple name and message (at most 2000 characters); `Sequenced` / `InvalidMessage` |
+| `blockedBy` | string | `SEQUENCED` only: the head letter when it was parked |
+| `attempts` | Int32 | handler attempts so far |
+| `parkedAt`, `lastAttemptAt`, `expireAt` | Date | `expireAt = parkedAt + retention` (TTL index) |
+
+Indexes: `dead_letters_processor_key_offset`, `dead_letters_processor_parked`, `dead_letters_expire` (TTL), created at startup.
 
 ## Sagas
 
@@ -1490,7 +1644,9 @@ Docker Compose from local builds together with the real `kraken-hub` image, Kafk
   it expires (minutes); a certificate until its `notAfter` or until the hub's `[[service]]` table is removed (no CRL, no OCSP: issue
   short-lived certificates). A client key must be unencrypted PKCS#8 PEM. With a single hub, a certificate rotation leaves the instance
   without a stream for a moment (see the rotation notes above).
-- No dead-letter topic: poison records are logged and skipped.
+- Event processors (P6a) are observed, not controlled: no pause, resume, reset or replay, and retry or discard of dead letters only
+  through the service's own `DeadLetters` bean (the hub's control plane is P6b). Attempts and back-off are shared by all processors;
+  one consumer thread per processor and instance.
 - No leader election for the outbox publisher; with several instances delivery is at-least-once and ordering is per
   publishing instance.
 - A stream pins one handler instance for its whole life: a restart of that instance fails the stream
