@@ -142,20 +142,22 @@ class ProcessorControl(
             answer(refused(request, ControlRefusal.CONTROL_REFUSAL_UNKNOWN_PROCESSOR, "processor ${request.processor} does not run on this instance"))
             return
         }
-        val queued = { slot.queue.execute { answer(guarded(request) { act(slot, request) }) } }
-        try {
-            val prepare = request.resetPrepare
-            if (request.hasResetPrepare() && prepare.leaseMs > 0 && slot.held?.id == prepare.operationId) {
-                // A renewal of the operation held here: answered at once, never behind an execute of it (ADR 0023).
-                Thread.ofVirtual().name("kraken-control-renew").start {
-                    val renewed = runCatching { store.renew(request.processor, prepare.operationId, Duration.ofMillis(prepare.leaseMs)) }.getOrDefault(false)
-                    if (renewed) answer(ok(request, "lease renewed")) else queued() // lost meanwhile: a prepare like any other
-                }
-            } else {
-                queued()
+        val queued = {
+            try {
+                slot.queue.execute { answer(guarded(request) { act(slot, request) }) }
+            } catch (_: RejectedExecutionException) {
+                answer(refused(request, ControlRefusal.CONTROL_REFUSAL_FAILED, "the event processors are stopping"))
             }
-        } catch (_: RejectedExecutionException) {
-            answer(refused(request, ControlRefusal.CONTROL_REFUSAL_FAILED, "the event processors are stopping"))
+        }
+        val prepare = request.resetPrepare
+        if (request.hasResetPrepare() && prepare.leaseMs > 0 && slot.held?.id == prepare.operationId) {
+            // A renewal of the operation held here: answered at once, never behind an execute of it (ADR 0023).
+            Thread.ofVirtual().name("kraken-control-renew").start {
+                val renewed = runCatching { store.renew(request.processor, prepare.operationId, Duration.ofMillis(prepare.leaseMs)) }.getOrDefault(false)
+                if (renewed) answer(ok(request, "lease renewed")) else queued() // lost meanwhile: a prepare like any other
+            }
+        } else {
+            queued()
         }
     }
 

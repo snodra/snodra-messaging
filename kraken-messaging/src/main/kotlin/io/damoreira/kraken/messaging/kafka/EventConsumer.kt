@@ -73,6 +73,11 @@ import java.util.concurrent.atomic.AtomicLong
  * [status] reports the processor for the hub (ADR 0022): assignment and positions from the rebalance listener and the
  * acknowledged records, committed offsets and high watermarks from [refreshOffsets] (called off the consumer thread with
  * an `Admin`), the dead-letter count from [sampleDeadLetters].
+ *
+ * **Control** (P6b, ADR 0023, driven by [io.damoreira.kraken.messaging.control.ProcessorControl]): [pause] stops consuming
+ * without leaving the group (kept across [stop] and [start]); the stage-1 marker of every record carries its position; a
+ * record inside an open [replay] range runs stage 1 without its `@DisallowReplay` handlers and never stage 2. The status says
+ * PAUSED, the [operationId] holding the processor's lock, `replaying` and each partition's `replay_until`.
  */
 class EventConsumer(
     consumerFactory: ConsumerFactory<String, ByteArray>,

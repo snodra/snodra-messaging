@@ -203,11 +203,12 @@ open class ProcessorControlStore(
          * `processor:<name>:<dedupe id>`, for `default` the bare dedupe id, in both cases a dedupe id without `:`. Every other
          * marker family has one there (`saga:`, `ingress:`, `failed:`, `processor:` and the external sources'
          * `<source>:<partition>:<offset>` / `<source>:<key>`), a Kafka event id (a UUID, or `<topic>-<partition>-<offset>`;
-         * a topic name cannot contain `:`) has none. An event id with a `:` keeps its legacy marker.
+         * a topic name cannot contain `:`) has none. An event id with a `:` keeps its legacy marker. A processor name is
+         * `[a-z0-9-]` only, so it needs no escaping in the pattern.
          */
         fun legacyMarkers(processor: String): Bson = Filters.and(
             Filters.exists("processor", false),
-            Filters.regex("_id", if (processor == Processors.DEFAULT) "^[^:]+$" else "^processor:${Regex.escape(processor)}:[^:]+$"),
+            Filters.regex("_id", if (processor == Processors.DEFAULT) "^[^:]+$" else "^processor:$processor:[^:]+$"),
         )
 
         /** `operation.kind` of a reset, the only kind so far. */
