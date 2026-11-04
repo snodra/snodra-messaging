@@ -1,6 +1,7 @@
 package io.damoreira.kraken.messaging.hub
 
 import io.damoreira.kraken.hub.v1.ErrorCode
+import io.damoreira.kraken.hub.v1.ProcessorStatus
 import io.damoreira.kraken.hub.v1.Reply
 import io.damoreira.kraken.hub.v1.ReplyPart
 import io.damoreira.kraken.hub.v1.Request
@@ -88,7 +89,8 @@ import java.util.concurrent.atomic.AtomicInteger
  *   exception in a check is logged once and the next tick checks again.
  * - **Status**: every [statusInterval], and whenever the live set changes, each live hub whose ack lists
  *   `instance-status` gets an `InstanceStatus` with the ids of the acknowledged (protocol v2) live hubs and the handlers
- *   in flight. Hubs without the capability never get one.
+ *   in flight, plus the event processors ([processors], P6a) when the ack also lists `processors`. Hubs without the
+ *   capability never get one.
  */
 class HubConnections(
     private val targets: HubTargets,
@@ -127,6 +129,11 @@ class HubConnections(
     private val rolloverMaxDelay: Duration = HubProtocol.ROLLOVER_MAX_DELAY,
     /** The random source of the wait before a rollover: a value in [0, 1). Replaced in tests. */
     private val rolloverRandom: () -> Double = { ThreadLocalRandom.current().nextDouble() },
+    /**
+     * The status of this instance's event processors (P6a, ADR 0022), read once per report and sent to the hubs whose ack lists
+     * `processors`. Must return at once from in-memory state; one that throws sends the report without processors.
+     */
+    private val processors: () -> List<ProcessorStatus> = { emptyList() },
 ) : HubTransport {
     private val log = LoggerFactory.getLogger(HubConnections::class.java)
 
@@ -549,7 +556,13 @@ class HubConnections(
         if (hubs.isEmpty()) return
         val ids = hubs.filter { it.handshake.value is HubHandshake.V2 }.mapNotNull { it.hubId }.distinct()
         val handlers = gate.inFlightHandlers.value
-        hubs.forEach { it.reportStatus(ids, handlers) }
+        val processors = try {
+            processors()
+        } catch (e: Exception) {
+            log.debug("Could not build the processor status: {}", e.toString())
+            emptyList()
+        }
+        hubs.forEach { it.reportStatus(ids, handlers, processors) }
     }
 
     private suspend fun resolveLoop(dns: HubTargets.Dns) {

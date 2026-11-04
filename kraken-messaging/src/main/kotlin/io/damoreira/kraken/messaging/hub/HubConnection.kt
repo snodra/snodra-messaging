@@ -10,6 +10,7 @@ import io.damoreira.kraken.hub.v1.ErrorCode
 import io.damoreira.kraken.hub.v1.Heartbeat
 import io.damoreira.kraken.hub.v1.HubGrpcKt
 import io.damoreira.kraken.hub.v1.InstanceStatus
+import io.damoreira.kraken.hub.v1.ProcessorStatus
 import io.damoreira.kraken.hub.v1.Permits
 import io.damoreira.kraken.hub.v1.Register
 import io.damoreira.kraken.hub.v1.RegisterAck
@@ -1084,15 +1085,17 @@ class HubConnection(
 
     /**
      * Writes an `InstanceStatus` on the live stream when its ack lists `instance-status`; false (nothing written) for a
-     * hub without the capability, a legacy hub, or no live stream.
+     * hub without the capability, a legacy hub, or no live stream. [processors] (ADR 0022) go in only when the ack also
+     * lists `processors`; to any other hub the field stays empty.
      */
-    fun reportStatus(connectedHubIds: List<String>, handlersInFlight: Int): Boolean {
+    fun reportStatus(connectedHubIds: List<String>, handlersInFlight: Int, processors: List<ProcessorStatus> = emptyList()): Boolean {
         val stream = current ?: return false
         val ack = (stream.handshake as? HubHandshake.V2)?.ack ?: return false
         if (HubProtocol.INSTANCE_STATUS !in ack.capabilitiesList) return false
         val status = InstanceStatus.newBuilder()
             .addAllConnectedHubIds(connectedHubIds)
             .setHandlersInFlight(handlersInFlight.coerceAtLeast(0))
+            .apply { if (HubProtocol.PROCESSORS in ack.capabilitiesList) addAllProcessors(processors) }
         return stream.out.trySend(ClientMessage.newBuilder().setStatus(status).build()).isSuccess
             .also { if (it) statusReports.incrementAndGet() }
     }

@@ -68,6 +68,7 @@ class HubConnectionsTest {
         settings: HubSettings = fast,
         resolver: (suspend (String) -> List<InetAddress>)? = null,
         dnsTarget: HubTargets? = null,
+        processors: () -> List<io.damoreira.kraken.hub.v1.ProcessorStatus> = { emptyList() },
         inbound: suspend (Request) -> Reply = { req -> errorReply(req.id, "unexpected") },
     ) = HubConnections(
         targets = dnsTarget ?: HubTargets.Static(targets),
@@ -81,6 +82,7 @@ class HubConnectionsTest {
         statusInterval = statusInterval,
         dnsRefresh = Duration.ofMillis(100),
         resolver = resolver ?: { host -> InetAddress.getAllByName(host).toList() },
+        processors = processors,
     ).also { clients += it }
 
     /** An instance of `svc-b` handling `test.Ping` on [targets]. */
@@ -103,7 +105,7 @@ class HubConnectionsTest {
 
         val onA = a.lastRegisterFrom("x")!!
         assertEquals(onA, b.lastRegisterFrom("x"))
-        assertEquals(listOf("flow-control", "instance-status", "scatter-gather", "streaming", "subscription", "credentials-refresh"), onA.capabilitiesList)
+        assertEquals(listOf("flow-control", "instance-status", "scatter-gather", "streaming", "subscription", "credentials-refresh", "processors"), onA.capabilitiesList)
         assertEquals(setOf(a.hubId, b.hubId), conns.liveHubIds().toSet())
         for (hub in listOf(a, b)) {
             eventually(2_000) { hub.lastStatusFrom("x")?.connectedHubIdsList?.toSet() == setOf(a.hubId, b.hubId) }
@@ -120,6 +122,35 @@ class HubConnectionsTest {
         eventually(2_000) { (p3.statusMessagesFrom("x")) >= 3 }
         assertEquals(setOf(p3.hubId, p2.hubId), p3.lastStatusFrom("x")!!.connectedHubIdsList.toSet())
         assertEquals(0, p2.statusMessagesFrom("x"))
+    }
+
+    @Test fun `processor status goes only to hubs whose ack lists processors, every report the whole list`() = runBlocking {
+        val p6a = hub()
+        val p5c = hub { processors = false }
+        val reports = java.util.concurrent.atomic.AtomicInteger()
+        val status = io.damoreira.kraken.hub.v1.ProcessorStatus.newBuilder().setName("orders").setGroupId("svc-x.orders")
+            .setState(io.damoreira.kraken.hub.v1.ProcessorState.PROCESSOR_RUNNING).setDeadLetterMode("collection").build()
+        val conns = client(listOf(p6a.name, p5c.name), "x", statusInterval = Duration.ofMillis(100), processors = {
+            reports.incrementAndGet()
+            listOf(status)
+        })
+        conns.start()
+        assertTrue(conns.awaitRegistered(wait))
+        assertTrue("processors" in p6a.lastRegisterFrom("x")!!.capabilitiesList)
+        eventually(2_000) { p6a.statusMessagesFrom("x") >= 3 && p5c.statusMessagesFrom("x") >= 3 }
+        assertEquals(listOf(status), p6a.lastStatusFrom("x")!!.processorsList)
+        assertEquals(emptyList(), p5c.lastStatusFrom("x")!!.processorsList, "a hub without the capability never sees the field")
+        assertEquals(setOf(p6a.hubId, p5c.hubId), p5c.lastStatusFrom("x")!!.connectedHubIdsList.toSet())
+        assertTrue(reports.get() >= 3)
+    }
+
+    @Test fun `a processor status source that throws costs the report its processors, not the report`() = runBlocking {
+        val hub = hub()
+        val conns = client(listOf(hub.name), "x", statusInterval = Duration.ofMillis(100), processors = { throw IllegalStateException("boom") })
+        conns.start()
+        assertTrue(conns.awaitRegistered(wait))
+        eventually(2_000) { hub.statusMessagesFrom("x") >= 2 }
+        assertEquals(emptyList(), hub.lastStatusFrom("x")!!.processorsList)
     }
 
     @Test fun `status reports the handlers in flight over all hubs`() = runBlocking {

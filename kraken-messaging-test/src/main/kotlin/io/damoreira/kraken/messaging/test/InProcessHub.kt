@@ -210,6 +210,13 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
     @Volatile
     var instanceStatus: Boolean = true
 
+    /**
+     * Set false to emulate a hub before P6a (ADR 0022): no `processors` capability in the ack. With it (the default, as the
+     * P6a hub) the `processors` of a session's reports are kept with its [lastStatusFrom] like the rest of the report.
+     */
+    @Volatile
+    var processors: Boolean = true
+
     /** Set false to emulate the P3 hub: no `scatter-gather` capability in the ack, `shared_query_types` ignored. */
     @Volatile
     var scatterGather: Boolean = true
@@ -551,6 +558,7 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
                 STREAMING.takeIf { streaming && it in capabilities },
                 SUBSCRIPTION.takeIf { subscription && it in capabilities },
                 CREDENTIALS_REFRESH.takeIf { credentialsRefresh && it in capabilities },
+                PROCESSORS.takeIf { processors && it in capabilities },
             ),
         )
         .setHubId(hubId)
@@ -1471,6 +1479,7 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
         const val STREAMING = "streaming"
         const val SUBSCRIPTION = "subscription"
         const val CREDENTIALS_REFRESH = "credentials-refresh"
+        const val PROCESSORS = "processors"
     }
 
     private fun error(requestId: String, code: ErrorCode, message: String): Error =

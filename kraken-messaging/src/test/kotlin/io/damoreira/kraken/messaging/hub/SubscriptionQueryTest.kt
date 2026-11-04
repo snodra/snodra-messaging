@@ -206,7 +206,7 @@ class SubscriptionQueryTest {
 
     @Test fun `register declares subscription and the connection reports the capability`() = runBlocking {
         val x = owner("svc-x", "x-1", AccountWatcher())
-        assertEquals(listOf("flow-control", "instance-status", "scatter-gather", "streaming", "subscription", "credentials-refresh"), hub.lastRegisterFrom("x-1")!!.capabilitiesList)
+        assertEquals(listOf("flow-control", "instance-status", "scatter-gather", "streaming", "subscription", "credentials-refresh", "processors"), hub.lastRegisterFrom("x-1")!!.capabilitiesList)
         assertTrue(x.connection.supportsSubscription)
         hub.subscription = false
         val old = owner("svc-y", "y-1", PlainCountOwner())

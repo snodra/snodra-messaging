@@ -42,8 +42,15 @@ object HubProtocol {
      */
     const val CREDENTIALS_REFRESH = "credentials-refresh"
 
+    /**
+     * Capability name of event processor status (P6a, ADR 0022): `InstanceStatus.processors`, filled only on a stream whose ack
+     * lists it (an older hub never sees the field). Declared together with [INSTANCE_STATUS]: the hub keeps the processors
+     * only for a session that negotiated both.
+     */
+    const val PROCESSORS = "processors"
+
     /** `Register.capabilities`: optional protocol features this client supports. */
-    val CAPABILITIES: List<String> = listOf(FLOW_CONTROL, INSTANCE_STATUS, SCATTER_GATHER, STREAMING, SUBSCRIPTION, CREDENTIALS_REFRESH)
+    val CAPABILITIES: List<String> = listOf(FLOW_CONTROL, INSTANCE_STATUS, SCATTER_GATHER, STREAMING, SUBSCRIPTION, CREDENTIALS_REFRESH, PROCESSORS)
 
     /** `Request.initial_credit` the hub assumes when a sender sends 0; the library always sends at least 1. */
     const val DEFAULT_INITIAL_CREDIT = 64
