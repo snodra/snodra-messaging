@@ -70,9 +70,12 @@ class DefaultResets {
     val contexts = CopyOnWriteArrayList<ResetContext>()
     @Volatile var failing = false
     @Volatile var gate: CountDownLatch? = null
+    /** Runs inside the reset handler, before it records the context. */
+    @Volatile var during: (() -> Unit)? = null
     @ResetHandler fun reset(ctx: ResetContext) {
         gate?.await(30, TimeUnit.SECONDS)
         if (failing) throw IllegalStateException("cannot clear the projection")
+        during?.invoke()
         contexts += ctx
     }
 }
@@ -144,7 +147,7 @@ class ProcessorControlTest {
     }
 
     /** One instance of the service: its processors and their control, over the shared handler beans. */
-    private inner class Instance(beans: List<Any>, controlled: Boolean = true) {
+    private inner class Instance(beans: List<Any>, controlled: Boolean = true, executeLeaseLimit: Duration = Duration.ofSeconds(120)) {
         val registry = HandlerRegistry(MessageTypeResolver("test")).also { r -> beans.forEach { r.register(it) } }
         val invoker = HandlerInvoker(registry, support.codec)
         val dispatcher = LocalEventDispatcher(registry, invoker, support.tx, mongo, sagas)
@@ -152,7 +155,9 @@ class ProcessorControlTest {
         val deadLetters = DeadLetters(DeadLetterMode.COLLECTION, letters, dispatcher)
         val adminConfig = mapOf<String, Any>("bootstrap.servers" to support.bootstrapServers, "request.timeout.ms" to 5000, "default.api.timeout.ms" to 5000)
         val control = if (controlled) {
-            ProcessorControl(ProcessorControlStore(mongo), registry, deadLetters, adminConfig, pollInterval = Duration.ofMillis(300))
+            ProcessorControl(
+                ProcessorControlStore(mongo), registry, deadLetters, adminConfig, pollInterval = Duration.ofMillis(300), executeLeaseLimit = executeLeaseLimit,
+            )
         } else {
             null
         }
@@ -178,8 +183,8 @@ class ProcessorControlTest {
         }
     }
 
-    private fun instance(vararg beans: Any = arrayOf(projection, once, resets, audit), controlled: Boolean = true) =
-        Instance(beans.toList(), controlled).also { instances += it; it.processors.start() }
+    private fun instance(vararg beans: Any = arrayOf(projection, once, resets, audit), controlled: Boolean = true, executeLeaseLimit: Duration = Duration.ofSeconds(120)) =
+        Instance(beans.toList(), controlled, executeLeaseLimit).also { instances += it; it.processors.start() }
 
     private fun request(processor: String, build: ControlRequest.Builder.() -> Unit): ControlRequest =
         ControlRequest.newBuilder().setControlId(UUID.randomUUID().toString()).setProcessor(processor).apply(build).build()
@@ -469,7 +474,7 @@ class ProcessorControlTest {
         assertEquals(6L, support.committed(group)[0])
     }
 
-    @Test fun `a failing reset handler fails the reset and changes nothing`() {
+    @Test fun `a failing reset handler fails the reset, says it ran, and touches no marker or offset`() {
         topic = support.newTopic("kraken.events.ctl", partitions = 1)
         val a = instance(projection, resets)
         repeat(2) { support.send(topic, "f-$it") }
@@ -480,6 +485,7 @@ class ProcessorControlTest {
         val reply = a.ask(execute("op-1", earliest))
         assertEquals(ControlRefusal.CONTROL_REFUSAL_RESET_HANDLER_FAILED, reply.refusal())
         assertTrue("cannot clear the projection" in reply.refused.message, reply.refused.message)
+        assertTrue("reset handlers ran (1), no markers deleted, offsets not moved" in reply.refused.message, reply.refused.message)
         assertEquals(2L, support.committed(group)[0])
         assertEquals(before, markers())
         assertEquals(emptyList(), control()!!.replay)
@@ -558,28 +564,6 @@ class ProcessorControlTest {
         assertEquals(listOf("d-1", "d-2"), audit.seen.toList())
     }
 
-    @Test fun `a letter parked during a replay is retried as a replay, without its DisallowReplay handlers`() {
-        topic = support.newTopic("kraken.events.ctl", partitions = 1)
-        val flaky = FlakyProjection()
-        val a = instance(flaky, once)
-        support.send(topic, "x-1")
-        await().atMost(Duration.ofSeconds(30)).until { "x-1" in once.seen && support.committed(group)[0] == 1L }
-        flaky.failing = "x-1"
-        assertTrue(a.ask(prepare("op-1")).hasOk())
-        assertTrue(a.ask(execute("op-1", earliest)).hasReset())
-        assertTrue(a.ask(finish("op-1")).hasOk())
-        await().atMost(Duration.ofSeconds(30)).until { a.deadLetters.count("default") == 1L }
-        val id = DeadLetterStore.id("default", topic, 0, 0)
-        val parked = mongo.db.getCollection(DeadLetterStore.COLLECTION).find(Document("_id", id)).first()!!
-        assertEquals(true, parked.getBoolean("replay"), parked.toJson())
-        assertTrue(a.deadLetters.get(id)!!.replay)
-        flaky.failing = null
-        val retried = a.ask(request("default") { deadLetterRetry = DeadLetterRetry.newBuilder().setLetterId(id).build() }).retry
-        assertEquals("Retried", retried.result, retried.detail)
-        assertEquals(4, flaky.seen.count { it == "x-1" }, "handled, failed twice in the replay, retried")
-        assertEquals(1, once.seen.count { it == "x-1" }, "the retry of a replayed record is a replay")
-    }
-
     @Test fun `a late renewal never takes the lock again`() {
         topic = support.newTopic("kraken.events.ctl", partitions = 1)
         val a = instance(projection)
@@ -605,5 +589,77 @@ class ProcessorControlTest {
         assertTrue(a.ask(prepare("op-3")).hasOk(), "a first prepare still locks")
         assertEquals("op-3", control()!!.operation!!.id)
         assertTrue(a.ask(finish("op-3")).hasOk())
+    }
+
+    @Test fun `a lease lost while the reset handlers run stops the reset before the markers and the offsets`() {
+        topic = support.newTopic("kraken.events.ctl", partitions = 1)
+        val a = instance(projection, resets)
+        repeat(2) { support.send(topic, "s-$it") }
+        await().atMost(Duration.ofSeconds(30)).until { projection.seen.size == 2 && support.committed(group)[0] == 2L }
+        val before = markers()
+        val store = ProcessorControlStore(mongo)
+        // Another instance cleared the passed lease and took the lock.
+        resets.during = { store.release("default", "op-1"); store.lock("default", "op-other", Duration.ofSeconds(60)) }
+        assertTrue(a.ask(prepare("op-1")).hasOk())
+        val reply = a.ask(execute("op-1", earliest))
+        assertEquals(ControlRefusal.CONTROL_REFUSAL_FAILED, reply.refusal(), reply.toString())
+        for (said in listOf("lease lost", "reset handlers ran (1)", "no markers deleted", "offsets not moved")) {
+            assertTrue(said in reply.refused.message, "$said: ${reply.refused.message}")
+        }
+        assertEquals(2L, support.committed(group)[0])
+        assertEquals(before, markers())
+        assertEquals(emptyList(), control()!!.replay)
+    }
+
+    @Test fun `an execute past its lease limit stops before the markers`() {
+        topic = support.newTopic("kraken.events.ctl", partitions = 1)
+        val a = instance(projection, resets, executeLeaseLimit = Duration.ofSeconds(1))
+        support.send(topic, "c-0")
+        await().atMost(Duration.ofSeconds(30)).until { support.committed(group)[0] == 1L }
+        val before = markers()
+        resets.during = { Thread.sleep(1500) }
+        assertTrue(a.ask(prepare("op-1")).hasOk())
+        val reply = a.ask(execute("op-1", earliest))
+        assertEquals(ControlRefusal.CONTROL_REFUSAL_FAILED, reply.refusal(), reply.toString())
+        assertTrue("lease lost: the reset ran longer than 1 s" in reply.refused.message, reply.refused.message)
+        assertEquals(1L, support.committed(group)[0])
+        assertEquals(before, markers())
+        assertTrue(a.ask(finish("op-1", aborted = true)).hasOk())
+    }
+
+    @Test fun `a reset handler that throws an Error is answered RESET_HANDLER_FAILED`() {
+        topic = support.newTopic("kraken.events.ctl", partitions = 1)
+        val a = instance(projection, resets)
+        support.send(topic, "e-0")
+        await().atMost(Duration.ofSeconds(30)).until { support.committed(group)[0] == 1L }
+        resets.during = { TODO("the projection reset") }
+        assertTrue(a.ask(prepare("op-1")).hasOk())
+        val reply = a.ask(execute("op-1", earliest), Duration.ofSeconds(15))
+        assertEquals(ControlRefusal.CONTROL_REFUSAL_RESET_HANDLER_FAILED, reply.refusal(), reply.toString())
+        assertTrue("NotImplementedError" in reply.refused.message, reply.refused.message)
+        assertTrue(a.ask(finish("op-1", aborted = true)).hasOk())
+        awaitRunning(a)
+    }
+
+    @Test fun `a letter parked during a replay is retried as a replay, without its DisallowReplay handlers`() {
+        topic = support.newTopic("kraken.events.ctl", partitions = 1)
+        val flaky = FlakyProjection()
+        val a = instance(flaky, once)
+        support.send(topic, "x-1")
+        await().atMost(Duration.ofSeconds(30)).until { "x-1" in once.seen && support.committed(group)[0] == 1L }
+        flaky.failing = "x-1"
+        assertTrue(a.ask(prepare("op-1")).hasOk())
+        assertTrue(a.ask(execute("op-1", earliest)).hasReset())
+        assertTrue(a.ask(finish("op-1")).hasOk())
+        await().atMost(Duration.ofSeconds(30)).until { a.deadLetters.count("default") == 1L }
+        val id = DeadLetterStore.id("default", topic, 0, 0)
+        val parked = mongo.db.getCollection(DeadLetterStore.COLLECTION).find(Document("_id", id)).first()!!
+        assertEquals(true, parked.getBoolean("replay"), parked.toJson())
+        assertTrue(a.deadLetters.get(id)!!.replay)
+        flaky.failing = null
+        val retried = a.ask(request("default") { deadLetterRetry = DeadLetterRetry.newBuilder().setLetterId(id).build() }).retry
+        assertEquals("Retried", retried.result, retried.detail)
+        assertEquals(4, flaky.seen.count { it == "x-1" }, "handled, failed twice in the replay, retried")
+        assertEquals(1, once.seen.count { it == "x-1" }, "the retry of a replayed record is a replay")
     }
 }

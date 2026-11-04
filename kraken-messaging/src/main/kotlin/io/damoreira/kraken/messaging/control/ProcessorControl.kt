@@ -57,7 +57,9 @@ import java.util.concurrent.TimeUnit
  *    per partition where the target is lower, 3. the group must be empty (`describeConsumerGroups`), 4. the processor's
  *    `@ResetHandler`s run (any range only), 5. the markers in the ranges are deleted (legacy ones too for `earliest`), the
  *    ranges written, then the offsets committed (`alterConsumerGroupOffsets`). While it runs the executor extends its own
- *    lease. Every action is logged at INFO with the control id, processor, action and result.
+ *    lease; right after the reset handlers and again before the commit that extension must succeed (and the execute be within
+ *    [executeLeaseLimit]), otherwise it stops with FAILED "lease lost". A refusal after the reset handlers ran says what
+ *    changed. Every action is logged at INFO with the control id, processor, action and result.
  *
  * An operation that ended here (finished, aborted, its lease passed or its lock lost) is remembered for
  * max(2 x lease, [FINISHED_KEPT]): a prepare of it is a renewal that came too late and is refused NOT_PREPARED without
@@ -256,7 +258,7 @@ class ProcessorControl(
             period, period, TimeUnit.MILLISECONDS,
         )
         try {
-            return reset(slot, request, op)
+            return reset(slot, request, held, until)
         } finally {
             extension?.cancel(false)
             if (System.nanoTime() < until) runCatching { store.renew(slot.consumer.processor, op, held.lease) } // a whole lease for the finish
@@ -264,7 +266,35 @@ class ProcessorControl(
         }
     }
 
-    private fun reset(slot: Slot, request: ControlRequest, op: String): ControlReply {
+    /** Null when [held]'s lease was extended now and the execute is within [executeLeaseLimit] ([until]); else why not. */
+    private fun leaseLost(slot: Slot, held: Held, until: Long): String? {
+        if (System.nanoTime() - until >= 0) return "lease lost: the reset ran longer than ${executeLeaseLimit.toSeconds()} s"
+        val renewed = try {
+            store.renew(slot.consumer.processor, held.id, held.lease)
+        } catch (e: Exception) {
+            return "lease lost: cannot extend it: ${e::class.java.simpleName}: ${e.message ?: ""}"
+        }
+        return if (renewed) null else "lease lost: operation ${held.id} no longer holds the lock of processor ${slot.consumer.processor}"
+    }
+
+    /** What an execute changed before it stopped. */
+    private class Changed {
+        var handlers = 0
+        var markers = 0L
+        var ranges = false
+
+        /** [reply] with what changed when it is a refusal and anything did: "nothing changed" would be false then. */
+        fun told(reply: ControlReply): ControlReply {
+            if (!reply.hasRefused() || (handlers == 0 && markers == 0L && !ranges)) return reply
+            val deleted = if (markers == 0L) "no markers deleted" else "$markers markers deleted"
+            val written = if (ranges) ", replay ranges written" else ""
+            val message = "${EventConsumer.utf8Cut(reply.refused.message, MAX_CAUSE_BYTES)}; reset handlers ran ($handlers), $deleted$written, offsets not moved: retry the reset"
+            return reply.toBuilder().setRefused(reply.refused.toBuilder().setMessage(EventConsumer.utf8Cut(message, MAX_TEXT_BYTES))).build()
+        }
+    }
+
+    private fun reset(slot: Slot, request: ControlRequest, held: Held, until: Long): ControlReply {
+        val op = held.id
         val consumer = slot.consumer
         val processor = consumer.processor
         val topic = consumer.topic
@@ -332,33 +362,47 @@ class ProcessorControl(
                 val still = open.filter { it.topic == topic && it.partition == tp.partition() }.maxOfOrNull { it.until } ?: 0L
                 ReplayRange(topic, tp.partition(), to, maxOf(from, still))
             }.sortedBy { it.partition }
-            // 4. The reset handlers, before anything changes.
-            var handlers = 0
+            // 4. The reset handlers, before any marker or offset changes.
+            val done = Changed()
             if (ranges.isNotEmpty()) {
                 val ctx = ResetContext(processor, op, target, ranges)
                 for (handler in registry.resetHandlers(processor)) {
+                    done.handlers++
                     try {
                         runBlocking { handler.invoke(ctx) }
-                    } catch (e: Exception) {
-                        log.warn("Reset handler {} of processor {} failed, the reset {} changed nothing: {}", handler.label, processor, op, e.toString())
-                        return refused(request, ControlRefusal.CONTROL_REFUSAL_RESET_HANDLER_FAILED, "${handler.label} failed: ${e::class.java.simpleName}: ${e.message ?: ""}")
+                    } catch (e: VirtualMachineError) {
+                        throw e
+                    } catch (e: Throwable) {
+                        log.warn("Reset handler {} of processor {} failed, the reset {} stops before the markers: {}", handler.label, processor, op, e.toString())
+                        return done.told(refused(request, ControlRefusal.CONTROL_REFUSAL_RESET_HANDLER_FAILED, "${handler.label} failed: ${e::class.java.simpleName}: ${e.message ?: ""}"))
                     }
-                    handlers++
                 }
             }
-            // 5. Markers and ranges first, then the offsets: a crash in between only re-runs what the next attempt re-runs.
-            val deleted = if (ranges.isEmpty()) 0L else store.deleteMarkers(processor, ranges, legacy = target == ResetTarget.Earliest)
-            val replay = open.filter { o -> ranges.none { it.topic == o.topic && it.partition == o.partition } } + ranges
-            if (ranges.isNotEmpty()) store.setReplay(processor, replay)
+            // 5. Markers and ranges first, then the offsets: a crash in between only re-runs what the next attempt re-runs. The
+            //    lease is checked before each: lost, another instance may consume or reset already.
+            val replay: List<ReplayRange>
             try {
-                admin.alterConsumerGroupOffsets(group, targets.mapValues { OffsetAndMetadata(it.value) }).all().get(timeout, TimeUnit.MILLISECONDS)
-            } catch (e: ExecutionException) {
-                val cause = e.cause
-                if (cause is UnknownMemberIdException || cause is GroupNotEmptyException || cause is RebalanceInProgressException) {
-                    return refused(request, ControlRefusal.CONTROL_REFUSAL_GROUP_NOT_EMPTY, "Kafka refused to move the offsets of group $group: ${cause.message}")
+                leaseLost(slot, held, until)?.let { return done.told(refused(request, ControlRefusal.CONTROL_REFUSAL_FAILED, it)) }
+                if (ranges.isNotEmpty()) done.markers = store.deleteMarkers(processor, ranges, legacy = target == ResetTarget.Earliest)
+                replay = open.filter { o -> ranges.none { it.topic == o.topic && it.partition == o.partition } } + ranges
+                if (ranges.isNotEmpty()) store.setReplay(processor, replay)
+                done.ranges = ranges.isNotEmpty()
+                leaseLost(slot, held, until)?.let { return done.told(refused(request, ControlRefusal.CONTROL_REFUSAL_FAILED, it)) }
+                try {
+                    admin.alterConsumerGroupOffsets(group, targets.mapValues { OffsetAndMetadata(it.value) }).all().get(timeout, TimeUnit.MILLISECONDS)
+                } catch (e: ExecutionException) {
+                    val cause = e.cause
+                    if (cause is UnknownMemberIdException || cause is GroupNotEmptyException || cause is RebalanceInProgressException) {
+                        return done.told(refused(request, ControlRefusal.CONTROL_REFUSAL_GROUP_NOT_EMPTY, "Kafka refused to move the offsets of group $group: ${cause.message}"))
+                    }
+                    throw e
                 }
-                throw e
+            } catch (e: Exception) {
+                log.warn("Reset {} of processor {} failed after its reset handlers: {}", op, processor, e.toString())
+                return done.told(failed(request, e))
             }
+            val deleted = done.markers
+            val handlers = done.handlers
             consumer.replay(replay)
             log.info(
                 "Processor {} reset to {} by operation {}: offsets {}, replay {}, {} markers deleted, {} reset handlers",
@@ -557,12 +601,19 @@ class ProcessorControl(
 
     // --- replies ---
 
+    /** [work]'s reply; FAILED when it throws, an [Error] included (a `TODO()`), so the hub always gets an answer. */
     private fun guarded(request: ControlRequest, work: () -> ControlReply): ControlReply = try {
         work()
-    } catch (e: Exception) {
+    } catch (e: VirtualMachineError) {
+        throw e
+    } catch (e: Throwable) {
         log.warn("Control {} on processor {} failed: {}", request.controlId, request.processor, e.toString())
+        failed(request, e)
+    }
+
+    private fun failed(request: ControlRequest, e: Throwable): ControlReply {
         val cause = if (e is ExecutionException) e.cause ?: e else e
-        refused(request, ControlRefusal.CONTROL_REFUSAL_FAILED, "${cause::class.java.simpleName}: ${cause.message ?: ""}")
+        return refused(request, ControlRefusal.CONTROL_REFUSAL_FAILED, "${cause::class.java.simpleName}: ${cause.message ?: ""}")
     }
 
     private fun reply(request: ControlRequest): ControlReply.Builder = ControlReply.newBuilder().setControlId(request.controlId)
@@ -601,6 +652,9 @@ class ProcessorControl(
 
         /** Refusal messages and retry details are cut to this many UTF-8 bytes. */
         const val MAX_TEXT_BYTES = 512
+
+        /** The most bytes of the cause in a refusal that also says what the execute changed. */
+        private const val MAX_CAUSE_BYTES = 300
 
         /** For how long at least an operation that ended here is remembered (twice its lease when that is longer). */
         val FINISHED_KEPT: Duration = Duration.ofSeconds(60)
