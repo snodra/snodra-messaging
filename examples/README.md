@@ -23,6 +23,9 @@ A disposable sandbox that shows cross-service messaging on the real `kraken-hub`
    by an external printer, **fake-printer**, which answers over a webhook, its own Kafka topic or a poll, never, or by dying.
 10. **service-c** runs the same story in Rust (S2, [The banner saga](#the-banner-saga)): every `TextShouted` gets a banner
    printed by the same fake printer, which answers service-c where each job asks it to.
+11. **service-b** and **service-c** each run a named event processor, `audit` (P6a, [Event processors and dead
+   letters](#event-processors-and-dead-letters)): its own consumer group, a failure switch, and example admin endpoints over
+   the library's dead letters.
 
 Everything is anonymous, nothing is persisted by the apps (MongoDB is only there because the starter's outbox and
 idempotent consumer need it), and the modules are never published. They build against the starter as a project
@@ -32,9 +35,9 @@ dependency, so they always exercise the current library. Wire classes live in `e
 |---|---|---|
 | `examples/examples-api` | `SendGreeting`, `GreetingAccepted`, `GreetingDelivered`, `CountGreetings`, `GreetingCount`; the texts types; the shared `Inventory` / `InventoryLevel`; the streaming `Rows` / `Row`; the subscription `WatchCounter` / `Counter` / `CounterChanged`, the command `IncrementCounter` and the shared query `OpenSubscriptions` / `SubscriptionCount` | – |
 | `examples/service-a` | REST caller + event listener; `GET /forbidden-send` sends a type outside its ACL on purpose ([Secure sandbox](#secure-sandbox)) | 8091 |
-| `examples/service-b` | the postcard saga, its printer adapter, webhook and topic translator (`GET /postcards/{jobId}`); owner of the greetings command and query, co-owner of the shared `Inventory`, the streaming `Rows`, the subscription `WatchCounter` and `OpenSubscriptions`; logs the text events | 8092 (`POST /counters/{name}/increment` and actuator) |
+| `examples/service-b` | the postcard saga, its printer adapter, webhook and topic translator (`GET /postcards/{jobId}`); owner of the greetings command and query, co-owner of the shared `Inventory`, the streaming `Rows`, the subscription `WatchCounter` and `OpenSubscriptions`; logs the text events; the `audit` processor and its `/audit/...` endpoints | 8092 (`POST /counters/{name}/increment`, `/audit/...` and actuator) |
 | `examples/fake-printer` | a partner, not a kraken service: the fake printer of [the postcard saga](#the-postcard-saga) and [the banner saga](#the-banner-saga) (`POST /jobs`, `GET /jobs/{id}`) | 8093 |
-| `kraken-messaging-rs/examples/service-c` | Rust: owner of `Shout`, `Reverse`, `IncrementCounter` and the banner saga's `PrintBanner` / `PollBannerJob`, co-owner of the shared `Inventory`, `Rows`, `WatchCounter` and `OpenSubscriptions`, publishes the text events, logs `GreetingDelivered`; the banner saga's webhook and `GET /banners/{jobId}` | 8094 |
+| `kraken-messaging-rs/examples/service-c` | Rust: owner of `Shout`, `Reverse`, `IncrementCounter` and the banner saga's `PrintBanner` / `PollBannerJob`, co-owner of the shared `Inventory`, `Rows`, `WatchCounter` and `OpenSubscriptions`, publishes the text events, logs `GreetingDelivered`; the banner saga's webhook and `GET /banners/{jobId}`; the `audit` processor and its `/audit/...` endpoints | 8094 |
 
 ## Prerequisites
 
@@ -234,6 +237,8 @@ SKIP_STREAM=1 bash examples/smoke.sh  # without the streaming-query steps
 ONLY_STREAM=1 bash examples/smoke.sh  # only the streaming-query steps (needs jq or python3)
 SKIP_SUBSCRIBE=1 bash examples/smoke.sh # without the subscription-query steps
 ONLY_SUBSCRIBE=1 bash examples/smoke.sh # only the subscription-query steps (needs jq or python3)
+SKIP_AUDIT=1 bash examples/smoke.sh   # without the named-processor and dead-letter steps (26 to 26h)
+ONLY_AUDIT=1 bash examples/smoke.sh   # only those steps (needs jq or python3)
 SECURE=1 bash examples/smoke.sh        # against the secure sandbox (see "Secure sandbox"): every step plus 21 and 21b
 SECURE=1 SKIP_SECURE=1 bash examples/smoke.sh  # the secure sandbox without steps 21 and 21b
 SECURE=1 ONLY_SECURE=1 bash examples/smoke.sh  # only steps 21 and 21b (needs the docker CLI)
@@ -472,6 +477,56 @@ Every shout prints a banner (the smoke's step 7 too); shouting a text again whil
 `printer-topic-init` creates `printer.banner.events` next to `printer.events`. Smoke steps 25 to 25e drive the five paths
 through `POST /shouts` on service-a (`SKIP_BANNER=1` skips them, `ONLY_BANNER=1` runs only them; `C=http://localhost:8094`
 is service-c's HTTP address); step 25 also replays the webhook (200) and sends a wrong secret (401).
+
+## Event processors and dead letters
+
+service-b (Kotlin) and service-c (Rust) each run a **named event processor**, `audit` (P6a, ADR 0022, `docs/02-messaging.md`
+"Event processors and dead letters"), next to their `default` one: service-b with `@ProcessingGroup("audit")` on `AuditHandler`
+(`service-b/.../Audit.kt`), service-c with `builder.event_in::<ShoutAudit, _, _>("audit", ...)` (`service-c/src/audit.rs`). The
+processor is its own Kafka consumer on `kraken.events`, consumer group `service-b.audit` / `service-c.audit` (the `default`
+processors keep `service-b` / `service-c`), idempotency markers `processor:audit:<eventId>` and its own dead letters. It handles
+an audit note (service-b's `examples.AuditNote`, service-c's `examples.ShoutAudit`: `{key, text, at}`; two types, so each service
+audits only its own) and records what it handled, in memory.
+
+The processor can be made to **fail on demand**: while the switch is on, a note whose text starts with `poison` throws; any
+other note is handled. A poison note that fails every attempt (5, one second apart) is parked in the service's `dead_letters`
+collection as `HANDLER_FAILED`; the later notes of its Kafka key are parked behind it as `SEQUENCED` (per-key order is kept) while
+other keys flow. The same endpoints, with the same JSON, exist on both services (`http://localhost:8092` is service-b,
+`http://localhost:8094` service-c); they are example code over the library's `DeadLetters` and put no authorization in front of it:
+
+| Endpoint | What it does |
+|---|---|
+| `POST /audit/notes` `{"key","text"}` | publishes an audit note keyed by `key` (202) |
+| `POST /audit/failing?on=true\|false` | the failure switch for `poison*` notes |
+| `GET /audit/handled` | the notes the processor handled, in handling order (`[{"key","text","at"}]`) |
+| `GET /audit/dead-letters[?processor=audit&limit=100]` | `DeadLetters.list`: `[{"id","processor","key","eventType","reason","attempts","error","blockedBy"}]`, oldest first |
+| `GET /audit/dead-letters/count[?processor=audit]` | `DeadLetters.count`: `{"count":n}` |
+| `POST /audit/dead-letters/{id}/retry` | `DeadLetters.retry`: `{"result":"Retried"\|"Duplicate"\|"Failed"\|"Blocked"\|"NotRetriable"\|"NotFound","detail"}` (the failure, or the blocking letter) |
+| `POST /audit/dead-letters/retry-all[?processor=audit]` | `DeadLetters.retryAll`: `{"retried","failed","blocked","skipped"}` |
+| `DELETE /audit/dead-letters/{id}` | `DeadLetters.discard`: 200, or 404 for an unknown letter |
+
+```bash
+curl -s -X POST 'localhost:8092/audit/failing?on=true'
+curl -s -X POST localhost:8092/audit/notes -H 'content-type: application/json' -d '{"key":"ada","text":"poison-1"}'
+curl -s -X POST localhost:8092/audit/notes -H 'content-type: application/json' -d '{"key":"ada","text":"poison-2"}'
+curl -s -X POST localhost:8092/audit/notes -H 'content-type: application/json' -d '{"key":"bob","text":"fine"}'   # another key: handled
+curl -s localhost:8092/audit/dead-letters   # ~5 s later: ada's poison-1 HANDLER_FAILED, poison-2 SEQUENCED (blockedBy the first)
+curl -s localhost:7001/api/v1/processors    # service-b's audit processor: FAILING, "deadLetters":2 (sampled by the service, within 30 s)
+curl -s -X POST localhost:8092/audit/dead-letters/<id of poison-2>/retry   # {"result":"Blocked","detail":"<id of poison-1>"}
+curl -s -X POST 'localhost:8092/audit/failing?on=false'
+curl -s -X POST localhost:8092/audit/dead-letters/retry-all                # {"retried":2,"failed":0,"blocked":0,"skipped":0}; handled in order
+```
+
+The dashboard's Processors page (`localhost:7001`, hub ADR 0022) shows both services' `audit` and `default` processors with their
+state, lag and dead letters. Smoke steps 26 to 26h drive all of it, for service-b and for service-c: 26 waits until both `audit`
+processors are RUNNING with partitions (group `<service>.audit`) next to `default` on the hub's `GET /api/v1/processors` and clears
+any letter left over; 26b and 26c turn the failure on and publish two poison notes under one key and a fine note under another
+(the first is `HANDLER_FAILED`, the second `SEQUENCED` behind it, the other key is handled, the parked key is not); 26d reads
+both processors on the hub, FAILING with two dead letters each; 26e retries while the failure is on (the head answers `Failed`
+and its attempts grow, the sequenced letter `Blocked` behind the head); 26f turns it off and retries (service-b: the head, then
+`retry-all`; service-c: the head, then the second), and expects the key handled in order and no letter left; 26g parks a
+poison note, discards it (a second discard is a 404) and expects its key to flow again; 26h waits for the hub's dead-letter
+count to be back at 0. They need `jq` or `python3`; `SKIP_AUDIT=1` skips them, `ONLY_AUDIT=1` runs only them.
 
 ## Tear down
 
