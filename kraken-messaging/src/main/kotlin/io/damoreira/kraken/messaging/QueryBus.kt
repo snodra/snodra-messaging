@@ -27,17 +27,15 @@ interface QueryBus {
      * answers: a failed or missing target does not fail the call. Always goes through the hub, also when this instance
      * owns the type (it is one of the targets then).
      *
-     * @throws UnsupportedByHubException when the hub does not offer `scatter-gather` (nothing is sent)
      * @throws NoHandlerException when nobody owns the type
      * @throws HubConnectionLostException when the stream to the hub breaks before the end (outcome unknown)
      */
-    suspend fun <R> scatterGather(query: Query<R>, options: ScatterOptions = ScatterOptions()): ScatterResult<R> =
-        throw UnsupportedOperationException("${this::class.simpleName} does not support scatter-gather")
+    suspend fun <R> scatterGather(query: Query<R>, options: ScatterOptions = ScatterOptions()): ScatterResult<R>
 
     /**
      * [scatterGather] as a [Flow]: emits each part as it arrives and completes normally on the end. The counts of
      * failed and timed-out targets are not part of the flow; use [scatterGather] when they matter. Errors before any
-     * part (no owner, unsupported hub) and a broken stream fail the flow with [scatterGather]'s exceptions.
+     * part (no owner, a command) and a broken stream fail the flow with [scatterGather]'s exceptions.
      */
     fun <R> scatterGatherFlow(query: Query<R>, options: ScatterOptions = ScatterOptions()): Flow<ScatterPart<R>> =
         flow { scatterGather(query, options).parts.forEach { emit(it) } }
@@ -53,7 +51,6 @@ interface QueryBus {
      * parts emitted before it stay emitted. Retry (the configured policy or [StreamOptions.retry]) applies with the
      * query rules only until the first part.
      *
-     * @throws UnsupportedByHubException when no live hub offers `streaming` (nothing is sent)
      * @throws NoHandlerException when nobody owns the type
      * @throws RemoteHandlerException when the handler's flow failed (`HANDLER_ERROR`)
      * @throws MessageTimeoutException when no part arrived within the idle timeout (`TIMEOUT`)
@@ -62,21 +59,18 @@ interface QueryBus {
      * @throws StreamCancelledException when the hub ended the stream for outliving its maximum duration (`CANCELLED`)
      * @throws HubConnectionLostException when the stream to the hub breaks before the end (outcome unknown)
      */
-    fun <R> stream(query: StreamingQuery<R>, options: StreamOptions = StreamOptions()): Flow<R> =
-        throw UnsupportedOperationException("${this::class.simpleName} does not support streaming queries")
+    fun <R> stream(query: StreamingQuery<R>, options: StreamOptions = StreamOptions()): Flow<R>
 
     /**
      * Subscription query (P4c, ADR 0017): returns once the initial result [I] arrived, with the [U] updates the handlers
      * push afterwards as [SubscriptionResult.updates]. One handler instance answers the initial result (a point query's
-     * choice among the instances that negotiated `subscription`); **every** such instance of every owner is a target for
-     * updates, as they are when the subscription opens: an instance that registers later is never added and a target that
+     * choice among the owners' instances); **every** instance of every owner is a target for updates, as they are when the subscription opens: an instance that registers later is never added and a target that
      * leaves is not replaced (updates are delivered at most once; resubscribe to hear every instance again). Always goes
      * through the hub, also when this instance owns the type.
      *
      * Retry (the configured policy or [SubscriptionOptions.retry]) applies with the query rules only until the initial
      * result; the caller's bearer token and trace context are read when this is called.
      *
-     * @throws UnsupportedByHubException when no live hub offers `subscription` (nothing is sent)
      * @throws NoHandlerException when nobody owns the type
      * @throws RemoteHandlerException when the initial request failed (`HANDLER_ERROR`) or a handler's emitter did
      * @throws MessageTimeoutException when the initial result did not arrive within [SubscriptionOptions.timeout]
@@ -84,6 +78,5 @@ interface QueryBus {
      * @throws HandlerBusyException when an instance's subscription limit or the hub queue is full (`RESOURCE_EXHAUSTED`)
      * @throws HubConnectionLostException when the stream to the hub breaks before the initial result (outcome unknown)
      */
-    suspend fun <I, U> subscribe(query: SubscriptionQuery<I, U>, options: SubscriptionOptions = SubscriptionOptions()): SubscriptionResult<I, U> =
-        throw UnsupportedOperationException("${this::class.simpleName} does not support subscription queries")
+    suspend fun <I, U> subscribe(query: SubscriptionQuery<I, U>, options: SubscriptionOptions = SubscriptionOptions()): SubscriptionResult<I, U>
 }
