@@ -239,6 +239,8 @@ SKIP_SUBSCRIBE=1 bash examples/smoke.sh # without the subscription-query steps
 ONLY_SUBSCRIBE=1 bash examples/smoke.sh # only the subscription-query steps (needs jq or python3)
 SKIP_AUDIT=1 bash examples/smoke.sh   # without the named-processor and dead-letter steps (26 to 26h)
 ONLY_AUDIT=1 bash examples/smoke.sh   # only those steps (needs jq or python3)
+SKIP_CONTROL=1 bash examples/smoke.sh # without the processor-control steps (27 to 27e)
+ONLY_CONTROL=1 bash examples/smoke.sh # only those steps (needs jq or python3 and the write token, see "Event processors and dead letters")
 SECURE=1 bash examples/smoke.sh        # against the secure sandbox (see "Secure sandbox"): every step plus 21 and 21b
 SECURE=1 SKIP_SECURE=1 bash examples/smoke.sh  # the secure sandbox without steps 21 and 21b
 SECURE=1 ONLY_SECURE=1 bash examples/smoke.sh  # only steps 21 and 21b (needs the docker CLI)
@@ -530,27 +532,61 @@ count to be back at 0. They need `jq` or `python3`; `SKIP_AUDIT=1` skips them, `
 
 **Processor control through the hub** (P6b, ADR 0023, `docs/02-messaging.md` "Processor control"). The hub pauses, resumes and
 resets a processor on every instance and works its dead letters, through its HTTP API with the write token
-(`KRAKEN_HUB_DASHBOARD_WRITE_TOKEN`; the dashboard token is refused on a write). In service-b the `audit` processor also has a
-`@ResetHandler` (`AuditHandler.onReset`, records each reset) and a second handler, `AuditNotifier`, marked `@DisallowReplay`
-(a side effect that must happen once): a reset of `audit` to `earliest` hands every note to `AuditHandler` again (`/audit/handled`
-lists them twice) but not to the notifier.
+(`KRAKEN_HUB_DASHBOARD_WRITE_TOKEN`; the dashboard token is refused on a write). The `audit` processor of each service also has a
+reset handler (service-b: `@ResetHandler` `AuditHandler.onReset`; service-c: `builder.reset_handler("audit", ...)`) that records
+each reset, and a second handler that must not run again in a replay, a stand-in for a notification (service-b: `AuditNotifier`,
+`@DisallowReplay`; service-c: `EventOptions::new().processor("audit").disallow_replay()`): a reset of `audit` to `earliest` hands
+every note to the first handler again (`/audit/handled` lists it twice) but not to the notifier.
 
-| Endpoint (service-b) | What it does |
+| Endpoint (both services) | What it does |
 |---|---|
-| `GET /audit/resets` | the processor's resets that replayed something, as its `@ResetHandler` saw them: `[{"operationId","target","ranges":[{"partition","from","until"}]}]` (`target`: `earliest`, `latest`, `timestamp <ms>`, `offsets {...}`) |
-| `GET /audit/notified` | what the `@DisallowReplay` notifier handled, each note once (`[{"key","text","at"}]`) |
+| `GET /audit/resets` | the processor's resets that replayed something, as its reset handler saw them: `[{"operationId","target","ranges":[{"partition","from","until"}]}]` (`target`: `earliest`, `latest`, `timestamp <ms>`, `offsets {...}`) |
+| `GET /audit/notified` | what the no-replay notifier handled, each note once (`[{"key","text","at"}]`) |
+
+**The write token in the sandbox.** `kraken/infra/scripts/dev-hub-pki.sh` writes it to the git-ignored
+`kraken/infra/.secrets/hub-control/dashboard-write.token`, and every sandbox mode gives it to both hubs as
+`KRAKEN_HUB_DASHBOARD_WRITE_TOKEN_FILE` (the plain one through `.secrets/hub-control.env`, read when it exists; the secure
+overlays set it themselves). Run the script once, also for the plain sandbox, and recreate `hub` and `hub-2`; without it the
+plain hubs answer every write `403 controls are disabled`. The smoke reads the same file (`WRITE_TOKEN_FILE` to override).
 
 ```bash
-W="Authorization: Bearer $KRAKEN_HUB_DASHBOARD_WRITE_TOKEN"
-HUB=http://localhost:7001/api/v1/services/service-b/processors/audit
-curl -s -X POST -H "$W" "$HUB/pause"     # every service-b instance: audit PAUSED, notes held (default keeps consuming)
+# from kraken-messaging, against the plain sandbox (secure modes: https://localhost:7001, --cacert ../kraken/infra/.secrets/ca.pem,
+# and the dashboard token on the GETs to the hub)
+W="Authorization: Bearer $(cat ../kraken/infra/.secrets/hub-control/dashboard-write.token)"
+HUB=http://localhost:7001/api/v1/services/service-b/processors/audit        # service-c: .../services/service-c/...
+curl -s -X POST "$HUB/pause"                     # 401: no credential (with the dashboard token: 403 read-only)
+curl -s -X POST -H "$W" "$HUB/pause"             # {"action":"pause","acknowledged":1,"failed":0,...}; /api/v1/processors: PAUSED
 curl -s -X POST localhost:8092/audit/notes -H 'content-type: application/json' -d '{"key":"ada","text":"held"}'
-curl -s -X POST -H "$W" "$HUB/resume"    # the held note is handled
+curl -s localhost:8092/audit/handled             # no "held" yet
+curl -s -X POST -H "$W" "$HUB/resume"            # "held" is handled
+curl -s -X POST -H "$W" "$HUB/pause"             # reset while paused, so the replay waits for the resume
 curl -s -X POST -H "$W" -H 'Content-Type: application/json' -d '{"to":"earliest"}' "$HUB/reset"
-curl -s localhost:8092/audit/resets      # one reset, target earliest, its ranges
-curl -s localhost:8092/audit/handled     # every note again; /audit/notified unchanged
-curl -s -H "$W" "$HUB/dead-letters"      # the letters, without payloads, through the hub
+                                                 # {"outcome":"ok","replay":true,"ranges":[...],"markersDeleted":n,"resetHandlers":1,...}
+curl -s localhost:8092/audit/resets              # the reset, target earliest, its ranges
+curl -s localhost:7001/api/v1/processors         # audit: PAUSED, "replaying":true, "operationId":""
+curl -s -X POST -H "$W" "$HUB/resume"            # every note handled again; then "replaying":false
+curl -s localhost:8092/audit/handled             # "held" twice
+curl -s localhost:8092/audit/notified            # "held" once
+curl -s -X POST 'localhost:8092/audit/failing?on=true'
+curl -s -X POST localhost:8092/audit/notes -H 'content-type: application/json' -d '{"key":"bob","text":"poison-1"}'
+curl -s "$HUB/dead-letters"                      # ~5 s later: {"total":1,"letters":[{"id":"audit:kraken.events:<p>:<o>","reason":"HANDLER_FAILED",...}]}, no payload
+curl -s -X POST -H "$W" "$HUB/dead-letters/<id>/retry"   # {"result":"Failed",...} while failing
+curl -s -X POST 'localhost:8092/audit/failing?on=false'
+curl -s -X POST -H "$W" "$HUB/dead-letters/<id>/retry"   # {"result":"Retried",...}; poison-1 handled, the list empty
+curl -s -X DELETE -H "$W" "$HUB/dead-letters/<id>"       # discard instead: {"discarded":true}; again: 404
 ```
+
+Smoke steps 27 to 27e drive this for service-b and for service-c, in every sandbox mode: 27 expects a write without a credential
+(or with a wrong one) to be 401 on both hubs and, with `SECURE=1`, the dashboard token's to be 403 read-only, clears leftover letters
+and resumes the processor; 27b pauses it (PAUSED on `GET /api/v1/processors`), publishes two notes that stay unhandled for 8 s and
+resumes it (they are handled); 27c publishes two notes under a key of the run (handled and notified once), pauses the processor and
+resets it to `earliest`: the reply is ok with a replay, one reset handler and markers deleted, `/audit/resets` gained that operation
+once, and the hub shows the processor PAUSED, replaying, with no operation left (the finish kept the pause); 27d resumes it and
+expects the run's notes handled again, the notifier not run again and the replay to end (RUNNING, not replaying); 27e parks a
+poison note, lists it through the hub (`HANDLER_FAILED`, no payload), retries it through the hub while failing (`Failed`) and with
+the failure off (`Retried`, the note handled, the list empty), and discards another one through the hub (a second discard is a
+404). The topic holds every note since the sandbox started, so a reset to `earliest` replays them all; the steps check only the
+keys of the run. They need `jq` or `python3`; `SKIP_CONTROL=1` skips them, `ONLY_CONTROL=1` runs only them.
 
 ## Tear down
 
