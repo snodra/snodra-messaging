@@ -56,7 +56,7 @@ import java.util.concurrent.atomic.AtomicLong
  * **Sequencing** (mode `collection`): the keys of this processor's letters on the assigned partitions are loaded on
  * assignment and added to on every park. A record with a stage-1 handler whose key is in that set is confirmed against
  * the collection: when the key still has a head letter, the record is parked `SEQUENCED` without running stage 1 (stage 2
- * still runs for it in `default`, ADR 0021 ruling 26); a miss (the letter was retried, discarded or expired, possibly on
+ * still runs for it in `default`, ADR 0021 ruling 26, with the attempts and the log-and-skip of any record's stage 2); a miss (the letter was retried, discarded or expired, possibly on
  * another instance) forgets the key and handles the record. A record whose own letter already exists was parked before a
  * crash: it is acknowledged.
  *
@@ -234,18 +234,37 @@ class EventConsumer(
             advance(record, ack)
             return true
         }
-        if (processor == Processors.DEFAULT) {
-            try {
-                dispatcher.runStage2(type, payload, ctx) // the sagas see it even though stage 1 waits (ADR 0021 ruling 26)
-            } catch (e: Exception) {
-                failing(e, "saga stage failed for a sequenced record")
-                throw e
-            }
-        }
+        if (processor == Processors.DEFAULT) stage2(record, type, payload, ctx) // the sagas see it even though stage 1 waits (ADR 0021 ruling 26)
         val letter = store.sequenced(processor, record, head)
         log.info("Record {}-{}@{} of type {} parked SEQUENCED in processor {} behind {}", record.topic(), partition, record.offset(), type, processor, head)
         toSink(record, ack) { if (store.park(letter)) parkedSinceSample.set(true) }
         return true
+    }
+
+    /**
+     * Stage 2 alone, for a record parked SEQUENCED in `default`, with the attempts and back-off of any record's stage 2: a
+     * failure that outlives them is logged and skipped as for any record (counted in `failed_total`), and the record is parked.
+     */
+    private fun stage2(record: ConsumerRecord<String, ByteArray>, type: String, payload: ByteArray, ctx: MessageContext) {
+        var attempts = 0
+        while (true) {
+            attempts++
+            try {
+                dispatcher.runStage2(type, payload, ctx)
+                return
+            } catch (e: Exception) {
+                if (attempts >= maxAttempts) {
+                    failedTotal.incrementAndGet()
+                    failing(e, null)
+                    log.error(
+                        "Giving up on the saga stage of sequenced event type={} id={} at {}-{}@{} after {} attempts: {}: {}",
+                        type, ctx.messageId, record.topic(), record.partition(), record.offset(), attempts, e::class.java.name, e.message,
+                    )
+                    return
+                }
+                if (!pause(backOffMs)) throw e // stopping: not acknowledged, redelivered after the restart or to the new owner
+            }
+        }
     }
 
     private fun attempt(record: ConsumerRecord<String, ByteArray>, ack: Acknowledgment, id: String, type: String, payload: ByteArray, ctx: MessageContext) {

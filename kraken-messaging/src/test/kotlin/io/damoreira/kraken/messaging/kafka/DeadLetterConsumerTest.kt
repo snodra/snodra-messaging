@@ -124,6 +124,30 @@ class DeadLetterConsumerTest {
         assertTrue(stage.seen.containsAll(listOf("p-1", "p-2", "o-1", "p-3")), "stage 2 saw every record: ${stage.seen}")
     }
 
+    @Test fun `a sequenced record's stage 2 is retried and then logged and skipped like any record's, and the record is parked`() {
+        handlers.failAlways.set("p-1")
+        val calls = CopyOnWriteArrayList<String>()
+        val stage = object : SagaStage {
+            override fun interested(type: String) = type == "test.Happened"
+            override fun process(type: String, payload: ByteArray, ctx: MessageContext): Boolean {
+                calls += ctx.messageId
+                if (ctx.messageId == "p-2") throw IllegalStateException("saga store down")
+                return true
+            }
+        }
+        val c = start(maxAttempts = 2, stage = stage)
+        support.send(topic, "p-1", key = "k1")
+        support.send(topic, "p-2", key = "k1")
+        support.send(topic, "o-1", key = "k2")
+        awaitSeen("o-1")
+        awaitCommitted(3)
+        assertEquals(listOf("HANDLER_FAILED", "SEQUENCED"), letters().map { it["reason"] })
+        assertEquals(2, calls.count { it == "p-2" }, "stage 2 had the usual attempts, then the record moved on: $calls")
+        val status = c.status()
+        assertEquals(2L, status.failedTotal, "p-1's stage 1 and p-2's stage 2 exhausted their attempts")
+        assertTrue(status.lastError.contains("saga store down"), status.lastError)
+    }
+
     @Test fun `a key whose letter was removed elsewhere is handled normally (the confirmation misses)`() {
         handlers.failAlways.set("m-1")
         start(maxAttempts = 1)
