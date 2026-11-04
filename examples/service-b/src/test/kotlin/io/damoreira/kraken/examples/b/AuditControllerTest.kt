@@ -35,12 +35,14 @@ class AuditControllerTest {
     class Config {
         @Bean fun buses() = InMemoryBuses(typePrefix = "service-b")
         @Bean fun audit() = AuditHandler()
+        @Bean fun notifier() = AuditNotifier()
         @Bean fun deadLetters(): DeadLetters = mockk()
     }
 
     @Autowired lateinit var mvc: MockMvcTester
     @Autowired lateinit var buses: InMemoryBuses
     @Autowired lateinit var audit: AuditHandler
+    @Autowired lateinit var notifier: AuditNotifier
     @Autowired lateinit var deadLetters: DeadLetters
 
     private fun letter(id: String, key: String?, reason: DeadLetterReason, blockedBy: String? = null) = DeadLetter(
@@ -138,5 +140,18 @@ class AuditControllerTest {
         every { deadLetters.count(null) } throws IllegalStateException("dead letters are not kept in mode log")
         assertThat(mvc.get().uri("/audit/dead-letters?processor=nope")).hasStatus(HttpStatus.BAD_REQUEST)
         assertThat(mvc.get().uri("/audit/dead-letters/count")).hasStatus(HttpStatus.CONFLICT)
+    }
+
+    @Test fun `GET resets lists the resets of the audit processor and GET notified what the notifier sent once (P6b)`() {
+        audit.onReset(
+            io.damoreira.kraken.messaging.control.ResetContext(
+                "audit", "op-1", io.damoreira.kraken.messaging.control.ResetTarget.Earliest,
+                listOf(io.damoreira.kraken.messaging.control.ReplayRange("kraken.events", 0, 0, 3)),
+            ),
+        )
+        assertThat(mvc.get().uri("/audit/resets")).hasStatus(HttpStatus.OK).bodyJson()
+            .isLenientlyEqualTo("""[{"operationId":"op-1","target":"earliest","ranges":[{"partition":0,"from":0,"until":3}]}]""")
+        notifier.on(AuditNote("k1", "first", Instant.EPOCH))
+        assertThat(mvc.get().uri("/audit/notified")).hasStatus(HttpStatus.OK).bodyJson().isLenientlyEqualTo("""[{"key":"k1","text":"first"}]""")
     }
 }

@@ -528,6 +528,30 @@ and its attempts grow, the sequenced letter `Blocked` behind the head); 26f turn
 poison note, discards it (a second discard is a 404) and expects its key to flow again; 26h waits for the hub's dead-letter
 count to be back at 0. They need `jq` or `python3`; `SKIP_AUDIT=1` skips them, `ONLY_AUDIT=1` runs only them.
 
+**Processor control through the hub** (P6b, ADR 0023, `docs/02-messaging.md` "Processor control"). The hub pauses, resumes and
+resets a processor on every instance and works its dead letters, through its HTTP API with the write token
+(`KRAKEN_HUB_DASHBOARD_WRITE_TOKEN`; the dashboard token is refused on a write). In service-b the `audit` processor also has a
+`@ResetHandler` (`AuditHandler.onReset`, records each reset) and a second handler, `AuditNotifier`, marked `@DisallowReplay`
+(a side effect that must happen once): a reset of `audit` to `earliest` hands every note to `AuditHandler` again (`/audit/handled`
+lists them twice) but not to the notifier.
+
+| Endpoint (service-b) | What it does |
+|---|---|
+| `GET /audit/resets` | the processor's resets that replayed something, as its `@ResetHandler` saw them: `[{"operationId","target","ranges":[{"partition","from","until"}]}]` (`target`: `earliest`, `latest`, `timestamp <ms>`, `offsets {...}`) |
+| `GET /audit/notified` | what the `@DisallowReplay` notifier handled, each note once (`[{"key","text","at"}]`) |
+
+```bash
+W="Authorization: Bearer $KRAKEN_HUB_DASHBOARD_WRITE_TOKEN"
+HUB=http://localhost:7001/api/v1/services/service-b/processors/audit
+curl -s -X POST -H "$W" "$HUB/pause"     # every service-b instance: audit PAUSED, notes held (default keeps consuming)
+curl -s -X POST localhost:8092/audit/notes -H 'content-type: application/json' -d '{"key":"ada","text":"held"}'
+curl -s -X POST -H "$W" "$HUB/resume"    # the held note is handled
+curl -s -X POST -H "$W" -H 'Content-Type: application/json' -d '{"to":"earliest"}' "$HUB/reset"
+curl -s localhost:8092/audit/resets      # one reset, target earliest, its ranges
+curl -s localhost:8092/audit/handled     # every note again; /audit/notified unchanged
+curl -s -H "$W" "$HUB/dead-letters"      # the letters, without payloads, through the hub
+```
+
 ## Tear down
 
 (Add `-f compose.secure.yaml` to the commands below when the secure overlay is up; it only needs `infra/.secrets/` to exist.)

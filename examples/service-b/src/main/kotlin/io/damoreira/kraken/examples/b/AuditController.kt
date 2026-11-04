@@ -37,8 +37,8 @@ data class RetryView(val result: String, val detail: String?)
 
 /**
  * Example-only admin edge of service-b's `audit` processor and of the library's [DeadLetters]: publish a note, flip the
- * processor's failure switch (while on, notes whose text starts with `poison` fail), read what it handled, and list, retry
- * and discard dead letters. `curl -X POST 'localhost:8092/audit/failing?on=true'`, then `curl -X POST
+ * processor's failure switch (while on, notes whose text starts with `poison` fail), read what it handled, its resets and
+ * what its `@DisallowReplay` notifier sent, and list, retry and discard dead letters. `curl -X POST 'localhost:8092/audit/failing?on=true'`, then `curl -X POST
  * localhost:8092/audit/notes -H 'content-type: application/json' -d '{"key":"k1","text":"poison-1"}'`, then
  * `curl localhost:8092/audit/dead-letters`. The sandbox is closed; a real service puts its own authorization in front of such
  * endpoints.
@@ -47,6 +47,7 @@ data class RetryView(val result: String, val detail: String?)
 class AuditController(
     private val events: EventBus,
     private val audit: AuditHandler,
+    private val notifier: AuditNotifier,
     private val deadLetters: DeadLetters,
 ) {
     @PostMapping("/audit/notes")
@@ -66,6 +67,14 @@ class AuditController(
 
     @GetMapping("/audit/handled")
     fun handled(): List<AuditNote> = audit.handled
+
+    /** The processor's resets that replayed something (P6b), as its `@ResetHandler` saw them. */
+    @GetMapping("/audit/resets")
+    fun resets(): List<AuditReset> = audit.resets
+
+    /** What the `@DisallowReplay` notifier notified: each note once, a replay adds nothing. */
+    @GetMapping("/audit/notified")
+    fun notified(): List<AuditNote> = notifier.notified
 
     @GetMapping("/audit/dead-letters")
     fun list(@RequestParam(required = false) processor: String?, @RequestParam(defaultValue = "100") limit: Int): List<LetterView> =
