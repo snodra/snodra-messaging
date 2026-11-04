@@ -7,9 +7,7 @@ import kotlin.test.assertEquals
 /** The flush rule of returned permits (ADR 0014), without a stream or a clock. */
 class PermitLedgerTest {
 
-    private fun ledger(initial: Int, flowControl: Boolean = true) = PermitLedger(initial).also {
-        assertEquals(Step.Wait, it.handshake(flowControl))
-    }
+    private fun ledger(initial: Int) = PermitLedger(initial)
 
     private fun PermitLedger.receive(n: Int) = repeat(n) { requestReceived() }
 
@@ -61,44 +59,8 @@ class PermitLedgerTest {
         assertEquals(Step.Flush(1), two.handlerCompleted())
     }
 
-    @Test fun `grants held before the handshake are flushed at once at the low-water mark`() {
-        val ledger = PermitLedger(initial = 1)
-        ledger.receive(1)
-        assertEquals(Step.Wait, ledger.handlerCompleted()) // held until the ack decides
-        assertEquals(Step.Flush(1), ledger.handshake(flowControl = true))
-    }
-
-    @Test fun `grants held before the handshake arm the timer above the low-water mark, or flush at 16`() {
-        val few = PermitLedger(initial = 64)
-        few.receive(3)
-        repeat(3) { assertEquals(Step.Wait, few.handlerCompleted()) }
-        assertEquals(Step.ArmTimer, few.handshake(flowControl = true))
-        assertEquals(3, few.timerFired())
-
-        val many = PermitLedger(initial = 256)
-        many.receive(20)
-        repeat(16) { assertEquals(Step.Wait, many.handlerCompleted()) }
-        assertEquals(Step.Flush(16), many.handshake(flowControl = true))
-    }
-
-    @Test fun `without flow control held and later grants are dropped`() {
-        val ledger = PermitLedger(initial = 1)
-        ledger.receive(2)
-        assertEquals(Step.Wait, ledger.handlerCompleted())
-        assertEquals(Step.Wait, ledger.handshake(flowControl = false))
-        assertEquals(Step.Wait, ledger.handlerCompleted())
-        assertEquals(0, ledger.timerFired())
-    }
-
-    @Test fun `nothing pending at the handshake does nothing`() {
-        assertEquals(Step.Wait, PermitLedger(initial = 1).handshake(flowControl = true))
-    }
-
-    @Test fun `a top-up counts as held by the hub and is written only once flow control is confirmed`() {
-        val unconfirmed = PermitLedger(4)
-        assertEquals(false, unconfirmed.toppedUp(4)) // before the handshake
-        val p0 = ledger(initial = 4, flowControl = false)
-        assertEquals(false, p0.toppedUp(4))
+    @Test fun `a top-up counts as held by the hub, an empty one is not written`() {
+        assertEquals(false, ledger(initial = 4).toppedUp(0))
 
         val ledger = ledger(initial = 4) // low-water mark min(16, 4 / 2) = 2
         ledger.receive(4) // the hub holds 0

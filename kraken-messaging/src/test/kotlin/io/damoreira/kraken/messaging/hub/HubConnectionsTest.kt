@@ -42,7 +42,6 @@ class HubConnectionsTest {
     private val clients = mutableListOf<HubConnections>()
     private val fast = HubSettings(
         requestTimeout = Duration.ofSeconds(2),
-        heartbeatInterval = Duration.ofSeconds(10),
         backoffMin = Duration.ofMillis(20),
         backoffMax = Duration.ofMillis(200),
     )
@@ -112,33 +111,23 @@ class HubConnectionsTest {
         }
     }
 
-    @Test fun `status is never sent to a hub without the instance-status capability`() = runBlocking {
-        val p3 = hub()
-        val p2 = hub { instanceStatus = false }
-        val conns = client(listOf(p3.name, p2.name), "x", statusInterval = Duration.ofMillis(100))
-        conns.start()
-        assertTrue(conns.awaitRegistered(wait))
-        eventually(2_000) { (p3.statusMessagesFrom("x")) >= 3 }
-        assertEquals(setOf(p3.hubId, p2.hubId), p3.lastStatusFrom("x")!!.connectedHubIdsList.toSet())
-        assertEquals(0, p2.statusMessagesFrom("x"))
-    }
-
-    @Test fun `processor status goes only to hubs whose ack lists processors, every report the whole list`() = runBlocking {
-        val p6a = hub()
-        val p5c = hub { processors = false }
+    @Test fun `processor status goes to every hub, every report the whole list`() = runBlocking {
+        val a = hub()
+        val b = hub()
         val reports = java.util.concurrent.atomic.AtomicInteger()
         val status = io.damoreira.kraken.hub.v1.ProcessorStatus.newBuilder().setName("orders").setGroupId("svc-x.orders")
             .setState(io.damoreira.kraken.hub.v1.ProcessorState.PROCESSOR_RUNNING).setDeadLetterMode("collection").build()
-        val conns = client(listOf(p6a.name, p5c.name), "x", statusInterval = Duration.ofMillis(100), processors = {
+        val conns = client(listOf(a.name, b.name), "x", statusInterval = Duration.ofMillis(100), processors = {
             reports.incrementAndGet()
             listOf(status)
         })
         conns.start()
         assertTrue(conns.awaitRegistered(wait))
-        eventually(2_000) { p6a.statusMessagesFrom("x") >= 3 && p5c.statusMessagesFrom("x") >= 3 }
-        assertEquals(listOf(status), p6a.lastStatusFrom("x")!!.processorsList)
-        assertEquals(emptyList(), p5c.lastStatusFrom("x")!!.processorsList, "a hub without the capability never sees the field")
-        assertEquals(setOf(p6a.hubId, p5c.hubId), p5c.lastStatusFrom("x")!!.connectedHubIdsList.toSet())
+        eventually(2_000) { a.statusMessagesFrom("x") >= 3 && b.statusMessagesFrom("x") >= 3 }
+        for (hub in listOf(a, b)) {
+            assertEquals(listOf(status), hub.lastStatusFrom("x")!!.processorsList)
+            assertEquals(setOf(a.hubId, b.hubId), hub.lastStatusFrom("x")!!.connectedHubIdsList.toSet())
+        }
         assertTrue(reports.get() >= 3)
     }
 
@@ -254,25 +243,29 @@ class HubConnectionsTest {
     }
 
     @Test fun `the local guard stays max-concurrent-handlers in total over all hubs`() = runBlocking {
-        // P0 hubs: unlimited forwarding from both, only the client's own guard holds handlers back.
-        val a = hub { flowControl = false }
-        val b = hub { flowControl = false }
+        val a = hub()
+        val b = hub()
         val running = java.util.concurrent.atomic.AtomicInteger()
         val peak = java.util.concurrent.atomic.AtomicInteger()
+        val done = java.util.concurrent.atomic.AtomicInteger()
         val handler = client(listOf(a.name, b.name), "b", maxConcurrentHandlers = 2) { req ->
             peak.accumulateAndGet(running.incrementAndGet(), ::maxOf)
             delay(50)
             running.decrementAndGet()
+            done.incrementAndGet()
             payloadReply(req.id, "{}")
         }
         handler.register(setOf("test.Ping"), emptySet())
         handler.start()
         assertTrue(handler.awaitRegistered(wait))
-        val sender = client(listOf(a.name, b.name), "a")
-        sender.start()
-        assertTrue(sender.awaitRegistered(wait))
-        val answers = (1..12).map { async { sender.send(request(timeoutMs = 5_000)) } }.awaitAll()
-        assertTrue(answers.all { it.hasReply() && !it.reply.hasError() }, answers.toString())
+        // More requests than permits, written straight onto both streams: only the client's own guard holds handlers back.
+        for (n in 1..6) {
+            for (hub in listOf(a, b)) {
+                val forwarded = request(timeoutMs = 5_000).toBuilder().setId("${hub.name}-$n").build()
+                hub.inject("b", io.damoreira.kraken.hub.v1.ServerMessage.newBuilder().setRequest(forwarded).build())
+            }
+        }
+        eventually(5_000) { done.get() == 12 }
         assertTrue(peak.get() <= 2, "peak ${peak.get()} handlers")
     }
 
@@ -493,17 +486,6 @@ class HubConnectionsTest {
         assertTrue(x.awaitRegistered(wait))
     }
 
-    @Test fun `a legacy hub is identified by its target`() = runBlocking {
-        val v1 = hub { legacy = true }
-        val conns = client(listOf(v1.name), "x")
-        conns.start()
-        assertTrue(conns.awaitRegistered(wait))
-        assertEquals(listOf(v1.name), conns.liveHubIds())
-        assertIs<HubHandshake.Legacy>(conns.connections().single().handshake.value)
-        delay(500)
-        assertEquals(0, v1.statusMessagesFrom("x"))
-    }
-
     @Test fun `dns targets are re-resolved - new addresses connect, vanished ones close`() = runBlocking {
         val a = hub()
         val b = hub()
@@ -587,7 +569,7 @@ class HubConnectionsTest {
         java.nio.file.Files.writeString(file, first)
         val conns = client(
             emptyList(), "x",
-            settings = fast.copy(heartbeatInterval = Duration.ofMillis(100), token = HubToken.of(null, file)),
+            settings = fast.copy(token = HubToken.of(null, file)),
             dnsTarget = HubTargets.Dns("kraken-hub", 7000),
             resolver = { answer.get().map(InetAddress::getByName) },
         )

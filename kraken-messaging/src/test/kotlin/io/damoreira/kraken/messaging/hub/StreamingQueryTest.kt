@@ -27,7 +27,6 @@ import io.damoreira.kraken.messaging.UnauthenticatedException
 import io.damoreira.kraken.messaging.RetryPolicy
 import io.damoreira.kraken.messaging.ScatterOptions
 import io.damoreira.kraken.messaging.StreamOptions
-import io.damoreira.kraken.messaging.UnsupportedByHubException
 import io.damoreira.kraken.messaging.codec.JsonCodec
 import io.damoreira.kraken.messaging.codec.MessageTypeResolver
 import io.damoreira.kraken.messaging.fixtures.Count
@@ -134,7 +133,6 @@ class StreamingQueryTest {
     private val invoker = HandlerInvoker(registry, codec)
     private val settings = HubSettings(
         requestTimeout = Duration.ofSeconds(2),
-        heartbeatInterval = Duration.ofSeconds(10),
         backoffMin = Duration.ofMillis(20),
         backoffMax = Duration.ofMillis(200),
     )
@@ -284,19 +282,6 @@ class StreamingQueryTest {
         assertEquals(5, end.parts)
         assertEquals(false, end.hasError())
         assertEquals("completed", state.ended.await())
-    }
-
-    @Test fun `register declares streaming and the connection reports the capability`() = runBlocking {
-        val conn = connection("a")
-        conn.register(emptySet(), setOf("test.ExportRows"))
-        conn.start()
-        assertTrue(conn.awaitRegistered(wait))
-        assertTrue(conn.supportsStreaming)
-        hub.streaming = false
-        val old = connection("b")
-        old.start()
-        assertTrue(old.awaitRegistered(wait))
-        assertEquals(false, old.supportsStreaming)
     }
 
     // --- the sender side ---
@@ -543,34 +528,12 @@ class StreamingQueryTest {
         }
     }
 
-    @Test fun `a hub without streaming is UnsupportedByHub and nothing is sent, unary and gathers keep working`() = runBlocking {
-        hub.streaming = false
-        owner("svc-x", "x-1", RowsStreamer(), OwnCountHandlers(7))
-        val conn = connection("caller")
-        conn.start()
-        assertTrue(conn.awaitRegistered(wait))
-        val bus = bus(conn)
-        val e = assertFailsWith<UnsupportedByHubException> { bus.stream(ExportRows(3)).toList() }
-        assertEquals("streaming", e.feature)
-        assertEquals(0, hub.requestsFrom("caller"))
-        assertEquals(Count(7), bus.send(GetCount("k")))
-        assertEquals(listOf(Count(7)), bus.scatterGather(GetCount("k")).results)
-        assertTrue(conn.connected.value)
-
-        hub.legacy = true
-        val legacy = connection("legacy")
-        legacy.start()
-        assertTrue(legacy.awaitRegistered(wait))
-        assertFailsWith<UnsupportedByHubException> { bus(legacy).stream(ExportRows(3)).toList() }
-        assertEquals(0, hub.requestsFrom("legacy"))
-    }
-
-    @Test fun `a stream goes to one hub, and only to hubs with the capability`() = runBlocking {
-        val old = hub { streaming = false }
-        owner("svc-x", "x-new", RowsStreamer(), hubName = hub.name)
-        owner("svc-x", "x-old", RowsStreamer(), hubName = old.name)
+    @Test fun `a stream goes to one hub, round-robin over the live hubs`() = runBlocking {
+        val other = hub()
+        owner("svc-x", "x-1", RowsStreamer(), hubName = hub.name)
+        owner("svc-x", "x-2", RowsStreamer(), hubName = other.name)
         val conns = HubConnections(
-            targets = HubTargets.Static(listOf(hub.name, old.name)),
+            targets = HubTargets.Static(listOf(hub.name, other.name)),
             channelFactory = { target -> InProcessChannelBuilder.forName(target).build() },
             serviceName = "svc-caller",
             instanceId = "caller",
@@ -582,14 +545,8 @@ class StreamingQueryTest {
         assertTrue(conns.awaitRegistered(wait))
         val bus = bus(conns)
         repeat(4) { assertEquals(listOf(Row(1), Row(2)), bus.stream(ExportRows(2)).toList()) }
-        assertEquals(4, hub.requestsFrom("caller"))
-        assertEquals(0, old.requestsFrom("caller"))
-
-        hub.close() // only the hub without the capability is left
-        awaitUntil { conns.liveHubIds() == listOf(old.hubId) }
-        val e = assertFailsWith<UnsupportedByHubException> { bus.stream(ExportRows(2)).toList() }
-        assertEquals("streaming", e.feature)
-        assertEquals(0, old.requestsFrom("caller"))
+        assertEquals(2, hub.requestsFrom("caller"))
+        assertEquals(2, other.requestsFrom("caller"))
     }
 
     @Test fun `errors before any part map as for a unary query`() = runBlocking {
@@ -861,7 +818,7 @@ class StreamingQueryTest {
             }
             send(
                 ClientMessage.newBuilder().setRegister(
-                    Register.newBuilder().setServiceName("svc-raw").setInstanceId(instanceId),
+                    Register.newBuilder().setServiceName("svc-raw").setInstanceId(instanceId).setInitialPermits(64),
                 ).build(),
             )
         }

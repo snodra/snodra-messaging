@@ -73,14 +73,13 @@ import kotlin.reflect.KClass
  * owns the type. Each part is decoded like a unary reply (the query's declared result type); a part's error becomes a
  * [RemoteHandlerException] carrying the hub's code; a part whose payload does not decode is a failed part too (code
  * `ERROR_CODE_UNSPECIFIED`, the decode error as message), never a failure of the whole gather. The hub's `Error` for the gather itself maps as for unary requests
- * (`NO_HANDLER` -> [io.damoreira.kraken.messaging.NoHandlerException], `INVALID_REQUEST` -> [InvalidMessageException],
- * `UNSUPPORTED` -> [io.damoreira.kraken.messaging.UnsupportedByHubException]). Retry applies to the whole gather with
+ * (`NO_HANDLER` -> [io.damoreira.kraken.messaging.NoHandlerException], `INVALID_REQUEST` -> [InvalidMessageException]). Retry applies to the whole gather with
  * the query rules: a retried gather is a new gather (fresh id) and its result holds only its own parts. A flow is
  * retried only while it has not emitted a part. [scatterGatherFlow] reads the caller's bearer token and trace context
  * when it is called, not when the flow is collected: a flow returned from a controller is collected on another thread.
  *
  * Streaming queries ([stream], P4b, ADR 0017) always go through the hub too. The flow is cold and unbuffered: each
- * collection sends one `STREAMING` request to a hub that lists `streaming`, and each part is decoded (the query's
+ * collection sends one `STREAMING` request through the hub, and each part is decoded (the query's
  * element type) and emitted before the next one is read, so the transport's credit refills ([HubTransport.stream])
  * follow what the collector consumed. Unlike a unary attempt, every attempt of a stream sends the chosen timeout
  * (`StreamOptions.timeout`, else [requestTimeout]) whole as `timeout_ms`: it is the stream's idle timeout, and the
@@ -101,7 +100,7 @@ import kotlin.reflect.KClass
  * [subscribe] returns once the initial result arrived (decoded as the query's `I`); `timeout_ms` bounds only that
  * request, so the call retries like a unary query (the retry budget, the remaining time per attempt) and never after the
  * initial result. A `ReplyEnd` with an error, or an `Error`, before the initial result fails the call exactly like a unary
- * `Error` with the same code (`HubErrors` with feature `subscription`: `RESOURCE_EXHAUSTED` keeps the hub's own message as
+ * `Error` with the same code (`HubErrors` for a subscription: `RESOURCE_EXHAUSTED` keeps the hub's own message as
  * [io.damoreira.kraken.messaging.HandlerBusyException]'s detail). The updates are a hot, collect-once flow over the
  * transport's [HubSubscription]: each is decoded as `U`, the credit refills as the collector consumes ([HubSubscription.next]),
  * `Cancel` goes to the hub when the collector is cancelled or throws (or [SubscriptionResult.cancel] is called), a clean
@@ -263,11 +262,11 @@ class HubBus(
                     when {
                         message.hasPart() -> emit(decodeUpdate(type, updateType, message.part))
                         message.hasEnd() && message.end.hasError() -> throw message.end.error.let {
-                            HubErrors.toException(type, it.code, it.message, it.details.toByteArray(), HubProtocol.SUBSCRIPTION)
+                            HubErrors.toException(type, it.code, it.message, it.details.toByteArray(), subscription = true)
                         }
                         message.hasEnd() -> return@flow
                         message.hasError() -> throw message.error.let {
-                            HubErrors.toException(type, it.code, it.message, it.details.toByteArray(), HubProtocol.SUBSCRIPTION)
+                            HubErrors.toException(type, it.code, it.message, it.details.toByteArray(), subscription = true)
                         }
                         else -> throw InvalidMessageException("Unexpected message in subscription $type")
                     }
@@ -294,10 +293,10 @@ class HubBus(
                 when {
                     // The failed initial result (or a refused target) ends the subscription: the same failure a unary Error with that code is.
                     terminal.hasEnd() && terminal.end.hasError() -> throw terminal.end.error.let {
-                        HubErrors.toException(type, it.code, it.message, it.details.toByteArray(), HubProtocol.SUBSCRIPTION)
+                        HubErrors.toException(type, it.code, it.message, it.details.toByteArray(), subscription = true)
                     }
                     terminal.hasError() -> throw terminal.error.let {
-                        HubErrors.toException(type, it.code, it.message, it.details.toByteArray(), HubProtocol.SUBSCRIPTION)
+                        HubErrors.toException(type, it.code, it.message, it.details.toByteArray(), subscription = true)
                     }
                     else -> throw InvalidMessageException("Unexpected answer to subscription query $type")
                 }
@@ -343,11 +342,11 @@ class HubBus(
         when {
             // The end's error is the same failure a unary send would see as an Error with that code.
             terminal.hasEnd() && terminal.end.hasError() -> throw terminal.end.error.let {
-                HubErrors.toException(type, it.code, it.message, it.details.toByteArray(), HubProtocol.STREAMING)
+                HubErrors.toException(type, it.code, it.message, it.details.toByteArray())
             }
             terminal.hasEnd() -> return
             terminal.hasError() -> throw terminal.error.let {
-                HubErrors.toException(type, it.code, it.message, it.details.toByteArray(), HubProtocol.STREAMING)
+                HubErrors.toException(type, it.code, it.message, it.details.toByteArray())
             }
             else -> throw InvalidMessageException("Unexpected answer to streaming query $type")
         }
@@ -502,7 +501,7 @@ class HubBus(
     /** [template] with a fresh id and [timeout] as `timeout_ms` (null sends 0). */
     private fun withFreshId(template: Request, timeout: Duration?): Request = template.toBuilder()
         .setId(UUID.randomUUID().toString())
-        // Unset: 0 on the wire, the hub decides (a legacy hub gets the 5 s default instead).
+        // Unset: 0 on the wire, the hub decides.
         .setTimeoutMs(timeout?.toMillis()?.coerceIn(0, Int.MAX_VALUE.toLong())?.toInt() ?: 0)
         .build()
 

@@ -65,33 +65,34 @@ class InProcessHubTest {
 
         fun send(msg: ClientMessage) = out.trySend(msg).getOrThrow()
 
-        /** A protocol v2 Register declaring `flow-control` with [permits] initial permits. */
-        fun registerFlowControlled(service: String, instance: String, permits: Int, vararg commands: String) = send(
-            ClientMessage.newBuilder().setRegister(
-                Register.newBuilder().setServiceName(service).setInstanceId(instance).addAllCommandTypes(commands.toList())
-                    .setInitialPermits(permits),
-            ).build(),
-        )
-
-        fun register(service: String, instance: String, vararg commands: String) = send(
-            ClientMessage.newBuilder().setRegister(
-                Register.newBuilder().setServiceName(service).setInstanceId(instance).addAllCommandTypes(commands.toList()),
-            ).build(),
-        )
-
-        /** A protocol v2 Register declaring [capabilities], with exclusive [queries] and [shared] query types. */
-        fun registerV2(
+        /** A Register of [commands], exclusive [queries] and [shared] query types with [permits] initial permits; the hub answers it with an ack. */
+        fun register(
             service: String,
             instance: String,
+            vararg commands: String,
             queries: List<String> = emptyList(),
             shared: List<String> = emptyList(),
-            capabilities: List<String> = listOf("scatter-gather"),
+            permits: Int = 1_000,
         ) = send(
             ClientMessage.newBuilder().setRegister(
-                Register.newBuilder().setServiceName(service).setInstanceId(instance).addAllQueryTypes(queries)
-                    .addAllSharedQueryTypes(shared),
+                Register.newBuilder().setServiceName(service).setInstanceId(instance).addAllCommandTypes(commands.toList())
+                    .addAllQueryTypes(queries).addAllSharedQueryTypes(shared).setInitialPermits(permits),
             ).build(),
         )
+
+        /** [register], then the hub's ack. */
+        suspend fun registered(
+            service: String,
+            instance: String,
+            vararg commands: String,
+            queries: List<String> = emptyList(),
+            shared: List<String> = emptyList(),
+            permits: Int = 1_000,
+        ): RawClient {
+            register(service, instance, *commands, queries = queries, shared = shared, permits = permits)
+            assertTrue(next().hasRegisterAck())
+            return this
+        }
 
         fun reply(id: String, json: String) = send(
             ClientMessage.newBuilder().setReply(Reply.newBuilder().setRequestId(id).setPayload(ByteString.copyFromUtf8(json))).build(),
@@ -122,8 +123,7 @@ class InProcessHubTest {
 
     @Test
     fun `permits never exceed the cap, which only a grant above it raises`() = runBlocking {
-        val handler = RawClient().also { it.registerFlowControlled("svc-a", "a-1", 2, "test.Ping") }
-        handler.next() // ack
+        val handler = RawClient().registered("svc-a", "a-1", "test.Ping", permits = 2)
         awaitRegistered("test.Ping")
         handler.sendPermits("a-1", permits(5))
         assertEquals(2, hub.permitsAvailable("a-1"), "clamped at initial_permits")
@@ -134,22 +134,10 @@ class InProcessHubTest {
     }
 
     @Test
-    fun `a hub that predates the grant keeps the cap at initial_permits`() = runBlocking {
-        hub.permitGrants = false
-        val handler = RawClient().also { it.registerFlowControlled("svc-a", "a-1", 2, "test.Ping") }
-        handler.next() // ack
+    fun `a handler gets requests only with permits, highest priority first`() = runBlocking {
+        val handler = RawClient().registered("svc-a", "a-1", "test.Ping", permits = 1)
         awaitRegistered("test.Ping")
-        handler.sendPermits("a-1", permits(2, grant = 4))
-        assertEquals(2, hub.permitsAvailable("a-1"))
-    }
-
-    @Test
-    fun `flow-controlled handler gets requests only with permits, highest priority first`() = runBlocking {
-        val handler = RawClient().also { it.registerFlowControlled("svc-a", "a-1", 1, "test.Ping") }
-        val ack = handler.next()
-        assertTrue(ack.hasRegisterAck())
-        awaitRegistered("test.Ping")
-        val sender = RawClient().also { it.register("svc-b", "b-1") }
+        val sender = RawClient().registered("svc-b", "b-1")
 
         sender.send(request("r1", "test.Ping"))
         assertEquals("r1", handler.next().request.id) // the one permit
@@ -166,38 +154,27 @@ class InProcessHubTest {
     }
 
     @Test
-    fun `full queue is RESOURCE_EXHAUSTED for flow-control senders and handler busy for others`() = runBlocking {
+    fun `a full queue is RESOURCE_EXHAUSTED`() = runBlocking {
         hub.queueCapacity = 1
-        val handler = RawClient().also { it.registerFlowControlled("svc-a", "a-1", 1, "test.Ping") }
-        handler.next() // ack
+        val handler = RawClient().registered("svc-a", "a-1", "test.Ping", permits = 1)
         awaitRegistered("test.Ping")
-        val v1 = RawClient().also { it.register("svc-b", "b-1") }
-        val flow = RawClient().also { it.registerFlowControlled("svc-c", "c-1", 4) }
-        flow.next() // ack
-        v1.send(request("r1", "test.Ping")) // forwarded
+        val sender = RawClient().registered("svc-b", "b-1")
+        sender.send(request("r1", "test.Ping")) // forwarded
         handler.next()
-        v1.send(request("r2", "test.Ping")) // queued
+        sender.send(request("r2", "test.Ping")) // queued
         withTimeout(TIMEOUT_MS) { while (hub.queuedFor("a-1") < 1) kotlinx.coroutines.delay(10) }
-        v1.send(request("r3", "test.Ping"))
-        flow.send(request("r4", "test.Ping"))
-        val busy = v1.next().error
-        assertEquals(ErrorCode.HANDLER_ERROR, busy.code)
-        assertEquals("handler busy", busy.message)
-        assertEquals(ErrorCode.RESOURCE_EXHAUSTED, flow.next().error.code)
+        sender.send(request("r3", "test.Ping"))
+        val busy = sender.next().error
+        assertEquals("r3" to ErrorCode.RESOURCE_EXHAUSTED, busy.requestId to busy.code)
     }
 
     @Test
-    fun `P0 emulation acks without flow-control and never queues`() = runBlocking {
-        hub.flowControl = false
-        val handler = RawClient().also { it.registerFlowControlled("svc-a", "a-1", 1, "test.Ping") }
-        assertTrue(handler.next().hasRegisterAck())
-        awaitRegistered("test.Ping")
-        val sender = RawClient().also { it.register("svc-b", "b-1") }
-        sender.send(request("r1", "test.Ping"))
-        sender.send(request("r2", "test.Ping"))
-        assertEquals("r1", handler.next().request.id)
-        assertEquals("r2", handler.next().request.id)
-        assertEquals(null, hub.permitsAvailable("a-1"))
+    fun `a first Register without permits is INVALID_ARGUMENT, like the real hub`() = runBlocking {
+        val client = RawClient().also { it.register("svc-a", "a-1", "test.Ping", permits = 0) }
+        val failure = assertIs<StatusException>(client.awaitEnd())
+        assertEquals(Status.Code.INVALID_ARGUMENT, failure.status.code)
+        assertEquals("Register.initial_permits must be at least 1", failure.status.description)
+        assertTrue("test.Ping" !in hub.registeredTypes())
     }
 
     private suspend fun awaitRegistered(type: String) = withTimeout(TIMEOUT_MS) {
@@ -206,10 +183,10 @@ class InProcessHubTest {
 
     @Test
     fun `relays command between two raw clients`() = runBlocking {
-        val handler = RawClient().also { it.register("svc-a", "a-1", "test.Ping") }
+        val handler = RawClient().registered("svc-a", "a-1", "test.Ping")
         awaitRegistered("test.Ping")
         assertEquals(setOf("a-1"), hub.connectedInstances())
-        val sender = RawClient().also { it.register("svc-b", "b-1") }
+        val sender = RawClient().registered("svc-b", "b-1")
 
         sender.send(request("r1", "test.Ping", mapOf("correlationId" to "c-1")))
         val forwarded = handler.next()
@@ -231,7 +208,7 @@ class InProcessHubTest {
 
     @Test
     fun `unknown type is NO_HANDLER`() = runBlocking {
-        val sender = RawClient().also { it.register("svc-b", "b-1") }
+        val sender = RawClient().registered("svc-b", "b-1")
         sender.send(request("r1", "nobody.Owns"))
         val err = sender.next()
         assertTrue(err.hasError())
@@ -241,9 +218,9 @@ class InProcessHubTest {
 
     @Test
     fun `dropped handler fails in flight with HANDLER_DISCONNECTED`() = runBlocking {
-        val handler = RawClient().also { it.register("svc-a", "a-1", "test.Ping") }
+        val handler = RawClient().registered("svc-a", "a-1", "test.Ping")
         awaitRegistered("test.Ping")
-        val sender = RawClient().also { it.register("svc-b", "b-1") }
+        val sender = RawClient().registered("svc-b", "b-1")
         sender.send(request("r1", "test.Ping"))
         handler.next()
 
@@ -258,9 +235,9 @@ class InProcessHubTest {
 
     @Test
     fun `a second stream of one instance id replaces the first, like the real hub`() = runBlocking {
-        val first = RawClient().also { it.register("svc-a", "a-1", "test.Ping") }
+        val first = RawClient().registered("svc-a", "a-1", "test.Ping")
         awaitRegistered("test.Ping")
-        val sender = RawClient().also { it.register("svc-b", "b-1") }
+        val sender = RawClient().registered("svc-b", "b-1")
         sender.send(request("r1", "test.Ping"))
         first.next()
 
@@ -272,6 +249,7 @@ class InProcessHubTest {
         assertEquals(1, hub.sessionsOf("a-1"))
         assertEquals(1, hub.sessionsReplacedOf("a-1"))
         assertEquals(2, hub.streamsOpenedBy("a-1"))
+        assertTrue(second.next().hasRegisterAck())
         sender.send(request("r2", "test.Ping"))
         assertEquals("r2", second.next().request.id)
     }
@@ -315,36 +293,36 @@ class InProcessHubTest {
 
     @Test
     fun `a shared type may have many owners, registrants must agree`() = runBlocking {
-        val x = RawClient().also { it.registerV2("svc-x", "x-1", shared = listOf("test.Search")) }
+        val x = RawClient().also { it.register("svc-x", "x-1", shared = listOf("test.Search")) }
         assertTrue(x.next().hasRegisterAck())
         awaitRegistered("test.Search")
-        val y = RawClient().also { it.registerV2("svc-y", "y-1", shared = listOf("test.Search")) }
+        val y = RawClient().also { it.register("svc-y", "y-1", shared = listOf("test.Search")) }
         assertTrue(y.next().hasRegisterAck())
 
-        val exclusive = RawClient().also { it.registerV2("svc-z", "z-1", queries = listOf("test.Search")) }
+        val exclusive = RawClient().also { it.register("svc-z", "z-1", queries = listOf("test.Search")) }
         val failure = assertIs<StatusException>(exclusive.awaitEnd())
         assertEquals(Status.Code.ALREADY_EXISTS, failure.status.code)
 
         // Even within one service: x-2 of svc-x registers the type exclusive.
-        val sameService = RawClient().also { it.registerV2("svc-x", "x-2", queries = listOf("test.Search")) }
+        val sameService = RawClient().also { it.register("svc-x", "x-2", queries = listOf("test.Search")) }
         assertEquals(Status.Code.ALREADY_EXISTS, assertIs<StatusException>(sameService.awaitEnd()).status.code)
 
-        RawClient().also { it.registerV2("svc-e", "e-1", queries = listOf("test.Exclusive")) }.next()
+        RawClient().also { it.register("svc-e", "e-1", queries = listOf("test.Exclusive")) }.next()
         awaitRegistered("test.Exclusive")
-        val sharedOverExclusive = RawClient().also { it.registerV2("svc-f", "f-1", shared = listOf("test.Exclusive")) }
+        val sharedOverExclusive = RawClient().also { it.register("svc-f", "f-1", shared = listOf("test.Exclusive")) }
         assertEquals(Status.Code.ALREADY_EXISTS, assertIs<StatusException>(sharedOverExclusive.awaitEnd()).status.code)
 
-        val both = RawClient().also { it.registerV2("svc-g", "g-1", queries = listOf("test.Both"), shared = listOf("test.Both")) }
+        val both = RawClient().also { it.register("svc-g", "g-1", queries = listOf("test.Both"), shared = listOf("test.Both")) }
         assertEquals(Status.Code.INVALID_ARGUMENT, assertIs<StatusException>(both.awaitEnd()).status.code)
     }
 
     @Test
     fun `scatter-gather sends each target its own unary request and relays parts then the end`() = runBlocking {
-        val x1 = RawClient().also { it.registerV2("svc-x", "x-1", shared = listOf("test.Search")) }.apply { next() }
-        val x2 = RawClient().also { it.registerV2("svc-x", "x-2", shared = listOf("test.Search")) }.apply { next() }
-        val y1 = RawClient().also { it.registerV2("svc-y", "y-1", shared = listOf("test.Search")) }.apply { next() }
+        val x1 = RawClient().also { it.register("svc-x", "x-1", shared = listOf("test.Search")) }.apply { next() }
+        val x2 = RawClient().also { it.register("svc-x", "x-2", shared = listOf("test.Search")) }.apply { next() }
+        val y1 = RawClient().also { it.register("svc-y", "y-1", shared = listOf("test.Search")) }.apply { next() }
         withTimeout(TIMEOUT_MS) { while (hub.connectedInstances().size < 3) kotlinx.coroutines.delay(10) }
-        val sender = RawClient().also { it.registerV2("svc-s", "s-1") }.apply { next() }
+        val sender = RawClient().also { it.register("svc-s", "s-1") }.apply { next() }
 
         sender.send(scatter("g1", "test.Search"))
         val targets = listOf(x1, x2, y1).map { it.next().request }
@@ -379,10 +357,10 @@ class InProcessHubTest {
 
     @Test
     fun `max_results ends early and the deadline counts the missing targets`() = runBlocking {
-        val x1 = RawClient().also { it.registerV2("svc-x", "x-1", shared = listOf("test.Search")) }.apply { next() }
-        val y1 = RawClient().also { it.registerV2("svc-y", "y-1", shared = listOf("test.Search")) }.apply { next() }
+        val x1 = RawClient().also { it.register("svc-x", "x-1", shared = listOf("test.Search")) }.apply { next() }
+        val y1 = RawClient().also { it.register("svc-y", "y-1", shared = listOf("test.Search")) }.apply { next() }
         withTimeout(TIMEOUT_MS) { while (hub.connectedInstances().size < 2) kotlinx.coroutines.delay(10) }
-        val sender = RawClient().also { it.registerV2("svc-s", "s-1") }.apply { next() }
+        val sender = RawClient().also { it.register("svc-s", "s-1") }.apply { next() }
 
         sender.send(scatter("g1", "test.Search", maxResults = 1))
         x1.next(); y1.next()
@@ -404,8 +382,8 @@ class InProcessHubTest {
     }
 
     @Test
-    fun `scatter-gather refusals - no target, a command, senders without the capability, the P3 emulation`() = runBlocking {
-        val sender = RawClient().also { it.registerV2("svc-s", "s-1") }.apply { next() }
+    fun `scatter-gather refusals - no target, a command`() = runBlocking {
+        val sender = RawClient().registered("svc-s", "s-1")
         sender.send(scatter("g1", "test.Nobody"))
         assertEquals(ErrorCode.NO_HANDLER, sender.next().error.code)
 
@@ -413,21 +391,6 @@ class InProcessHubTest {
         awaitRegistered("test.Cmd")
         sender.send(scatter("g2", "test.Cmd"))
         assertEquals(ErrorCode.INVALID_REQUEST, sender.next().error.code)
-
-        val undeclared = RawClient().also { it.registerV2("svc-u", "u-1", capabilities = emptyList()) }.apply { next() }
-        undeclared.send(scatter("g3", "test.Cmd"))
-        assertEquals(ErrorCode.INVALID_REQUEST, undeclared.next().error.code)
-        val v1 = RawClient().also { it.register("svc-v", "v-1") }
-        v1.send(scatter("g4", "test.Cmd"))
-        assertEquals(ErrorCode.INVALID_REQUEST, v1.next().error.code)
-
-        hub.scatterGather = false // a P3 hub: no capability, shared types ignored
-        val p3 = RawClient().also { it.registerV2("svc-p", "p-1", shared = listOf("test.Search")) }
-        assertTrue(p3.next().hasRegisterAck())
-        p3.send(scatter("g5", "test.Cmd"))
-        assertEquals(ErrorCode.INVALID_REQUEST, p3.next().error.code)
-        kotlinx.coroutines.delay(50)
-        assertTrue("test.Search" !in hub.registeredTypes())
     }
 
     // --- streaming queries (P4b) ---
@@ -450,15 +413,15 @@ class InProcessHubTest {
 
     private fun cancel(id: String, reason: String) = ClientMessage.newBuilder().setCancel(Cancel.newBuilder().setRequestId(id).setReason(reason)).build()
 
-    private suspend fun streamingPair(handlerCapabilities: List<String> = listOf("streaming", "scatter-gather")): Pair<RawClient, RawClient> {
-        val handler = RawClient().also { it.registerV2("svc-h", "h-1", queries = listOf("test.Export"), capabilities = handlerCapabilities) }.apply { next() }
+    private suspend fun streamingPair(): Pair<RawClient, RawClient> {
+        val handler = RawClient().also { it.register("svc-h", "h-1", queries = listOf("test.Export")) }.apply { next() }
         awaitRegistered("test.Export")
-        val sender = RawClient().also { it.registerV2("svc-s", "s-1", capabilities = listOf("streaming", "scatter-gather")) }.apply { next() }
+        val sender = RawClient().also { it.register("svc-s", "s-1") }.apply { next() }
         return handler to sender
     }
 
     @Test
-    fun `a streaming request goes to one capable instance and its parts flow back under the sender's credit`() = runBlocking {
+    fun `a streaming request goes to one instance and its parts flow back under the sender's credit`() = runBlocking {
         val (handler, sender) = streamingPair()
         sender.send(stream("s1", "test.Export", timeoutMs = 5_000, credit = 2))
         val forwarded = handler.next().request
@@ -541,16 +504,14 @@ class InProcessHubTest {
         assertEquals("late failure", endError.error.message)
         assertEquals(0, endError.parts)
 
-        // A unary Reply to a streaming target (not a streaming library): one part then the end; Reply{error} as the end's error.
+        // A unary Reply to a streaming target answers no unary request: ignored, like the real hub.
         sender.send(stream("s5", "test.Export", credit = 8))
         handler.next()
         handler.reply("s5#1", "{\"one\":true}")
-        assertEquals("{\"one\":true}", sender.next().part.payload.toStringUtf8())
-        assertEquals(1, sender.next().end.parts)
-        sender.send(stream("s6", "test.Export", credit = 8))
-        handler.next()
-        handler.send(ClientMessage.newBuilder().setReply(Reply.newBuilder().setRequestId("s6#1").setError(Error.newBuilder().setRequestId("s6#1").setCode(ErrorCode.HANDLER_ERROR).setMessage("unary boom"))).build())
-        assertEquals("unary boom", sender.next().end.error.message)
+        sender.nothingWithin(100)
+        assertEquals(1, hub.openStreams())
+        handler.send(end("s5#1"))
+        assertEquals(0, sender.next().end.parts)
     }
 
     @Test
@@ -589,16 +550,8 @@ class InProcessHubTest {
     }
 
     @Test
-    fun `streaming refusals follow the gate order, and multi-part client messages need the capability`() = runBlocking {
-        val v1 = RawClient().also { it.register("svc-v", "v-1") }
-        v1.send(stream("r1", "test.Export"))
-        assertEquals(ErrorCode.INVALID_REQUEST, v1.next().error.code)
-
-        val undeclared = RawClient().also { it.registerV2("svc-u", "u-1", capabilities = emptyList()) }.apply { next() }
-        undeclared.send(stream("r2", "test.Export"))
-        assertEquals(ErrorCode.INVALID_REQUEST, undeclared.next().error.code)
-
-        val sender = RawClient().also { it.registerV2("svc-s", "s-1", capabilities = listOf("streaming")) }.apply { next() }
+    fun `streaming refusals follow the gate order, an unknown mode is INVALID_REQUEST, other sessions' messages are ignored`() = runBlocking {
+        val sender = RawClient().registered("svc-s", "s-1")
         sender.send(stream("r3", "test.Export"))
         assertEquals(ErrorCode.NO_HANDLER, sender.next().error.code)
 
@@ -607,38 +560,31 @@ class InProcessHubTest {
         sender.send(stream("r4", "test.Cmd"))
         assertEquals(ErrorCode.INVALID_REQUEST, sender.next().error.code)
 
-        // The owner has instances, none negotiated streaming: UNSUPPORTED, naming the service and the capability.
-        val old = RawClient().also { it.registerV2("svc-h", "h-old", queries = listOf("test.Export"), capabilities = listOf("scatter-gather")) }.apply { next() }
-        awaitRegistered("test.Export")
-        sender.send(stream("r5", "test.Export"))
-        val none = sender.next().error
-        assertEquals(ErrorCode.INVALID_REQUEST, none.code)
-        assertTrue("svc-h" in none.message && "streaming" in none.message, none.message)
-        old.nothingWithin(50)
+        val handler = RawClient().registered("svc-h", "h-1", queries = listOf("test.Export"))
+        val other = RawClient().registered("svc-o", "o-1")
+        withTimeout(TIMEOUT_MS) { while (hub.connectedInstances().size < 4) kotlinx.coroutines.delay(10) }
+        sender.send(
+            ClientMessage.newBuilder().setRequest(
+                Request.newBuilder().setId("r5").setKind(RequestKind.QUERY).setType("test.Export").setModeValue(99).setPayload(ByteString.copyFromUtf8("{}")),
+            ).build(),
+        )
+        val unknown = sender.next().error
+        assertEquals(ErrorCode.INVALID_REQUEST to "invalid request: unknown request mode 99", unknown.code to unknown.message)
 
-        val handler = RawClient().also { it.registerV2("svc-h", "h-1", queries = listOf("test.Export"), capabilities = listOf("streaming")) }.apply { next() }
-        withTimeout(TIMEOUT_MS) { while (hub.connectedInstances().size < 5) kotlinx.coroutines.delay(10) }
         repeat(2) { sender.send(stream("r6-$it", "test.Export", timeoutMs = 5_000)) }
-        repeat(2) { handler.next() } // only the capable instance is a target
-        old.nothingWithin(50)
+        repeat(2) { handler.next() }
         sender.send(stream("r6-0", "test.Export"))
         assertEquals(ErrorCode.INVALID_REQUEST, sender.next().error.code) // duplicate id
         sender.send(stream("r6-0#1", "test.Export"))
         assertEquals(ErrorCode.INVALID_REQUEST, sender.next().error.code) // duplicate target id
 
-        // Flow and Cancel from a session that did not negotiate streaming are ignored; so are parts from a non-target.
-        undeclared.send(flow("r6-0", 5))
-        undeclared.send(cancel("r6-0", "nope"))
-        old.send(part("r6-0#1", 1, "{}"))
+        // Flow and Cancel from a session that is not the stream's sender are ignored; so are parts from a non-target.
+        other.send(flow("r6-0", 5))
+        other.send(cancel("r6-0", "nope"))
+        other.send(part("r6-0#1", 1, "{}"))
         handler.nothingWithin(100)
         sender.nothingWithin(50)
         assertEquals(2, hub.openStreams())
-
-        hub.streaming = false // a P4a hub: no capability in the ack, STREAMING is UNSUPPORTED
-        val p4a = RawClient().also { it.registerV2("svc-p", "p-1", capabilities = listOf("streaming", "scatter-gather")) }
-        assertTrue(p4a.next().hasRegisterAck())
-        p4a.send(stream("r7", "test.Export"))
-        assertEquals(ErrorCode.INVALID_REQUEST, p4a.next().error.code)
     }
 
     @Test
@@ -653,7 +599,7 @@ class InProcessHubTest {
         assertEquals(ErrorCode.HANDLER_DISCONNECTED, lost.error.code)
         assertEquals(1, lost.parts)
 
-        val handler2 = RawClient().also { it.registerV2("svc-h", "h-2", queries = listOf("test.Export"), capabilities = listOf("streaming")) }.apply { next() }
+        val handler2 = RawClient().also { it.register("svc-h", "h-2", queries = listOf("test.Export")) }.apply { next() }
         awaitRegistered("test.Export")
         sender.send(stream("s2", "test.Export", timeoutMs = 5_000, credit = 8))
         handler2.next()
@@ -664,30 +610,31 @@ class InProcessHubTest {
     }
 
     @Test
-    fun `a gather that ends early cancels its forwarded targets that negotiated streaming`() = runBlocking {
-        val capable = RawClient().also { it.registerV2("svc-x", "x-1", shared = listOf("test.Search"), capabilities = listOf("streaming", "scatter-gather")) }.apply { next() }
-        val plain = RawClient().also { it.registerV2("svc-y", "y-1", shared = listOf("test.Search"), capabilities = listOf("scatter-gather")) }.apply { next() }
+    fun `a gather that ends early cancels its forwarded targets`() = runBlocking {
+        val x = RawClient().registered("svc-x", "x-1", shared = listOf("test.Search"))
+        val y = RawClient().registered("svc-y", "y-1", shared = listOf("test.Search"))
         withTimeout(TIMEOUT_MS) { while (hub.connectedInstances().size < 2) kotlinx.coroutines.delay(10) }
-        val sender = RawClient().also { it.registerV2("svc-s", "s-1", capabilities = listOf("streaming", "scatter-gather")) }.apply { next() }
+        val sender = RawClient().registered("svc-s", "s-1")
 
         sender.send(scatter("g1", "test.Search", maxResults = 1))
-        capable.next(); plain.next()
-        plain.reply("g1#1", "{}")
+        x.next(); y.next()
+        y.reply("g1#1", "{}")
         assertTrue(sender.next().hasPart())
         assertEquals(1, sender.next().end.parts)
-        assertEquals("g1#0" to "max results", capable.next().cancel.let { it.requestId to it.reason })
-        plain.nothingWithin(100)
+        assertEquals("g1#0" to "max results", x.next().cancel.let { it.requestId to it.reason })
+        y.nothingWithin(100) // it answered: nothing to cancel
 
         sender.send(scatter("g2", "test.Search", timeoutMs = 200))
-        capable.next(); plain.next()
+        x.next(); y.next()
         assertEquals(2, sender.next().end.timedOut) // both missed the deadline
-        assertEquals("deadline", capable.next().cancel.reason)
+        assertEquals("g2#0" to "deadline", x.next().cancel.let { it.requestId to it.reason })
+        assertEquals("g2#1" to "deadline", y.next().cancel.let { it.requestId to it.reason })
 
         sender.send(scatter("g3", "test.Search", timeoutMs = 5_000))
-        capable.next(); plain.next()
+        x.next(); y.next()
         hub.dropInstance("s-1")
-        assertEquals("sender disconnected", capable.next().cancel.reason)
-        plain.nothingWithin(100)
+        assertEquals("sender disconnected", x.next().cancel.reason)
+        assertEquals("sender disconnected", y.next().cancel.reason)
     }
 
     // --- subscription queries (P4c) ---
@@ -708,12 +655,12 @@ class InProcessHubTest {
         return out
     }
 
-    /** Two handlers of the shared `acct.Watch` (svc-a / a-1 and svc-b / b-1, both with `subscription`) and a sender with it. */
+    /** Two handlers of the shared `acct.Watch` (svc-a / a-1 and svc-b / b-1) and a sender. */
     private suspend fun subscriptionTrio(): Triple<RawClient, RawClient, RawClient> {
-        val a = RawClient().also { it.registerV2("svc-a", "a-1", shared = listOf("acct.Watch"), capabilities = listOf("subscription")) }.apply { next() }
-        val b = RawClient().also { it.registerV2("svc-b", "b-1", shared = listOf("acct.Watch"), capabilities = listOf("subscription")) }.apply { next() }
+        val a = RawClient().also { it.register("svc-a", "a-1", shared = listOf("acct.Watch")) }.apply { next() }
+        val b = RawClient().also { it.register("svc-b", "b-1", shared = listOf("acct.Watch")) }.apply { next() }
         withTimeout(TIMEOUT_MS) { while (hub.connectedInstances().size < 2) kotlinx.coroutines.delay(10) }
-        val sender = RawClient().also { it.registerV2("svc-web", "s-1", capabilities = listOf("subscription", "streaming")) }
+        val sender = RawClient().also { it.register("svc-web", "s-1") }
         assertTrue(sender.next().hasRegisterAck())
         return Triple(a, b, sender)
     }
@@ -740,7 +687,7 @@ class InProcessHubTest {
     private class Opened(val initial: RawClient, val ta: String, val tb: String)
 
     @Test
-    fun `a subscription reaches every capable target, one answers the initial, updates are renumbered, the last clean end ends it`() = runBlocking {
+    fun `a subscription reaches every target, one answers the initial, updates are renumbered, the last clean end ends it`() = runBlocking {
         val (a, b, sender) = subscriptionTrio()
         val opened = open(sender, a, b, "sub1")
         assertEquals("sub1#1" to "sub1#2", opened.ta to opened.tb)
@@ -890,8 +837,8 @@ class InProcessHubTest {
         assertEquals(ErrorCode.HANDLER_DISCONNECTED to 2, lost.error.code to lost.parts)
         assertEquals(0, hub.openSubscriptions())
 
-        val a2 = RawClient().also { it.registerV2("svc-a", "a-2", shared = listOf("acct.Watch"), capabilities = listOf("subscription")) }.apply { next() }
-        val b2 = RawClient().also { it.registerV2("svc-b", "b-2", shared = listOf("acct.Watch"), capabilities = listOf("subscription")) }.apply { next() }
+        val a2 = RawClient().also { it.register("svc-a", "a-2", shared = listOf("acct.Watch")) }.apply { next() }
+        val b2 = RawClient().also { it.register("svc-b", "b-2", shared = listOf("acct.Watch")) }.apply { next() }
         withTimeout(TIMEOUT_MS) { while (hub.connectedInstances().size < 3) kotlinx.coroutines.delay(10) }
         val second = open(sender, a2, b2, "sub2")
         hub.dropInstance("s-1")
@@ -901,18 +848,8 @@ class InProcessHubTest {
     }
 
     @Test
-    fun `subscription refusals follow the gate order, and a P4b hub answers UNSUPPORTED`() = runBlocking {
-        val v1 = RawClient().also { it.register("svc-v", "v-1") }
-        v1.send(subscribe("r1", "acct.Watch"))
-        assertEquals(ErrorCode.INVALID_REQUEST, v1.next().error.code)
-
-        val undeclared = RawClient().also { it.registerV2("svc-u", "u-1", capabilities = listOf("streaming")) }.apply { next() }
-        undeclared.send(subscribe("r2", "acct.Watch"))
-        val unsupported = undeclared.next().error
-        assertEquals(ErrorCode.INVALID_REQUEST, unsupported.code)
-        assertTrue("\"subscription\"" in unsupported.message, unsupported.message)
-
-        val sender = RawClient().also { it.registerV2("svc-s", "s-1", capabilities = listOf("subscription")) }.apply { next() }
+    fun `subscription refusals follow the gate order`() = runBlocking {
+        val sender = RawClient().registered("svc-s", "s-1")
         sender.send(subscribe("r3", "acct.Watch"))
         assertEquals(ErrorCode.NO_HANDLER, sender.next().error.code)
 
@@ -921,20 +858,12 @@ class InProcessHubTest {
         sender.send(subscribe("r4", "test.Cmd"))
         assertEquals(ErrorCode.INVALID_REQUEST, sender.next().error.code)
 
-        // The owner has instances, none negotiated subscription: UNSUPPORTED naming the service and the capability.
-        val old = RawClient().also { it.registerV2("svc-h", "h-old", queries = listOf("acct.Watch"), capabilities = listOf("streaming")) }.apply { next() }
-        awaitRegistered("acct.Watch")
-        sender.send(subscribe("r5", "acct.Watch"))
-        val none = sender.next().error
-        assertEquals(ErrorCode.INVALID_REQUEST, none.code)
-        assertTrue("svc-h" in none.message && "subscription" in none.message, none.message)
-        old.nothingWithin(50)
-
-        val handler = RawClient().also { it.registerV2("svc-h", "h-1", queries = listOf("acct.Watch"), capabilities = listOf("subscription")) }.apply { next() }
-        withTimeout(TIMEOUT_MS) { while (hub.connectedInstances().size < 5) kotlinx.coroutines.delay(10) }
+        val handler = RawClient().registered("svc-h", "h-1", queries = listOf("acct.Watch"))
+        val other = RawClient().registered("svc-o", "o-1")
+        withTimeout(TIMEOUT_MS) { while (hub.connectedInstances().size < 4) kotlinx.coroutines.delay(10) }
         sender.send(subscribe("r6", "acct.Watch"))
-        assertEquals(setOf("r6#1", "r6#0"), handler.requests().keys) // only the capable instance is a target
-        old.nothingWithin(50)
+        assertEquals(setOf("r6#1", "r6#0"), handler.requests().keys)
+        other.nothingWithin(50)
         sender.send(subscribe("r6", "acct.Watch"))
         assertEquals(ErrorCode.INVALID_REQUEST, sender.next().error.code) // duplicate id
         sender.send(request("r6#0", "acct.Watch"))
@@ -954,30 +883,9 @@ class InProcessHubTest {
 
         // A unary Reply to an update target is ignored; a part from a non-target is ignored.
         handler.reply("r6#1", "{}")
-        old.send(part("r6#1", 1, "{}"))
+        other.send(part("r6#1", 1, "{}"))
         sender.nothingWithin(100)
         assertEquals(1, hub.openSubscriptions())
-
-        hub.subscription = false // a P4b hub: no capability in the ack, SUBSCRIPTION is UNSUPPORTED
-        val p4b = RawClient().also { it.registerV2("svc-p", "p-1", capabilities = listOf("subscription", "streaming")) }
-        assertTrue(p4b.next().hasRegisterAck())
-        p4b.send(subscribe("r8", "acct.Watch"))
-        assertEquals(ErrorCode.INVALID_REQUEST, p4b.next().error.code)
-    }
-
-    @Test
-    fun `a gather that ends early also cancels its forwarded targets that negotiated only subscription`() = runBlocking {
-        val capable = RawClient().also { it.registerV2("svc-x", "x-1", shared = listOf("test.Search"), capabilities = listOf("subscription", "scatter-gather")) }.apply { next() }
-        val plain = RawClient().also { it.registerV2("svc-y", "y-1", shared = listOf("test.Search"), capabilities = listOf("scatter-gather")) }.apply { next() }
-        withTimeout(TIMEOUT_MS) { while (hub.connectedInstances().size < 2) kotlinx.coroutines.delay(10) }
-        val sender = RawClient().also { it.registerV2("svc-s", "s-1", capabilities = listOf("scatter-gather")) }.apply { next() }
-        sender.send(scatter("g1", "test.Search", maxResults = 1))
-        capable.next(); plain.next()
-        plain.reply("g1#1", "{}")
-        assertTrue(sender.next().hasPart())
-        assertEquals(1, sender.next().end.parts)
-        assertEquals("g1#0" to "max results", capable.next().cancel.let { it.requestId to it.reason })
-        plain.nothingWithin(100)
     }
 
     private companion object {

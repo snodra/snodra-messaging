@@ -37,16 +37,13 @@ data class KrakenMessagingProperties(
          * of them (one connection per hub), or one `dns:///name:port` re-resolved every 30 s. Parsed by `HubTargets`.
          */
         val address: String = "static://kraken-hub:7000",
-        /** How often an `InstanceStatus` report goes to every hub that supports it (capability `instance-status`). */
+        /** How often an `InstanceStatus` report goes to every hub. */
         val statusInterval: Duration = Duration.ofSeconds(5),
         /**
-         * Per-request timeout sent as `timeout_ms`. Unset (default): a v2 hub applies its default (5 s) or its per-type
-         * override (`KRAKEN_HUB_TIMEOUT_OVERRIDES`); a legacy hub gets 5 s. Set it only to force one timeout for every
-         * request of this service.
+         * Per-request timeout sent as `timeout_ms`. Unset (default): the hub applies its default (5 s) or its per-type
+         * override (`KRAKEN_HUB_TIMEOUT_OVERRIDES`). Set it only to force one timeout for every request of this service.
          */
         val requestTimeout: Duration? = null,
-        /** Heartbeat period used only when the hub does not announce one (legacy hubs); a v2 hub announces 3 s. */
-        val heartbeatInterval: Duration = Duration.ofSeconds(10),
         /** Jittered exponential backoff when the stream drops. */
         val reconnectBackoff: Backoff = Backoff(),
         /**
@@ -92,7 +89,7 @@ data class KrakenMessagingProperties(
          * `KRAKEN_MESSAGING_HUB_TOKEN_FILE`, or `KRAKEN_HUB_TOKEN_FILE` when this property is unset.
          */
         val tokenFile: Path? = null,
-        /** TLS towards the hub (P5a): off by default (plain text, as before). */
+        /** TLS towards the hub (P5a): off by default (plain text). */
         val tls: Tls = Tls(),
         /**
          * Keycloak client-credentials authentication (P5b, ADR 0019): the service gets an access token from [OAuth2.tokenUri] and
@@ -103,7 +100,7 @@ data class KrakenMessagingProperties(
     ) {
         /** The token never appears: every other field as the data class prints it. */
         override fun toString(): String = "Hub(enabled=$enabled, address=$address, statusInterval=$statusInterval, " +
-            "requestTimeout=$requestTimeout, heartbeatInterval=$heartbeatInterval, reconnectBackoff=$reconnectBackoff, " +
+            "requestTimeout=$requestTimeout, reconnectBackoff=$reconnectBackoff, " +
             "maxConcurrentHandlers=$maxConcurrentHandlers, loadFactor=$loadFactor, tags=$tags, priorities=$priorities, " +
             "retry=$retry, streamCreditTimeout=$streamCreditTimeout, maxSubscriptions=$maxSubscriptions, " +
             "token=${if (token.isNullOrEmpty()) token else "****"}, tokenFile=$tokenFile, tls=$tls, oauth2=$oauth2)"
@@ -245,7 +242,7 @@ data class KrakenMessagingProperties(
 
     /** `kafka.dead-letter.*` (P6a, ADR 0022): what an event processor does with a record it cannot handle. */
     data class DeadLetter(
-        /** `collection` (park in `dead_letters`, the default), `topic` (produce to `<topic>.dlt`) or `log` (log and skip, as before P6a). */
+        /** `collection` (park in `dead_letters`, the default), `topic` (produce to `<topic>.dlt`) or `log` (log and skip: nothing is parked). */
         val mode: DeadLetterMode = DeadLetterMode.COLLECTION,
         /** A letter is deleted this long after it was parked (TTL index on `expireAt`), which also unblocks its key; at least 1 s. */
         val retention: Duration = Duration.ofDays(30),

@@ -8,6 +8,6 @@ enum class DeadLetterMode(val wireName: String) {
     /** Produce it to `<topic>.dlt` with `kraken-dlt-*` headers; the topic belongs to the operator's tooling. */
     TOPIC("topic"),
 
-    /** Log it (never the payload) and skip it: the behaviour before P6a. */
+    /** Log it (never the payload) and skip it: nothing is parked. */
     LOG("log"),
 }

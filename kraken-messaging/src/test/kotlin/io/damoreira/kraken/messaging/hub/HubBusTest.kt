@@ -99,7 +99,6 @@ class HubBusTest {
     private val invoker = HandlerInvoker(registry, codec)
     private val settings = HubSettings(
         requestTimeout = Duration.ofSeconds(2),
-        heartbeatInterval = Duration.ofSeconds(10),
         backoffMin = Duration.ofMillis(20),
         backoffMax = Duration.ofMillis(200),
     )

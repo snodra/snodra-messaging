@@ -35,27 +35,18 @@ interface HubTransport {
     /** See [HubConnection.hubTimeoutFor]. */
     fun hubTimeoutFor(type: String): java.time.Duration
 
-    /** See [HubConnection.gather]. A transport without scatter-gather fails with `UnsupportedByHubException`. */
+    /** See [HubConnection.gather]. */
     suspend fun gather(
         request: io.damoreira.kraken.hub.v1.Request,
         onPart: suspend (io.damoreira.kraken.hub.v1.ReplyPart) -> Unit,
-    ): io.damoreira.kraken.hub.v1.ServerMessage = throw io.damoreira.kraken.messaging.UnsupportedByHubException(
-        HubProtocol.SCATTER_GATHER,
-        "${this::class.simpleName} does not support ${HubProtocol.SCATTER_GATHER}",
-    )
+    ): io.damoreira.kraken.hub.v1.ServerMessage
 
-    /** See [HubConnection.stream]. A transport without streaming fails with `UnsupportedByHubException`. */
+    /** See [HubConnection.stream]. */
     suspend fun stream(
         request: io.damoreira.kraken.hub.v1.Request,
         onPart: suspend (io.damoreira.kraken.hub.v1.ReplyPart) -> Unit,
-    ): io.damoreira.kraken.hub.v1.ServerMessage = throw io.damoreira.kraken.messaging.UnsupportedByHubException(
-        HubProtocol.STREAMING,
-        "${this::class.simpleName} does not support ${HubProtocol.STREAMING}",
-    )
+    ): io.damoreira.kraken.hub.v1.ServerMessage
 
-    /** See [HubConnection.subscribe]. A transport without subscriptions fails with `UnsupportedByHubException`. */
-    suspend fun subscribe(request: io.damoreira.kraken.hub.v1.Request): SubscribeResult = throw io.damoreira.kraken.messaging.UnsupportedByHubException(
-        HubProtocol.SUBSCRIPTION,
-        "${this::class.simpleName} does not support ${HubProtocol.SUBSCRIPTION}",
-    )
+    /** See [HubConnection.subscribe]. */
+    suspend fun subscribe(request: io.damoreira.kraken.hub.v1.Request): SubscribeResult
 }

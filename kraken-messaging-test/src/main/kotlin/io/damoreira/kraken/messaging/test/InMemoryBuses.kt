@@ -33,7 +33,6 @@ import io.damoreira.kraken.messaging.handler.HandlerRegistry
 import io.damoreira.kraken.messaging.handler.InvocationResult
 import io.damoreira.kraken.messaging.handler.SubscriptionAdmission
 import io.damoreira.kraken.messaging.hub.HubErrors
-import io.damoreira.kraken.messaging.hub.HubProtocol
 import io.damoreira.kraken.hub.v1.ErrorCode
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
@@ -132,7 +131,7 @@ class InMemoryBuses(
             val failure = invoker.invokeStream(type, codec.encode(query), context(type), identity()) { payload ->
                 emit(codec.decode(payload, elementType) as R)
             }
-            if (failure != null) throw HubErrors.toException(type, failure.code, failure.message, failure.details, HubProtocol.STREAMING)
+            if (failure != null) throw HubErrors.toException(type, failure.code, failure.message, failure.details)
         }
         return if (options.maxResults > 0) parts.take(options.maxResults) else parts
     }
@@ -141,10 +140,10 @@ class InMemoryBuses(
     override suspend fun <I, U> subscribe(query: SubscriptionQuery<I, U>, options: SubscriptionOptions): SubscriptionResult<I, U> {
         val type = resolver.typeNameOf(query::class)
         val payload = codec.encode(query)
-        if (registry.queryHandler(type) == null) throw HubErrors.toException(type, ErrorCode.NO_HANDLER, "", ByteArray(0), HubProtocol.SUBSCRIPTION)
+        if (registry.queryHandler(type) == null) throw HubErrors.toException(type, ErrorCode.NO_HANDLER, "", ByteArray(0), subscription = true)
         val decoded = when (val admission = invoker.admitSubscription(type, payload, context(type), identity())) {
             is SubscriptionAdmission.Rejected -> admission.failure.let {
-                throw HubErrors.toException(type, it.code, it.message, it.details, HubProtocol.SUBSCRIPTION)
+                throw HubErrors.toException(type, it.code, it.message, it.details, subscription = true)
             }
             is SubscriptionAdmission.Accepted -> admission.query
         }
@@ -228,7 +227,7 @@ class InMemoryBuses(
                 subscription.channel.close()
             } else {
                 val message = "${cause::class.simpleName}: ${cause.message}"
-                subscription.channel.close(HubErrors.toException(subscription.type, ErrorCode.HANDLER_ERROR, message, ByteArray(0), HubProtocol.SUBSCRIPTION))
+                subscription.channel.close(HubErrors.toException(subscription.type, ErrorCode.HANDLER_ERROR, message, ByteArray(0), subscription = true))
             }
         }
 

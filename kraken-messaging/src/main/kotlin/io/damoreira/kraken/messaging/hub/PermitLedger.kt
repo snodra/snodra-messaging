@@ -4,13 +4,11 @@ package io.damoreira.kraken.messaging.hub
  * Permit accounting of one hub stream (flow control, ADR 0014): decides when the permits of completed handlers are
  * written back in a `Permits` message.
  *
- * Per stream it keeps `initial` (the `Register.initial_permits` sent on it), `received` (requests that arrived on it,
- * counted whatever the flow-control mode), `returned` (permits written in `Permits` messages, top-ups included) and
- * `pending` (handlers completed, permits not yet written). The hub therefore still holds `initial - received +
- * returned` permits for this stream. A top-up ([toppedUp], multi-hub: another hub went away) adds to `returned`: it is
- * written with `Permits.grant`, which raises the hub's cap on the session so the hub keeps it. (A hub that predates
- * the grant clamps it away; the ledger then over-counts, which only delays a grant by at most
- * [HubProtocol.PERMIT_FLUSH_DELAY].) On each completion, `pending += 1`, then:
+ * Per stream it keeps `initial` (the `Register.initial_permits` sent on it), `received` (requests that arrived on it),
+ * `returned` (permits written in `Permits` messages, top-ups included) and `pending` (handlers completed, permits not
+ * yet written). The hub therefore still holds `initial - received + returned` permits for this stream. A top-up
+ * ([toppedUp], multi-hub: another hub went away) adds to `returned`: it is written with `Permits.grant`, which raises
+ * the hub's cap on the session so the hub keeps it. On each completion, `pending += 1`, then:
  *
  * - the hub holds at most the low-water mark `min(PERMIT_BATCH, initial / 2)`: flush now (with one permit, every
  *   completion goes back at once instead of after [HubProtocol.PERMIT_FLUSH_DELAY]);
@@ -18,8 +16,7 @@ package io.damoreira.kraken.messaging.hub
  * - else arm the [HubProtocol.PERMIT_FLUSH_DELAY] timer unless it is armed.
  *
  * A flush writes `Permits{count = pending}`, `returned += pending`, `pending = 0`; the timer flush does the same.
- * Completions before the handshake are held: [handshake] applies the same rule to them when the hub shares
- * flow control and drops them otherwise (no `Permits` are ever sent to such a hub). Thread-safe.
+ * Thread-safe.
  */
 internal class PermitLedger(private val initial: Int) {
 
@@ -36,7 +33,6 @@ internal class PermitLedger(private val initial: Int) {
     }
 
     private val lowWaterMark: Long = minOf(HubProtocol.PERMIT_BATCH, initial / 2).toLong()
-    private var flowControl: Boolean? = null // null until the handshake
     private var received = 0L
     private var returned = 0L
     private var pending = 0
@@ -49,27 +45,13 @@ internal class PermitLedger(private val initial: Int) {
 
     /** A handler of a request from the stream completed. */
     @Synchronized fun handlerCompleted(): Step {
-        if (flowControl == false) return Step.Wait
         pending++
-        return if (flowControl == true) decide() else Step.Wait
+        return decide()
     }
 
-    /** The stream's handshake: whether the hub shares flow control. Decides the completions held until now. */
-    @Synchronized fun handshake(flowControl: Boolean): Step {
-        this.flowControl = flowControl
-        if (!flowControl) {
-            pending = 0
-            return Step.Wait
-        }
-        return if (pending > 0) decide() else Step.Wait
-    }
-
-    /**
-     * [count] extra permits are about to be written in a `Permits` message of their own (not paid for by handlers).
-     * False (write nothing) unless the stream's handshake confirmed flow control.
-     */
+    /** [count] extra permits are about to be written in a `Permits` message of their own (not paid for by handlers); false (write nothing) for none. */
     @Synchronized fun toppedUp(count: Int): Boolean {
-        if (flowControl != true || count <= 0) return false
+        if (count <= 0) return false
         returned += count
         return true
     }

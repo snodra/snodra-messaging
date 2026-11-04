@@ -55,12 +55,12 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 /**
- * Subscription queries (P4c, ADR 0017) against two real `kraken-hub:p4c-hub` containers (`KRAKEN_HUB_P4C_IMAGE`) in the P3
+ * Subscription queries (P4c, ADR 0017) against two containers of the hub image under test (`KRAKEN_HUB_IMAGE`) in the
  * multi-hub configuration: every instance is connected to both hubs. Two services own `test.WatchAccount` (a shared type)
  * through the real handler stack and their own [QueryUpdateEmitter]; a third subscribes through `QueryBus.subscribe`,
  * connected to the first hub only so that every subscription lands on it.
  *
- * The hub exports its metrics over OTLP only (`kraken_hub_subscriptions_open` is not readable over HTTP) and `/topology`
+ * The hub exports its metrics over OTLP only (`kraken_hub_subscriptions_open` is not readable over HTTP) and `/api/v1/topology`
  * does not show subscriptions, so what the hub holds open is observed through its limit: the hubs run with
  * `KRAKEN_HUB_MAX_SUBSCRIPTIONS_PER_INSTANCE=1`, a second subscription is refused with `RESOURCE_EXHAUSTED` while the
  * first is open, and accepted again once the hub has released it (the owners' registries emptying shows the hub's `Cancel`
@@ -75,7 +75,6 @@ class SubscriptionQueryEndToEndTest {
     private val resolver = MessageTypeResolver("test")
     private val defaults = HubSettings(
         requestTimeout = null,
-        heartbeatInterval = Duration.ofSeconds(10),
         backoffMin = Duration.ofMillis(500),
         backoffMax = Duration.ofSeconds(5),
     )
@@ -171,7 +170,7 @@ class SubscriptionQueryEndToEndTest {
     // --- helpers ---
 
     private fun startHubs(): List<Hub> {
-        Assumptions.assumeTrue(KrakenContainers.hubP4cImageAvailable(), "P4c hub image not available")
+        Assumptions.assumeTrue(KrakenContainers.hubImageAvailable(), "hub image under test not built")
         val suffix = UUID.randomUUID().toString().take(8)
         return listOf(start("e2e-p4c-1-$suffix"), start("e2e-p4c-2-$suffix"))
     }
@@ -179,7 +178,7 @@ class SubscriptionQueryEndToEndTest {
     private fun start(id: String): Hub {
         val grpc = ServerSocket(0).use { it.localPort }
         val web = ServerSocket(0).use { it.localPort }
-        val container = KrakenContainers.hubP4c()
+        val container = KrakenContainers.hub()
             .withEnv("KRAKEN_HUB_OTLP_ENDPOINT", "")
             .withEnv("KRAKEN_HUB_ID", id)
             .withEnv("KRAKEN_HUB_MAX_SUBSCRIPTIONS_PER_INSTANCE", "1")

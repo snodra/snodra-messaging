@@ -9,7 +9,6 @@ import io.damoreira.kraken.messaging.e2e.control.ItemAdded
 import io.damoreira.kraken.messaging.e2e.control.Ledger
 import io.damoreira.kraken.messaging.e2e.control.Notifier
 import io.damoreira.kraken.messaging.hub.HubConnections
-import io.damoreira.kraken.messaging.hub.HubHandshake
 import io.damoreira.kraken.messaging.test.KrakenContainers
 import kotlinx.coroutines.runBlocking
 import org.apache.kafka.clients.admin.AdminClient
@@ -44,7 +43,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
- * Processor control end to end (P6b, ADR 0023): a Spring Boot service against the real `kraken-hub:p6b-hub`, driven through
+ * Processor control end to end (P6b, ADR 0023): a Spring Boot service against the real hub image under test, driven through
  * the hub's HTTP API with the write token: pause (records held, PAUSED in the hub), resume, a reset to `earliest` that
  * replays the named processor (its `@ResetHandler` ran once, its `@DisallowReplay` handler did not run again), and the dead
  * letters listed, retried and discarded through the hub. The dashboard token is refused on a write. Skips when the image is
@@ -62,13 +61,13 @@ class ProcessorControlEndToEndTest {
     private val codec = JsonCodec()
 
     @BeforeAll fun startAll() {
-        Assumptions.assumeTrue(KrakenContainers.hubP6bImageAvailable(), "kraken-hub:p6b-hub not built")
+        Assumptions.assumeTrue(KrakenContainers.hubImageAvailable(), "hub image under test not built")
         kafka = KrakenContainers.kafka().also { it.start() }
         mongo = KrakenContainers.mongo().also { it.start() }
         AdminClient.create(mapOf<String, Any>("bootstrap.servers" to kafka.bootstrapServers)).use {
             it.createTopics(listOf(NewTopic(topic, 2, 1.toShort()))).all().get()
         }
-        hub = KrakenContainers.hubP6b()
+        hub = KrakenContainers.hub()
             .withEnv("KRAKEN_HUB_OTLP_ENDPOINT", "")
             .withEnv("KRAKEN_HUB_DASHBOARD_TOKEN", READ_TOKEN)
             .withEnv("KRAKEN_HUB_DASHBOARD_WRITE_TOKEN", WRITE_TOKEN)
@@ -129,7 +128,7 @@ class ProcessorControlEndToEndTest {
         return services.singleOrNull { it["serviceName"].asString() == "svc-p6b" }?.get("processors")?.nodes()?.singleOrNull { it["name"].asString() == name }
     }
 
-    @Test fun `pause, resume, reset and dead letters through the P6b hub's HTTP API`() {
+    @Test fun `pause, resume, reset and dead letters through the hub's HTTP API`() {
         val connection = ctx.getBean(HubConnections::class.java).connections().single()
         val catalog = ctx.getBean(Catalog::class.java)
         val notifier = ctx.getBean(Notifier::class.java)

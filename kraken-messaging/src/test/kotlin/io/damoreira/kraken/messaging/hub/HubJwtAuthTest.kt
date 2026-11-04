@@ -73,7 +73,6 @@ class HubJwtAuthTest {
 
     private fun settings(provider: HubTokenProvider?) = HubSettings(
         requestTimeout = Duration.ofSeconds(2),
-        heartbeatInterval = Duration.ofSeconds(10),
         backoffMin = Duration.ofMillis(20),
         backoffMax = Duration.ofMillis(300),
         tokenProvider = provider,
@@ -128,25 +127,24 @@ class HubJwtAuthTest {
 
     // --- refresh on the wire ---
 
-    @Test fun `a renewed token goes to live streams whose ack lists credentials-refresh, and to no other`() {
-        hubB.credentialsRefresh = false // a pre-P5b hub: no capability in its ack
+    @Test fun `a renewed token goes to every live stream`() {
         oauth.expiresIn = 2
         val provider = provider()
         val settings = settings(provider)
-        val capable = connection(hubA, "i-1", settings).also { it.start() }
-        val incapable = connection(hubB, "i-1", settings).also { it.start() }
-        runBlocking { assertTrue(capable.awaitRegistered(wait) && incapable.awaitRegistered(wait)) }
+        val onA = connection(hubA, "i-1", settings).also { it.start() }
+        val onB = connection(hubB, "i-1", settings).also { it.start() }
+        runBlocking { assertTrue(onA.awaitRegistered(wait) && onB.awaitRegistered(wait)) }
         val first = hubA.jwtsSeenFrom("i-1").single()
 
-        await atMost wait until { hubA.credentialsSeenFrom("i-1").isNotEmpty() }
-        val sent = hubA.credentialsSeenFrom("i-1")
-        assertFalse(first in sent, "a fresh token, not the Register's")
-        assertTrue(sent.all { it in oauth.tokens }, "only tokens the endpoint issued")
-        assertTrue(hubB.credentialsSeenFrom("i-1").isEmpty(), "a hub that did not offer the capability gets nothing")
-        assertEquals(1, hubA.sessionsOf("i-1"))
-        assertEquals(1, hubA.streamsOpenedBy("i-1"), "refreshed on the same stream, no reconnect")
-        assertTrue(capable.credentialsRefreshesSent >= 1)
-        assertEquals(0, incapable.credentialsRefreshesSent)
+        await atMost wait until { hubA.credentialsSeenFrom("i-1").isNotEmpty() && hubB.credentialsSeenFrom("i-1").isNotEmpty() }
+        for (hub in listOf(hubA, hubB)) {
+            val sent = hub.credentialsSeenFrom("i-1")
+            assertFalse(first in sent, "a fresh token, not the Register's")
+            assertTrue(sent.all { it in oauth.tokens }, "only tokens the endpoint issued")
+            assertEquals(1, hub.sessionsOf("i-1"))
+            assertEquals(1, hub.streamsOpenedBy("i-1"), "refreshed on the same stream, no reconnect")
+        }
+        assertTrue(onA.credentialsRefreshesSent >= 1 && onB.credentialsRefreshesSent >= 1)
     }
 
     @Test fun `a token renewed before the ack arrives is sent as soon as the handshake completes, not at the next renewal`() {

@@ -125,7 +125,7 @@ class HubAutoConfiguration {
         // One provider for every hub connection: N hubs, one access token (a failure here is a startup error, before any thread runs).
         val provider = hubOAuth2(properties, environment, token)?.let { HubTokenProvider(TokenEndpoint(it), scope) }
         val settings = HubSettings(
-            hub.requestTimeout, hub.heartbeatInterval, hub.reconnectBackoff.min, hub.reconnectBackoff.max, hub.streamCreditTimeout, token, provider,
+            hub.requestTimeout, hub.reconnectBackoff.min, hub.reconnectBackoff.max, hub.streamCreditTimeout, token, provider,
             clientCertificate,
         )
         val handlerDispatcher = Executors.newVirtualThreadPerTaskExecutor().asCoroutineDispatcher()

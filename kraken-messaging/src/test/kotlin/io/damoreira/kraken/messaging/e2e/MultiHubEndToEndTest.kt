@@ -49,7 +49,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 /**
- * Multi-hub HA (P3, ADR 0016) against two real `kraken-hub:p3-hub` containers (`KRAKEN_HUB_P3_IMAGE`): every instance
+ * Multi-hub HA (P3, ADR 0016) against two containers of the hub image under test (`KRAKEN_HUB_IMAGE`): every instance
  * registers on both hubs, reports both ids, spreads unkeyed requests over both and survives losing one. Each hub gets
  * fixed host ports so a stopped container comes back on the same address. Skips when the image is not built.
  */
@@ -62,7 +62,6 @@ class MultiHubEndToEndTest {
     private val json = JsonMapper.builder().build()
     private val defaults = HubSettings(
         requestTimeout = null,
-        heartbeatInterval = Duration.ofSeconds(10),
         backoffMin = Duration.ofMillis(500),
         backoffMax = Duration.ofSeconds(5),
     )
@@ -214,7 +213,7 @@ class MultiHubEndToEndTest {
     @Test fun `two targets of one hub - the instance stays registered and served without interruption`() = runBlocking {
         // The real hub keeps one session per instance id: a second stream with the same id replaces the first. Two
         // targets of one hub (an alias, or the A and AAAA records of one name) must settle on one stream and stay there.
-        Assumptions.assumeTrue(KrakenContainers.hubP3ImageAvailable(), "P3 hub image not available")
+        Assumptions.assumeTrue(KrakenContainers.hubImageAvailable(), "hub image under test not built")
         val hub = start("e2e-hub-alias-" + UUID.randomUUID().toString().take(8))
         val aliasDialed = AtomicBoolean()
         val b = HubConnections(
@@ -252,7 +251,7 @@ class MultiHubEndToEndTest {
             delay(50)
         }
         log.info("Alias test: {} polls/calls, absent {} times, {} failures", calls, absent.size, failures.size)
-        assertTrue(absent.isEmpty(), "svc-b missing from /topology at ${absent.size} of $calls polls")
+        assertTrue(absent.isEmpty(), "svc-b missing from /api/v1/topology at ${absent.size} of $calls polls")
         assertTrue(failures.isEmpty(), "failed calls: $failures")
         assertEquals(1, b.connections().size)
         assertEquals(listOf(hub.id), b.liveHubIds())
@@ -261,7 +260,7 @@ class MultiHubEndToEndTest {
     // --- helpers ---
 
     private fun startHubs(): Pair<Hub, Hub> {
-        Assumptions.assumeTrue(KrakenContainers.hubP3ImageAvailable(), "P3 hub image not available")
+        Assumptions.assumeTrue(KrakenContainers.hubImageAvailable(), "hub image under test not built")
         val suffix = UUID.randomUUID().toString().take(8)
         return start("e2e-hub-1-$suffix") to start("e2e-hub-2-$suffix")
     }
@@ -269,7 +268,7 @@ class MultiHubEndToEndTest {
     private fun start(id: String): Hub {
         val grpc = ServerSocket(0).use { it.localPort }
         val web = ServerSocket(0).use { it.localPort }
-        val container = KrakenContainers.hubP3()
+        val container = KrakenContainers.hub()
             .withEnv("KRAKEN_HUB_OTLP_ENDPOINT", "")
             .withEnv("KRAKEN_HUB_ID", id)
             .withCreateContainerCmdModifier { cmd ->
@@ -295,7 +294,7 @@ class MultiHubEndToEndTest {
             withTimeout(30_000) {
                 while (true) {
                     val ok = runCatching {
-                        get(hub, "/topology")
+                        get(hub, "/api/v1/topology")
                         HubGrpcKt.HubCoroutineStub(channel).withDeadlineAfter(1, TimeUnit.SECONDS)
                             .topology(TopologyRequest.getDefaultInstance())
                     }.isSuccess
@@ -338,7 +337,7 @@ class MultiHubEndToEndTest {
     }
 
     private suspend fun instance(hub: Hub, service: String, instanceId: String): JsonNode? =
-        get(hub, "/topology")["services"]
+        get(hub, "/api/v1/topology")["services"]
             .firstOrNull { it["serviceName"].asString() == service }
             ?.get("instances")?.firstOrNull { it["instanceId"].asString() == instanceId }
 

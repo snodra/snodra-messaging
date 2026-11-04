@@ -77,8 +77,8 @@ class ExportHandlers {
 }
 
 /**
- * Streaming queries (P4b, ADR 0017) against two real `kraken-hub:p4b-hub` containers (`KRAKEN_HUB_P4B_IMAGE`) in the
- * P3 multi-hub configuration: every instance is connected to both hubs. One service streams through the real handler
+ * Streaming queries (P4b, ADR 0017) against two containers of the hub image under test (`KRAKEN_HUB_IMAGE`) in the
+ * multi-hub configuration: every instance is connected to both hubs. One service streams through the real handler
  * stack (registry, dispatcher, credits), the other collects through `QueryBus.stream`. Skips when the image is not built.
  */
 class StreamingQueryEndToEndTest {
@@ -90,7 +90,6 @@ class StreamingQueryEndToEndTest {
     private val resolver = MessageTypeResolver("test")
     private val defaults = HubSettings(
         requestTimeout = null,
-        heartbeatInterval = Duration.ofSeconds(10),
         backoffMin = Duration.ofMillis(500),
         backoffMax = Duration.ofSeconds(5),
     )
@@ -160,7 +159,7 @@ class StreamingQueryEndToEndTest {
     // --- helpers ---
 
     private fun startHubs(): List<Hub> {
-        Assumptions.assumeTrue(KrakenContainers.hubP4bImageAvailable(), "P4b hub image not available")
+        Assumptions.assumeTrue(KrakenContainers.hubImageAvailable(), "hub image under test not built")
         val suffix = UUID.randomUUID().toString().take(8)
         return listOf(start("e2e-p4b-1-$suffix"), start("e2e-p4b-2-$suffix"))
     }
@@ -168,7 +167,7 @@ class StreamingQueryEndToEndTest {
     private fun start(id: String): Hub {
         val grpc = ServerSocket(0).use { it.localPort }
         val web = ServerSocket(0).use { it.localPort }
-        val container = KrakenContainers.hubP4b()
+        val container = KrakenContainers.hub()
             .withEnv("KRAKEN_HUB_OTLP_ENDPOINT", "")
             .withEnv("KRAKEN_HUB_ID", id)
             .withCreateContainerCmdModifier { cmd ->

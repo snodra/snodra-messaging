@@ -8,7 +8,6 @@ import io.damoreira.kraken.messaging.e2e.processors.OrderPlaced
 import io.damoreira.kraken.messaging.e2e.processors.OrdersProjection
 import io.damoreira.kraken.messaging.e2e.processors.ProcessorsService
 import io.damoreira.kraken.messaging.hub.HubConnections
-import io.damoreira.kraken.messaging.hub.HubHandshake
 import io.damoreira.kraken.messaging.test.KrakenContainers
 import kotlinx.coroutines.runBlocking
 import org.apache.kafka.clients.admin.AdminClient
@@ -43,8 +42,8 @@ import kotlin.test.assertTrue
 
 /**
  * Event processors end to end (ADR 0022): a Spring Boot service with a `default` handler and a named processor, its status
- * reported to the real `kraken-hub:p6a-hub` (`GET /api/v1/processors`, `/topology`), a poisoned event parked and retried;
- * the same service against `kraken-hub:p5c` negotiates no `processors` and sends it none. Skips when an image is not built.
+ * reported to the real hub image under test (`GET /api/v1/processors`, `/api/v1/topology`), a poisoned event parked and
+ * retried. Skips when the image is not built.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class ProcessorsEndToEndTest {
@@ -58,7 +57,7 @@ class ProcessorsEndToEndTest {
     private val codec = JsonCodec()
 
     @BeforeAll fun startAll() {
-        Assumptions.assumeTrue(KrakenContainers.hubP6aImageAvailable(), "kraken-hub:p6a-hub not built")
+        Assumptions.assumeTrue(KrakenContainers.hubImageAvailable(), "hub image under test not built")
         kafka = KrakenContainers.kafka().also { it.start() }
         mongo = KrakenContainers.mongo().also { it.start() }
     }
@@ -121,8 +120,8 @@ class ProcessorsEndToEndTest {
 
     private fun JsonNode.nodes(): List<JsonNode> = (0 until size()).map { get(it) }
 
-    @Test fun `the P6a hub shows both processors with their group, state, partitions and dead letters`() {
-        val hub = startHub(KrakenContainers.hubP6a())
+    @Test fun `the hub shows both processors with their group, state, partitions and dead letters`() {
+        val hub = startHub(KrakenContainers.hub())
         val ctx = service(hub, "svc-p6a")
         val connection = ctx.getBean(HubConnections::class.java).connections().single()
 
@@ -157,7 +156,7 @@ class ProcessorsEndToEndTest {
             assertEquals(3L, partitions.nodes().sumOf { it["highWatermark"].asLong() })
         }
         // The raw report is in the topology as well.
-        val instance = get(hub, "/topology")["services"].nodes().single { it["serviceName"].asString() == "svc-p6a" }["instances"].nodes().single()
+        val instance = get(hub, "/api/v1/topology")["services"].nodes().single { it["serviceName"].asString() == "svc-p6a" }["instances"].nodes().single()
         assertEquals(setOf("default", "orders"), instance["processors"].nodes().map { it["name"].asString() }.toSet())
 
         // Fix nothing, retry the head: still failing; the follower stays blocked; discard the head, retry the rest.
@@ -169,21 +168,5 @@ class ProcessorsEndToEndTest {
         assertTrue(deadLetters.discard(head.id))
         assertEquals(RetryResult.Retried, deadLetters.retry(follower.id))
         assertEquals(listOf("o-1", "o-2", "o-2", "o-2", "o-3"), ctx.getBean(OrdersProjection::class.java).seen.sorted())
-    }
-
-    @Test fun `a P5c hub negotiates no processors and is never sent any`() {
-        Assumptions.assumeTrue(KrakenContainers.hubP5cImageAvailable(), "kraken-hub:p5c not built")
-        val hub = startHub(KrakenContainers.hubP5c())
-        val ctx = service(hub, "svc-p5c")
-        val connection = ctx.getBean(HubConnections::class.java).connections().single()
-        val ack = (connection.handshake.value as HubHandshake.V2).ack
-        publish(OrderPlaced("q-1"), "k1")
-        await().atMost(Duration.ofSeconds(30)).until { ctx.getBean(Audit::class.java).seen.contains("q-1") }
-        await().atMost(Duration.ofSeconds(10)).until { (connection.lastStatus?.connectedHubIdsCount ?: 0) > 0 }
-        val processors = ctx.getBean(io.damoreira.kraken.messaging.kafka.ProcessorStatusSource::class.java).processorStatuses()
-        assertEquals(setOf("default", "orders"), processors.map { it.name }.toSet(), "the processors exist")
-        Thread.sleep(1500)
-        assertEquals(0, connection.lastStatus!!.processorsCount, "but the P5c hub is never sent them")
-        assertTrue(connection.statusReportsWritten >= 2)
     }
 }

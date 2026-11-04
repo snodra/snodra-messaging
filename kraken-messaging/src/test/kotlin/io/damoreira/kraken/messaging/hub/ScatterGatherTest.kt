@@ -16,7 +16,6 @@ import io.damoreira.kraken.messaging.NoHandlerException
 import io.damoreira.kraken.messaging.RetryPolicy
 import io.damoreira.kraken.messaging.ScatterOptions
 import io.damoreira.kraken.messaging.ScatterPart
-import io.damoreira.kraken.messaging.UnsupportedByHubException
 import io.damoreira.kraken.messaging.codec.JsonCodec
 import io.damoreira.kraken.messaging.codec.MessageTypeResolver
 import io.damoreira.kraken.messaging.fixtures.Count
@@ -76,7 +75,6 @@ class ScatterGatherTest {
     private val invoker = HandlerInvoker(registry, codec)
     private val settings = HubSettings(
         requestTimeout = Duration.ofSeconds(2),
-        heartbeatInterval = Duration.ofSeconds(10),
         backoffMin = Duration.ofMillis(20),
         backoffMax = Duration.ofMillis(200),
     )
@@ -133,9 +131,9 @@ class ScatterGatherTest {
         }
     }
 
-    // --- registration and capability ---
+    // --- registration ---
 
-    @Test fun `register declares scatter-gather and lists shared query types apart`() = runBlocking {
+    @Test fun `register lists shared query types apart`() = runBlocking {
         val conn = connection("a")
         conn.register(setOf("test.Ping"), setOf("test.Get"), setOf("test.GetCount"))
         conn.start()
@@ -143,30 +141,6 @@ class ScatterGatherTest {
         val register = hub.lastRegisterFrom("a")!!
         assertEquals(listOf("test.Get"), register.queryTypesList)
         assertEquals(listOf("test.GetCount"), register.sharedQueryTypesList)
-        assertTrue(conn.supportsScatterGather)
-    }
-
-    @Test fun `a hub without the capability is UnsupportedByHub and nothing is sent`() = runBlocking {
-        hub.scatterGather = false // a P3 hub: it ignores shared_query_types, so the owner registers exclusive
-        owner("svc-x", "x-1", shared = false) { req -> count(req.id, 7) }
-        val conn = connection("caller")
-        conn.start()
-        assertTrue(conn.awaitRegistered(wait))
-        assertEquals(false, conn.supportsScatterGather)
-        val e = assertFailsWith<UnsupportedByHubException> { bus(conn).scatterGather(GetCount("k")) }
-        assertEquals("scatter-gather", e.feature)
-        assertFailsWith<UnsupportedByHubException> { bus(conn).scatterGatherFlow(GetCount("k")).toList() }
-        assertEquals(0, hub.requestsFrom("caller"))
-        assertEquals(Count(7), bus(conn).send(GetCount("k"))) // unary queries still work
-    }
-
-    @Test fun `a legacy hub is UnsupportedByHub`() = runBlocking {
-        hub.legacy = true
-        val conn = connection("caller")
-        conn.start()
-        assertTrue(conn.awaitRegistered(wait))
-        assertFailsWith<UnsupportedByHubException> { bus(conn).scatterGather(GetCount("k")) }
-        assertEquals(0, hub.requestsFrom("caller"))
     }
 
     // --- the gather ---
@@ -422,12 +396,12 @@ class ScatterGatherTest {
 
     // --- multi-hub (P3) ---
 
-    @Test fun `one gather goes to one hub, and only to hubs with the capability`() = runBlocking {
-        val old = hub { scatterGather = false }
-        owner("svc-x", "x-new", hubName = hub.name) { req -> count(req.id, 1) }
-        owner("svc-x", "x-old", shared = false, hubName = old.name) { req -> count(req.id, 1) }
+    @Test fun `one gather goes to one hub, round-robin over the live hubs`() = runBlocking {
+        val other = hub()
+        owner("svc-x", "x-1", hubName = hub.name) { req -> count(req.id, 1) }
+        owner("svc-x", "x-2", hubName = other.name) { req -> count(req.id, 2) }
         val conns = HubConnections(
-            targets = HubTargets.Static(listOf(hub.name, old.name)),
+            targets = HubTargets.Static(listOf(hub.name, other.name)),
             channelFactory = { target -> InProcessChannelBuilder.forName(target).build() },
             serviceName = "svc-caller",
             instanceId = "caller",
@@ -438,14 +412,9 @@ class ScatterGatherTest {
         conns.start()
         assertTrue(conns.awaitRegistered(wait))
         val bus = bus(conns)
-        repeat(4) { assertEquals(1, bus.scatterGather(GetCount("k")).parts.size) }
-        assertEquals(4, hub.requestsFrom("caller"))
-        assertEquals(0, old.requestsFrom("caller"))
-
-        hub.close() // only the hub without the capability is left
-        withTimeout(3_000) { while (conns.liveHubIds() != listOf(old.hubId)) delay(10) }
-        assertFailsWith<UnsupportedByHubException> { bus.scatterGather(GetCount("k")) }
-        assertEquals(0, old.requestsFrom("caller"))
+        repeat(4) { assertEquals(1, bus.scatterGather(GetCount("k")).parts.size) } // each hub knows only its own owner
+        assertEquals(2, hub.requestsFrom("caller"))
+        assertEquals(2, other.requestsFrom("caller"))
     }
 
     // --- helpers ---

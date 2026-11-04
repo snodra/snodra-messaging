@@ -105,7 +105,7 @@ class HubJwtEndToEndTest {
         inbound: suspend (Request) -> Reply = { req -> Reply.newBuilder().setRequestId(req.id).build() },
     ): HubConnection {
         val settings = HubSettings(
-            requestTimeout = null, heartbeatInterval = Duration.ofSeconds(10),
+            requestTimeout = null,
             backoffMin = Duration.ofMillis(200), backoffMax = Duration.ofSeconds(1), tokenProvider = provider,
         )
         val factory = DefaultHubChannelFactory()

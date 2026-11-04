@@ -54,7 +54,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
- * Hub access control and TLS (P5a, ADR 0018) against `kraken-hub:p5a-hub` (`KRAKEN_HUB_P5A_IMAGE`) in mode `enforce`, with an
+ * Hub access control and TLS (P5a, ADR 0018) against the hub image under test (`KRAKEN_HUB_IMAGE`) in mode `enforce`, with an
  * ACL file and a TLS certificate generated for each test: tokens are random strings, the certificate is created at test
  * time, nothing is checked in. The tests skip when the image is not built.
  */
@@ -88,8 +88,8 @@ class HubSecurityEndToEndTest {
     }
 
     private fun hub(tls: TestCertificates? = null, mode: String = "enforce"): GenericContainer<*> {
-        Assumptions.assumeTrue(KrakenContainers.hubP5aImageAvailable(), "P5a hub image not available")
-        return KrakenContainers.hubP5a(dir, acl, mode, tls).also {
+        Assumptions.assumeTrue(KrakenContainers.hubImageAvailable(), "hub image under test not built")
+        return KrakenContainers.hubAcl(dir, acl, mode, tls).also {
             containers += it
             it.start()
         }
@@ -104,7 +104,7 @@ class HubSecurityEndToEndTest {
         inbound: suspend (Request) -> Reply = { req -> Reply.newBuilder().setRequestId(req.id).build() },
     ): HubConnection {
         val settings = HubSettings(
-            requestTimeout = null, heartbeatInterval = Duration.ofSeconds(10),
+            requestTimeout = null,
             backoffMin = Duration.ofMillis(200), backoffMax = Duration.ofSeconds(1), token = HubToken.of(token, null),
         )
         val factory = DefaultHubChannelFactory(HubTls(enabled = tls != null, caFile = tls?.certificate))

@@ -88,7 +88,7 @@ class HubCertificateSessionTest {
     }
 
     private fun settings(certificate: HubClientCertificate?, token: HubToken = HubToken.NONE) = HubSettings(
-        requestTimeout = Duration.ofSeconds(2), heartbeatInterval = Duration.ofSeconds(10),
+        requestTimeout = Duration.ofSeconds(2),
         backoffMin = Duration.ofMillis(20), backoffMax = cap, token = token, clientCertificate = certificate,
     )
 

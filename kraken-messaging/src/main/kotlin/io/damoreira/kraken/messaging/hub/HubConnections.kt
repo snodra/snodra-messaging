@@ -8,7 +8,6 @@ import io.damoreira.kraken.hub.v1.Request
 import io.damoreira.kraken.hub.v1.ServerMessage
 import io.damoreira.kraken.messaging.HubRegistrationRejectedException
 import io.damoreira.kraken.messaging.HubUnavailableException
-import io.damoreira.kraken.messaging.UnsupportedByHubException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
@@ -32,7 +31,7 @@ import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * This instance's connections to every hub (multi-hub HA, ADR 0016): one [HubConnection] (one `Connect` stream, with its
- * own handshake, heartbeat, reconnect backoff and legacy detection) per hub target, all sending the identical
+ * own handshake, heartbeat and reconnect backoff) per hub target, all sending the identical
  * registration. With a single target it behaves like that one connection.
  *
  * - **Targets**: [HubTargets.Static] connects to each listed target; [HubTargets.Dns] resolves the name every
@@ -40,7 +39,7 @@ import java.util.concurrent.atomic.AtomicInteger
  *   once idle (it first announces an empty registration, then waits up to [dnsRefresh] for its requests and handlers).
  *   An address resolved again while its connection is still draining revives that connection (its registration is
  *   announced again) instead of opening a second stream. A failed or empty resolution keeps the current connections.
- * - **Dedupe**: a hub is its `RegisterAck.hub_id` (a legacy hub: its target). The first target to acknowledge an id
+ * - **Dedupe**: a hub is its `RegisterAck.hub_id`. The first target to acknowledge an id
  *   owns it for as long as that target is kept, live or reconnecting: the hub keeps one session per instance id, so a
  *   second target of the same hub (an alias) replaces the owner's session with its `Register`, and the owner's stream
  *   ends before the alias's ack arrives. A target that acknowledges an owned id is therefore closed and parked
@@ -54,18 +53,15 @@ import java.util.concurrent.atomic.AtomicInteger
  *   The whole call has one deadline: the request's `timeout_ms` when set (the caller's `SendOptions.timeout` or
  *   `request-timeout`), else `requestTimeout`, else 5 s. Waiting ends there with [HubUnavailableException], and a request
  *   sent again carries what is left of its `timeout_ms`. A request already written fails with
- *   `HubConnectionLostException` as before.
- * - **Scatter-gather**: one gather goes to one live hub, round-robin like an unkeyed request, chosen among the hubs whose
- *   ack lists `scatter-gather` (during a rolling hub upgrade the others are skipped); with live hubs and none of them
- *   capable it fails at once with [UnsupportedByHubException]. A gather not yet written fails over like a request; once
- *   written, a broken stream fails it with `HubConnectionLostException` (the parts already received are not asked again).
- * - **Streaming** (P4b): a streaming query goes to one live hub whose ack lists `streaming`, chosen and failed over
- *   exactly like a gather; with live hubs and none capable it fails at once with [UnsupportedByHubException]. Its
+ *   `HubConnectionLostException`.
+ * - **Scatter-gather**: one gather goes to one live hub, round-robin like an unkeyed request. A gather not yet written
+ *   fails over like a request; once written, a broken stream fails it with `HubConnectionLostException` (the parts
+ *   already received are not asked again).
+ * - **Streaming** (P4b): a streaming query goes to one live hub, chosen and failed over exactly like a gather. Its
  *   `timeout_ms` is the idle timeout and is sent whole, never reduced by a hub wait or a failover (the deadline of the
  *   call bounds only those); a collector exception (`StreamCollectorException`) is never a reason to fail over.
- * - **Subscriptions** (P4c): a subscription goes to one live hub whose ack lists `subscription`, chosen and failed over
- *   like a gather; with live hubs and none capable it fails at once with [UnsupportedByHubException]. `timeout_ms` bounds
- *   the initial request (as for a unary request: what is left of the call's deadline after a hub wait is sent). Instances
+ * - **Subscriptions** (P4c): a subscription goes to one live hub, chosen and failed over like a gather. `timeout_ms`
+ *   bounds the initial request (as for a unary request: what is left of the call's deadline after a hub wait is sent). Instances
  *   serve subscriptions from every hub they are connected to through one shared [SubscriptionRegistry].
  * - **Permits**: a stream announces `ceil(maxConcurrentHandlers / N)` initial permits, N = 1 (itself) + the other kept
  *   hubs that are live or still on their first connect attempt. Whenever that set changes, every live hub's stream is
@@ -87,10 +83,8 @@ import java.util.concurrent.atomic.AtomicInteger
  *   `NO_HANDLER`). Open subscriptions of the rolled stream end (the hub tells their subscribers `HANDLER_DISCONNECTED`). A roll that does not
  *   complete stops the rollover for that pair (one ERROR); the remaining hubs keep the old pair until the files change again. An unexpected
  *   exception in a check is logged once and the next tick checks again.
- * - **Status**: every [statusInterval], and whenever the live set changes, each live hub whose ack lists
- *   `instance-status` gets an `InstanceStatus` with the ids of the acknowledged (protocol v2) live hubs and the handlers
- *   in flight, plus the event processors ([processors], P6a) when the ack also lists `processors`. Hubs without the
- *   capability never get one.
+ * - **Status**: every [statusInterval], and whenever the live set changes, each live hub gets an `InstanceStatus` with the
+ *   ids of the live hubs, the handlers in flight and the event processors ([processors], P6a).
  */
 class HubConnections(
     private val targets: HubTargets,
@@ -280,47 +274,40 @@ class HubConnections(
      * `Reply` or `Error`, with [HubConnection.send]'s exceptions.
      */
     override suspend fun send(request: Request): ServerMessage =
-        route(request, eligible = { true }, declined = { it.hasError() && it.error.code == ErrorCode.NO_HANDLER }) { connection, outgoing ->
+        route(request, declined = { it.hasError() && it.error.code == ErrorCode.NO_HANDLER }) { connection, outgoing ->
             connection.send(outgoing, awaitStream = false)
         }
 
     /**
-     * Sends [request] as a scatter-gather through one live hub that supports it (see the class comment), with
-     * [HubConnection.gather]'s parts, result and exceptions.
-     *
-     * @throws UnsupportedByHubException when hubs are live but none lists `scatter-gather`
+     * Sends [request] as a scatter-gather through one live hub (see the class comment), with [HubConnection.gather]'s parts,
+     * result and exceptions.
      */
     override suspend fun gather(request: Request, onPart: suspend (ReplyPart) -> Unit): ServerMessage =
-        route(request, eligible = { it.supportsScatterGather }, feature = HubProtocol.SCATTER_GATHER) { connection, outgoing ->
+        route(request) { connection, outgoing ->
             connection.gather(outgoing, awaitStream = false, onPart)
         }
 
     /**
-     * Sends [request] as a streaming query through one live hub that supports it (see the class comment), with
-     * [HubConnection.stream]'s parts, result and exceptions.
-     *
-     * @throws UnsupportedByHubException when hubs are live but none lists `streaming`
+     * Sends [request] as a streaming query through one live hub (see the class comment), with [HubConnection.stream]'s
+     * parts, result and exceptions.
      */
     override suspend fun stream(request: Request, onPart: suspend (ReplyPart) -> Unit): ServerMessage =
-        route(request, eligible = { it.supportsStreaming }, feature = HubProtocol.STREAMING, keepTimeout = true) { connection, outgoing ->
+        route(request, keepTimeout = true) { connection, outgoing ->
             connection.stream(outgoing, awaitStream = false, onPart)
         }
 
     /**
-     * Sends [request] as a subscription query through one live hub that supports it (see the class comment), with
-     * [HubConnection.subscribe]'s result and exceptions. `timeout_ms` bounds the initial request: it is what is left of the
-     * call's deadline after a hub wait or a hub that did not take the request, as for [send].
-     *
-     * @throws UnsupportedByHubException when hubs are live but none lists `subscription`
+     * Sends [request] as a subscription query through one live hub (see the class comment), with [HubConnection.subscribe]'s
+     * result and exceptions. `timeout_ms` bounds the initial request: it is what is left of the call's deadline after a hub
+     * wait or a hub that did not take the request, as for [send].
      */
     override suspend fun subscribe(request: Request): SubscribeResult =
-        route(request, eligible = { it.supportsSubscription }, feature = HubProtocol.SUBSCRIPTION) { connection, outgoing ->
+        route(request) { connection, outgoing ->
             connection.subscribe(outgoing, awaitStream = false)
         }
 
     /**
-     * The hub choice and failover of [send], [gather], [stream] and [subscribe], restricted to the hubs that are [eligible] for
-     * [feature]. A positive `timeout_ms` is one deadline for the whole call: a hub wait or a hub that did not take the
+     * The hub choice and failover of [send], [gather], [stream] and [subscribe]. A positive `timeout_ms` is one deadline for the whole call: a hub wait or a hub that did not take the
      * request uses some of it and the request is sent with what is left, unless [keepTimeout] (a stream: `timeout_ms`
      * is its idle timeout, sent whole; the deadline bounds only the hub wait and the retries). A hub whose answer is [declined]
      * (`NO_HANDLER` for a unary request) is skipped like one that could not take the request; when every live hub declined, the
@@ -328,8 +315,6 @@ class HubConnections(
      */
     private suspend fun <T> route(
         request: Request,
-        eligible: (HubConnection) -> Boolean,
-        feature: String = HubProtocol.SCATTER_GATHER,
         keepTimeout: Boolean = false,
         declined: (T) -> Boolean = { false },
         call: suspend (HubConnection, Request) -> T,
@@ -343,14 +328,7 @@ class HubConnections(
         var lastDeclined: T? = null
         while (true) {
             val hubs = live.value
-            val capable = hubs.filter(eligible)
-            if (hubs.isNotEmpty() && capable.isEmpty()) {
-                throw UnsupportedByHubException(
-                    feature,
-                    "no connected hub supports $feature (hubs: ${hubs.joinToString { it.hubId ?: it.target }})",
-                )
-            }
-            val connection = choose(request, capable.filter { it !in tried })
+            val connection = choose(request, hubs.filter { it !in tried })
             // Every live hub answered that it has no handler (see [declined]): that is the answer, not a reason to wait for a hub to appear.
             if (connection == null && lastDeclined != null) return lastDeclined
             val leftMs = (deadline - System.nanoTime()) / 1_000_000
@@ -455,7 +433,7 @@ class HubConnections(
                 self = connection
                 types?.let { connection.register(it.commands, it.queries, it.shared) }
                 val watcher = scope.launch(start = CoroutineStart.LAZY) {
-                    merge(connection.handshake, connection.firstAttemptOver).collect { onHandshake(connection) }
+                    merge(connection.ack, connection.firstAttemptOver).collect { onHandshake(connection) }
                 }
                 active[target] = Member(connection, watcher)
                 connection to watcher
@@ -557,7 +535,7 @@ class HubConnections(
     private fun reportStatus() {
         val hubs = live.value
         if (hubs.isEmpty()) return
-        val ids = hubs.filter { it.handshake.value is HubHandshake.V2 }.mapNotNull { it.hubId }.distinct()
+        val ids = hubs.mapNotNull { it.hubId }.distinct()
         val handlers = gate.inFlightHandlers.value
         val processors = try {
             processors()

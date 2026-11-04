@@ -51,8 +51,8 @@ import kotlin.test.assertIs
 import kotlin.test.assertTrue
 
 /**
- * Scatter-gather and shared query types (P4a, ADR 0017) against two real `kraken-hub:p4a-hub` containers
- * (`KRAKEN_HUB_P4A_IMAGE`) in the P3 multi-hub configuration: every instance is connected to both hubs. Skips when the
+ * Scatter-gather and shared query types (P4a, ADR 0017) against two containers of the hub image under test
+ * (`KRAKEN_HUB_IMAGE`) in the multi-hub configuration: every instance is connected to both hubs. Skips when the
  * image is not built.
  */
 class ScatterGatherEndToEndTest {
@@ -62,7 +62,6 @@ class ScatterGatherEndToEndTest {
     private val containers = mutableListOf<GenericContainer<*>>()
     private val defaults = HubSettings(
         requestTimeout = null,
-        heartbeatInterval = Duration.ofSeconds(10),
         backoffMin = Duration.ofMillis(500),
         backoffMax = Duration.ofSeconds(5),
     )
@@ -142,7 +141,7 @@ class ScatterGatherEndToEndTest {
     // --- helpers ---
 
     private fun startHubs(): List<Hub> {
-        Assumptions.assumeTrue(KrakenContainers.hubP4aImageAvailable(), "P4a hub image not available")
+        Assumptions.assumeTrue(KrakenContainers.hubImageAvailable(), "hub image under test not built")
         val suffix = UUID.randomUUID().toString().take(8)
         return listOf(start("e2e-p4a-1-$suffix"), start("e2e-p4a-2-$suffix"))
     }
@@ -150,7 +149,7 @@ class ScatterGatherEndToEndTest {
     private fun start(id: String): Hub {
         val grpc = ServerSocket(0).use { it.localPort }
         val web = ServerSocket(0).use { it.localPort }
-        val container = KrakenContainers.hubP4a()
+        val container = KrakenContainers.hub()
             .withEnv("KRAKEN_HUB_OTLP_ENDPOINT", "")
             .withEnv("KRAKEN_HUB_ID", id)
             .withCreateContainerCmdModifier { cmd ->

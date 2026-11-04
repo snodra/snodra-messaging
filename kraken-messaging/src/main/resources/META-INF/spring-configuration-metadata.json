@@ -138,22 +138,15 @@
     {
       "name": "kraken.messaging.hub.status-interval",
       "type": "java.time.Duration",
-      "description": "Period of the InstanceStatus report sent to every hub whose RegisterAck lists the instance-status capability (must be positive).",
+      "description": "Period of the InstanceStatus report sent to every hub (must be positive).",
       "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Hub",
       "defaultValue": "5s"
     },
     {
       "name": "kraken.messaging.hub.request-timeout",
       "type": "java.time.Duration",
-      "description": "Per-request timeout sent as timeout_ms. Unset: a protocol v2 hub applies its default or per-type override, a legacy hub gets 5s. 0s counts as unset.",
+      "description": "Per-request timeout sent as timeout_ms. Unset: the hub applies its default or per-type override. 0s counts as unset.",
       "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Hub"
-    },
-    {
-      "name": "kraken.messaging.hub.heartbeat-interval",
-      "type": "java.time.Duration",
-      "description": "Fallback heartbeat period, used only when the hub does not announce one in its RegisterAck (legacy hubs).",
-      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Hub",
-      "defaultValue": "10s"
     },
     {
       "name": "kraken.messaging.hub.reconnect-backoff.min",
@@ -545,7 +538,7 @@
         },
         {
           "value": "log",
-          "description": "Log and skip (before P6a)."
+          "description": "Log and skip: nothing is parked."
         }
       ]
     }

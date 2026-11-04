@@ -63,7 +63,6 @@ import io.damoreira.kraken.messaging.StreamCancelledException
 import io.damoreira.kraken.messaging.StreamOptions
 import io.damoreira.kraken.messaging.SubscriptionOptions
 import io.damoreira.kraken.messaging.UnauthenticatedException
-import io.damoreira.kraken.messaging.UnsupportedByHubException
 import io.damoreira.kraken.messaging.fixtures.ExportRows
 import io.damoreira.kraken.messaging.fixtures.Row
 import io.damoreira.kraken.messaging.fixtures.TestJwt
@@ -114,11 +113,6 @@ class HangingWatcher {
     @QueryHandler(shared = true) suspend fun handle(query: WatchAccount): Balance = awaitCancellation()
 }
 
-/** A streaming handler, so a sender can prove streams keep working next to subscriptions. */
-class RowsStreamerForSubscriptions {
-    @QueryHandler fun handle(query: ExportRows): Flow<Row> = flow { repeat(query.count) { emit(Row(it + 1)) } }
-}
-
 /** A transaction manager that does nothing but run the synchronizations, as a test double for `@Transactional`. */
 class NoopTransactionManager : AbstractPlatformTransactionManager() {
     override fun doGetTransaction(): Any = Any()
@@ -140,7 +134,6 @@ class SubscriptionQueryTest {
     private val invoker = HandlerInvoker(registry, codec)
     private val settings = HubSettings(
         requestTimeout = Duration.ofSeconds(2),
-        heartbeatInterval = Duration.ofSeconds(10),
         backoffMin = Duration.ofMillis(20),
         backoffMax = Duration.ofMillis(200),
     )
@@ -203,14 +196,6 @@ class SubscriptionQueryTest {
     private suspend fun awaitUntil(ms: Long = 5_000, condition: () -> Boolean) = withTimeout(ms) { while (!condition()) delay(10) }
 
     // --- the handler side on the wire ---
-
-    @Test fun `register declares subscription and the connection reports the capability`() = runBlocking {
-        val x = owner("svc-x", "x-1", AccountWatcher())
-        assertTrue(x.connection.supportsSubscription)
-        hub.subscription = false
-        val old = owner("svc-y", "y-1", PlainCountOwner())
-        assertFalse(old.connection.supportsSubscription)
-    }
 
     @Test fun `a SUBSCRIPTION request registers a subscription, the handler answers the initial request and emits follow in call order`() = runBlocking {
         val x = owner("svc-x", "x-1", AccountWatcher())
@@ -548,7 +533,7 @@ class SubscriptionQueryTest {
         val y = owner("svc-y", "y-1", SharedAccountWatcher(base = 200))
         val result = withTimeout(5_000) { caller().subscribe(WatchAccount(7)) }
         assertTrue(result.initial == Balance(107) || result.initial == Balance(207), result.initial.toString()) // one of the owners answered
-        awaitUntil { x.subscriptions.size == 1 && y.subscriptions.size == 1 } // every capable instance is a target
+        awaitUntil { x.subscriptions.size == 1 && y.subscriptions.size == 1 } // every instance is a target
         val seen = CopyOnWriteArrayList<Int>()
         val collecting = async { result.updates.collect { seen += it.value } }
         x.emitter.emit(WatchAccount::class, { true }, BalanceChanged(7, 1))
@@ -764,40 +749,14 @@ class SubscriptionQueryTest {
         assertEquals(1, withTimeout(5_000) { update.await() }.single().value)
     }
 
-    @Test fun `a hub without subscription is UnsupportedByHub and nothing is sent, unary, gathers and streams keep working`() = runBlocking {
-        hub.subscription = false
-        owner("svc-x", "x-1", AccountWatcher(), OwnCountHandlers(7), RowsStreamerForSubscriptions())
-        val bus = caller()
-        val e = assertFailsWith<UnsupportedByHubException> { bus.subscribe(WatchAccount(7)) }
-        assertEquals("subscription", e.feature)
-        assertEquals(0, hub.requestsFrom(callerId()))
-        assertEquals(Count(7), bus.send(GetCount("k")))
-        assertEquals(listOf(Count(7)), bus.scatterGather(GetCount("k")).results)
-        assertEquals(listOf(Row(1), Row(2)), bus.stream(ExportRows(2)).toList())
-
-        hub.legacy = true
-        val legacyConn = HubConnection({ InProcessChannelBuilder.forName(hub.name).build() }, "svc-l", "legacy", settings, { req -> error(req.id, ErrorCode.HANDLER_ERROR, "x") }, scope)
-            .also { connections += it }
-        legacyConn.start()
-        assertTrue(legacyConn.awaitRegistered(wait))
-        assertFailsWith<UnsupportedByHubException> { bus(legacyConn).subscribe(WatchAccount(7)) }
-        assertEquals(0, hub.requestsFrom("legacy"))
-    }
-
-    @Test fun `a subscription goes to one hub, and only to hubs with the capability`() = runBlocking {
-        val old = hub { subscription = false }
-        owner("svc-x", "x-new", AccountWatcher(), hubName = hub.name)
-        owner("svc-x", "x-old", AccountWatcher(), hubName = old.name)
-        val bus = bus(multiCaller(hub.name, old.name))
+    @Test fun `a subscription goes to one hub, round-robin over the live hubs`() = runBlocking {
+        val other = hub()
+        owner("svc-x", "x-1", AccountWatcher(), hubName = hub.name)
+        owner("svc-x", "x-2", AccountWatcher(), hubName = other.name)
+        val bus = bus(multiCaller(hub.name, other.name))
         repeat(4) { assertEquals(Balance(107), bus.subscribe(WatchAccount(7)).also { it.cancel() }.initial) }
-        assertEquals(4, hub.requestsFrom("caller"))
-        assertEquals(0, old.requestsFrom("caller"))
-
-        hub.close() // only the hub without the capability is left
-        awaitUntil { multi.single().liveHubIds() == listOf(old.hubId) }
-        val e = assertFailsWith<UnsupportedByHubException> { bus.subscribe(WatchAccount(7)) }
-        assertEquals("subscription", e.feature)
-        assertEquals(0, old.requestsFrom("caller"))
+        assertEquals(2, hub.requestsFrom("caller"))
+        assertEquals(2, other.requestsFrom("caller"))
     }
 
     @Test fun `errors before the initial result map as for a unary query`() = runBlocking {
@@ -997,8 +956,7 @@ class SubscriptionQueryTest {
             }
             send(
                 ClientMessage.newBuilder().setRegister(
-                    Register.newBuilder().setServiceName("svc-raw").setInstanceId(instanceId)
-                        ,
+                    Register.newBuilder().setServiceName("svc-raw").setInstanceId(instanceId).setInitialPermits(64),
                 ).build(),
             )
         }

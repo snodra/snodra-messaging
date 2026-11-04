@@ -27,7 +27,6 @@ class PropertiesBindingTest {
             assertEquals(true, p.hub.enabled)
             assertEquals("static://kraken-hub:7000", p.hub.address)
             assertEquals(null, p.hub.requestTimeout) // unset: the hub's default or per-type override applies
-            assertEquals(Duration.ofSeconds(10), p.hub.heartbeatInterval)
             assertEquals(256, p.hub.maxConcurrentHandlers)
             assertEquals(Duration.ofMillis(500), p.hub.reconnectBackoff.min)
             assertEquals(Duration.ofSeconds(5), p.hub.reconnectBackoff.max)

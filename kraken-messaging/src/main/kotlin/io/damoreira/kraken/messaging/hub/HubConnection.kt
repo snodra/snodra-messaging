@@ -30,7 +30,6 @@ import io.damoreira.kraken.messaging.HubUnavailableException
 import io.damoreira.kraken.messaging.InvalidMessageException
 import io.damoreira.kraken.messaging.MessageTimeoutException
 import io.damoreira.kraken.messaging.MessagingException
-import io.damoreira.kraken.messaging.UnsupportedByHubException
 import io.damoreira.kraken.messaging.kafka.EventConsumer
 import io.grpc.ManagedChannel
 import io.grpc.Status
@@ -68,13 +67,10 @@ import kotlin.random.Random
 
 data class HubSettings(
     /**
-     * Sent as `timeout_ms` when set (the caller chose a timeout). Null lets a v2 hub apply its default or per-type
-     * override (`timeout_ms = 0`); against a legacy hub [HubProtocol.DEFAULT_REQUEST_TIMEOUT] is sent instead. Also
-     * bounds how long [HubConnection.send] waits for a stream (default 5 s).
+     * Sent as `timeout_ms` when set (the caller chose a timeout). Null lets the hub apply its default or per-type
+     * override (`timeout_ms = 0`). Also bounds how long [HubConnection.send] waits for a stream (default 5 s).
      */
     val requestTimeout: Duration?,
-    /** Heartbeat period until, or unless, the hub announces one in its `RegisterAck` (legacy hubs never do). */
-    val heartbeatInterval: Duration,
     val backoffMin: Duration,
     val backoffMax: Duration,
     /**
@@ -99,6 +95,11 @@ data class HubSettings(
      * identity from the certificate, ignores a `ClientMessage.credentials` on such a session and refuses a stale token next to it).
      */
     val clientCertificate: HubClientCertificate? = null,
+    /**
+     * How long a new stream waits for the hub's `RegisterAck` ([HubProtocol.HANDSHAKE_TIMEOUT]): without one in time the
+     * stream fails ("registration not confirmed in time") and the connection reconnects with backoff.
+     */
+    val handshakeTimeout: Duration = HubProtocol.HANDSHAKE_TIMEOUT,
 ) {
     /** [requestTimeout] when the caller chose one; zero (or negative) counts as unset, never as an instant deadline. */
     val chosenRequestTimeout: Duration? get() = requestTimeout?.takeIf { !it.isZero && !it.isNegative }
@@ -113,15 +114,6 @@ data class HubSettings(
 internal fun isRegistrationRejection(status: Status): Boolean = when (status.code) {
     Status.Code.ALREADY_EXISTS, Status.Code.INVALID_ARGUMENT, Status.Code.UNAUTHENTICATED, Status.Code.PERMISSION_DENIED -> true
     else -> false
-}
-
-/** What the hub answered on the current stream: a v2 `RegisterAck`, or only the heartbeat echo of a legacy (v1) hub. */
-sealed interface HubHandshake {
-    /** A protocol v2 hub; [ack] is the latest `RegisterAck` of the stream. */
-    data class V2(val ack: RegisterAck) : HubHandshake
-
-    /** A hub that echoed the first heartbeat without a `RegisterAck`: protocol v1, today's behaviour applies. */
-    data object Legacy : HubHandshake
 }
 
 /**
@@ -142,15 +134,14 @@ internal object ReconnectBackoff {
 /**
  * The single bidirectional `Hub.Connect` stream of this service instance.
  *
- * The connect loop opens a stream, writes the current `Register` first (protocol version 2, see [HubProtocol]) and
- * keeps the stream alive with heartbeats. Every `Register` is followed by a heartbeat; since the hub handles a stream's
- * messages in order and fails the stream on a rejected registration, the echo of that heartbeat confirms the
- * registration ([awaitRegistered]).
+ * The connect loop opens a stream, writes the current `Register` first (see [HubProtocol]) and keeps the stream alive
+ * with heartbeats. Every `Register` is followed by a heartbeat; since the hub handles a stream's messages in order and
+ * fails the stream on a rejected registration, the echo of that heartbeat confirms that registration ([awaitRegistered]).
  *
- * Handshake: a v2 hub answers the first `Register` with a `RegisterAck` before that echo; a legacy hub sends only the
- * echo. Whichever of the two arrives first decides the stream's [handshake] ([HubHandshake.V2] or
- * [HubHandshake.Legacy]) and marks the stream [connected]. The ack's heartbeat interval replaces
- * `heartbeatInterval` for that stream.
+ * Handshake: the hub answers every accepted `Register` with a `RegisterAck`, written before the echo of the heartbeat
+ * that follows it. The ack of the stream's first `Register` completes the handshake: it marks the stream [connected], and
+ * its heartbeat interval is the stream's ([ack] keeps the latest). A stream without an ack within
+ * [HubSettings.handshakeTimeout] fails ("registration not confirmed in time") and the loop reconnects.
  *
  * When the stream fails, every request written to it fails with [HubConnectionLostException] (outcome unknown) and the
  * loop reconnects with jittered exponential backoff ([ReconnectBackoff]); a stream that reached the handshake resets
@@ -170,26 +161,23 @@ internal object ReconnectBackoff {
  * on a nested `sendBlocking`) cannot starve the stream collector that would deliver its own reply. At most
  * [maxConcurrentHandlers] handlers run at once; further requests wait for a permit.
  *
- * Flow control (P1): `Register` declares the `flow-control` capability with `initial_permits = maxConcurrentHandlers`,
- * [loadFactor] and [tags]. When the stream's ack shares `flow-control`, the hub forwards only against permits, and every
- * completed inbound handler grants one back on the stream the request arrived on (never on a newer stream, which
- * starts again from its own initial permits). Grants go back at once while the hub holds at most
- * `min(PERMIT_BATCH, initial_permits / 2)` permits for the stream, otherwise in `Permits` messages of
- * [HubProtocol.PERMIT_BATCH] or after [HubProtocol.PERMIT_FLUSH_DELAY] ([PermitLedger] has the rule). Against a hub
- * without the capability (P0, legacy) no `Permits` are ever sent.
+ * Flow control (P1): `Register` carries `initial_permits = maxConcurrentHandlers`, [loadFactor] and [tags]. The hub
+ * forwards only against permits, and every completed inbound handler grants one back on the stream the request arrived
+ * on (never on a newer stream, which starts again from its own initial permits). Grants go back at once while the hub
+ * holds at most `min(PERMIT_BATCH, initial_permits / 2)` permits for the stream, otherwise in `Permits` messages of
+ * [HubProtocol.PERMIT_BATCH] or after [HubProtocol.PERMIT_FLUSH_DELAY] ([PermitLedger] has the rule).
  *
  * Multi-hub (P3): [HubConnections] runs one connection per hub [target], all sharing one [HandlerGate] (the local bound
  * on handlers over every hub) and announcing [initialPermits] (read when each stream opens) as `initial_permits`. A
  * request still queued for a stream when it breaks was never written: it fails with [HubUnavailableException], so it
- * can go to another hub. [reportStatus] writes an `InstanceStatus` to a hub whose ack lists `instance-status`.
+ * can go to another hub. [reportStatus] writes an `InstanceStatus` to the hub.
  *
- * Scatter-gather (P4a, ADR 0017): `Register` declares `scatter-gather` and lists shared query types in
- * `shared_query_types`. [gather] sends a `SCATTER_GATHER` request only to a hub whose ack lists the capability
- * ([supportsScatterGather]); its pending entry collects the `ReplyPart`s until the `ReplyEnd` (or an `Error`), under one
+ * Scatter-gather (P4a, ADR 0017): `Register` lists shared query types in `shared_query_types`. [gather] sends a
+ * `SCATTER_GATHER` request; its pending entry collects the `ReplyPart`s until the `ReplyEnd` (or an `Error`), under one
  * local guard for the whole gather. Parts and ends for ids nobody waits for are ignored.
  *
- * Streaming (P4b, ADR 0017): `Register` declares `streaming`. As a sender, [stream] sends a `STREAMING` request only to a
- * hub whose ack lists it ([supportsStreaming]), hands each `ReplyPart` to the caller (checking `seq` runs 1, 2, 3, ...
+ * Streaming (P4b, ADR 0017): as a sender, [stream] sends a `STREAMING` request, hands each `ReplyPart` to the caller
+ * (checking `seq` runs 1, 2, 3, ...
  * and, at the end, that `ReplyEnd.parts` is what arrived: a part the hub dropped fails the stream as lost), writes
  * `Flow{initial_credit / 2}` each time that many parts were consumed (the caller's callback returned) and `Cancel`
  * when the caller gives up before the end (cancellation, an exception, the local idle guard, a lost part). As a
@@ -204,8 +192,8 @@ internal object ReconnectBackoff {
  * as at a hub `Cancel`) and releases its handler slot and hub permit. The permit of every inbound request goes back
  * to the hub when its coroutine completes, whichever way.
  *
- * Subscriptions (P4c, ADR 0017): `Register` declares `subscription`. As a sender, [subscribe] sends a `SUBSCRIPTION`
- * request only to a hub whose ack lists it ([supportsSubscription]), waits for the initial part and returns the open
+ * Subscriptions (P4c, ADR 0017): as a sender, [subscribe] sends a `SUBSCRIPTION` request, waits for the initial part and
+ * returns the open
  * [HubSubscription]: its [HubSubscription.next] hands out the updates in order (checking `seq` runs 1, 2, 3, ... and the end's
  * `parts` count, refilling `Flow{initial_credit / 2}` per that many parts consumed, the initial part included) and
  * [HubSubscription.cancel] writes `Cancel` once. As a handler, a `SUBSCRIPTION` request is an update target the hub wrote
@@ -216,10 +204,9 @@ internal object ReconnectBackoff {
  * stream closing removes every subscription the stream carried, and the update emitter writes its parts and its end on the
  * stream it arrived on. The initial result is an ordinary unary request (id `<id>#0`).
  *
- * Processor control (P6b, ADR 0023): `Register` declares `processor-control`. A `ControlRequest` from a hub whose ack lists it
- * goes to [control] in arrival order from one lane per stream, never from the read loop (a control handler that blocks holds
- * up only the control requests behind it, not the stream), and its `ControlReply` is written on the stream it arrived on. A
- * `ControlRequest` from a hub whose ack does not list the capability is dropped.
+ * Processor control (P6b, ADR 0023): a `ControlRequest` goes to [control] in arrival order from one lane per stream, never
+ * from the read loop (a control handler that blocks holds up only the control requests behind it, not the stream), and its
+ * `ControlReply` is written on the stream it arrived on.
  */
 class HubConnection(
     private val channelFactory: () -> ManagedChannel,
@@ -232,7 +219,7 @@ class HubConnection(
     private val maxConcurrentHandlers: Int = 256,
     private val loadFactor: Int = 100,
     private val tags: Map<String, String> = emptyMap(),
-    /** The hub's gRPC target (`host:port`); the hub's id for a legacy hub, which sends none. */
+    /** The hub's gRPC target (`host:port`). */
     val target: String = "hub",
     private val gate: HandlerGate = HandlerGate(maxConcurrentHandlers),
     /** `Register.initial_permits` of a new stream (P3 splits `maxConcurrentHandlers` over the hubs). */
@@ -251,12 +238,12 @@ class HubConnection(
     private val log = LoggerFactory.getLogger(HubConnection::class.java)
 
     private val connectedState = MutableStateFlow(false)
-    /** True while the current stream has completed its handshake (ack or first echo). */
+    /** True while the current stream has completed its handshake (the hub's `RegisterAck` arrived). */
     val connected: StateFlow<Boolean> = connectedState.asStateFlow()
 
-    private val handshakeState = MutableStateFlow<HubHandshake?>(null)
-    /** The current stream's handshake; null while no stream has completed one. */
-    val handshake: StateFlow<HubHandshake?> = handshakeState.asStateFlow()
+    private val ackState = MutableStateFlow<RegisterAck?>(null)
+    /** The latest `RegisterAck` of the current stream; null while no stream has completed its handshake. */
+    val ack: StateFlow<RegisterAck?> = ackState.asStateFlow()
 
     private val rejection = MutableStateFlow<Status?>(null)
     val lastRejection: StateFlow<Status?> = rejection.asStateFlow()
@@ -316,7 +303,7 @@ class HubConnection(
      * One open stream: its outbound queue, handshake, the heartbeats awaiting an echo (`sentAtMs` -> generation) and the
      * permit accounting against its `initial_permits`.
      */
-    private class Stream(val out: Channel<ClientMessage>, fallbackHeartbeatMs: Long, val initialPermits: Int) {
+    private class Stream(val out: Channel<ClientMessage>, val initialPermits: Int) {
         /** The credential the hub knows for this stream: the one `Register` carries, then the latest refresh written (guarded by the stream itself). */
         var credentials: Credentials? = null
         val probes = ConcurrentSkipListMap<Long, Long>()
@@ -324,8 +311,9 @@ class HubConnection(
         /** `initial_permits` plus every top-up written on this stream (guarded by the stream itself). */
         var offered = initialPermits
         @Volatile var registeredGeneration = -1L
-        @Volatile var handshake: HubHandshake? = null
-        @Volatile var heartbeatIntervalMs: Long = fallbackHeartbeatMs
+        /** The latest `RegisterAck` of the stream; null until the handshake. */
+        @Volatile var ack: RegisterAck? = null
+        @Volatile var heartbeatIntervalMs: Long = HubProtocol.DEFAULT_HEARTBEAT_INTERVAL.toMillis()
         val handshakeReached = CompletableDeferred<Unit>()
         /** Completed once the connect loop is done with this stream (the hub finished it, or it failed) and cleaned up. */
         val closed = CompletableDeferred<Unit>()
@@ -359,16 +347,8 @@ class HubConnection(
     @Volatile private var stopping = false
     private var lastHeartbeatAt = 0L
 
-    /**
-     * The hub's id: `RegisterAck.hub_id` of the current stream ([target] when it is empty), [target] for a legacy hub,
-     * null while no stream has completed its handshake.
-     */
-    val hubId: String?
-        get() = when (val handshake = handshakeState.value) {
-            is HubHandshake.V2 -> handshake.ack.hubId.ifEmpty { target }
-            HubHandshake.Legacy -> target
-            null -> null
-        }
+    /** The hub's id: `RegisterAck.hub_id` of the current stream ([target] when it is empty), null before the handshake. */
+    val hubId: String? get() = ackState.value?.hubId?.ifEmpty { target }
 
     /** True while the hub has confirmed the most recent [register] call on the live stream. */
     internal val registered: Boolean get() = connectedState.value && acknowledged.value >= generation.value
@@ -448,7 +428,7 @@ class HubConnection(
      */
     internal suspend fun rollOver(drainTimeout: Duration, reconnectTimeout: Duration, onDrained: () -> Unit = {}): Boolean {
         val stream = synchronized(lock) { if (stopping) null else current } ?: return true
-        if (stream.handshake == null) return true // not registered yet: it is ahead of nothing, and its generation tells the next tick to roll it
+        if (stream.ack == null) return true // not registered yet: it is ahead of nothing, and its generation tells the next tick to roll it
         log.info("Rolling the hub stream of {} ({}) to {} over to the renewed client certificate", serviceName, instanceId, target)
         val probe = synchronized(lock) {
             stream.draining = true
@@ -485,15 +465,6 @@ class HubConnection(
     suspend fun awaitHandlersIdle(timeout: Duration): Boolean =
         withTimeoutOrNull(timeout.toMillis()) { inFlight.first { it == 0 } } != null
 
-    /** True while the current stream's ack lists `scatter-gather` (never for a legacy hub). */
-    val supportsScatterGather: Boolean get() = current?.handshake.supports(HubProtocol.SCATTER_GATHER)
-
-    /** True while the current stream's ack lists `streaming` (never for a legacy hub). */
-    val supportsStreaming: Boolean get() = current?.handshake.supports(HubProtocol.STREAMING)
-
-    /** True while the current stream's ack lists `subscription` (never for a legacy hub). */
-    val supportsSubscription: Boolean get() = current?.handshake.supports(HubProtocol.SUBSCRIPTION)
-
     /**
      * Replaces the announced handler types ([sharedQueryTypes]: `@QueryHandler(shared = true)`, sent as
      * `shared_query_types`); sent now if a stream is open and re-sent on every reconnect.
@@ -509,14 +480,14 @@ class HubConnection(
     /**
      * Sends [request] and returns the hub's `Reply` or `Error` for its id. [Request.getId] must be fresh for every call.
      *
-     * `timeout_ms` is the caller's choice: a positive [Request.getTimeoutMs] is sent as is. Zero means "unset": a v2 hub
-     * gets 0 (its default or per-type override applies), a legacy hub gets `requestTimeout` (default 5 s) as before.
+     * `timeout_ms` is the caller's choice: a positive [Request.getTimeoutMs] is sent as is. Zero means "unset": the hub's
+     * default or per-type override applies.
      *
      * @throws HubUnavailableException if no stream completed its handshake within `requestTimeout` (default 5 s), or the
      *   stream closed before the request was written; the request never reached the hub
      * @throws HubConnectionLostException if the stream broke after the request was written; the outcome is unknown
      * @throws MessageTimeoutException if nothing arrives within the local guard: the hub's deadline bound plus
-     *   [HubProtocol.LOCAL_GUARD_MARGIN] (v2), or `max(timeoutMs, requestTimeout)` (legacy)
+     *   [HubProtocol.LOCAL_GUARD_MARGIN]
      */
     override suspend fun send(request: Request): ServerMessage = send(request, awaitStream = true)
 
@@ -526,11 +497,11 @@ class HubConnection(
      */
     internal suspend fun send(request: Request, awaitStream: Boolean): ServerMessage {
         val stream = liveStream(awaitStream)
-        val (outgoing, guardMs) = prepare(request, stream.handshake!!)
+        val guardMs = HubProtocol.localGuardMs(request.timeoutMs, request.type, stream.ack!!)
         val entry = Pending.Unary(stream)
         require(pending.putIfAbsent(request.id, entry) == null) { "request id ${request.id} is already in flight" }
         try {
-            write(stream, outgoing)
+            write(stream, request)
             return withTimeoutOrNull(guardMs) { entry.answer.await() } ?: throw MessageTimeoutException(request.type)
         } finally {
             pending.remove(request.id, entry)
@@ -542,8 +513,6 @@ class HubConnection(
      * arrival order and returns the terminal message: the `ReplyEnd`, or the hub's `Error` for the request itself (no
      * owner, a command, ...). [Request.getId] must be fresh for every call.
      *
-     * @throws UnsupportedByHubException if the stream's ack does not list `scatter-gather` (a legacy hub never does);
-     *   nothing is sent
      * @throws HubUnavailableException, HubConnectionLostException as [send]; parts already handed to [onPart] stay
      * @throws MessageTimeoutException if the end does not arrive within the local guard (the hub's deadline bound for the
      *   whole gather plus [HubProtocol.LOCAL_GUARD_MARGIN])
@@ -554,7 +523,7 @@ class HubConnection(
     /** [gather]; [awaitStream] as for [send]. */
     internal suspend fun gather(request: Request, awaitStream: Boolean, onPart: suspend (ReplyPart) -> Unit): ServerMessage {
         val stream = liveStream(awaitStream)
-        val ack = capableAck(stream, HubProtocol.SCATTER_GATHER)
+        val ack = stream.ack!!
         val outgoing = request.toBuilder().setMode(RequestMode.SCATTER_GATHER).build()
         val guardMs = HubProtocol.localGuardMs(outgoing.timeoutMs, outgoing.type, ack)
         val entry = Pending.Multi(stream)
@@ -582,7 +551,7 @@ class HubConnection(
      * Sends [request] as a streaming query (`mode = STREAMING` is set here; `initial_credit` is the caller's window,
      * at least 1), hands every `ReplyPart` to [onPart] in order and returns the terminal message: the `ReplyEnd` (with
      * the handler's or the hub's error when the stream failed), or the hub's `Error` for the request itself (no owner,
-     * a command, no capable instance, ...). [Request.getId] must be fresh for every call.
+     * a command, ...). [Request.getId] must be fresh for every call.
      *
      * Credits: after every `initial_credit / 2` (at least 1) parts [onPart] consumed, `Flow` grants that many more.
      * Giving up: when [onPart] throws or the caller is cancelled before the end, `Cancel{id, reason}` is written and
@@ -590,7 +559,6 @@ class HubConnection(
      * `timeout_ms` (the idle timeout) plus [HubProtocol.LOCAL_GUARD_MARGIN], twice the bound for the first part (the
      * hub bounds a queue wait by the timeout, then starts the idle timeout over at the forward).
      *
-     * @throws UnsupportedByHubException if the stream's ack does not list `streaming` (a legacy hub never does); nothing is sent
      * @throws HubUnavailableException, HubConnectionLostException as [send]; parts already handed to [onPart] stay
      * @throws MessageTimeoutException if no part or end arrives within the local guard (a `Cancel` is written)
      * @throws InvalidMessageException `stream <type> lost N part(s)` when a part's `seq` jumps (the hub drops a part it
@@ -606,7 +574,7 @@ class HubConnection(
     /** [stream]; [awaitStream] as for [send]. */
     internal suspend fun stream(request: Request, awaitStream: Boolean, onPart: suspend (ReplyPart) -> Unit): ServerMessage {
         val stream = liveStream(awaitStream)
-        val ack = capableAck(stream, HubProtocol.STREAMING)
+        val ack = stream.ack!!
         val window = request.initialCredit.takeIf { it > 0 } ?: HubProtocol.DEFAULT_INITIAL_CREDIT
         val outgoing = request.toBuilder().setMode(RequestMode.STREAMING).setInitialCredit(window).build()
         val bound = HubProtocol.hubDeadlineBoundMs(outgoing.timeoutMs, outgoing.type, ack)
@@ -684,7 +652,6 @@ class HubConnection(
      * The local guard is the unary one: the hub's deadline bound for `timeout_ms` plus [HubProtocol.LOCAL_GUARD_MARGIN]
      * (`timeout_ms` bounds the initial request, queue wait included); a quiet subscription afterwards is never timed out.
      *
-     * @throws UnsupportedByHubException if the stream's ack does not list `subscription` (a legacy hub never does); nothing is sent
      * @throws HubUnavailableException, HubConnectionLostException as [send]
      * @throws MessageTimeoutException if no part or end arrives within the local guard (a `Cancel` is written)
      * @throws InvalidMessageException `subscription <type> lost N part(s)` when the first part's `seq` is not 1
@@ -694,7 +661,7 @@ class HubConnection(
     /** [subscribe]; [awaitStream] as for [send]. */
     internal suspend fun subscribe(request: Request, awaitStream: Boolean): SubscribeResult {
         val stream = liveStream(awaitStream)
-        val ack = capableAck(stream, HubProtocol.SUBSCRIPTION)
+        val ack = stream.ack!!
         val window = request.initialCredit.takeIf { it > 0 } ?: HubProtocol.DEFAULT_INITIAL_CREDIT
         val outgoing = request.toBuilder().setMode(RequestMode.SUBSCRIPTION).setInitialCredit(window).build()
         val guardMs = HubProtocol.localGuardMs(outgoing.timeoutMs, outgoing.type, ack)
@@ -811,25 +778,16 @@ class HubConnection(
         }
     }
 
-    /** The ack of [stream] when it lists [capability]; [UnsupportedByHubException] otherwise (nothing is sent). */
-    private fun capableAck(stream: Stream, capability: String): RegisterAck {
-        val ack = (stream.handshake as? HubHandshake.V2)?.ack
-        if (!stream.handshake.supports(capability) || ack == null) {
-            throw UnsupportedByHubException(capability, "hub ${hubId ?: target} does not support $capability (its RegisterAck does not list it)")
-        }
-        return ack
-    }
-
     /** The live stream (waiting up to `requestTimeout` for one when [awaitStream]), its handshake completed. */
     private suspend fun liveStream(awaitStream: Boolean): Stream {
         val wait = settings.chosenRequestTimeout ?: HubProtocol.DEFAULT_REQUEST_TIMEOUT
-        if (!awaitStream && current?.handshake == null) throw HubUnavailableException("hub $target not connected")
+        if (!awaitStream && current?.ack == null) throw HubUnavailableException("hub $target not connected")
         if (!connectedState.value) {
             withTimeoutOrNull(wait.toMillis()) { connectedState.first { it } }
                 ?: throw HubUnavailableException("hub not connected within $wait")
         }
         val stream = current ?: throw HubUnavailableException("hub not connected")
-        if (stream.handshake == null) throw HubUnavailableException("hub not connected")
+        if (stream.ack == null) throw HubUnavailableException("hub not connected")
         return stream
     }
 
@@ -841,27 +799,13 @@ class HubConnection(
         }
     }
 
-    private fun HubHandshake?.supports(capability: String): Boolean =
-        this is HubHandshake.V2 && capability in HubProtocol.CAPABILITIES
-
-    /** The request as written to [handshake]'s stream, and the local guard in milliseconds. */
-    private fun prepare(request: Request, handshake: HubHandshake): Pair<Request, Long> = when (handshake) {
-        is HubHandshake.V2 -> request to HubProtocol.localGuardMs(request.timeoutMs, request.type, handshake.ack)
-        HubHandshake.Legacy -> {
-            val fallback = (settings.chosenRequestTimeout ?: HubProtocol.DEFAULT_REQUEST_TIMEOUT).toMillis()
-            val outgoing = if (request.timeoutMs > 0) request
-            else request.toBuilder().setTimeoutMs(fallback.coerceIn(0, Int.MAX_VALUE.toLong()).toInt()).build()
-            outgoing to outgoing.timeoutMs.toLong().coerceAtLeast(fallback)
-        }
-    }
-
     /**
      * The hub's deadline for a request of [type] sent with `timeout_ms = 0`: the ack's per-type override, else its
-     * default; [HubProtocol.DEFAULT_REQUEST_TIMEOUT] against a legacy hub or before any handshake. The retry budget when
-     * the caller chose no timeout.
+     * default; [HubProtocol.DEFAULT_REQUEST_TIMEOUT] before any handshake. The retry budget when the caller chose no
+     * timeout.
      */
     override fun hubTimeoutFor(type: String): Duration {
-        val ack = (handshakeState.value as? HubHandshake.V2)?.ack ?: return HubProtocol.DEFAULT_REQUEST_TIMEOUT
+        val ack = ackState.value ?: return HubProtocol.DEFAULT_REQUEST_TIMEOUT
         val ms = ack.typeTimeoutsMsMap[type]?.takeIf { it > 0 } ?: ack.defaultTimeoutMs.takeIf { it > 0 }
         return ms?.let { Duration.ofMillis(it.toLong()) } ?: HubProtocol.DEFAULT_REQUEST_TIMEOUT
     }
@@ -907,7 +851,7 @@ class HubConnection(
         var hintLogged = false // the TLS hint has reached WARN since the last handshake
         while (currentCoroutineContext().isActive && !stopping) {
             var channel: ManagedChannel? = null
-            val stream = Stream(Channel(Channel.UNLIMITED), settings.heartbeatInterval.toMillis(), initialPermits().coerceAtLeast(1))
+            val stream = Stream(Channel(Channel.UNLIMITED), initialPermits().coerceAtLeast(1))
             var status: Status = Status.CANCELLED
             var reachedHandshake = false
             var noToken: HubTokenException? = null
@@ -944,6 +888,8 @@ class HubConnection(
                 status = Status.UNAUTHENTICATED.withDescription("no access token: ${e.message}").withCause(e)
             } catch (e: HeartbeatTimeoutException) {
                 status = Status.UNAVAILABLE.withDescription(e.message)
+            } catch (e: HandshakeTimeoutException) {
+                status = Status.DEADLINE_EXCEEDED.withDescription(e.message)
             } catch (e: Throwable) {
                 status = Status.fromThrowable(e)
             } finally {
@@ -951,10 +897,10 @@ class HubConnection(
                     if (current === stream) current = null
                     stream.out.close()
                 }
-                reachedHandshake = stream.handshake != null
+                reachedHandshake = stream.ack != null
                 firstAttemptEnded.value = true
                 connectedState.value = false
-                handshakeState.value = null
+                ackState.value = null
                 acknowledged.value = -1
                 channel?.shutdownNow()
                 // Requests still in the closed outbound queue were never handed to gRPC: never sent, so retryable elsewhere.
@@ -983,7 +929,7 @@ class HubConnection(
                 val jwt = synchronized(stream) { stream.credentials }?.takeIf { it.hasJwt() }?.jwt
                 if (provider != null && jwt != null) provider.invalidate(jwt)
             }
-            // A stream the hub answered (ack or echo) proves the hub is back: start again from the floor.
+            // A stream the hub acknowledged proves the hub is back: start again from the floor.
             if (reachedHandshake) {
                 backoff = settings.backoffMin
                 failures = 0
@@ -1053,8 +999,10 @@ class HubConnection(
             announce(stream) // the Register is the first message of every stream
         }
         val heartbeats = launch {
-            // The ack may shorten the interval: wait for the handshake (at most one fallback interval) before the first tick.
-            withTimeoutOrNull(settings.heartbeatInterval.toMillis()) { stream.handshakeReached.await() }
+            // The ack sets the interval: the first tick waits for the handshake. A hub that does not acknowledge the
+            // registration in time fails the stream (throwing here ends it like any failure).
+            withTimeoutOrNull(settings.handshakeTimeout.toMillis()) { stream.handshakeReached.await() }
+                ?: throw HandshakeTimeoutException("registration not confirmed in time: no RegisterAck within ${settings.handshakeTimeout.toMillis()} ms")
             while (true) {
                 val interval = stream.heartbeatIntervalMs
                 delay(interval)
@@ -1121,36 +1069,30 @@ class HubConnection(
     }
 
     /**
-     * Writes an `InstanceStatus` on the live stream when its ack lists `instance-status`; false (nothing written) for a
-     * hub without the capability, a legacy hub, or no live stream. [processors] (ADR 0022) go in only when the ack also
-     * lists `processors`; to any other hub the field stays empty.
+     * Writes an `InstanceStatus` with the event [processors] (ADR 0022) on the live stream; false (nothing written) while no
+     * stream has completed its handshake.
      */
     fun reportStatus(connectedHubIds: List<String>, handlersInFlight: Int, processors: List<ProcessorStatus> = emptyList()): Boolean {
         val stream = current ?: return false
-        if (stream.handshake !is HubHandshake.V2) return false
+        if (stream.ack == null) return false
         val status = InstanceStatus.newBuilder()
             .addAllConnectedHubIds(connectedHubIds)
             .setHandlersInFlight(handlersInFlight.coerceAtLeast(0))
             .addAllProcessors(processors)
-        val message = status.build()
-        return stream.out.trySend(ClientMessage.newBuilder().setStatus(message).build()).isSuccess
-            .also { if (it) { statusReports.incrementAndGet(); lastStatus = message } }
+        return stream.out.trySend(ClientMessage.newBuilder().setStatus(status).build()).isSuccess
+            .also { if (it) statusReports.incrementAndGet() }
     }
-
-    /** The last `InstanceStatus` written to this hub (tests: what an older hub was sent). */
-    @Volatile internal var lastStatus: InstanceStatus? = null
-        private set
 
     /**
      * Tops the live stream up to [share] permits offered in total (`initial_permits` plus earlier top-ups; multi-hub: a
      * hub went away and [HubConnections] raises the others' share). Writes `Permits{count = share - offered, grant =
-     * share}` when that is positive and the stream's handshake shares flow control: the grant raises the hub's cap on
-     * the session (`initial_permits` until then) to the share, so the top-up is kept rather than clamped away. A hub that
-     * predates `Permits.grant` ignores it and clamps the top-up, as before. Returns the count written (0 = nothing).
+     * share}` when that is positive and the stream completed its handshake: the grant raises the hub's cap on the session
+     * (`initial_permits` until then) to the share, so the top-up is kept rather than clamped away. Returns the count
+     * written (0 = nothing).
      */
     internal fun topUpPermits(share: Int): Int {
         val stream = current ?: return 0
-        if (stream.handshake == null) return 0
+        if (stream.ack == null) return 0
         val extra = synchronized(stream) {
             val extra = share - stream.offered
             if (!stream.permits.toppedUp(extra)) return 0
@@ -1201,16 +1143,9 @@ class HubConnection(
                     log.debug("Hub cancelled subscription {}: {}", message.cancel.requestId, message.cancel.reason)
                 }
             }
-            message.hasControl() -> {
-                if (stream.handshake.supports(HubProtocol.PROCESSOR_CONTROL)) {
-                    stream.controls.trySend(message.control)
-                } else {
-                    log.debug("ControlRequest {} from a hub that did not acknowledge processor-control ignored", message.control.controlId)
-                }
-            }
+            message.hasControl() -> stream.controls.trySend(message.control)
             message.hasRegisterAck() -> onAck(stream, message.registerAck)
             message.hasHeartbeat() -> {
-                if (stream.handshake == null) completeHandshake(stream, HubHandshake.Legacy) // echo before any ack: v1 hub
                 val sentAt = message.heartbeat.sentAtMs
                 val generation = stream.probes[sentAt] ?: return // an unsolicited keep-alive
                 stream.probes.headMap(sentAt, true).clear()
@@ -1219,42 +1154,20 @@ class HubConnection(
         }
     }
 
+    /** A `RegisterAck`: the first one of the stream completes the handshake, a later one (a re-registration) replaces the values. */
     private fun onAck(stream: Stream, ack: RegisterAck) {
-        when (stream.handshake) {
-            null -> completeHandshake(stream, HubHandshake.V2(ack))
-            is HubHandshake.V2 -> { // the answer to a re-registration: keep the latest values
-                applyAck(stream, ack)
-                stream.handshake = HubHandshake.V2(ack)
-                if (current === stream) handshakeState.value = stream.handshake
-            }
-            HubHandshake.Legacy -> log.debug("RegisterAck after the legacy handshake on the stream of {} ignored", instanceId)
-        }
-    }
-
-    private fun applyAck(stream: Stream, ack: RegisterAck) {
         if (ack.heartbeatIntervalMs > 0) stream.heartbeatIntervalMs = ack.heartbeatIntervalMs.toLong()
-    }
-
-    private fun completeHandshake(stream: Stream, handshake: HubHandshake) {
-        if (handshake is HubHandshake.V2) applyAck(stream, handshake.ack)
-        val flowControl = handshake is HubHandshake.V2
-        // Grants of requests completed before the handshake (requests may arrive before the ack) are decided or dropped now.
-        apply(stream, stream.permits.handshake(flowControl))
-        stream.handshake = handshake
+        val first = stream.ack == null
+        stream.ack = ack
         if (current === stream) {
-            handshakeState.value = handshake
-            connectedState.value = true
-            rejection.value = null
-            when (handshake) {
-                is HubHandshake.V2 -> log.info(
-                    "Connected to hub {} as {} ({}): protocol v{}, heartbeat every {} ms",
-                    handshake.ack.hubId, serviceName, instanceId, HubProtocol.PROTOCOL_VERSION, stream.heartbeatIntervalMs,
-                )
-                HubHandshake.Legacy -> log.info(
-                    "Connected to a legacy (protocol v1) hub as {} ({}): heartbeat every {} ms", serviceName, instanceId, stream.heartbeatIntervalMs,
-                )
+            ackState.value = ack
+            if (first) {
+                connectedState.value = true
+                rejection.value = null
+                log.info("Connected to hub {} as {} ({}): heartbeat every {} ms", ack.hubId, serviceName, instanceId, stream.heartbeatIntervalMs)
             }
         }
+        if (!first) return
         stream.handshakeReached.complete(Unit)
         refreshCredentials(stream) // a credential renewed between this stream's Register and its ack
     }
@@ -1265,13 +1178,13 @@ class HubConnection(
     val credentialsRefreshesSent: Long get() = refreshes.get()
 
     /**
-     * Gives the live [stream] the credential the hub should know now when it differs from the one it was told, if its ack lists
-     * `credentials-refresh`: the provider's latest access token, or a static token that changed in its file (a rotation without
-     * reconnecting). A stream without the capability gets nothing; its next reconnect presents the new credential.
+     * Gives the live [stream] the credential the hub should know now when it differs from the one it was told: the provider's
+     * latest access token, or a static token that changed in its file (a rotation without reconnecting). Nothing before the
+     * handshake: the ack calls it again.
      */
     private fun refreshCredentials(stream: Stream) {
         if (current !== stream || settings.clientCertificate != null) return
-        if (stream.handshake !is HubHandshake.V2) return
+        if (stream.ack == null) return
         val provider = settings.tokenProvider
         val wanted = (if (provider != null) provider.current.value?.let { Credentials.newBuilder().setJwt(it.value).build() } else staticCredentials()) ?: return
         val changed = synchronized(stream) { (wanted != stream.credentials).also { if (it) stream.credentials = wanted } }
@@ -1455,7 +1368,7 @@ class HubConnection(
         }
     }
 
-    /** One completed handler: pays a permit back to the stream the request arrived on (when it shares flow control). */
+    /** One completed handler: pays a permit back to the stream the request arrived on. */
     private fun grantPermit(stream: Stream) = apply(stream, stream.permits.handlerCompleted())
 
     private fun apply(stream: Stream, step: PermitLedger.Step) {
@@ -1524,6 +1437,8 @@ class HubConnection(
     private fun describe(status: Status) = status.code.name + (status.description?.let { " ($it)" } ?: "")
 
     private class HeartbeatTimeoutException(message: String) : RuntimeException(message)
+
+    private class HandshakeTimeoutException(message: String) : RuntimeException(message)
 
     /** A registration this client refuses to send (a client certificate that has ended): handled like the hub's `UNAUTHENTICATED`, without a stream. */
     private class LocalRejection(val status: Status) : RuntimeException(status.description)

@@ -58,12 +58,6 @@ class HandlerBusyException(val type: String, detail: String? = null) :
 class DuplicateHandlerException(val type: String, val existing: String, val duplicate: String) :
     MessagingException("Duplicate handler for '$type': $existing and $duplicate")
 
-/**
- * The connected hub does not offer [feature] (for example `scatter-gather`): its `RegisterAck` does not list the
- * capability, or it is a legacy hub. Nothing was sent; retrying against the same hub fails the same way.
- */
-class UnsupportedByHubException(val feature: String, message: String) : MessagingException(message)
-
 /** The hub refused this instance's handler registration. */
 class HubRegistrationRejectedException(message: String) : MessagingException(message)
 

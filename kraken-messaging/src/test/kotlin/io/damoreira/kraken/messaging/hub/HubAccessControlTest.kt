@@ -63,7 +63,6 @@ class HubAccessControlTest {
 
     private fun settings(token: HubToken = HubToken.of(this.token, null)) = HubSettings(
         requestTimeout = Duration.ofSeconds(2),
-        heartbeatInterval = Duration.ofSeconds(10),
         backoffMin = Duration.ofMillis(20),
         backoffMax = cap,
         token = token,
@@ -170,7 +169,7 @@ class HubAccessControlTest {
         assertEquals(listOf<String?>(first, second), hub.tokensSeenFrom("i-1").distinct())
     }
 
-    @Test fun `a token file that changes is sent to the hub as a refresh on the live stream, no reconnect, and a hub without the capability gets none`(@TempDir dir: Path) = runBlocking {
+    @Test fun `a token file that changes is sent to the hub as a refresh on the live stream, no reconnect`(@TempDir dir: Path) = runBlocking {
         hub.heartbeatInterval = Duration.ofMillis(100) // the connection looks at its token file once per heartbeat
         val rotated = "rotated-" + UUID.randomUUID()
         hub.auth = HubAuth.enforce(acl + (rotated to AclEntry("svc-a", handle = listOf("test.*"), send = listOf("other.*"))))
@@ -188,14 +187,6 @@ class HubAccessControlTest {
         assertEquals(1, hub.streamsOpenedBy("i-1"), "rotated on the same stream")
         assertEquals(1, conn.credentialsRefreshesSent)
         assertTrue(hub.authViolations().isEmpty())
-
-        hub.credentialsRefresh = false
-        val old = connection("i-2", settings = settings(HubToken.of(null, file)))
-        old.start()
-        assertTrue(old.awaitRegistered(wait))
-        Files.writeString(file, token + "\n")
-        delay(400)
-        assertTrue(hub.credentialsSeenFrom("i-2").isEmpty())
     }
 
     @Test fun `a token file that disappears keeps the last token read, one that is missing at startup fails`(@TempDir dir: Path) {

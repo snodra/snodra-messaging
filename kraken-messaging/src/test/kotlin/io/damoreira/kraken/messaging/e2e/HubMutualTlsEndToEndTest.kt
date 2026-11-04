@@ -142,7 +142,7 @@ class HubMutualTlsEndToEndTest {
     }
 
     private fun settings(certificate: HubClientCertificate?) = HubSettings(
-        requestTimeout = null, heartbeatInterval = Duration.ofSeconds(10),
+        requestTimeout = null,
         backoffMin = Duration.ofMillis(200), backoffMax = Duration.ofSeconds(1), clientCertificate = certificate,
     )
 
@@ -192,7 +192,7 @@ class HubMutualTlsEndToEndTest {
             it.start()
         }
 
-    /** The hub's `/topology` over HTTPS (the pair is the hub's own), the instance [instanceId] of [service], or null. */
+    /** The hub's `/api/v1/topology` over HTTPS (the pair is the hub's own), the instance [instanceId] of [service], or null. */
     private suspend fun instance(hub: GenericContainer<*>, service: String, instanceId: String): JsonNode? = withContext(Dispatchers.IO) {
         val trust = KeyStore.getInstance(KeyStore.getDefaultType()).apply {
             load(null)
@@ -204,10 +204,10 @@ class HubMutualTlsEndToEndTest {
         val http = HttpClient.newBuilder().sslContext(context).connectTimeout(Duration.ofSeconds(3)).build()
         val host = if (hub.host == "localhost") "127.0.0.1" else hub.host
         val response = http.send(
-            HttpRequest.newBuilder(URI.create("https://$host:${hub.getMappedPort(7001)}/topology")).timeout(Duration.ofSeconds(5)).build(),
+            HttpRequest.newBuilder(URI.create("https://$host:${hub.getMappedPort(7001)}/api/v1/topology")).timeout(Duration.ofSeconds(5)).build(),
             HttpResponse.BodyHandlers.ofString(),
         )
-        check(response.statusCode() == 200) { "GET /topology: ${response.statusCode()} ${response.body().take(200)}" }
+        check(response.statusCode() == 200) { "GET /api/v1/topology: ${response.statusCode()} ${response.body().take(200)}" }
         json.readTree(response.body())["services"]
             .firstOrNull { it["serviceName"].asString() == service }
             ?.get("instances")?.firstOrNull { it["instanceId"].asString() == instanceId }

@@ -4,60 +4,8 @@ import io.damoreira.kraken.hub.v1.RegisterAck
 import java.time.Duration
 import java.util.Properties
 
-/**
- * What this library announces in `Register` (protocol v2, see ADR 0013 in the umbrella repo) and the client-side rules
- * that depend on what the hub answers.
- */
+/** What this library announces in `Register` and the client-side rules that depend on what the hub answers. */
 object HubProtocol {
-    /** `Register.protocol_version`. 0 would be v1; a v2 hub answers with a `RegisterAck`, a v1 hub ignores the field. */
-    const val PROTOCOL_VERSION = 2
-
-    /** Capability name of hub flow control: permits, `Register.initial_permits`, `RESOURCE_EXHAUSTED` (P1). */
-    const val FLOW_CONTROL = "flow-control"
-
-    /** Capability name of `InstanceStatus` reports (P3, multi-hub HA): sent only to a hub whose ack lists it. */
-    const val INSTANCE_STATUS = "instance-status"
-
-    /** Capability name of scatter-gather queries (P4a, ADR 0017): `Request.mode = SCATTER_GATHER`, `ReplyPart`, `ReplyEnd`. */
-    const val SCATTER_GATHER = "scatter-gather"
-
-    /**
-     * Capability name of streaming queries (P4b, ADR 0017): `Request.mode = STREAMING`, client-sent `ReplyPart` and
-     * `ReplyEnd`, `Flow` and `Cancel` both ways. Declared by senders and handlers alike: the hub streams only to
-     * instances that negotiated it.
-     */
-    const val STREAMING = "streaming"
-
-    /**
-     * Capability name of subscription queries (P4c, ADR 0017): `Request.mode = SUBSCRIPTION` (an update target on handlers,
-     * the subscription itself from senders), client-sent `ReplyPart` and `ReplyEnd` for update targets, `Flow` and
-     * `Cancel`. Declared by senders and handlers alike: the hub subscribes only instances that negotiated it.
-     */
-    const val SUBSCRIPTION = "subscription"
-
-    /**
-     * Capability name of credential refresh (P5b, ADR 0019): `ClientMessage.credentials`, a fresh credential for a live session
-     * (a JWT session is closed at its `exp` plus the hub's grace without one). Declared by every `Register`, static token
-     * sessions too; sent only on a stream whose ack lists it.
-     */
-    const val CREDENTIALS_REFRESH = "credentials-refresh"
-
-    /**
-     * Capability name of event processor status (P6a, ADR 0022): `InstanceStatus.processors`, filled only on a stream whose ack
-     * lists it (an older hub never sees the field). Declared together with [INSTANCE_STATUS]: the hub keeps the processors
-     * only for a session that negotiated both.
-     */
-    const val PROCESSORS = "processors"
-
-    /**
-     * Capability name of processor control (P6b, ADR 0023): `ServerMessage.control` (pause, resume, the leased reset, the dead
-     * letters) answered by `ClientMessage.control_reply`, only on a stream whose ack lists it.
-     */
-    const val PROCESSOR_CONTROL = "processor-control"
-
-    /** `Register.capabilities`: optional protocol features this client supports. */
-    val CAPABILITIES: List<String> = listOf(FLOW_CONTROL, INSTANCE_STATUS, SCATTER_GATHER, STREAMING, SUBSCRIPTION, CREDENTIALS_REFRESH, PROCESSORS, PROCESSOR_CONTROL)
-
     /** `Request.initial_credit` the hub assumes when a sender sends 0; the library always sends at least 1. */
     const val DEFAULT_INITIAL_CREDIT = 64
 
@@ -70,7 +18,7 @@ object HubProtocol {
     /** How often a `dns:///` hub address is resolved again. */
     val DNS_REFRESH: Duration = Duration.ofSeconds(30)
 
-    /** How often the client certificate files are read (P5c): the heartbeat period a v2 hub announces. */
+    /** How often the client certificate files are read (P5c): the heartbeat period kraken-hub announces. */
     val CERTIFICATE_CHECK_INTERVAL: Duration = Duration.ofSeconds(3)
 
     /** The longest a rollover waits for the work in flight on a stream before it closes it (P5c; shared with the Rust library). */
@@ -104,13 +52,22 @@ object HubProtocol {
     /** `Register.client_version`, for example `kraken-messaging/0.1.0`. */
     val CLIENT_VERSION: String = "kraken-messaging/" + (libraryVersion() ?: "unknown")
 
-    /** Request timeout used against a legacy hub when `request-timeout` is unset, and to wait for a stream. */
+    /**
+     * How long a request waits for a live stream when `request-timeout` is unset, and the hub's deadline assumed before any
+     * `RegisterAck` (the retry budget of a request without a timeout).
+     */
     val DEFAULT_REQUEST_TIMEOUT: Duration = Duration.ofSeconds(5)
+
+    /** How long a new stream waits for the hub's `RegisterAck` before it fails and the connection reconnects. */
+    val HANDSHAKE_TIMEOUT: Duration = Duration.ofSeconds(10)
+
+    /** The heartbeat period of a stream whose `RegisterAck` announces none (kraken-hub always does: 3 s by default). */
+    val DEFAULT_HEARTBEAT_INTERVAL: Duration = Duration.ofSeconds(3)
 
     /** Added to the hub's own deadline: the local guard only fires when the hub never answers at all. */
     val LOCAL_GUARD_MARGIN: Duration = Duration.ofSeconds(1)
 
-    /** Used when a v2 ack carries no `max_timeout_ms` (never sent by kraken-hub). */
+    /** Used when an ack carries no `max_timeout_ms` (kraken-hub always sends one). */
     private const val FALLBACK_MAX_TIMEOUT_MS = 60_000L
 
     /**

@@ -54,42 +54,34 @@ import java.util.concurrent.TimeUnit
  * `HANDLER_DISCONNECTED` is sent for in-flight requests when the handler stream ends, heartbeats are echoed, empty
  * names are `INVALID_ARGUMENT` and malformed or duplicate in-flight requests are `INVALID_REQUEST`.
  *
- * Protocol v2 (the default): every accepted `Register` with `protocol_version >= 2` is answered with a `RegisterAck`
- * (written before the echo of the heartbeat that follows it) carrying [hubId], [heartbeatInterval],
- * [heartbeatTimeout], [replyTimeout] as the default, [maxTimeout] and [typeTimeouts]. The effective timeout follows the
- * hub's rule: `timeoutMs > 0` -> `min(timeoutMs, override or maxTimeout)`, `timeoutMs == 0` -> `override or
- * replyTimeout`. Set [legacy] to emulate a protocol v1 hub that never sends an ack.
+ * Every accepted `Register` is answered with a `RegisterAck` (written before the echo of the heartbeat that follows it)
+ * carrying [hubId], [heartbeatInterval], [heartbeatTimeout], [replyTimeout] as the default, [maxTimeout] and
+ * [typeTimeouts]. The effective timeout follows the hub's rule: `timeoutMs > 0` -> `min(timeoutMs, override or
+ * maxTimeout)`, `timeoutMs == 0` -> `override or replyTimeout`.
  *
- * Flow control (protocol P1, capability `flow-control`): a registrant that declares the capability gets it back in the
- * ack; with `initial_permits > 0` it is permit-managed: a request is forwarded only while it has permits (one per
- * forward), otherwise queued per instance ordered by `Request.priority` (higher first) then arrival, keeping its own
- * deadline. `Permits` messages add permits and drain the queue; like kraken-hub, a session never holds more than its cap,
- * which starts at `initial_permits` and is raised (never lowered) to `Permits.grant` when a grant is above it (P3
- * multi-hub top-up). Set [permitCap] false to drop the cap (permits add up without bound) or [permitGrants] false to
- * emulate a hub that predates `Permits.grant` (the cap stays at `initial_permits`). A full queue ([queueCapacity]) answers
- * `RESOURCE_EXHAUSTED` to senders that share `flow-control` and `HANDLER_ERROR "handler busy"` to others. Set
- * [flowControl] false to emulate the P0 hub (protocol v2 without the capability: everything unlimited).
+ * Flow control (P1): the first `Register` of a stream must carry `initial_permits >= 1` (`INVALID_ARGUMENT` otherwise). A
+ * request is forwarded only while the handler's session has permits (one per forward), otherwise queued per instance
+ * ordered by `Request.priority` (higher first) then arrival, keeping its own deadline. `Permits` messages add permits and
+ * drain the queue; like kraken-hub, a session never holds more than its cap, which starts at `initial_permits` and is
+ * raised (never lowered) to `Permits.grant` when a grant is above it (P3 multi-hub top-up). Set [permitCap] false to drop
+ * the cap (permits add up without bound). A full queue ([queueCapacity]) answers `RESOURCE_EXHAUSTED`.
  *
- * Multi-hub status (P3, capability `instance-status`): a registrant that declares the capability gets it back in the ack
- * and its `InstanceStatus` reports are kept ([lastStatusFrom]); reports on a stream that did not negotiate it are counted
- * ([statusMessagesFrom]) and ignored. Set [instanceStatus] false to emulate the P2 hub. [pauseReading] stops reading
- * every stream (what clients write stays queued on their side), and [requestsFrom] counts requests per sender.
+ * Multi-hub status (P3): the `InstanceStatus` reports of every session are kept ([lastStatusFrom], with their
+ * `processors`) and counted ([statusMessagesFrom]). [pauseReading] stops reading every stream (what clients write stays
+ * queued on their side), and [requestsFrom] counts requests per sender.
  *
- * Query modes (P4a, ADR 0017, capability `scatter-gather`): `shared_query_types` may be owned by many services; a type
- * registered exclusive (or as a command) by one registrant and shared by another, even of the same service, is
- * `ALREADY_EXISTS`, and one listed both ways in a single `Register` is `INVALID_ARGUMENT`. A point query on a shared type
- * round-robins over every owner's instances. A `SCATTER_GATHER` request from a session that negotiated the capability
- * sends every registered instance owning the type (sorted by service, then instance id) an ordinary unary request with
+ * Query modes (P4a, ADR 0017): `shared_query_types` may be owned by many services; a type registered exclusive (or as a
+ * command) by one registrant and shared by another, even of the same service, is `ALREADY_EXISTS`, and one listed both
+ * ways in a single `Register` is `INVALID_ARGUMENT`. A point query on a shared type round-robins over every owner's
+ * instances. A `SCATTER_GATHER` request sends every registered instance owning the type (sorted by service, then instance id) an ordinary unary request with
  * id `<id>#<n>`, flow control and queues applying per target; answers go back as `ReplyPart`s in arrival order (`seq`,
  * `responder_service`, `responder_instance`), then one `ReplyEnd{parts, failed, timed_out}` once every target answered,
  * after `max_results` successful parts, or at the deadline. A target whose handler stream ends fails as a part
- * (`HANDLER_DISCONNECTED`). No target: `NO_HANDLER`; a command: `INVALID_REQUEST`; a v2 sender without the capability
- * (or any other mode): `UNSUPPORTED`, a v1 sender `INVALID_REQUEST`. Set [scatterGather] false to emulate the P3 hub:
- * no capability in the ack and `shared_query_types` ignored. [inject] writes any message to an instance's stream.
+ * (`HANDLER_DISCONNECTED`). No target: `NO_HANDLER`; a command: `INVALID_REQUEST`; a mode this hub does not know:
+ * `INVALID_REQUEST`. [inject] writes any message to an instance's stream.
  *
- * Streaming queries (P4b, capability `streaming`): a `STREAMING` request from a session that negotiated the capability
- * goes to one live instance that lists the type **and** negotiated `streaming` (round-robin per type; owners with
- * instances but none capable: `UNSUPPORTED`), as `Request{id = <id>#1, mode = STREAMING, initial_credit}` (a uint32; 0 reads
+ * Streaming queries (P4b): a `STREAMING` request goes to one live instance that lists the type (round-robin per type), as
+ * `Request{id = <id>#1, mode = STREAMING, initial_credit}` (a uint32; 0 reads
  * as 64; `max_results` is kept by the hub) through the target's permits and queue. The handler's `ReplyPart{<id>#1}` and
  * `ReplyEnd{<id>#1}` are relayed with the sender's id, `responder_service` / `responder_instance` and the handler's
  * `seq`; each part takes one credit (initial plus every sender `Flow`, relayed as `Flow{<id>#1}`). A part beyond the
@@ -99,14 +91,12 @@ import java.util.concurrent.TimeUnit
  * queue wait counts too): `ReplyEnd{TIMEOUT}` and `Cancel{"idle timeout"}`; open
  * for [maxStreamDuration]: `ReplyEnd{CANCELLED}` and a cancel; a sender `Cancel`: `Cancel{<id>#1, reason}` to the
  * handler, nothing to the sender; the handler leaving: `ReplyEnd{HANDLER_DISCONNECTED}`; the sender leaving:
- * `Cancel{"sender disconnected"}`. A unary `Reply` to the target is one part then the end. A gather ending early sends
- * `Cancel{<id>#<n>, reason}` to its forwarded targets whose session negotiated `streaming`. Client-sent `ReplyPart`,
- * `ReplyEnd`, `Flow` and `Cancel` from sessions without the capability are ignored. Set [streaming] false to emulate
- * the P4a hub (no capability in the ack, `STREAMING` is `UNSUPPORTED`); [dropParts] drops relayed parts by `seq` (the
- * real hub's full-buffer drop). [openStreams], [creditOf], [flowsFrom] and [cancelsFrom] observe it.
+ * `Cancel{"sender disconnected"}`. A unary `Reply` to the target is ignored. A gather ending early sends
+ * `Cancel{<id>#<n>, reason}` to its forwarded targets. [dropParts] drops relayed parts by `seq` (the real hub's
+ * full-buffer drop). [openStreams], [creditOf], [flowsFrom] and [cancelsFrom] observe it.
  *
- * Subscription queries (P4c, capability `subscription`): a `SUBSCRIPTION` request from a session that negotiated the
- * capability goes to **every** live instance that lists the type and negotiated `subscription`, as they are at the open
+ * Subscription queries (P4c): a `SUBSCRIPTION` request goes to **every** live instance that lists the type, as they are
+ * at the open
  * (sorted by service, then instance id; an instance registering later is never added), each getting
  * `Request{id = <id>#n, mode = SUBSCRIPTION}` (`n` from 1; `initial_credit` and `max_results` 0) written directly, without
  * a permit or a queue; one of them, chosen round-robin per type, also gets the initial request `Request{id = <id>#0, mode
@@ -121,12 +111,9 @@ import java.util.concurrent.TimeUnit
  * that error and `Cancel{"initial result failed"}`; `max_results` counts updates (`Cancel{"max results"}`); a sender
  * `Cancel` goes to every target (and to `<id>#0` while still forwarded); the sender leaving: the same with `"sender
  * disconnected"`; a target leaving: silent, the last one `ReplyEnd{HANDLER_DISCONNECTED}`; [maxSubscriptionDuration]
- * (0 = unlimited, the default): `ReplyEnd{CANCELLED}` and a cancel. Gates, in order: v1 `INVALID_REQUEST`, no capability
- * `UNSUPPORTED`, a command `INVALID_REQUEST`, no owner `NO_HANDLER`, owners without a capable instance `UNSUPPORTED`
- * naming them, a duplicate id (`<id>` or `<id>#0`) `INVALID_REQUEST`, a target at [maxSubscriptionsPerInstance]
- * `RESOURCE_EXHAUSTED`. An update target's id is no pending id. Client-sent `ReplyPart`, `ReplyEnd`, `Flow` and `Cancel`
- * are read from sessions with `streaming` or `subscription`; a gather's cancel goes to either. Set [subscription] false
- * to emulate the P4b hub. [openSubscriptions], [subscriptionTargetsOf], [subscriptionCreditOf] and [bufferedUpdatesOf]
+ * (0 = unlimited, the default): `ReplyEnd{CANCELLED}` and a cancel. Gates, in order: a command `INVALID_REQUEST`, no
+ * owner `NO_HANDLER`, a duplicate id (`<id>` or `<id>#0`) `INVALID_REQUEST`, a target at [maxSubscriptionsPerInstance]
+ * `RESOURCE_EXHAUSTED`. An update target's id is no pending id. [openSubscriptions], [subscriptionTargetsOf], [subscriptionCreditOf] and [bufferedUpdatesOf]
  * observe it; [dropParts] applies to relayed updates too.
  *
  * One session per instance id, like the real hub: the first `Register` of a stream whose instance id already has a
@@ -150,14 +137,11 @@ import java.util.concurrent.TimeUnit
  * registering service and that has such an entry is accepted, with the entry's rights; another `azp` is `PERMISSION_DENIED`, a
  * service without an entry too, a token that is not three segments with an `azp` is `UNAUTHENTICATED`, and without `services` the
  * hub answers "jwt credentials are not configured on this hub" like a hub with no issuer. The signature and `exp` are **not**
- * checked (the double does not know the issuer's keys): the real hub image covers them. A registrant that declares
- * `credentials-refresh` gets it in the ack ([credentialsRefresh] false emulates a hub without it); a `ClientMessage.credentials`
- * is recorded ([credentialsSeenFrom]) and judged like a `Register`'s against the session's own service (an invalid one or one for
+ * checked (the double does not know the issuer's keys): the real hub image covers them. A `ClientMessage.credentials` is recorded ([credentialsSeenFrom]) and judged like a `Register`'s against the session's own service (an invalid one or one for
  * another service closes the stream in `enforce`); [jwtsSeenFrom] lists the JWTs of the `Register`s.
  *
- * Processor control (P6b, ADR 0023, capability `processor-control`): a registrant that declares it gets it in the ack
- * ([processorControl] false emulates a hub before P6b); [control] writes a `ControlRequest` to an instance's session that
- * negotiated it and waits for the `ControlReply` with its `control_id` from that session; every reply received is kept
+ * Processor control (P6b, ADR 0023): [control] writes a `ControlRequest` to an instance's session and waits for the
+ * `ControlReply` with its `control_id` from that session; every reply received is kept
  * ([controlRepliesFrom]), the unmatched ones too.
  *
  * It does not implement consistent hashing on `routing_key`, metrics, or the real hub's owner grace period and
@@ -172,10 +156,6 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
     /** Set false to stop echoing heartbeats (still counted), simulating a hub that silently stopped answering. */
     @Volatile
     var echoHeartbeats: Boolean = true
-
-    /** Emulates a protocol v1 hub: no `RegisterAck`, ever. */
-    @Volatile
-    var legacy: Boolean = false
 
     /** `RegisterAck.hub_id`. */
     val hubId: String get() = name
@@ -200,55 +180,16 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
     @Volatile
     var emitTimeouts: Boolean = true
 
-    /** Set false to emulate the P0 hub: a v2 ack without the `flow-control` capability, every instance unlimited. */
-    @Volatile
-    var flowControl: Boolean = true
-
     /**
-     * True (the default, as the real hub): a permit-managed session never holds more than its cap (`initial_permits`,
-     * raised by `Permits.grant`). False lets permits add up without bound.
+     * True (the default, as the real hub): a session never holds more than its cap (`initial_permits`, raised by
+     * `Permits.grant`). False lets permits add up without bound.
      */
     @Volatile
     var permitCap: Boolean = true
 
-    /** True (the default, as the real hub): `Permits.grant` raises the cap. False emulates a hub that predates it. */
-    @Volatile
-    var permitGrants: Boolean = true
-
-    /** Set false to emulate the P2 hub: no `instance-status` capability in the ack, reports ignored. */
-    @Volatile
-    var instanceStatus: Boolean = true
-
-    /**
-     * Set false to emulate a hub before P6a (ADR 0022): no `processors` capability in the ack. With it (the default, as the
-     * P6a hub) the `processors` of a session's reports are kept with its [lastStatusFrom] like the rest of the report.
-     */
-    @Volatile
-    var processors: Boolean = true
-
-    /** Set false to emulate a hub before P6b (ADR 0023): no `processor-control` capability in the ack, [control] fails. */
-    @Volatile
-    var processorControl: Boolean = true
-
-    /** Set false to emulate the P3 hub: no `scatter-gather` capability in the ack, `shared_query_types` ignored. */
-    @Volatile
-    var scatterGather: Boolean = true
-
-    /** Set false to emulate the P4a hub: no `streaming` capability in the ack, `STREAMING` requests are `UNSUPPORTED`. */
-    @Volatile
-    var streaming: Boolean = true
-
     /** Bound on a streaming query's whole life (`KRAKEN_HUB_MAX_STREAM_DURATION`): `ReplyEnd{CANCELLED}` and a cancel. */
     @Volatile
     var maxStreamDuration: Duration = Duration.ofMinutes(10)
-
-    /** Set false to emulate a hub without `credentials-refresh` (a pre-P5b hub): the ack never lists it. */
-    @Volatile
-    var credentialsRefresh: Boolean = true
-
-    /** Set false to emulate the P4b hub: no `subscription` capability in the ack, `SUBSCRIPTION` requests are `UNSUPPORTED`. */
-    @Volatile
-    var subscription: Boolean = true
 
     /** Updates held per subscription while its sender owes credit (`KRAKEN_HUB_SUBSCRIPTION_BUFFER`); one more ends it. */
     @Volatile
@@ -287,7 +228,7 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
     @Volatile
     var dropParts: Set<Long> = emptySet()
 
-    /** Requests queued per permit-managed instance before new ones are rejected (`KRAKEN_HUB_QUEUE_CAPACITY_PER_INSTANCE`). */
+    /** Requests queued per instance before new ones are rejected (`KRAKEN_HUB_QUEUE_CAPACITY_PER_INSTANCE`). */
     @Volatile
     var queueCapacity: Int = 10_000
 
@@ -321,15 +262,6 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
         @Volatile var types: Set<String> = emptySet()
         @Volatile var commandTypes: Set<String> = emptySet()
         @Volatile var sharedTypes: Set<String> = emptySet()
-        @Volatile var protocolVersion = 0
-        /** Negotiated `scatter-gather` (fixed by the stream's first Register). */
-        @Volatile var scatterGather = false
-        /** Negotiated `streaming` (fixed by the stream's first Register). */
-        @Volatile var streaming = false
-        /** Negotiated `subscription` (fixed by the stream's first Register). */
-        @Volatile var subscription = false
-        /** Reads the multi-part client messages (`ReplyPart`, `ReplyEnd`, `Flow`, `Cancel`) and understands `Cancel`. */
-        val multiPart: Boolean get() = streaming || subscription
         @Volatile var registered = false
         /** The stream's first `Register` was judged for credentials (ruling 5 of ADR 0018: only the first counts). */
         var credentialsJudged = false
@@ -339,17 +271,10 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
         @Volatile var jwtService: String? = null
         /** True once the token is one [auth] knew at the first `Register`: the session is judged per request. */
         @Volatile var authenticated = false
-        /** Negotiated `credentials-refresh` (fixed by the stream's first Register). */
-        @Volatile var credentialsRefresh = false
-        /** Shares `flow-control` with this hub (fixed by the stream's first Register). */
-        @Volatile var flowControl = false
-        /** Negotiated `instance-status` (fixed by the stream's first Register). */
-        @Volatile var instanceStatus = false
-        @Volatile var processorControl = false
         /** The ack of the Register just handled, written by the stream's collector (after [ackDelay]). */
         var ack: ServerMessage? = null
-        /** Remaining permits; null = unlimited (not permit-managed). Guarded by [lock]. */
-        var permits: Int? = null
+        /** Remaining permits (fixed by the stream's first Register, then `Permits`). Guarded by [lock]. */
+        var permits: Int = 0
         /** Most permits the session may hold: `initial_permits`, raised by `Permits.grant`. Guarded by [lock]. */
         var cap: Int = 0
         /** Requests waiting for a permit, highest priority first, then arrival. Guarded by [lock]. */
@@ -479,10 +404,10 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
     /** `Request` messages received from [instanceId] over all of its streams. */
     fun requestsFrom(instanceId: String): Int = requestsBySender[instanceId] ?: 0
 
-    /** `InstanceStatus` messages received from [instanceId], kept or ignored. */
+    /** `InstanceStatus` messages received from [instanceId]. */
     fun statusMessagesFrom(instanceId: String): Int = statusMessages[instanceId] ?: 0
 
-    /** The latest `InstanceStatus` kept from [instanceId] (only on streams that negotiated `instance-status`), or null. */
+    /** The latest `InstanceStatus` from [instanceId], or null. */
     fun lastStatusFrom(instanceId: String): InstanceStatus? = lastStatuses[instanceId]
 
     fun heartbeatsFrom(instanceId: String): Int = heartbeats[instanceId] ?: 0
@@ -520,7 +445,7 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
     /** Number of `Permits` messages received from [instanceId] over all of its streams. */
     fun permitMessagesFrom(instanceId: String): Int = permitMessages[instanceId] ?: 0
 
-    /** Permits [instanceId] has left on its current stream; null when it is not permit-managed (unlimited). */
+    /** Permits [instanceId] has left on its current stream; null when it has no registered stream. */
     fun permitsAvailable(instanceId: String): Int? = synchronized(lock) {
         sessions.firstOrNull { it.registered && it.instanceId == instanceId }?.permits
     }
@@ -531,13 +456,12 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
     }
 
     /**
-     * Sends [request] to the live session of [instanceId] (it must have negotiated `processor-control`) and waits up to
-     * [timeout] for its `ControlReply` from that session.
+     * Sends [request] to the live session of [instanceId] and waits up to [timeout] for its `ControlReply` from that
+     * session.
      */
     suspend fun control(instanceId: String, request: ControlRequest, timeout: Duration = Duration.ofSeconds(10)): ControlReply {
         val session = sessions.lastOrNull { it.registered && it.instanceId == instanceId }
             ?: throw IllegalStateException("no live session of $instanceId")
-        check(session.processorControl) { "$instanceId did not negotiate processor-control" }
         val answer = CompletableDeferred<ControlReply>()
         controlWaiters[request.controlId] = session to answer
         session.out.trySend(ServerMessage.newBuilder().setControl(request).build())
@@ -585,7 +509,7 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
     /** Updates the hub holds for the subscription [requestId] (beyond the credit, or before its initial part); 0 when it is not open. */
     fun bufferedUpdatesOf(requestId: String): Int = synchronized(lock) { subscriptions[requestId]?.buffer?.size ?: 0 }
 
-    /** The ack this hub sends to a v2 registrant. */
+    /** The ack this hub sends for every accepted `Register`. */
     fun registerAck(): RegisterAck = RegisterAck.newBuilder()
         .setHubId(hubId)
         .setHeartbeatIntervalMs(heartbeatInterval.toMillis().toInt())
@@ -655,7 +579,7 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
             }
             msg.hasStatus() -> {
                 statusMessages.merge(session.instanceId, 1, Int::plus)
-                if (session.instanceStatus) lastStatuses[session.instanceId] = msg.status
+                lastStatuses[session.instanceId] = msg.status
             }
             msg.hasHeartbeat() -> {
                 heartbeats.merge(session.instanceId, 1, Int::plus)
@@ -670,10 +594,13 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
         if (reg.serviceName.isEmpty() || reg.instanceId.isEmpty()) {
             throw Status.INVALID_ARGUMENT.withDescription("service_name and instance_id must not be empty").asException()
         }
+        // Like the real hub, the permits of the first Register are the session's (a later Register cannot change them).
+        if (!session.registered && reg.initialPermits == 0) {
+            throw Status.INVALID_ARGUMENT.withDescription("Register.initial_permits must be at least 1").asException()
+        }
         authorizeRegister(session, reg)
         val exclusive = (reg.commandTypesList + reg.queryTypesList).toSet()
-        // A P3 hub predates shared_query_types: the field is ignored (the types are simply not registered).
-        val shared = if (scatterGather && !legacy) reg.sharedQueryTypesList.toSet() else emptySet()
+        val shared = reg.sharedQueryTypesList.toSet()
         shared.firstOrNull { it in exclusive }?.let { type ->
             throw Status.INVALID_ARGUMENT.withDescription("type $type is listed as shared and as exclusive").asException()
         }
@@ -711,17 +638,9 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
             } else {
                 emptyList()
             }
-            if (first) { // like the real hub: the first Register of a stream fixes flow control
-                session.flowControl = !legacy && flowControl
-                session.permits = if (session.flowControl && reg.initialPermits > 0) reg.initialPermits else null
+            if (first) { // like the real hub: the first Register of a stream fixes the permits
+                session.permits = reg.initialPermits
                 session.cap = reg.initialPermits
-                session.instanceStatus = !legacy && instanceStatus
-                session.scatterGather = !legacy && scatterGather
-                session.streaming = !legacy && streaming
-                session.subscription = !legacy && subscription
-                session.credentialsRefresh = !legacy && credentialsRefresh
-                session.processorControl = !legacy && processorControl
-                session.protocolVersion = if (legacy) 0 else 2
             }
             session.serviceName = reg.serviceName
             session.instanceId = reg.instanceId
@@ -740,11 +659,9 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
         }
         registrations.merge(reg.instanceId, 1, Int::plus)
         lastRegisters[reg.instanceId] = reg
-        if (!legacy) {
-            // Written before this stream's next message is handled, so it precedes the echo of the following heartbeat.
-            session.ack = ServerMessage.newBuilder().setRegisterAck(registerAck()).build()
-            acks.merge(reg.instanceId, 1, Int::plus)
-        }
+        // Written before this stream's next message is handled, so it precedes the echo of the following heartbeat.
+        session.ack = ServerMessage.newBuilder().setRegisterAck(registerAck()).build()
+        acks.merge(reg.instanceId, 1, Int::plus)
     }
 
     /** The real hub's `reevaluate_sessions`: re-judges every registered session against [acl], closing the denied ones in `enforce`. */
@@ -892,19 +809,11 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
         }
         if (!maySend(sender, req)) return
         if (req.mode != RequestMode.UNARY) {
-            // A v1 session cannot know UNSUPPORTED: it gets INVALID_REQUEST, like from the real hub.
-            val refusal = ErrorCode.INVALID_REQUEST
-            when {
-                req.mode == RequestMode.SCATTER_GATHER && !sender.scatterGather ->
-                    sender.fail(req.id, refusal, "scatter-gather needs the $SCATTER_GATHER capability")
-                req.mode == RequestMode.SCATTER_GATHER -> scatter(sender, req)
-                req.mode == RequestMode.STREAMING && !sender.streaming ->
-                    sender.fail(req.id, refusal, "request mode STREAMING needs the \"$STREAMING\" capability, not declared by this session")
-                req.mode == RequestMode.STREAMING -> startStream(sender, req)
-                req.mode == RequestMode.SUBSCRIPTION && !sender.subscription ->
-                    sender.fail(req.id, refusal, "request mode SUBSCRIPTION needs the \"$SUBSCRIPTION\" capability, not declared by this session")
-                req.mode == RequestMode.SUBSCRIPTION -> startSubscription(sender, req)
-                else -> sender.fail(req.id, refusal, "request mode ${req.mode} is not supported")
+            when (req.mode) {
+                RequestMode.SCATTER_GATHER -> scatter(sender, req)
+                RequestMode.STREAMING -> startStream(sender, req)
+                RequestMode.SUBSCRIPTION -> startSubscription(sender, req)
+                else -> sender.fail(req.id, ErrorCode.INVALID_REQUEST, "invalid request: unknown request mode ${req.modeValue}")
             }
             return
         }
@@ -930,12 +839,10 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
                 }
                 expired?.sender?.fail(req.id, ErrorCode.TIMEOUT, "no reply for ${req.type} within ${timeout.toMillis()} ms")
             }
-            val permits = handler.permits
-            if (permits != null && permits <= 0) {
+            if (handler.permits <= 0) {
                 if (handler.queue.size >= queueCapacity) {
                     timer.cancel()
-                    if (sender.flowControl) sender.fail(req.id, ErrorCode.RESOURCE_EXHAUSTED, "queue of ${handler.instanceId} is full")
-                    else sender.fail(req.id, ErrorCode.HANDLER_ERROR, "handler busy")
+                    sender.fail(req.id, ErrorCode.RESOURCE_EXHAUSTED, "queue of ${handler.instanceId} is full")
                     return
                 }
                 pending[req.id] = Pending(sender, handler, timer)
@@ -985,14 +892,12 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
                 val targetRequest = req.toBuilder().setId("${req.id}#$n").setMode(RequestMode.UNARY).setMaxResults(0).build()
                 if (gathers[req.id] !== gather) return // every target so far failed and ended the gather
                 pending[targetRequest.id] = Pending(sender, target, timer = null, gather = gather)
-                val permits = target.permits
                 when {
-                    permits == null || permits > 0 -> deliver(target, targetRequest)
+                    target.permits > 0 -> deliver(target, targetRequest)
                     target.queue.size >= queueCapacity -> {
                         pending.remove(targetRequest.id)
-                        val code = if (sender.flowControl) ErrorCode.RESOURCE_EXHAUSTED else ErrorCode.HANDLER_ERROR
-                        val text = if (sender.flowControl) "queue of ${target.instanceId} is full" else "handler busy"
-                        answered(gather, targetRequest.id, target, null, Error.newBuilder().setCode(code).setMessage(text).build())
+                        val full = Error.newBuilder().setCode(ErrorCode.RESOURCE_EXHAUSTED).setMessage("queue of ${target.instanceId} is full").build()
+                        answered(gather, targetRequest.id, target, null, full)
                     }
                     else -> {
                         target.queue += Queued(targetRequest, seq++)
@@ -1028,9 +933,8 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
     }
 
     /**
-     * Ends [gather]: its unanswered targets leave their queues and the map (a forwarded one whose session negotiated
-     * `streaming` or `subscription` gets `Cancel{<id>#<n>, reason}`, P4b/P4c), then its `ReplyEnd` (unless the sender is
-     * gone). Caller holds [lock].
+     * Ends [gather]: its unanswered targets leave their queues and the map (a forwarded one gets `Cancel{<id>#<n>,
+     * reason}`), then its `ReplyEnd` (unless the sender is gone). Caller holds [lock].
      */
     private fun closeGather(gather: Gather, timedOut: Int, reason: String, tellSender: Boolean = true) {
         if (gathers.remove(gather.id) !== gather) return
@@ -1038,7 +942,7 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
         for (targetId in gather.remaining) {
             val entry = pending.remove(targetId) ?: continue
             val queued = entry.handler.queue.removeIf { it.request.id == targetId }
-            if (!queued && entry.handler.multiPart) entry.handler.cancel(targetId, reason)
+            if (!queued) entry.handler.cancel(targetId, reason)
         }
         gather.remaining.clear()
         if (!tellSender) return
@@ -1064,19 +968,13 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
                 sender.fail(req.id, ErrorCode.INVALID_REQUEST, "invalid request: ${req.type} is a command; streaming is for queries")
                 return
             }
-            val capable = owners.filter { it.streaming }
-            if (capable.isEmpty()) {
-                val services = owners.map { it.serviceName }.distinct().sorted().joinToString(", ")
-                sender.fail(req.id, ErrorCode.INVALID_REQUEST, "no live instance of $services serving ${req.type} negotiated the \"$STREAMING\" capability")
-                return
-            }
             val targetId = "${req.id}#1"
             if (req.id in pending || req.id in gathers || req.id in streams || req.id in subscriptions || targetId in pending || targetId in streams) {
                 sender.fail(req.id, ErrorCode.INVALID_REQUEST, "request ${req.id} is already in flight")
                 return
             }
             val index = rotation.merge(req.type, 1, Int::plus)!! - 1
-            val handler = capable[index % capable.size]
+            val handler = owners[index % owners.size]
             // initial_credit is a uint32 (0xFFFFFFFF is a window of 4 billion parts, not -1); 0 reads as 64.
             val credit = Integer.toUnsignedLong(req.initialCredit).takeIf { it > 0 } ?: 64L
             val stream = Stream(req.id, sender, handler, credit, req.maxResults, effectiveTimeout(req))
@@ -1091,13 +989,10 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
             armIdle(stream)
             val target = req.toBuilder().setId(targetId).setInitialCredit(credit.toInt()).setMaxResults(0).build()
             pending[targetId] = Pending(sender, handler, timer = null, stream = stream)
-            val permits = handler.permits
             when {
-                permits == null || permits > 0 -> deliver(handler, target)
+                handler.permits > 0 -> deliver(handler, target)
                 handler.queue.size >= queueCapacity -> {
-                    val code = if (sender.flowControl) ErrorCode.RESOURCE_EXHAUSTED else ErrorCode.HANDLER_ERROR
-                    val text = if (sender.flowControl) "queue of ${handler.instanceId} is full" else "handler busy"
-                    closeStream(stream, error(stream.id, code, text), cancel = null)
+                    closeStream(stream, error(stream.id, ErrorCode.RESOURCE_EXHAUSTED, "queue of ${handler.instanceId} is full"), cancel = null)
                 }
                 else -> {
                     handler.queue += Queued(target, seq++)
@@ -1149,7 +1044,6 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
         pending[targetId]?.stream?.takeIf { it.handler === handler && streams[it.id] === it }
 
     private fun relayPart(handler: Session, part: ReplyPart) {
-        if (!handler.multiPart) return
         synchronized(lock) {
             val stream = streamOfTarget(part.requestId, handler) ?: run {
                 subscriptionOfTarget(part.requestId, handler)?.let { onSubscriptionPart(it, part.requestId, handler, part) }
@@ -1173,7 +1067,6 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
     }
 
     private fun relayEnd(handler: Session, end: ReplyEnd) {
-        if (!handler.multiPart) return
         synchronized(lock) {
             val stream = streamOfTarget(end.requestId, handler) ?: run {
                 subscriptionOfTarget(end.requestId, handler)?.let { onSubscriptionEnd(it, end.requestId, handler, end) }
@@ -1186,7 +1079,7 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
     private fun relayFlow(sender: Session, flow: Flow) {
         flowsBySender.computeIfAbsent(sender.instanceId) { CopyOnWriteArrayList() }.add(flow.credits)
         val credits = Integer.toUnsignedLong(flow.credits) // uint32, as initial_credit
-        if (!sender.multiPart || credits == 0L) return
+        if (credits == 0L) return
         synchronized(lock) {
             subscriptions[flow.requestId]?.takeIf { it.sender === sender }?.let { sub ->
                 // Nothing is relayed to the targets: the credit only drains what the hub holds.
@@ -1204,7 +1097,6 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
 
     private fun onCancel(sender: Session, cancel: Cancel) {
         cancelsBySender.computeIfAbsent(sender.instanceId) { CopyOnWriteArrayList() }.add(cancel)
-        if (!sender.multiPart) return
         synchronized(lock) {
             subscriptions[cancel.requestId]?.takeIf { it.sender === sender }?.let { sub ->
                 closeSubscription(sub, null, cancel = cancel.reason, tellSender = false)
@@ -1215,9 +1107,9 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
         }
     }
 
-    /** Forwards [req] to [handler], spending a permit when it is permit-managed. Caller holds [lock]. */
+    /** Forwards [req] to [handler], spending a permit. Caller holds [lock]. */
     private fun deliver(handler: Session, req: Request) {
-        handler.permits = handler.permits?.minus(1)
+        handler.permits--
         forwardedOrder += req.id
         handler.out.trySend(ServerMessage.newBuilder().setRequest(req).build())
         pending[req.id]?.stream?.let { stream -> // a stream's idle timeout starts over at the forward
@@ -1231,10 +1123,10 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
         permitMessages.merge(session.instanceId, 1, Int::plus)
         permitsGranted.merge(session.instanceId, count, Int::plus)
         synchronized(lock) {
-            val permits = session.permits ?: return // not permit-managed: ignored, like the real hub
-            if (permitGrants) session.cap = maxOf(session.cap, grant)
-            session.permits = if (permitCap) minOf(permits + count, session.cap) else permits + count
-            while ((session.permits ?: 0) > 0 && session.queue.isNotEmpty()) {
+            if (!session.registered) return
+            session.cap = maxOf(session.cap, grant)
+            session.permits = if (permitCap) minOf(session.permits + count, session.cap) else session.permits + count
+            while (session.permits > 0 && session.queue.isNotEmpty()) {
                 val next = session.queue.removeAt(0)
                 if (next.request.id in pending) deliver(session, next.request) // skip entries that already timed out
             }
@@ -1244,21 +1136,8 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
     private fun relay(handler: Session, msg: ClientMessage) {
         val reply = msg.reply
         val entry = synchronized(lock) {
-            // A unary Reply to a streaming target (not a streaming library): one part then the end, Reply{error} as the end's error.
-            streamOfTarget(reply.requestId, handler)?.let { stream ->
-                if (reply.hasError()) {
-                    closeStream(stream, reply.error.toBuilder().setRequestId(stream.id).build(), cancel = null)
-                } else {
-                    stream.parts++
-                    val part = ReplyPart.newBuilder().setRequestId(stream.id).setPayload(reply.payload)
-                        .setResponderService(handler.serviceName).setResponderInstance(handler.instanceId).setSeq(0)
-                    stream.sender.out.trySend(ServerMessage.newBuilder().setPart(part).build())
-                    closeStream(stream, null, cancel = null)
-                }
-                return
-            }
-            // A unary Reply to an update target (not a subscription library) is ignored.
-            if (subscriptionOfTarget(reply.requestId, handler) != null) return
+            // Like the real hub, a unary Reply to a streaming or an update target is a reply for no unary request: ignored.
+            if (streamOfTarget(reply.requestId, handler) != null || subscriptionOfTarget(reply.requestId, handler) != null) return
             val p = pending[reply.requestId]
             val taken = if (p != null && p.handler === handler) pending.remove(reply.requestId) else null
             taken?.gather?.let { gather -> answered(gather, reply.requestId, handler, reply, null) }
@@ -1321,7 +1200,7 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
 
     // --- subscription queries (P4c) ---
 
-    /** Starts the subscription [req] from [sender]: the gates in the hub's order, then every capable target and the initial request. */
+    /** Starts the subscription [req] from [sender]: the gates in the hub's order, then every target and the initial request. */
     private fun startSubscription(sender: Session, req: Request) {
         synchronized(lock) {
             val forQueries = "invalid request: ${req.type} is a command; subscription is for queries"
@@ -1338,12 +1217,6 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
                 sender.fail(req.id, ErrorCode.INVALID_REQUEST, forQueries)
                 return
             }
-            val capable = owners.filter { it.subscription }
-            if (capable.isEmpty()) {
-                val services = owners.map { it.serviceName }.distinct().sorted().joinToString(", ")
-                sender.fail(req.id, ErrorCode.INVALID_REQUEST, "no live instance of $services serving ${req.type} negotiated the \"$SUBSCRIPTION\" capability")
-                return
-            }
             val initialId = "${req.id}#0"
             if (req.id in pending || req.id in gathers || req.id in streams || req.id in subscriptions || initialId in pending) {
                 sender.fail(req.id, ErrorCode.INVALID_REQUEST, "invalid request: duplicate id")
@@ -1351,7 +1224,7 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
             }
             // The per-instance limit, over the targets of every open subscription (the last gate, under the lock).
             val max = maxSubscriptionsPerInstance
-            capable.firstOrNull { target -> subscriptions.values.sumOf { s -> s.targets.values.count { it === target } } >= max }?.let { full ->
+            owners.firstOrNull { target -> subscriptions.values.sumOf { s -> s.targets.values.count { it === target } } >= max }?.let { full ->
                 sender.fail(req.id, ErrorCode.RESOURCE_EXHAUSTED, "handler instance ${full.instanceId} already serves $max subscription${if (max == 1) "" else "s"} (KRAKEN_HUB_MAX_SUBSCRIPTIONS_PER_INSTANCE)")
                 return
             }
@@ -1360,8 +1233,8 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
             val credit = Integer.toUnsignedLong(req.initialCredit).takeIf { it > 0 } ?: 64L
             val sub = Subscription(req.id, sender, req.type, credit, req.maxResults)
             val index = rotation.merge(req.type, 1, Int::plus)!! - 1
-            sub.initialHandler = capable[index % capable.size]
-            capable.sortedWith(compareBy({ it.serviceName }, { it.instanceId })).forEachIndexed { n, target -> sub.targets["${req.id}#${n + 1}"] = target }
+            sub.initialHandler = owners[index % owners.size]
+            owners.sortedWith(compareBy({ it.serviceName }, { it.instanceId })).forEachIndexed { n, target -> sub.targets["${req.id}#${n + 1}"] = target }
             subscriptions[req.id] = sub
             val maxDuration = maxSubscriptionDuration
             if (!maxDuration.isZero && !maxDuration.isNegative) {
@@ -1391,15 +1264,12 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
                 }
             }
             pending[initialId] = Pending(sender, handler, timer, subscription = sub)
-            val permits = handler.permits
             when {
-                permits == null || permits > 0 -> deliver(handler, initial)
+                handler.permits > 0 -> deliver(handler, initial)
                 handler.queue.size >= queueCapacity -> {
-                    val code = if (sender.flowControl) ErrorCode.RESOURCE_EXHAUSTED else ErrorCode.HANDLER_ERROR
-                    val text = if (sender.flowControl) "queue of ${handler.instanceId} is full" else "handler busy"
                     pending.remove(initialId)
                     timer.cancel()
-                    closeSubscription(sub, error(sub.id, code, text), cancel = "initial result failed")
+                    closeSubscription(sub, error(sub.id, ErrorCode.RESOURCE_EXHAUSTED, "queue of ${handler.instanceId} is full"), cancel = "initial result failed")
                 }
                 else -> {
                     handler.queue += Queued(initial, seq++)
@@ -1504,17 +1374,6 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
         if (cancel != null) sub.targets.forEach { (targetId, target) -> target.cancel(targetId, cancel) }
         sub.targets.clear()
         sub.buffer.clear()
-    }
-
-    private companion object {
-        const val FLOW_CONTROL = "flow-control"
-        const val INSTANCE_STATUS = "instance-status"
-        const val SCATTER_GATHER = "scatter-gather"
-        const val STREAMING = "streaming"
-        const val SUBSCRIPTION = "subscription"
-        const val CREDENTIALS_REFRESH = "credentials-refresh"
-        const val PROCESSORS = "processors"
-        const val PROCESSOR_CONTROL = "processor-control"
     }
 
     private fun error(requestId: String, code: ErrorCode, message: String): Error =

@@ -71,7 +71,7 @@ class InProcessHubAuthTest {
             queries: List<String> = emptyList(),
             shared: List<String> = emptyList(),
         ) {
-            val reg = Register.newBuilder().setServiceName(service).setInstanceId(instance)
+            val reg = Register.newBuilder().setServiceName(service).setInstanceId(instance).setInitialPermits(64)
                 .addAllCommandTypes(commands).addAllQueryTypes(queries).addAllSharedQueryTypes(shared)
             if (token != null) reg.credentials = Credentials.newBuilder().setToken(token).build()
             if (jwt != null) reg.credentials = Credentials.newBuilder().setJwt(jwt).build()
@@ -363,7 +363,7 @@ class InProcessHubAuthTest {
         assertTrue("not configured" in notConfigured.description!!, notConfigured.toString())
     }
 
-    @Test fun `the ack offers credentials-refresh to a client that declared it, and ClientMessage credentials are recorded`() = runBlocking {
+    @Test fun `ClientMessage credentials are recorded`() = runBlocking {
         hub.auth = HubAuth.enforce(acl, jwtServices)
         val first = jwt("billing-service")
         val raw = Raw().also { it.register("billing-service", "i-1", jwt = first) }
@@ -373,13 +373,6 @@ class InProcessHubAuthTest {
         withTimeout(5_000) { while (hub.credentialsSeenFrom("i-1").isEmpty()) kotlinx.coroutines.delay(5) }
         assertEquals(listOf(second), hub.credentialsSeenFrom("i-1"))
         assertEquals(1, hub.sessionsOf("i-1"))
-        // a client that did not declare the capability is not offered it
-        val plain = Raw()
-        plain.out.trySend(
-            ClientMessage.newBuilder().setRegister(Register.newBuilder().setServiceName("billing-service").setInstanceId("i-2")
-                .setCredentials(Credentials.newBuilder().setJwt(jwt("billing-service")))).build(),
-        )
-        assertTrue(plain.next().hasRegisterAck())
     }
 
     @Test fun `enforce closes the stream when a refresh names another service, or is not a valid credential`() = runBlocking {

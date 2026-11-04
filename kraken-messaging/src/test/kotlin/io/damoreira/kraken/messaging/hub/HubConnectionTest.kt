@@ -60,7 +60,6 @@ class HubConnectionTest {
     private val virtualThreads = Executors.newVirtualThreadPerTaskExecutor().asCoroutineDispatcher()
     private val fast = HubSettings(
         requestTimeout = Duration.ofSeconds(2),
-        heartbeatInterval = Duration.ofSeconds(10),
         backoffMin = Duration.ofMillis(20),
         backoffMax = Duration.ofMillis(200),
     )
@@ -99,7 +98,7 @@ class HubConnectionTest {
 
     // --- flow control (P1) ---
 
-    @Test fun `register declares flow-control with initial permits, load factor and tags`() = runBlocking {
+    @Test fun `register carries the initial permits, load factor and tags`() = runBlocking {
         val conn = flowConnection("a", maxConcurrentHandlers = 4, loadFactor = 150, tags = mapOf("zone" to "eu-1")) { req ->
             payloadReply(req.id, "{}")
         }
@@ -185,39 +184,6 @@ class HubConnectionTest {
         assertTrue(elapsed < Duration.ofSeconds(1), "100 calls through one permit took $elapsed")
         await atMost Duration.ofSeconds(1) until { hub.permitsAvailable("b") == 1 }
         assertEquals(100, hub.permitsGrantedBy("b"))
-    }
-
-    @Test fun `no permits are sent to a hub without flow-control`() = runBlocking {
-        hub.flowControl = false // the P0 hub
-        hub.instanceStatus = false
-        hub.scatterGather = false
-        hub.streaming = false
-        hub.subscription = false
-        hub.credentialsRefresh = false
-        hub.processors = false
-        hub.processorControl = false
-        val handler = flowConnection("b", maxConcurrentHandlers = 4) { req -> payloadReply(req.id, "{}") }
-        handler.register(setOf("test.Ping"), emptySet())
-        handler.start()
-        val sender = connection("a")
-        sender.start()
-        assertTrue(handler.awaitRegistered(wait) && sender.awaitRegistered(wait))
-        repeat(5) { sender.send(request()) }
-        delay(300)
-        assertEquals(0, hub.permitMessagesFrom("b"))
-    }
-
-    @Test fun `no permits are sent to a legacy hub`() = runBlocking {
-        hub.legacy = true
-        val handler = flowConnection("b", maxConcurrentHandlers = 4) { req -> payloadReply(req.id, "{}") }
-        handler.register(setOf("test.Ping"), emptySet())
-        handler.start()
-        val sender = connection("a")
-        sender.start()
-        assertTrue(handler.awaitRegistered(wait) && sender.awaitRegistered(wait))
-        repeat(3) { sender.send(request()) }
-        delay(300)
-        assertEquals(0, hub.permitMessagesFrom("b"))
     }
 
     @Test fun `a handler finishing after its stream broke grants nothing on the new stream`() = runBlocking {
@@ -380,7 +346,7 @@ class HubConnectionTest {
     }
 
     @Test fun missing_heartbeat_echoes_trigger_reconnect() = runBlocking {
-        hub.heartbeatInterval = Duration.ofMillis(100) // announced in the ack; the 10 s fallback is not used
+        hub.heartbeatInterval = Duration.ofMillis(100) // announced in the ack
         val conn = connection("a")
         conn.register(setOf("test.Ping"), emptySet())
         conn.start()
@@ -399,7 +365,7 @@ class HubConnectionTest {
 
     @Test fun `heartbeats are sent at the interval the hub announces`() = runBlocking {
         hub.heartbeatInterval = Duration.ofMillis(50)
-        val conn = connection("a") // fallback interval 10 s
+        val conn = connection("a")
         conn.start()
         assertTrue(conn.awaitRegistered(wait))
 
@@ -444,9 +410,9 @@ class HubConnectionTest {
         assertTrue(response.reply.error.message.startsWith("TimeoutCancellationException: "), response.reply.error.message)
     }
 
-    // --- protocol v2 handshake, timeouts, error split, backoff (P0) ---
+    // --- handshake, timeouts, error split, backoff (P0) ---
 
-    @Test fun `register announces protocol v2 and the ack is parsed`() = runBlocking {
+    @Test fun `the ack is parsed`() = runBlocking {
         hub.typeTimeouts = mapOf("test.Slow" to Duration.ofSeconds(30))
         val conn = connection("a")
         conn.register(setOf("test.Ping"), emptySet())
@@ -456,15 +422,16 @@ class HubConnectionTest {
         val reg = assertNotNull(hub.lastRegisterFrom("a"))
         assertTrue(reg.clientVersion.startsWith("kraken-messaging/"), reg.clientVersion)
         assertFalse(reg.clientVersion.endsWith("/unknown"), reg.clientVersion)
-        val handshake = assertIs<HubHandshake.V2>(conn.handshake.value)
-        assertEquals(hub.hubId, handshake.ack.hubId)
-        assertEquals(3_000, handshake.ack.heartbeatIntervalMs)
-        assertEquals(10_000, handshake.ack.heartbeatTimeoutMs)
-        assertEquals("default", handshake.ack.context)
-        assertEquals(mapOf("test.Slow" to 30_000), handshake.ack.typeTimeoutsMsMap)
+        val ack = assertNotNull(conn.ack.value)
+        assertEquals(hub.hubId, ack.hubId)
+        assertEquals(hub.hubId, conn.hubId)
+        assertEquals(3_000, ack.heartbeatIntervalMs)
+        assertEquals(10_000, ack.heartbeatTimeoutMs)
+        assertEquals("default", ack.context)
+        assertEquals(mapOf("test.Slow" to 30_000), ack.typeTimeoutsMsMap)
     }
 
-    @Test fun `every accepted register is acknowledged on a v2 hub`() = runBlocking {
+    @Test fun `every accepted register is acknowledged`() = runBlocking {
         val conn = connection("a")
         conn.register(setOf("test.Ping"), emptySet())
         conn.start()
@@ -472,23 +439,28 @@ class HubConnectionTest {
         conn.register(setOf("test.Ping", "test.Pong"), emptySet())
         assertTrue(conn.awaitRegistered(wait))
         await atMost Duration.ofSeconds(2) until { hub.acksSentTo("a") == 2 }
-        assertIs<HubHandshake.V2>(conn.handshake.value)
+        assertNotNull(conn.ack.value)
         Unit
     }
 
-    @Test fun `legacy hub is detected from an echo without ack and the fallback interval is used`() = runBlocking {
-        hub.legacy = true
-        val conn = connection("a", settings = fast.copy(heartbeatInterval = Duration.ofMillis(50)))
+    @Test fun `a stream without an ack within the handshake timeout fails and the connection reconnects`() = runBlocking {
+        hub.ackDelay = Duration.ofSeconds(2) // every ack comes too late (the stream's later messages wait behind it)
+        val conn = connection("a", settings = fast.copy(handshakeTimeout = Duration.ofMillis(200)))
         conn.register(setOf("test.Ping"), emptySet())
         conn.start()
-        assertTrue(conn.awaitRegistered(wait))
 
-        assertEquals(HubHandshake.Legacy, conn.handshake.value)
-        assertEquals(0, hub.acksSentTo("a"))
-        await atMost Duration.ofMillis(500) until { hub.heartbeatsFrom("a") >= 3 }
+        // Registration completes on the ack only: the stream is given up and a new one opened, never connected.
+        await atMost Duration.ofSeconds(3) until { hub.streamsOpenedBy("a") >= 3 }
+        assertFalse(conn.connected.value)
+        assertFalse(conn.awaitRegistered(Duration.ofMillis(100)))
+
+        hub.ackDelay = Duration.ZERO
+        assertTrue(conn.awaitRegistered(wait))
+        assertNotNull(conn.ack.value)
+        Unit
     }
 
-    @Test fun `v2 sends timeout 0 unless the caller chose one`() = runBlocking {
+    @Test fun `timeout 0 is sent unless the caller chose one`() = runBlocking {
         val handler = connection("b") { req -> payloadReply(req.id, "{}") }
         handler.register(setOf("test.Ping"), emptySet())
         handler.start()
@@ -500,22 +472,6 @@ class HubConnectionTest {
         assertEquals(0, hub.lastRequest()!!.timeoutMs)
         withTimeout(5_000) { sender.send(request(timeoutMs = 1_500)) }
         assertEquals(1_500, hub.lastRequest()!!.timeoutMs)
-    }
-
-    @Test fun `legacy mode sends request-timeout or 5 s as before`() = runBlocking {
-        hub.legacy = true
-        val handler = connection("b") { req -> payloadReply(req.id, "{}") }
-        handler.register(setOf("test.Ping"), emptySet())
-        handler.start()
-        val unset = connection("a", settings = fast.copy(requestTimeout = null))
-        val configured = connection("c", settings = fast.copy(requestTimeout = Duration.ofSeconds(2)))
-        unset.start(); configured.start()
-        for (c in listOf(handler, unset, configured)) assertTrue(c.awaitRegistered(wait))
-
-        withTimeout(5_000) { unset.send(request(timeoutMs = 0)) }
-        assertEquals(5_000, hub.lastRequest()!!.timeoutMs)
-        withTimeout(5_000) { configured.send(request(timeoutMs = 0)) }
-        assertEquals(2_000, hub.lastRequest()!!.timeoutMs)
     }
 
     @Test fun `per-type override applies to a request without a timeout`() = runBlocking {
@@ -591,8 +547,7 @@ class HubConnectionTest {
         Unit
     }
 
-    @Test fun `zero request-timeout counts as unset against a legacy hub`() = runBlocking {
-        hub.legacy = true
+    @Test fun `zero request-timeout counts as unset`() = runBlocking {
         val zero = fast.copy(requestTimeout = Duration.ZERO)
         val handler = connection("b", settings = zero) { req -> delay(200); payloadReply(req.id, "{}") }
         handler.register(setOf("test.Ping"), emptySet())
@@ -601,7 +556,6 @@ class HubConnectionTest {
         sender.start()
         assertTrue(handler.awaitRegistered(wait))
         assertTrue(sender.awaitRegistered(wait))
-        assertIs<HubHandshake.Legacy>(sender.handshake.value)
 
         // Before the fix: 0 ms sent and a 0 ms local guard, so this failed at once with MessageTimeoutException.
         val response = withTimeout(5_000) { sender.send(request(timeoutMs = 0)) }
@@ -702,18 +656,6 @@ class HubConnectionTest {
         assertTrue(first.await().hasOk())
         assertTrue(second.await().hasOk())
         assertEquals(listOf("c-1", "c-2"), hub.controlRepliesFrom("h").map { it.controlId })
-    }
-
-    @Test fun `a hub that does not list processor-control is never answered`() = runBlocking {
-        hub.processorControl = false
-        val seen = CopyOnWriteArrayList<String>()
-        val handler = connection("h", control = { request, reply -> seen += request.controlId; reply(ok(request)) })
-        handler.start()
-        assertTrue(handler.awaitRegistered(wait))
-        hub.inject("h", ServerMessage.newBuilder().setControl(pause("c-1")).build())
-        delay(500)
-        assertEquals(emptyList(), seen.toList())
-        assertEquals(emptyList(), hub.controlRepliesFrom("h"))
     }
 
     @Test fun `without event processors every control request is UNKNOWN_PROCESSOR`() = runBlocking {

@@ -6,7 +6,6 @@ import io.damoreira.kraken.messaging.HandlerBusyException
 import io.damoreira.kraken.messaging.RemoteHandlerException
 import io.damoreira.kraken.messaging.StreamCancelledException
 import io.damoreira.kraken.messaging.UnauthenticatedException
-import io.damoreira.kraken.messaging.UnsupportedByHubException
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
@@ -39,15 +38,15 @@ class HubErrorsTest {
     }
 
     @Test
-    fun `a subscription's resource exhausted keeps the hub's reason, the feature names subscription`() {
-        val e = HubErrors.toException("c.R", ErrorCode.RESOURCE_EXHAUSTED, "subscriber buffer (256) exceeded", ByteArray(0), HubProtocol.SUBSCRIPTION)
+    fun `a subscription's resource exhausted keeps the hub's reason`() {
+        val e = HubErrors.toException("c.R", ErrorCode.RESOURCE_EXHAUSTED, "subscriber buffer (256) exceeded", ByteArray(0), subscription = true)
         assertIs<HandlerBusyException>(e)
         assertEquals("c.R", e.type)
         assertEquals("Handler for 'c.R' is busy: subscriber buffer (256) exceeded", e.message)
     }
 
     @Test
-    fun `unsupported maps to UnsupportedByHubException, an unmapped code keeps its name`() {
+    fun `cancelled maps to StreamCancelledException, an unmapped code keeps its name`() {
         val cancelled = HubErrors.toException("c.R", ErrorCode.CANCELLED, "max stream duration (600000 ms) exceeded", ByteArray(0))
         assertEquals("max stream duration (600000 ms) exceeded", assertIs<StreamCancelledException>(cancelled).message)
         val other = HubErrors.toException("c.R", ErrorCode.ERROR_CODE_UNSPECIFIED, "odd", ByteArray(0))

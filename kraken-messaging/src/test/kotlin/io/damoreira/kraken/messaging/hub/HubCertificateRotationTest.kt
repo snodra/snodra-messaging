@@ -133,7 +133,7 @@ class HubCertificateRotationTest {
     private val byName get() = listOf(a, b).associateBy { it.name }
 
     private fun settings(certificate: HubClientCertificate?) = HubSettings(
-        requestTimeout = Duration.ofSeconds(3), heartbeatInterval = Duration.ofSeconds(10),
+        requestTimeout = Duration.ofSeconds(3),
         backoffMin = Duration.ofMillis(20), backoffMax = Duration.ofMillis(300), clientCertificate = certificate,
     )
 

@@ -11,11 +11,10 @@ import io.damoreira.kraken.messaging.NoHandlerException
 import io.damoreira.kraken.messaging.RemoteHandlerException
 import io.damoreira.kraken.messaging.StreamCancelledException
 import io.damoreira.kraken.messaging.UnauthenticatedException
-import io.damoreira.kraken.messaging.UnsupportedByHubException
 
 /**
- * Maps hub [ErrorCode]s to the exceptions thrown to callers of the buses. [feature] names the capability an
- * `UNSUPPORTED` answer is about (`scatter-gather`, `streaming`, `subscription`).
+ * Maps hub [ErrorCode]s to the exceptions thrown to callers of the buses. [subscription] is true for the answers of a
+ * subscription query, whose `RESOURCE_EXHAUSTED` says why (a subscriber buffer overflow, an instance's subscription limit).
  */
 object HubErrors {
     fun toException(
@@ -23,7 +22,7 @@ object HubErrors {
         code: ErrorCode,
         message: String,
         details: ByteArray,
-        feature: String = HubProtocol.SCATTER_GATHER,
+        subscription: Boolean = false,
     ): MessagingException = when (code) {
         ErrorCode.NO_HANDLER -> NoHandlerException(type)
         ErrorCode.TIMEOUT -> MessageTimeoutException(type)
@@ -33,7 +32,7 @@ object HubErrors {
         ErrorCode.INVALID_REQUEST -> InvalidMessageException(message)
         ErrorCode.PERMISSION_DENIED -> AccessDeniedException(message)
         // A subscription's RESOURCE_EXHAUSTED says why (a subscriber buffer overflow, an instance's subscription limit).
-        ErrorCode.RESOURCE_EXHAUSTED -> HandlerBusyException(type, message.takeIf { feature == HubProtocol.SUBSCRIPTION && it.isNotEmpty() })
+        ErrorCode.RESOURCE_EXHAUSTED -> HandlerBusyException(type, message.takeIf { subscription && it.isNotEmpty() })
         // A streaming query or subscription the hub ended for outliving its maximum duration (P4b, P4c).
         ErrorCode.CANCELLED -> StreamCancelledException(message.ifEmpty { "cancelled by the hub" })
         else -> RemoteHandlerException(type, message, details, code.name)
