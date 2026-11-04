@@ -1,6 +1,7 @@
 package io.damoreira.kraken.messaging.handler
 
 import io.damoreira.kraken.messaging.MessageContext
+import io.damoreira.kraken.messaging.control.ResetContext
 import io.damoreira.kraken.messaging.external.CompiledIdempotency
 import java.lang.reflect.InvocationTargetException
 import kotlin.reflect.KClass
@@ -51,5 +52,24 @@ class HandlerMethod(
             throw e.targetException ?: e
         }
         return result ?: Unit
+    }
+}
+
+/** A `@ResetHandler` method (P6b) of [processor]: called with the [ResetContext] when it takes one. */
+class ResetHandlerMethod(val bean: Any, val function: KFunction<*>, val processor: String, val wantsContext: Boolean) {
+    init {
+        function.isAccessible = true
+    }
+
+    /** `Bean.method` label used in diagnostics. */
+    val label: String get() = "${bean::class.simpleName}.${function.name}"
+
+    suspend fun invoke(ctx: ResetContext) {
+        val args = if (wantsContext) arrayOf(bean, ctx) else arrayOf(bean)
+        try {
+            if (function.isSuspend) function.callSuspend(*args) else function.call(*args)
+        } catch (e: InvocationTargetException) {
+            throw e.targetException ?: e
+        }
     }
 }

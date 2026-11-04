@@ -39,7 +39,7 @@ class HandlerBeanPostProcessor(private val registryProvider: () -> HandlerRegist
 
     private companion object {
         val SKIPPED_PREFIXES = listOf("java.", "kotlin.", "org.springframework.")
-        val HANDLER_ANNOTATIONS = listOf(EventHandler::class.java, CommandHandler::class.java, QueryHandler::class.java)
+        val HANDLER_ANNOTATIONS = listOf(EventHandler::class.java, CommandHandler::class.java, QueryHandler::class.java, ResetHandler::class.java)
         const val KOTLIN_REFLECTION_INTERNAL_ERROR = "kotlin.reflect.jvm.internal.KotlinReflectionInternalError"
     }
 }

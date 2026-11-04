@@ -5,6 +5,7 @@ import io.damoreira.kraken.messaging.MessageContext
 import io.damoreira.kraken.messaging.api.StreamingQuery
 import io.damoreira.kraken.messaging.api.SubscriptionQuery
 import io.damoreira.kraken.messaging.codec.MessageTypeResolver
+import io.damoreira.kraken.messaging.control.ResetContext
 import io.damoreira.kraken.messaging.external.IdempotentHandler
 import io.damoreira.kraken.messaging.external.IdempotentHandlers
 import kotlinx.coroutines.flow.Flow
@@ -26,6 +27,7 @@ class HandlerRegistry(private val typeResolver: MessageTypeResolver) {
     private val events = ConcurrentHashMap<String, CopyOnWriteArrayList<HandlerMethod>>()
     private val commands = ConcurrentHashMap<String, HandlerMethod>()
     private val queries = ConcurrentHashMap<String, HandlerMethod>()
+    private val resets = CopyOnWriteArrayList<ResetHandlerMethod>()
     private val registered: MutableSet<Any> = Collections.newSetFromMap(IdentityHashMap())
     private val listeners = CopyOnWriteArrayList<() -> Unit>()
 
@@ -33,7 +35,9 @@ class HandlerRegistry(private val typeResolver: MessageTypeResolver) {
     fun register(bean: Any): List<HandlerMethod> {
         val added = synchronized(this) {
             if (!registered.add(bean)) return emptyList()
-            scan(bean).also { it.forEach(::add) }
+            val found = scan(bean)
+            resets += scanResets(bean) // after scan: an invalid @ProcessingGroup fails there first, naming an event handler
+            found.also { it.forEach(::add) }
         }
         if (added.isNotEmpty()) listeners.forEach { it() }
         return added
@@ -48,6 +52,9 @@ class HandlerRegistry(private val typeResolver: MessageTypeResolver) {
 
     /** The event handlers of [type] in [processor] (ADR 0022). */
     fun eventHandlers(type: String, processor: String): List<HandlerMethod> = eventHandlers(type).filter { it.processor == processor }
+
+    /** The `@ResetHandler`s of [processor] (P6b), in registration order (beans as registered, then by method name). */
+    fun resetHandlers(processor: String): List<ResetHandlerMethod> = resets.filter { it.processor == processor }
 
     /** The processors that have at least one event handler, `default` included when it has one. */
     fun processors(): Set<String> = events.values.flatten().mapTo(sortedSetOf()) { it.processor }
@@ -108,6 +115,21 @@ class HandlerRegistry(private val typeResolver: MessageTypeResolver) {
             found += handler
         }
         return found
+    }
+
+    private fun scanResets(bean: Any): List<ResetHandlerMethod> {
+        val klass = AopUtils.getTargetClass(bean).kotlin
+        return klass.memberFunctions.sortedBy { it.name }.filter { it.findAnnotation<ResetHandler>() != null }.map { fn ->
+            val processor = processorOf(klass) ?: throw IllegalStateException(
+                "Reset handler ${labelOf(klass, fn)}: @ProcessingGroup(\"${klass.findAnnotation<ProcessingGroup>()!!.value}\") is not a valid processor name",
+            )
+            val params = fn.parameters.drop(1)
+            val wantsContext = params.size == 1 && params[0].type.classifier == ResetContext::class
+            if (!(params.isEmpty() || wantsContext)) {
+                throw IllegalStateException("Reset handler ${labelOf(klass, fn)} must take no parameter or a ResetContext")
+            }
+            ResetHandlerMethod(bean, fn, processor, wantsContext)
+        }
     }
 
     /** The class's processor: its `@ProcessingGroup` name, `default` without one, null when the name is invalid. */

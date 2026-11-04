@@ -6,6 +6,7 @@ import com.mongodb.client.MongoCollection
 import com.mongodb.client.model.Filters
 import com.mongodb.client.model.UpdateOptions
 import com.mongodb.client.model.Updates
+import io.damoreira.kraken.messaging.handler.Processors
 import org.bson.Document
 import org.bson.conversions.Bson
 import org.springframework.data.mongodb.core.MongoTemplate
@@ -133,6 +134,26 @@ open class ProcessorControlStore(
             Updates.combine(Updates.pull("replay", rangeDocument(range)), Updates.set("updatedAt", now())),
         ).modifiedCount == 1L
 
+    /**
+     * Deletes [processor]'s stage-1 markers (`processed_events`) in [ranges]: `{processor, topic, partition, offset in
+     * [from, until)}` per range, and with [legacy] (a reset to `earliest`) also its markers from before P6b, which carry no
+     * position ([legacyMarkers]). Returns how many were deleted.
+     */
+    fun deleteMarkers(processor: String, ranges: List<ReplayRange>, legacy: Boolean): Long {
+        val markers = mongo.db.getCollection(MARKERS)
+        var deleted = 0L
+        for (range in ranges) {
+            deleted += markers.deleteMany(
+                Filters.and(
+                    Filters.eq("processor", processor), Filters.eq("topic", range.topic), Filters.eq("partition", range.partition),
+                    Filters.gte("offset", range.from), Filters.lt("offset", range.until),
+                ),
+            ).deletedCount
+        }
+        if (legacy) deleted += markers.deleteMany(legacyMarkers(processor)).deletedCount
+        return deleted
+    }
+
     private fun held(processor: String, op: String): Bson = Filters.and(Filters.eq("_id", processor), Filters.eq("operation.id", op))
 
     private fun now(): Date = Date.from(clock.instant())
@@ -173,6 +194,21 @@ open class ProcessorControlStore(
 
     companion object {
         const val COLLECTION = "processor_control"
+
+        /** The idempotency markers' collection. */
+        const val MARKERS = "processed_events"
+
+        /**
+         * The markers [processor] wrote before P6b (no `processor` field): for a named processor `_id`
+         * `processor:<name>:<dedupe id>`, for `default` the bare dedupe id, in both cases a dedupe id without `:`. Every other
+         * marker family has one there (`saga:`, `ingress:`, `failed:`, `processor:` and the external sources'
+         * `<source>:<partition>:<offset>` / `<source>:<key>`), a Kafka event id (a UUID, or `<topic>-<partition>-<offset>`;
+         * a topic name cannot contain `:`) has none. An event id with a `:` keeps its legacy marker.
+         */
+        fun legacyMarkers(processor: String): Bson = Filters.and(
+            Filters.exists("processor", false),
+            Filters.regex("_id", if (processor == Processors.DEFAULT) "^[^:]+$" else "^processor:${Regex.escape(processor)}:[^:]+$"),
+        )
 
         /** `operation.kind` of a reset, the only kind so far. */
         const val KIND_RESET = "reset"

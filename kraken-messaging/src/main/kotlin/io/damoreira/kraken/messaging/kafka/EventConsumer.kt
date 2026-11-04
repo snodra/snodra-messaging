@@ -76,7 +76,8 @@ import java.util.concurrent.atomic.AtomicLong
  */
 class EventConsumer(
     consumerFactory: ConsumerFactory<String, ByteArray>,
-    private val topic: String,
+    /** The event topic this processor consumes. */
+    val topic: String,
     private val groupId: String,
     private val registry: HandlerRegistry,
     invoker: HandlerInvoker,

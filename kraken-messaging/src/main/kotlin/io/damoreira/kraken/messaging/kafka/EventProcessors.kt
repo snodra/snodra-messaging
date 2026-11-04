@@ -1,6 +1,7 @@
 package io.damoreira.kraken.messaging.kafka
 
 import io.damoreira.kraken.hub.v1.ProcessorStatus
+import io.damoreira.kraken.messaging.control.ProcessorControl
 import org.apache.kafka.clients.admin.Admin
 import org.apache.kafka.clients.admin.AdminClientConfig
 import org.slf4j.LoggerFactory
@@ -27,6 +28,9 @@ fun interface ProcessorStatusSource {
  * committed offsets and high watermarks through one `Admin` client ([adminConfig]; at most every [offsetsRefresh], each call
  * bounded by [adminTimeout]) and the dead-letter counts (every [deadLetterSample], and after a park). So the values in a report
  * are at most one status interval older than the refresh; until the first refresh they read -1.
+ *
+ * With a [control] (P6b, ADR 0023) the consumers are started by it, as their `processor_control` documents say (paused, with
+ * their replay ranges, or not at all while a reset holds the lock), and follow the documents from then on.
  */
 class EventProcessors(
     private val dispatcher: LocalEventDispatcher,
@@ -36,6 +40,7 @@ class EventProcessors(
     private val deadLetterSample: Duration = Duration.ofSeconds(30),
     private val adminTimeout: Duration = Duration.ofSeconds(4),
     private val clock: Clock = Clock.systemUTC(),
+    private val control: ProcessorControl? = null,
 ) : SmartLifecycle, ProcessorStatusSource {
     private val log = LoggerFactory.getLogger(EventProcessors::class.java)
     @Volatile private var consumers: List<EventConsumer> = emptyList()
@@ -55,9 +60,9 @@ class EventProcessors(
         val created = dispatcher.processors().map(consumerFor)
         val up = mutableListOf<EventConsumer>()
         try {
-            for (c in created) { c.start(); up += c }
+            if (control != null) control.attach(created) else for (c in created) { c.start(); up += c }
         } catch (e: Exception) {
-            up.forEach { runCatching { it.stop() } } // all or nothing: a failed start leaves nothing half-running
+            (if (control != null) created else up).forEach { runCatching { it.stop() } } // all or nothing: a failed start leaves nothing half-running
             throw e
         }
         consumers = created
@@ -72,6 +77,7 @@ class EventProcessors(
     override fun stop() {
         if (!running) return
         running = false
+        control?.detach()
         consumers.forEach { runCatching { it.stop() } }
         executor?.let { ex ->
             ex.submit { runCatching { admin?.close(Duration.ofSeconds(1)) }; admin = null }
@@ -86,7 +92,8 @@ class EventProcessors(
     override fun getPhase(): Int = EventConsumer.PHASE
 
     override fun processorStatuses(): List<ProcessorStatus> {
-        val statuses = consumers.filter { it.wasStarted }.map { it.status() }
+        // A consumer kept out of its group by a reset's lock since the start reports STOPPED with the operation.
+        val statuses = consumers.filter { it.wasStarted || it.operationId.isNotEmpty() }.map { it.status() }
         if (running) kick()
         return statuses
     }

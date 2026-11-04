@@ -112,6 +112,22 @@ class SubscriptionAsCommand {
     @CommandHandler fun handle(query: WatchAccount): Balance = Balance(0)
 }
 
+class ResettingProjection {
+    val calls = mutableListOf<String>()
+    @EventHandler fun on(event: Happened) {}
+    @ResetHandler fun clear() { calls += "clear" }
+    @ResetHandler suspend fun note(ctx: io.damoreira.kraken.messaging.control.ResetContext) { calls += "note:${ctx.operationId}" }
+}
+
+@ProcessingGroup("audit")
+class ResettingAudit {
+    @ResetHandler fun clear() {}
+}
+
+class ResetWithWrongParameter {
+    @ResetHandler fun clear(event: Happened) {}
+}
+
 class HandlerRegistryTest {
     private val registry = HandlerRegistry(MessageTypeResolver("test"))
     private val ctx = MessageContext("m1", "test.Ping", "c1", "alice", setOf("USER"), null, emptyMap())
@@ -287,5 +303,19 @@ class HandlerRegistryTest {
     @Test fun `a command handler cannot take a SubscriptionQuery`() {
         val e = assertThrows<IllegalStateException> { registry.register(SubscriptionAsCommand()) }
         assertEquals("Handler SubscriptionAsCommand.handle takes a SubscriptionQuery: use @QueryHandler", e.message)
+    }
+
+    @Test fun `reset handlers are kept per processor in registration order and take no parameter or a ResetContext (P6b)`() = runBlocking {
+        val registry = HandlerRegistry(MessageTypeResolver("test"))
+        val projection = ResettingProjection()
+        registry.register(projection)
+        registry.register(ResettingAudit())
+        assertEquals(listOf("ResettingProjection.clear", "ResettingProjection.note"), registry.resetHandlers("default").map { it.label })
+        assertEquals(listOf("audit"), registry.resetHandlers("audit").map { it.processor })
+        val ctx = io.damoreira.kraken.messaging.control.ResetContext("default", "op-1", io.damoreira.kraken.messaging.control.ResetTarget.Earliest, emptyList())
+        registry.resetHandlers("default").forEach { it.invoke(ctx) }
+        assertEquals(listOf("clear", "note:op-1"), projection.calls)
+        val e = assertThrows<IllegalStateException> { registry.register(ResetWithWrongParameter()) }
+        assertEquals("Reset handler ResetWithWrongParameter.clear must take no parameter or a ResetContext", e.message)
     }
 }
