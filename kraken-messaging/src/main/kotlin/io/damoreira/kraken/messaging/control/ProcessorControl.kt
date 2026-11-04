@@ -65,6 +65,11 @@ class ProcessorControl(
     private val adminConfig: Map<String, Any>,
     private val pollInterval: Duration = POLL_INTERVAL,
     private val adminTimeout: Duration = Duration.ofSeconds(10),
+    /**
+     * How long the executor of a reset extends its own lease (the hub's default `KRAKEN_HUB_RESET_TIMEOUT`): an execute that
+     * hangs longer lets the lease lapse, so the other instances resume (the hub has given up and its finish waits behind it).
+     */
+    private val executeLeaseLimit: Duration = Duration.ofSeconds(120),
     private val clock: Clock = Clock.systemUTC(),
 ) : ControlInbound {
     private val log = LoggerFactory.getLogger(ProcessorControl::class.java)
@@ -207,14 +212,21 @@ class ProcessorControl(
         if (held == null || held.id != op) return notPrepared(slot, request, op)
         slot.executing = true
         val period = minOf(LEASE_EXTENSION, held.lease.dividedBy(3)).toMillis().coerceAtLeast(50)
+        val until = System.nanoTime() + executeLeaseLimit.toNanos()
         val extension = leases?.scheduleAtFixedRate(
-            { runCatching { store.renew(slot.consumer.processor, op, held.lease) } }, period, period, TimeUnit.MILLISECONDS,
+            {
+                if (System.nanoTime() < until) {
+                    runCatching { store.renew(slot.consumer.processor, op, held.lease) }
+                        .onFailure { log.debug("Could not extend the lease of reset operation {}: {}", op, it.toString()) }
+                }
+            },
+            period, period, TimeUnit.MILLISECONDS,
         )
         try {
             return reset(slot, request, op)
         } finally {
             extension?.cancel(false)
-            runCatching { store.renew(slot.consumer.processor, op, held.lease) } // a whole lease for the finish
+            if (System.nanoTime() < until) runCatching { store.renew(slot.consumer.processor, op, held.lease) } // a whole lease for the finish
             slot.executing = false
         }
     }

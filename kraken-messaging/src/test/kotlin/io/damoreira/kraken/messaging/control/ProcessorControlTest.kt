@@ -250,8 +250,11 @@ class ProcessorControlTest {
         support.send(topic, "p-1", partition = 1)
         Thread.sleep(2000)
         assertEquals(emptyList(), projection.seen.toList())
-        ProcessorControlStore(mongo).setPaused("default", false, "local")
+        b.control!!.resume("default") // the local API, on the other instance
+        assertEquals(null, control()!!.pausedBy)
         await().atMost(Duration.ofSeconds(20)).until { projection.seen.toSet() == setOf("p-0", "p-1") }
+        a.control!!.pause("default")
+        assertEquals("local", control()!!.pausedBy)
     }
 
     @Test fun `prepare leaves the group, a second operation is locked out, and an unrenewed lease resumes the instance`() {
