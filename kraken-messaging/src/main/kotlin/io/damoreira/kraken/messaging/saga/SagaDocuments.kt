@@ -82,9 +82,9 @@ enum class DeadlineStatus { SCHEDULED, FIRED, CANCELLED }
  * A deadline of a saga instance in `deadlines`. [payload] is the JSON text of the payload (any JSON value, not only an
  * object) and [payloadType] its type name; both absent when there is none. A scheduler instance claims a due deadline
  * by setting [claimedBy] and [claimedUntil] (a lease: an expired one lets it fire again). [finishedAt] (added by the S1
- * plan: a TTL index needs a date) is set when the deadline is FIRED or CANCELLED. [correlationId] (review amendment, ruling
- * 37) is the correlation id of the message that scheduled it: the deadline handler's `MessageContext.correlationId` and the
- * commands it sends carry it, so a trace follows a saga through its timeouts; absent on a deadline stored before.
+ * plan: a TTL index needs a date) is set when the deadline is FIRED or CANCELLED. [correlationId] (ruling 37) is the
+ * correlation id of the message that scheduled it: the deadline handler's `MessageContext.correlationId` and the commands
+ * it sends carry it, so a trace follows a saga through its timeouts.
  */
 @Document("deadlines")
 data class DeadlineDocument(
@@ -95,11 +95,11 @@ data class DeadlineDocument(
     val payload: String? = null,
     val payloadType: String? = null,
     val dueAt: Instant,
+    val correlationId: String,
     val status: DeadlineStatus = DeadlineStatus.SCHEDULED,
     val claimedBy: String? = null,
     val claimedUntil: Instant? = null,
     val finishedAt: Instant? = null,
-    val correlationId: String? = null,
 )
 
 /**

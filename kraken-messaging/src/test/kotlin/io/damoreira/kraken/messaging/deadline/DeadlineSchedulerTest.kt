@@ -282,8 +282,8 @@ class DeadlineSchedulerTest {
         val ended = saga("o1")
         assertTrue(ended.ended)
         // A deadline that survived the end (a race, or one written by an older version): found due, it is cancelled, not run.
-        mongo.insert(DeadlineDocument("late", "dl.Charge", ended.id, "charge-timeout", """{"reason":"late"}""", "dl.TimeoutPayload", start.plusSeconds(10)))
-        mongo.insert(DeadlineDocument("orphan", "dl.Charge", "no-such-saga", "charge-timeout", """{"reason":"orphan"}""", "dl.TimeoutPayload", start.plusSeconds(10)))
+        mongo.insert(DeadlineDocument("late", "dl.Charge", ended.id, "charge-timeout", """{"reason":"late"}""", "dl.TimeoutPayload", start.plusSeconds(10), "corr-late"))
+        mongo.insert(DeadlineDocument("orphan", "dl.Charge", "no-such-saga", "charge-timeout", """{"reason":"orphan"}""", "dl.TimeoutPayload", start.plusSeconds(10), "corr-orphan"))
 
         advance(3600)
         scheduler().pollOnce()

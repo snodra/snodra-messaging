@@ -287,8 +287,8 @@ class SagaRuntime(
             ports.deadlines.cancel(claimed.sagaId, claimed.id, now)
             return false
         }
-        // The correlation id of the message that scheduled it (a deadline stored before it was recorded falls back to its own id).
-        val ctx = MessageContext(claimed.id, "deadline:${claimed.name}", claimed.correlationId ?: claimed.id, null, emptySet(), null, emptyMap())
+        // The correlation id of the message that scheduled it.
+        val ctx = MessageContext(claimed.id, "deadline:${claimed.name}", claimed.correlationId, null, emptySet(), null, emptyMap())
         val payload = handler.payloadClass?.let { klass -> claimed.payload?.let { codec.decode(it.toByteArray(Charsets.UTF_8), klass as KClass<Any>) } }
         val run = Run(sagaType, doc.id, doc.version + 1, ctx, now, doc.associations)
         val saga = sagaType.decodeState(doc)
