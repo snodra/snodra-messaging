@@ -14,6 +14,10 @@
 #        C=http://localhost:8094 is service-c's HTTP address;
 #        SKIP_AUDIT=1 skips the named-processor and dead-letter steps 26-26h (the `audit` processor of service-b and
 #        service-c), ONLY_AUDIT=1 runs only them;
+#        SKIP_CONTROL=1 skips the processor-control steps 27-27e (pause, resume, reset and dead letters of both `audit`
+#        processors through the hub's HTTP API with the write token), ONLY_CONTROL=1 runs only them; WRITE_TOKEN_FILE names
+#        the write token, default <secrets directory>/hub-control/dashboard-write.token (kraken/infra/scripts/dev-hub-pki.sh,
+#        in every mode);
 #        SECURE=1 runs against the secure sandbox (kraken/infra/compose.secure.yaml, secrets from
 #        kraken/infra/scripts/dev-hub-pki.sh): the hub calls are https with the dev CA and carry the dashboard token, every
 #        other step runs unchanged, and the security steps 21 and 21b are added; SKIP_SECURE=1 skips those two, ONLY_SECURE=1
@@ -278,6 +282,15 @@ if command -v jq >/dev/null; then
     jq -r --arg s "$1" --arg p "$2" '.services[] | select(.serviceName == $s) | .processors[] | select(.name == $p)
       | "\(.state) \(.groupId) \(.deadLetters) \(.assignedPartitions) \(.instancesReporting)"' 2>/dev/null || true
   }
+  # /api/v1/processors -> "<state> <replaying> <operationId or ->" of the processor named $2 of the service named $1.
+  control_state() {
+    jq -r --arg s "$1" --arg p "$2" '.services[] | select(.serviceName == $s) | .processors[] | select(.name == $p)
+      | "\(.state) \(.replaying) \(if (.operationId // "") == "" then "-" else .operationId end)"' 2>/dev/null || true
+  }
+  # A top-level field of a control reply as text (empty when absent): reply_field result.
+  reply_field() { jq -r --arg f "$1" 'if has($f) then .[$f] | tostring else empty end' 2>/dev/null || true; }
+  # GET .../dead-letters through the hub -> one line per letter, oldest first: "<id> <key> <reason> <attempts>".
+  hub_letters() { jq -r '.letters[] | "\(.id) \(.key) \(.reason) \(.attempts)"' 2>/dev/null || true; }
 elif command -v python3 >/dev/null; then
   hub_id_of() { python3 -I -c 'import json,sys
 try: print(json.load(sys.stdin).get("hubId") or "")
@@ -343,6 +356,24 @@ try:
                 if p.get("name") == sys.argv[2]:
                     print(p["state"], p["groupId"], p["deadLetters"], p["assignedPartitions"], p["instancesReporting"])
 except Exception: pass' "$1" "$2" || true; }
+  control_state() { python3 -I -c 'import json,sys
+try:
+    for s in json.load(sys.stdin).get("services", []):
+        if s.get("serviceName") == sys.argv[1]:
+            for p in s.get("processors", []):
+                if p.get("name") == sys.argv[2]:
+                    print(p["state"], "true" if p.get("replaying") else "false", p.get("operationId") or "-")
+except Exception: pass' "$1" "$2" || true; }
+  reply_field() { python3 -I -c 'import json,sys
+try:
+    v = json.load(sys.stdin)[sys.argv[1]]
+    print(json.dumps(v) if isinstance(v, (bool, list, dict)) or v is None else v)
+except Exception: pass' "$1" || true; }
+  hub_letters() { python3 -I -c 'import json,sys
+try:
+    for l in json.load(sys.stdin).get("letters", []):
+        print(l["id"], l["key"], l["reason"], l["attempts"])
+except Exception: pass' || true; }
 else
   hub_id_of() { fail "jq or python3 needed for the two-hub steps (or set SKIP_HA=1)"; }
   example_instances() { hub_id_of; }
@@ -356,6 +387,9 @@ else
   open_summary() { type_owners; }
   in_flight() { rows_summary; }
   processor_summary() { fail "jq or python3 needed for the processor steps (or set SKIP_AUDIT=1)"; }
+  control_state() { fail "jq or python3 needed for the processor-control steps (or set SKIP_CONTROL=1)"; }
+  reply_field() { control_state; }
+  hub_letters() { control_state; }
 fi
 
 # Succeeds (prints nothing) when both hubs list the same instances of service-a, service-b and service-c, each of
@@ -1049,6 +1083,213 @@ audit_steps() {
   audit_off
 }
 
+# P6b (ADR 0023): the hub as control plane for event processors, through its HTTP API
+# ($HUB/api/v1/services/<service>/processors/audit/...) with the dashboard write token: kraken/infra/scripts/dev-hub-pki.sh
+# writes it to <secrets>/hub-control/dashboard-write.token and every sandbox mode mounts it into both hubs
+# (KRAKEN_HUB_DASHBOARD_WRITE_TOKEN_FILE). For the `audit` processor of service-b (Kotlin) and of service-c (Rust):
+# 27: a write without a credential (or with a wrong one) is 401 on both hubs, with the dashboard token 403 (SECURE=1 only: the
+# plain hubs have no dashboard token); leftover letters are cleared and the processor resumed. 27b: pause: the hub shows PAUSED and notes published
+# meanwhile are not handled; resume: they are, and RUNNING again. 27c: notes under a key of this run are handled (and notified
+# once), the processor is paused, then reset to earliest: the reset handler ran once (`/audit/resets`), the hub shows it
+# PAUSED and replaying with no operation left (a finish keeps the pause, so nothing is replayed yet). 27d: resume: the notes
+# of this run are handled again, the notifier (`@DisallowReplay` / `disallow_replay`) did not run again, and the replay ends
+# (RUNNING, not replaying). The topic holds every note since the sandbox started, so only this run's keys are checked.
+# 27e: dead letters through the hub: a poison note parked (the failure on), listed by the hub without a payload, retried
+# (Failed while failing, Retried with the failure off, its key handled), the list empty; another one discarded (a second
+# discard is a 404). SKIP_CONTROL=1 skips these steps, ONLY_CONTROL=1 runs only them.
+
+# A call to <hub>'s control API for <service>'s audit processor, with the credential <cred>: `write` (the write token), `read`
+# (the dashboard token, SECURE=1), `wrong` or `none`. Prints the body and then the HTTP code on a line of its own. A token goes
+# through a curl config on a pipe, as the curl wrapper does, so it never shows in a process list.
+control_call() { # <hub> <cred> <method> <service> <path> [json body]
+  local url="$1/api/v1/services/$4/processors/audit/$5" token="" args=(-sS --max-time 200 -X "$3" -w '\n%{http_code}')
+  [ "$SECURE" = "1" ] && args+=(--cacert "$SECRETS/ca.pem")
+  case $2 in write) token=$WRITE_TOKEN ;; read) token=$DASHBOARD_TOKEN ;; wrong) token=wrong-write-token-0123456789 ;; esac
+  [ -n "${6:-}" ] && args+=(-H 'content-type: application/json' -d "$6")
+  if [ -n "$token" ]; then
+    command curl "${args[@]}" -K <(printf 'header = "Authorization: Bearer %s"\n' "$token") "$url"
+  else
+    command curl "${args[@]}" "$url"
+  fi
+}
+
+# control_call, expecting the HTTP code <code>; prints the body.
+control_expect() { # <code> <hub> <cred> <method> <service> <path> [json body]
+  local want=$1 reply code
+  shift
+  reply=$(control_call "$@") || fail "$3 $1 .../$4/processors/audit/$5 failed"
+  code=${reply##*$'\n'}
+  [ "$code" = "$want" ] || fail "$3 $1/api/v1/services/$4/processors/audit/$5 ($2 credential): expected $want, got $code: ${reply%$'\n'*}"
+  printf '%s' "${reply%$'\n'*}"
+}
+
+# Waits until the hub shows <service>'s audit processor as "<state> <replaying> <operationId or ->" matching <pattern>.
+await_control_state() { # <service> <pattern> <seconds>
+  local start=$SECONDS st=""
+  while [ $((SECONDS - start)) -lt "$3" ]; do
+    st=$(curl -fsS "$HUB/api/v1/processors" 2>/dev/null | control_state "$1" audit || true)
+    if printf '%s' "$st" | grep -Eq "^($2)$"; then printf '%s' "$st"; return 0; fi
+    sleep 1
+  done
+  fail "$HUB/api/v1/processors: expected $1's audit processor as '$2' (state replaying operation) within ${3}s, got '${st:-not listed}'"
+}
+
+# The texts the audit processor's notifier at <base> handled for <key>, comma-separated (as audit_handled).
+audit_notified() { # <base> <key>
+  curl -fsS "$1/audit/notified" | { grep -o '{[^{}]*}' || true; } | grep "\"key\":\"$2\"" \
+    | sed 's/.*"text":"\([^"]*\)".*/\1/' | paste -sd, - || true
+}
+
+# The resets the audit processor's reset handler at <base> recorded, one per line: "<operationId> <target>".
+audit_resets() { # <base>
+  curl -fsS "$1/audit/resets" | { grep -o '"operationId":"[^"]*","target":"[^"]*"' || true; } \
+    | sed 's/"operationId":"\([^"]*\)","target":"\([^"]*\)"/\1 \2/'
+}
+
+# The hub's letters of <service>'s audit processor under <key> (as hub_letters), with the dashboard token in SECURE mode.
+hub_letters_of() { # <service> <key>
+  curl -fsS "$HUB/api/v1/services/$1/processors/audit/dead-letters?limit=100" | hub_letters | { grep " $2 " || true; }
+}
+
+# Waits until the hub lists exactly one letter of <service>'s audit processor under <key> and prints it.
+await_hub_letter() { # <service> <key> <seconds>
+  local start=$SECONDS got=""
+  while [ $((SECONDS - start)) -lt "$3" ]; do
+    got=$(hub_letters_of "$1" "$2")
+    [ "$(printf '%s' "$got" | grep -c .)" = "1" ] && { printf '%s' "$got"; return 0; }
+    sleep 1
+  done
+  fail "$HUB: expected one dead letter of $1's audit processor under key $2 within ${3}s, got '$got'"
+}
+
+# Leaves nothing behind when a step fails: both audit processors resumed, the failure off.
+control_off() {
+  trap - EXIT
+  control_call "$HUB" write POST service-b resume >/dev/null 2>&1 || true
+  control_call "$HUB" write POST service-c resume >/dev/null 2>&1 || true
+  command curl -fsS -X POST "$B/audit/failing?on=false" >/dev/null 2>&1 || true
+  command curl -fsS -X POST "$C/audit/failing?on=false" >/dev/null 2>&1 || true
+}
+
+control_steps() {
+  local run file secrets label base reply code h st op n resets id key reason attempts
+  run=$(date +%s)
+  secrets=${SECRETS:-${SECRETS_DIR:-${KRAKEN_SECRETS_DIR:-$INFRA/.secrets}}}
+  file=${WRITE_TOKEN_FILE:-$secrets/hub-control/dashboard-write.token}
+  [ -s "$file" ] || fail "the control steps need the hubs' write token in '$file' (run kraken/infra/scripts/dev-hub-pki.sh, then recreate hub and hub-2; or set WRITE_TOKEN_FILE, or SKIP_CONTROL=1)"
+  WRITE_TOKEN=$(cat "$file")
+  trap control_off EXIT
+
+  echo "27. a write without a credential or with a wrong one is 401 on both hubs, with the dashboard token 403; no letters left over ..."
+  for label in "service-b $B" "service-c $C"; do
+    read -r label base <<< "$label"
+    for h in "$HUB" "$HUB2"; do
+      reply=$(control_call "$h" none POST "$label" pause) || fail "POST $h .../$label/processors/audit/pause failed"
+      code=${reply##*$'\n'}
+      [ "$code" != "403" ] || fail "$h answers 403 to a write without a credential (${reply%$'\n'*}): the hubs have no write token; run kraken/infra/scripts/dev-hub-pki.sh and recreate hub and hub-2"
+      [ "$code" = "401" ] || fail "$h: a pause of $label's audit without a credential should be 401, got $code"
+      control_expect 401 "$h" wrong POST "$label" pause >/dev/null
+      if [ "$SECURE" = "1" ]; then
+        control_expect 403 "$h" read POST "$label" pause | grep -q 'read-only' || fail "$h: the dashboard token's 403 should say read-only"
+      fi
+    done
+    audit_failing "$base" false
+    curl -fsS -X POST "$base/audit/dead-letters/retry-all?processor=audit" >/dev/null || fail "retry-all of $label's leftover letters failed"
+    for id in $(audit_letters "$base" | cut -d' ' -f1); do
+      curl -fsS -X DELETE "$base/audit/dead-letters/$id" >/dev/null || fail "discarding the leftover letter $id of $label failed"
+    done
+    control_expect 200 "$HUB" write POST "$label" resume >/dev/null
+    st=$(await_control_state "$label" '(RUNNING|FAILING) false -' 90)
+    if [ "$SECURE" = "1" ]; then
+      echo "   $label: none 401, wrong 401, dashboard token 403 (read-only) on both hubs; audit: $st"
+    else
+      echo "   $label: none 401, wrong 401 on both hubs (no dashboard token in this mode); audit: $st"
+    fi
+  done
+
+  echo "27b. pause through the hub: PAUSED, notes published meanwhile are held; resume: they are handled ..."
+  for label in "service-b $B" "service-c $C"; do
+    read -r label base <<< "$label"
+    reply=$(control_expect 200 "$HUB" write POST "$label" pause)
+    [ "$(printf '%s' "$reply" | reply_field acknowledged)" -ge 1 ] && [ "$(printf '%s' "$reply" | reply_field failed)" = "0" ] \
+      || fail "$label: the pause should be acknowledged by every instance, got: $reply"
+    st=$(await_control_state "$label" 'PAUSED false -' 30)
+    audit_note "$base" "p$run" held-1
+    audit_note "$base" "p$run" held-2
+    sleep 8
+    [ -z "$(audit_handled "$base" "p$run")" ] || fail "$label: a note published while audit is paused was handled: $(audit_handled "$base" "p$run")"
+    control_expect 200 "$HUB" write POST "$label" resume >/dev/null
+    await_handled "$base" "p$run" "held-1,held-2" 30
+    st=$(await_control_state "$label" '(RUNNING|FAILING) false -' 30)
+    echo "   $label: paused (acknowledged $(printf '%s' "$reply" | reply_field acknowledged)), held-1 and held-2 held for 8 s, handled after the resume; audit: $st"
+  done
+
+  echo "27c. reset to earliest while paused: the reset handler runs once, the hub shows PAUSED and replaying, no operation left ..."
+  for label in "service-b $B" "service-c $C"; do
+    read -r label base <<< "$label"
+    audit_note "$base" "r$run" replay-1
+    audit_note "$base" "r$run" replay-2
+    await_handled "$base" "r$run" "replay-1,replay-2" 30
+    [ "$(audit_notified "$base" "r$run")" = "replay-1,replay-2" ] || fail "$label: the notifier should have handled replay-1,replay-2 once, got '$(audit_notified "$base" "r$run")'"
+    resets=$(audit_resets "$base" | grep -c . || true)
+    control_expect 200 "$HUB" write POST "$label" pause >/dev/null
+    await_control_state "$label" 'PAUSED false -' 30 >/dev/null
+    reply=$(control_expect 200 "$HUB" write POST "$label" reset '{"to":"earliest"}')
+    op=$(printf '%s' "$reply" | reply_field operationId)
+    [ "$(printf '%s' "$reply" | reply_field outcome)" = "ok" ] && [ "$(printf '%s' "$reply" | reply_field replay)" = "true" ] \
+      && [ "$(printf '%s' "$reply" | reply_field resetHandlers)" = "1" ] && [ "$(printf '%s' "$reply" | reply_field markersDeleted)" -ge 2 ] \
+      && [ -n "$op" ] || fail "$label: the reset to earliest should be ok, replay, one reset handler, at least 2 markers deleted, got: $reply"
+    n=$(audit_resets "$base" | grep -c . || true)
+    [ "$n" = "$((resets + 1))" ] && [ "$(audit_resets "$base" | tail -1)" = "$op earliest" ] \
+      || fail "$label: the reset handler should have recorded '$op earliest' once, got $(audit_resets "$base" | tail -2 | paste -sd';' -)"
+    st=$(await_control_state "$label" 'PAUSED true -' 30)
+    [ "$(audit_handled "$base" "r$run")" = "replay-1,replay-2" ] || fail "$label: notes were replayed while audit is paused: $(audit_handled "$base" "r$run")"
+    echo "   $label: operation $op ok, executed by $(printf '%s' "$reply" | reply_field executedBy), $(printf '%s' "$reply" | reply_field markersDeleted) markers deleted, reset handler once; audit: $st"
+  done
+
+  echo "27d. resume: this run's notes are handled again, the no-replay notifier is not, and the replay ends ..."
+  for label in "service-b $B" "service-c $C"; do
+    read -r label base <<< "$label"
+    control_expect 200 "$HUB" write POST "$label" resume >/dev/null
+    await_handled "$base" "r$run" "replay-1,replay-2,replay-1,replay-2" 180
+    await_handled "$base" "p$run" "held-1,held-2,held-1,held-2" 30
+    [ "$(audit_notified "$base" "r$run")" = "replay-1,replay-2" ] || fail "$label: the notifier ran again in the replay: '$(audit_notified "$base" "r$run")'"
+    st=$(await_control_state "$label" '(RUNNING|FAILING) false -' 60)
+    echo "   $label: r$run handled as replay-1,replay-2 twice, notified once; audit: $st"
+  done
+
+  echo "27e. dead letters through the hub: a parked note listed, retried (Failed, then Retried), the list empty; another discarded ..."
+  for label in "service-b $B" "service-c $C"; do
+    read -r label base <<< "$label"
+    audit_failing "$base" true
+    audit_note "$base" "d$run" poison-hub
+    read -r id key reason attempts <<< "$(await_hub_letter "$label" "d$run" 90)"
+    [ "$reason" = "HANDLER_FAILED" ] && [ "$attempts" -ge 1 ] || fail "$label: the hub should list d$run's letter HANDLER_FAILED, got '$id $key $reason $attempts'"
+    curl -fsS "$HUB/api/v1/services/$label/processors/audit/dead-letters" | grep -q '"payload"' && fail "$label: the hub's letter list carries a payload"
+    reply=$(control_expect 200 "$HUB" write POST "$label" "dead-letters/$id/retry")
+    [ "$(printf '%s' "$reply" | reply_field result)" = "Failed" ] || fail "$label: retrying $id while failing should answer Failed, got: $reply"
+    [ "$SECURE" = "1" ] && control_expect 403 "$HUB" read POST "$label" "dead-letters/$id/retry" >/dev/null
+    audit_failing "$base" false
+    reply=$(control_expect 200 "$HUB" write POST "$label" "dead-letters/$id/retry")
+    [ "$(printf '%s' "$reply" | reply_field result)" = "Retried" ] || fail "$label: retrying $id with the failure off should answer Retried, got: $reply"
+    await_handled "$base" "d$run" "poison-hub" 10
+    reply=$(curl -fsS "$HUB/api/v1/services/$label/processors/audit/dead-letters")
+    [ "$(printf '%s' "$reply" | reply_field total)" = "0" ] && [ -z "$(printf '%s' "$reply" | hub_letters)" ] \
+      || fail "$label: the hub should list no letter after the retry, got: $reply"
+    echo "   $label: $id listed by the hub (HANDLER_FAILED, $attempts attempts, no payload), retry Failed, then Retried; no letter left"
+    audit_failing "$base" true
+    audit_note "$base" "x$run" poison-discard
+    id=$(await_hub_letter "$label" "x$run" 90 | cut -d' ' -f1)
+    audit_failing "$base" false
+    reply=$(control_expect 200 "$HUB" write DELETE "$label" "dead-letters/$id")
+    [ "$(printf '%s' "$reply" | reply_field discarded)" = "true" ] || fail "$label: discarding $id should answer discarded, got: $reply"
+    control_expect 404 "$HUB" write DELETE "$label" "dead-letters/$id" >/dev/null
+    [ -z "$(hub_letters_of "$label" "x$run")" ] || fail "$label: the discarded letter $id is still listed"
+    echo "   $label: $id discarded through the hub, a second discard 404"
+  done
+  control_off
+}
+
 # P5a (ADR 0018), only with SECURE=1 against the secure sandbox (kraken/infra/compose.secure.yaml). Step 21: a service
 # with a token the ACL does not know, and one with a valid token that grants only another service name, are refused by
 # both hubs and logged by the client as a registration rejection (ERROR once per hub), and never listed on /topology; a
@@ -1442,6 +1683,12 @@ if [ "${ONLY_AUDIT:-0}" = "1" ]; then
   exit 0
 fi
 
+if [ "${ONLY_CONTROL:-0}" = "1" ]; then
+  control_steps
+  echo "SMOKE OK (processor-control steps only)"
+  exit 0
+fi
+
 if [ "${ONLY_SECURE:-0}" = "1" ]; then
   [ "$SECURE" = "1" ] || fail "ONLY_SECURE=1 needs SECURE=1"
   secure_steps
@@ -1550,6 +1797,7 @@ echo "   delivered: $TEXTS"
 [ "${SKIP_POSTCARD:-0}" = "1" ] || postcard_steps
 [ "${SKIP_BANNER:-0}" = "1" ] || banner_steps
 [ "${SKIP_AUDIT:-0}" = "1" ] || audit_steps
+[ "${SKIP_CONTROL:-0}" = "1" ] || control_steps
 if [ "$SECURE" = "1" ] && [ "${SKIP_SECURE:-0}" != "1" ]; then secure_steps; fi
 if [ "$JWT" = "1" ] && [ "${SKIP_JWT:-0}" != "1" ]; then jwt_steps; fi
 if [ "$MTLS" = "1" ] && [ "${SKIP_MTLS:-0}" != "1" ]; then mtls_steps; fi
