@@ -1,47 +1,77 @@
 package io.damoreira.kraken.messaging.kafka
 
+import io.damoreira.kraken.hub.v1.PartitionStatus
+import io.damoreira.kraken.hub.v1.ProcessorState
+import io.damoreira.kraken.hub.v1.ProcessorStatus
 import io.damoreira.kraken.messaging.InvalidMessageException
 import io.damoreira.kraken.messaging.MessageContext
 import io.damoreira.kraken.messaging.codec.JsonCodec
+import io.damoreira.kraken.messaging.deadletter.DeadLetterError
+import io.damoreira.kraken.messaging.deadletter.DeadLetterMode
+import io.damoreira.kraken.messaging.deadletter.DeadLetterReason
+import io.damoreira.kraken.messaging.deadletter.DeadLetterStore
 import io.damoreira.kraken.messaging.handler.HandlerInvoker
 import io.damoreira.kraken.messaging.handler.HandlerRegistry
+import io.damoreira.kraken.messaging.handler.Processors
+import org.apache.kafka.clients.admin.Admin
+import org.apache.kafka.clients.admin.OffsetSpec
+import org.apache.kafka.clients.consumer.Consumer
 import org.apache.kafka.clients.consumer.ConsumerRecord
+import org.apache.kafka.clients.producer.ProducerRecord
+import org.apache.kafka.common.TopicPartition
+import org.apache.kafka.common.header.internals.RecordHeader
 import org.slf4j.LoggerFactory
 import org.springframework.context.SmartLifecycle
 import org.springframework.data.mongodb.core.MongoTemplate
+import org.springframework.kafka.KafkaException
 import org.springframework.kafka.core.ConsumerFactory
 import org.springframework.kafka.listener.AcknowledgingMessageListener
 import org.springframework.kafka.listener.ConcurrentMessageListenerContainer
+import org.springframework.kafka.listener.ConsumerAwareRebalanceListener
 import org.springframework.kafka.listener.ContainerProperties
 import org.springframework.kafka.listener.DefaultErrorHandler
 import org.springframework.kafka.support.Acknowledgment
-import org.springframework.util.backoff.FixedBackOff
 import org.springframework.transaction.support.TransactionTemplate
+import org.springframework.util.backoff.FixedBackOff
+import java.time.Clock
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentSkipListMap
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 /**
- * Consumes one event topic with at-least-once delivery and exactly-once handler effects.
+ * One event processor (ADR 0022): consumes one event topic in its own consumer group with at-least-once delivery and
+ * exactly-once handler effects, and puts what it cannot handle in its [DeadLetterSink].
  *
- * Per record the [LocalEventDispatcher] runs the ordinary handlers, then the saga stage (when sagas exist). For the
- * handlers: the idempotency marker ([ProcessedEventDocument], keyed by the `id` header) is inserted and the handlers
- * run inside one Mongo transaction; the offset is acknowledged only after the transaction committed (and the saga stage
- * ran, which parks a failing saga event instead of throwing). A duplicate id (`DuplicateKeyException` from the marker
- * insert only) is acknowledged and skipped. A handler failure, including a
- * `DuplicateKeyException` from the handler's own writes, rolls the marker back and the record is redelivered by a
- * [DefaultErrorHandler] up to [maxAttempts] invocations in total, then logged (never the payload) and skipped with its
- * offset committed. An [InvalidMessageException] (payload does not fit the handler's message class) is not retried.
+ * Per record the [LocalEventDispatcher] runs [processor]'s handlers (stage 1, marker [Processors.markerId]), then, for
+ * `default` only, the saga stage. A handler failure is retried in place up to [maxAttempts] invocations in all, every
+ * [backOffMs]; an [InvalidMessageException] (the payload does not fit the handler's message class) is not retried. Then the
+ * record goes to the sink: mode `collection` parks a `HANDLER_FAILED` letter, `topic` produces it to `<topic>.dlt`, `log`
+ * logs it (never the payload) and skips it. A record that only failed in stage 2 (the sagas could not run: their store is
+ * down) is logged and skipped. A record without a `type` header, or whose payload is not a JSON object for a type this
+ * processor handles, is `INVALID` (parked, produced, or logged; it never blocks its key). A type the processor does not
+ * handle is acknowledged and skipped. A missing `id` header falls back to `<topic>-<partition>-<offset>`.
  *
- * The record's correlation id is in the handlers' coroutine context ([CorrelationContext]) and the MDC, so events
- * they publish carry it.
+ * **Sequencing** (mode `collection`): the keys of this processor's letters on the assigned partitions are loaded on
+ * assignment and added to on every park. A record with a stage-1 handler whose key is in that set is confirmed against
+ * the collection: when the key still has a head letter, the record is parked `SEQUENCED` without running stage 1 (stage 2
+ * still runs for it in `default`, ADR 0021 ruling 26); a miss (the letter was retried, discarded or expired, possibly on
+ * another instance) forgets the key and handles the record. A record whose own letter already exists was parked before a
+ * crash: it is acknowledged.
  *
- * Handlers run via `runBlocking` on the listener thread so the thread-bound Mongo transaction wraps them; handlers
- * that switch threads (other dispatchers, `withContext`) lose the transaction and their writes are not rolled back.
+ * **Acknowledgement.** The offset is acknowledged only after the dispatch succeeded or the sink took the record (the
+ * letter exists, the broker acknowledged the DLT record). When the sink fails (MongoDB or the DLT unreachable) the listener
+ * throws, nothing is acknowledged and the container redelivers the record every [backOffMs] for as long as it takes; the
+ * redelivery goes straight to the sink (it does not run the handlers again) unless the partition moved meanwhile.
  *
- * Records without a `type` header, without a registered handler or interested saga, or with a payload that is not a
- * JSON object are acknowledged and skipped (they cannot become valid by retrying).
+ * The record's correlation id is in the handlers' coroutine context ([io.damoreira.kraken.messaging.tracing.CorrelationContext])
+ * and the MDC, so events they publish carry it. Handlers run via `runBlocking` on the listener thread so the thread-bound
+ * Mongo transaction wraps them; handlers that switch threads lose the transaction.
  *
- * [backOffMs] is the delay between redeliveries (default 1000 ms; lowered in tests). [dispatcher] defaults to one over
- * [registry], [invoker], [tx] and [mongo] without a saga stage; the auto-configuration passes the shared one.
+ * [status] reports the processor for the hub (ADR 0022): assignment and positions from the rebalance listener and the
+ * acknowledged records, committed offsets and high watermarks from [refreshOffsets] (called off the consumer thread with
+ * an `Admin`), the dead-letter count from [sampleDeadLetters].
  */
 class EventConsumer(
     consumerFactory: ConsumerFactory<String, ByteArray>,
@@ -55,15 +85,44 @@ class EventConsumer(
     private val backOffMs: Long = 1000L,
     private val codec: JsonCodec = JsonCodec(),
     private val dispatcher: LocalEventDispatcher = LocalEventDispatcher(registry, invoker, tx, mongo),
+    /** The processor this consumer runs: `default` or a `@ProcessingGroup` name. */
+    val processor: String = Processors.DEFAULT,
+    private val deadLetters: DeadLetterSink = DeadLetterSink.Log,
+    private val clock: Clock = Clock.systemUTC(),
 ) : SmartLifecycle {
     private val log = LoggerFactory.getLogger(EventConsumer::class.java)
     private val factory = consumerFactory
     private val running = AtomicBoolean(false)
+    @Volatile private var started = false
     @Volatile private var container: ConcurrentMessageListenerContainer<String, ByteArray>? = null
 
     init {
         require(maxAttempts >= 1) { "maxAttempts must be >= 1" }
     }
+
+    // --- status (written on the consumer thread or the refresher, read by status()) ---
+    private class Track {
+        val position = AtomicLong(-1)
+        @Volatile var committed = -1L
+        @Volatile var highWatermark = -1L
+    }
+    private val assigned = ConcurrentSkipListMap<Int, Track>()
+    @Volatile private var assignedOnce = false
+    @Volatile private var rebalancing = false
+    private val processedTotal = AtomicLong()
+    private val failedTotal = AtomicLong()
+    @Volatile private var lastError: String = ""
+    @Volatile private var lastErrorAtMs = 0L
+    @Volatile private var failingSinceMs = 0L
+    @Volatile private var deadLetterCount = 0L
+    private val parkedSinceSample = AtomicBoolean(true)
+
+    // --- consumer thread only ---
+    private val parkedKeys = HashMap<Int, MutableSet<String>>() // partition -> keys with a blocking letter
+    private val keysUnknown = HashSet<Int>() // partitions whose keys could not be loaded: every keyed record is confirmed
+    private val pending = ConcurrentHashMap<String, () -> Unit>() // "<partition>:<offset>" -> what the sink still has to do
+
+    private val store: DeadLetterStore? = (deadLetters as? DeadLetterSink.Collection)?.store
 
     @Synchronized
     override fun start() {
@@ -72,22 +131,33 @@ class EventConsumer(
             setGroupId(this@EventConsumer.groupId)
             setAckMode(ContainerProperties.AckMode.MANUAL_IMMEDIATE)
             setMessageListener(AcknowledgingMessageListener<String, ByteArray> { record, ack -> handle(record, ack!!) })
+            setConsumerRebalanceListener(Rebalance())
         }
-        val errorHandler = DefaultErrorHandler(
-            { record, ex -> logSkipped(record, ex) },
-            FixedBackOff(backOffMs, (maxAttempts - 1).toLong()),
-        ).apply {
-            setCommitRecovered(true)
-            addNotRetryableExceptions(InvalidMessageException::class.java) // retrying cannot change the payload
+        // Only what the listener throws reaches it: a sink that could not take the record, or a stop in the middle of the
+        // attempts. Never recovered (skipped): the record is redelivered until it is handled or parked.
+        val errorHandler = DefaultErrorHandler({ _, _ -> }, FixedBackOff(backOffMs, FixedBackOff.UNLIMITED_ATTEMPTS)).apply {
+            setLogLevel(KafkaException.Level.DEBUG)
         }
-        val started = ConcurrentMessageListenerContainer(factory, props).apply {
-            concurrency = 1
-            setCommonErrorHandler(errorHandler)
-            start()
+        assignedOnce = false
+        rebalancing = false
+        started = true
+        running.set(true) // before the container: a record may arrive before start() returns
+        val up = try {
+            ConcurrentMessageListenerContainer(factory, props).apply {
+                concurrency = 1
+                setCommonErrorHandler(errorHandler)
+                start()
+            }
+        } catch (e: Exception) {
+            running.set(false) // a failed start leaves the consumer stopped and restartable
+            started = false
+            throw e
         }
-        container = started
-        running.set(true) // only once the container is up: a failed start leaves the consumer stopped and restartable
-        log.info("EventConsumer started on topic {} group {} handling {} event types", topic, groupId, registry.eventTypes().size)
+        container = up
+        log.info(
+            "Event processor {} started on topic {} group {} handling {} event types, dead letters: {}",
+            processor, topic, groupId, dispatcher.eventTypes(processor).size, deadLetters.mode.wireName,
+        )
     }
 
     @Synchronized
@@ -95,9 +165,13 @@ class EventConsumer(
         if (!running.compareAndSet(true, false)) return
         container?.stop()
         container = null
+        assigned.clear()
     }
 
     internal fun groupIdForTest(): String = groupId
+
+    /** The Kafka consumer group of this processor. */
+    val group: String get() = groupId
 
     override fun isRunning(): Boolean = running.get()
     override fun isAutoStartup(): Boolean = true
@@ -105,14 +179,15 @@ class EventConsumer(
     override fun getPhase(): Int = PHASE
 
     private fun handle(record: ConsumerRecord<String, ByteArray>, ack: Acknowledgment) {
-        val headers = record.headers().associate { it.key() to String(it.value() ?: ByteArray(0), Charsets.UTF_8) }
+        pending[coords(record)]?.let { toSink(record, ack, it); return }
+        val headers = HashMap<String, String>()
+        record.headers().forEach { headers[it.key()] = String(it.value() ?: ByteArray(0), Charsets.UTF_8) }
         val type = headers[EventHeaders.TYPE]
         if (type.isNullOrBlank()) {
-            log.warn("Skipping record without type header at {}-{}@{}", record.topic(), record.partition(), record.offset())
-            ack.acknowledge(); return
+            invalid(record, ack, null, "record without type header"); return
         }
-        if (!dispatcher.interested(type)) {
-            ack.acknowledge(); return
+        if (!dispatcher.interested(processor, type)) {
+            advance(record, ack); return
         }
         val id = headers[EventHeaders.ID]?.takeIf { it.isNotBlank() } ?: "${record.topic()}-${record.partition()}-${record.offset()}".also {
             log.warn("Record of type {} at {}-{}@{} has no id header, using {} for idempotency", type, record.topic(), record.partition(), record.offset(), it)
@@ -120,8 +195,7 @@ class EventConsumer(
         val payload = record.value() ?: ByteArray(0)
         val isObject = try { codec.decodeTree(payload).isObject } catch (_: Exception) { false }
         if (!isObject) {
-            log.warn("Skipping record {} of type {} at {}-{}@{}: payload is not a JSON object", id, type, record.topic(), record.partition(), record.offset())
-            ack.acknowledge(); return
+            invalid(record, ack, id, "payload is not a JSON object", type); return
         }
         val ctx = MessageContext(
             messageId = id,
@@ -132,21 +206,334 @@ class EventConsumer(
             authorization = null,
             headers = headers,
         )
-        dispatcher.dispatch(id, type, payload, ctx)
+        if (sequenced(record, ack, type, payload, ctx)) return
+        attempt(record, ack, id, type, payload, ctx)
+    }
+
+    /** Parks [record] SEQUENCED when its key has a live letter (or acknowledges it when its own letter exists); true when done with it. */
+    private fun sequenced(record: ConsumerRecord<String, ByteArray>, ack: Acknowledgment, type: String, payload: ByteArray, ctx: MessageContext): Boolean {
+        val store = store ?: return false
+        val key = record.key() ?: return false
+        if (!dispatcher.hasStage1(processor, type)) return false // only stage 1 is sequenced
+        val partition = record.partition()
+        if (partition in keysUnknown) loadKeys(listOf(partition))
+        if (partition !in keysUnknown && parkedKeys[partition]?.contains(key) != true) return false
+        val head = try {
+            store.head(processor, key)
+        } catch (e: Exception) {
+            failing(e, "could not check the dead letters of key at ${record.topic()}-$partition@${record.offset()}")
+            throw e
+        }
+        if (head == null) {
+            parkedKeys[partition]?.remove(key) // retried, discarded or expired, here or on another instance
+            return false
+        }
+        val own = DeadLetterStore.id(processor, record.topic(), partition, record.offset())
+        if (head == own || store.exists(own)) {
+            log.info("Record {}-{}@{} is already parked in processor {}, acknowledging it", record.topic(), partition, record.offset(), processor)
+            advance(record, ack)
+            return true
+        }
+        if (processor == Processors.DEFAULT) {
+            try {
+                dispatcher.runStage2(type, payload, ctx) // the sagas see it even though stage 1 waits (ADR 0021 ruling 26)
+            } catch (e: Exception) {
+                failing(e, "saga stage failed for a sequenced record")
+                throw e
+            }
+        }
+        val letter = store.sequenced(processor, record, head)
+        log.info("Record {}-{}@{} of type {} parked SEQUENCED in processor {} behind {}", record.topic(), partition, record.offset(), type, processor, head)
+        toSink(record, ack) { if (store.park(letter)) parkedSinceSample.set(true) }
+        return true
+    }
+
+    private fun attempt(record: ConsumerRecord<String, ByteArray>, ack: Acknowledgment, id: String, type: String, payload: ByteArray, ctx: MessageContext) {
+        var attempts = 0
+        var failure: Exception
+        while (true) {
+            attempts++
+            try {
+                dispatcher.dispatchIn(processor, id, type, payload, ctx)
+                processedTotal.incrementAndGet()
+                advance(record, ack)
+                return
+            } catch (e: InvalidMessageException) {
+                failure = e
+                break // retrying cannot change the payload
+            } catch (e: Exception) {
+                failure = e
+            }
+            if (attempts >= maxAttempts) break
+            if (!pause(backOffMs)) throw failure // stopping: not acknowledged, redelivered after the restart or to the new owner
+        }
+        exhausted(record, ack, id, type, failure, attempts)
+    }
+
+    private fun exhausted(record: ConsumerRecord<String, ByteArray>, ack: Acknowledgment, id: String, type: String, failure: Exception, attempts: Int) {
+        failedTotal.incrementAndGet()
+        val cause = if (failure is SagaStageException) failure.cause ?: failure else failure
+        val error = DeadLetterError.of(cause)
+        failing(cause, null)
+        if (failure is SagaStageException) {
+            // Stage 1 is done (or had nothing to do); only the sagas could not run. Not a letter: stage 1 has nothing to retry.
+            log.error(
+                "Giving up on the saga stage of event type={} id={} at {}-{}@{} after {} attempts: {}: {}",
+                type, id, record.topic(), record.partition(), record.offset(), attempts, cause::class.java.name, cause.message,
+            )
+            advance(record, ack); return
+        }
+        when (val sink = deadLetters) {
+            is DeadLetterSink.Collection -> {
+                val letter = sink.store.letter(processor, record, DeadLetterReason.HANDLER_FAILED, error, attempts)
+                log.error(
+                    "Event type={} id={} at {}-{}@{} failed {} attempts in processor {}, parked as dead letter {}: {}: {}",
+                    type, id, record.topic(), record.partition(), record.offset(), attempts, processor, letter["_id"], cause::class.java.name, cause.message,
+                )
+                val key = record.key()
+                toSink(record, ack) {
+                    if (sink.store.park(letter)) parkedSinceSample.set(true)
+                    if (key != null) parkedKeys.getOrPut(record.partition()) { HashSet() } += key
+                }
+            }
+            is DeadLetterSink.Topic -> {
+                log.error(
+                    "Event type={} id={} at {}-{}@{} failed {} attempts in processor {}, sending it to {}.dlt: {}: {}",
+                    type, id, record.topic(), record.partition(), record.offset(), attempts, processor, record.topic(), cause::class.java.name, cause.message,
+                )
+                toSink(record, ack) { produce(sink, record, DeadLetterReason.HANDLER_FAILED, error) }
+            }
+            DeadLetterSink.Log -> {
+                log.error(
+                    "Giving up on event type={} id={} at {}-{}@{} after {} attempts: {}: {}",
+                    type, id, record.topic(), record.partition(), record.offset(), attempts, cause::class.java.name, cause.message,
+                )
+                advance(record, ack)
+            }
+        }
+    }
+
+    private fun invalid(record: ConsumerRecord<String, ByteArray>, ack: Acknowledgment, id: String?, why: String, type: String? = null) {
+        val error = DeadLetterError.invalid(why)
+        when (val sink = deadLetters) {
+            is DeadLetterSink.Collection -> {
+                val letter = sink.store.letter(processor, record, DeadLetterReason.INVALID, error, attempts = 0)
+                log.warn("Record {} of type {} at {}-{}@{} is invalid ({}), parked as dead letter {}", id, type, record.topic(), record.partition(), record.offset(), why, letter["_id"])
+                toSink(record, ack) { if (sink.store.park(letter)) parkedSinceSample.set(true) }
+            }
+            is DeadLetterSink.Topic -> {
+                log.warn("Record {} of type {} at {}-{}@{} is invalid ({}), sending it to {}.dlt", id, type, record.topic(), record.partition(), record.offset(), why, record.topic())
+                toSink(record, ack) { produce(sink, record, DeadLetterReason.INVALID, error) }
+            }
+            DeadLetterSink.Log -> {
+                log.warn("Skipping record {} of type {} at {}-{}@{}: {}", id, type, record.topic(), record.partition(), record.offset(), why)
+                advance(record, ack)
+            }
+        }
+    }
+
+    /** Runs [work] (park, produce) and acknowledges; when it throws the record stays unacknowledged and [work] is kept for the redelivery. */
+    private fun toSink(record: ConsumerRecord<String, ByteArray>, ack: Acknowledgment, work: () -> Unit) {
+        val coords = coords(record)
+        pending[coords] = work
+        try {
+            work()
+        } catch (e: Exception) {
+            failing(e, "could not hand record ${record.topic()}-${record.partition()}@${record.offset()} to the dead letters (${deadLetters.mode.wireName}), not acknowledging it")
+            throw e
+        }
+        pending.remove(coords)
+        advance(record, ack)
+    }
+
+    private fun produce(sink: DeadLetterSink.Topic, record: ConsumerRecord<String, ByteArray>, reason: DeadLetterReason, error: DeadLetterError) {
+        val out = ProducerRecord<String, ByteArray>("${record.topic()}.dlt", null, record.key(), record.value())
+        record.headers().filter { it.key() !in DLT_HEADERS }.forEach { out.headers().add(it) }
+        val add = { name: String, value: String -> out.headers().add(RecordHeader(name, value.toByteArray(Charsets.UTF_8))) }
+        add(DLT_PROCESSOR, processor)
+        add(DLT_REASON, reason.name)
+        add(DLT_ERROR, DeadLetterError.cut("${error.type}: ${error.message}", DeadLetterError.MAX_MESSAGE))
+        add(DLT_ORIGINAL_TOPIC, record.topic())
+        add(DLT_ORIGINAL_PARTITION, record.partition().toString())
+        add(DLT_ORIGINAL_OFFSET, record.offset().toString())
+        sink.kafka.send(out).get(sink.sendTimeout.toMillis(), TimeUnit.MILLISECONDS)
+    }
+
+    private fun advance(record: ConsumerRecord<String, ByteArray>, ack: Acknowledgment) {
         ack.acknowledge()
+        assigned[record.partition()]?.position?.set(record.offset() + 1)
+    }
+
+    /** Sleeps [ms] in slices; false as soon as the consumer is stopping. */
+    private fun pause(ms: Long): Boolean {
+        val until = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(ms)
+        while (running.get()) {
+            val left = until - System.nanoTime()
+            if (left <= 0) return true
+            Thread.sleep(TimeUnit.NANOSECONDS.toMillis(left).coerceIn(1, 100))
+        }
+        return false
+    }
+
+    private fun failing(e: Throwable, context: String?) {
+        val now = clock.millis()
+        lastError = utf8Cut("${e::class.java.simpleName.ifEmpty { e::class.java.name }}: ${e.message ?: ""}", MAX_LAST_ERROR_BYTES)
+        lastErrorAtMs = now
+        failingSinceMs = now
+        if (context != null) log.warn("Processor {}: {}: {}: {}", processor, context, e::class.java.name, e.message)
+    }
+
+    private fun loadKeys(partitions: Collection<Int>) {
+        val store = store ?: return
+        try {
+            val keys = store.keys(processor, topic, partitions)
+            for (p in partitions) {
+                parkedKeys[p] = keys[p].orEmpty().toHashSet()
+                keysUnknown.remove(p)
+            }
+        } catch (e: Exception) {
+            keysUnknown += partitions // every keyed record of these partitions is confirmed until a load succeeds
+            log.warn("Processor {}: could not load the keys of its dead letters for partitions {}: {}", processor, partitions, e.message)
+        }
+    }
+
+    private inner class Rebalance : ConsumerAwareRebalanceListener {
+        override fun onPartitionsRevokedBeforeCommit(consumer: Consumer<*, *>, partitions: Collection<TopicPartition>) {
+            rebalancing = true
+            forget(partitions)
+        }
+
+        override fun onPartitionsLost(consumer: Consumer<*, *>, partitions: Collection<TopicPartition>) {
+            rebalancing = true
+            forget(partitions)
+        }
+
+        override fun onPartitionsAssigned(consumer: Consumer<*, *>, partitions: Collection<TopicPartition>) {
+            val numbers = partitions.filter { it.topic() == topic }.map { it.partition() }
+            numbers.forEach { assigned.putIfAbsent(it, Track()) }
+            loadKeys(numbers)
+            assignedOnce = true
+            rebalancing = false
+        }
+
+        private fun forget(partitions: Collection<TopicPartition>) {
+            for (tp in partitions) {
+                assigned.remove(tp.partition())
+                parkedKeys.remove(tp.partition())
+                keysUnknown.remove(tp.partition())
+                pending.keys.removeIf { it.startsWith("${tp.partition()}:") } // the new owner parks it, from the start
+            }
+        }
+    }
+
+    /** This processor's status for the hub (ADR 0022), from in-memory state only: never blocks. */
+    fun status(): ProcessorStatus {
+        val now = clock.millis()
+        val state = when {
+            !running.get() -> ProcessorState.PROCESSOR_STOPPED
+            failingSinceMs != 0L && now - failingSinceMs < FAILING_WINDOW_MS -> ProcessorState.PROCESSOR_FAILING
+            !assignedOnce || rebalancing -> ProcessorState.PROCESSOR_STARTING
+            else -> ProcessorState.PROCESSOR_RUNNING
+        }
+        val builder = ProcessorStatus.newBuilder()
+            .setName(processor)
+            .setGroupId(groupId)
+            .setTopic(topic)
+            .setState(state)
+            .setProcessedTotal(processedTotal.get())
+            .setFailedTotal(failedTotal.get())
+            .setDeadLetters(if (deadLetters.mode == DeadLetterMode.COLLECTION) deadLetterCount else 0L)
+            .setLastError(lastError)
+            .setLastErrorAtMs(lastErrorAtMs)
+            .addAllEventTypes(dispatcher.eventTypes(processor).sorted())
+            .setDeadLetterMode(deadLetters.mode.wireName)
+        for ((partition, track) in assigned) {
+            val position = track.position.get()
+            val committed = track.committed
+            val high = track.highWatermark
+            val base = if (committed >= 0) committed else position
+            val lag = if (high < 0 || base < 0) -1L else (high - base).coerceAtLeast(0)
+            builder.addPartitions(
+                PartitionStatus.newBuilder().setPartition(partition).setPosition(position).setCommitted(committed)
+                    .setHighWatermark(high).setLag(lag),
+            )
+        }
+        return builder.build()
+    }
+
+    /** Whether this processor was started (also while it is stopping or stopped: it then reports STOPPED). */
+    val wasStarted: Boolean get() = started
+
+    /**
+     * Refreshes the committed offsets of this processor's group and the high watermarks of its assigned partitions through
+     * [admin]. Blocking (at most [timeoutMs] per call): run it off the consumer thread and off the hub connection.
+     */
+    fun refreshOffsets(admin: Admin, timeoutMs: Long) {
+        val partitions = assigned.keys.toList()
+        if (partitions.isEmpty()) return
+        val tps = partitions.map { TopicPartition(topic, it) }
+        val committed = admin.listConsumerGroupOffsets(groupId).partitionsToOffsetAndMetadata().get(timeoutMs, TimeUnit.MILLISECONDS)
+        val latest = admin.listOffsets(tps.associateWith { OffsetSpec.latest() }).all().get(timeoutMs, TimeUnit.MILLISECONDS)
+        for (tp in tps) {
+            val track = assigned[tp.partition()] ?: continue
+            track.committed = committed[tp]?.offset() ?: -1L
+            track.highWatermark = latest[tp]?.offset() ?: -1L
+        }
+    }
+
+    /**
+     * Samples this processor's letter count (`countDocuments({processor})`) when [force]d (every 30 s) or when a letter was
+     * parked since the last sample. Blocking: run it off the consumer thread. No-op outside mode `collection`.
+     */
+    fun sampleDeadLetters(force: Boolean) {
+        val store = store ?: return
+        if (!force && !parkedSinceSample.get()) return
+        parkedSinceSample.set(false)
+        try {
+            deadLetterCount = store.count(processor)
+        } catch (e: Exception) {
+            parkedSinceSample.set(true)
+            throw e
+        }
     }
 
     companion object {
         const val PHASE = SmartLifecycle.DEFAULT_PHASE - 1900
-    }
 
-    private fun logSkipped(record: ConsumerRecord<*, *>, ex: Exception) {
-        val cause = ex.cause ?: ex
-        val h = { name: String -> record.headers().lastHeader(name)?.value()?.let { String(it, Charsets.UTF_8) } }
-        log.error(
-            "Giving up on event type={} id={} at {}-{}@{} after {} attempts: {}: {}",
-            h(EventHeaders.TYPE), h(EventHeaders.ID), record.topic(), record.partition(), record.offset(), maxAttempts,
-            cause::class.java.name, cause.message,
-        )
+        /** A processor reports FAILING this long after a record exhausted its attempts or could not be acknowledged. */
+        const val FAILING_WINDOW_MS = 60_000L
+
+        /** `ProcessorStatus.last_error` is cut to this many UTF-8 bytes. */
+        const val MAX_LAST_ERROR_BYTES = 512
+
+        const val DLT_PROCESSOR = "kraken-dlt-processor"
+        const val DLT_REASON = "kraken-dlt-reason"
+        const val DLT_ERROR = "kraken-dlt-error"
+        const val DLT_ORIGINAL_TOPIC = "kraken-dlt-original-topic"
+        const val DLT_ORIGINAL_PARTITION = "kraken-dlt-original-partition"
+        const val DLT_ORIGINAL_OFFSET = "kraken-dlt-original-offset"
+        private val DLT_HEADERS = setOf(DLT_PROCESSOR, DLT_REASON, DLT_ERROR, DLT_ORIGINAL_TOPIC, DLT_ORIGINAL_PARTITION, DLT_ORIGINAL_OFFSET)
+
+        private fun coords(record: ConsumerRecord<*, *>) = "${record.partition()}:${record.offset()}"
+
+        /** [text] cut to at most [maxBytes] UTF-8 bytes at a code point boundary. */
+        internal fun utf8Cut(text: String, maxBytes: Int): String {
+            if (text.toByteArray(Charsets.UTF_8).size <= maxBytes) return text
+            var bytes = 0
+            var i = 0
+            while (i < text.length) {
+                val cp = text.codePointAt(i)
+                val n = when {
+                    cp < 0x80 -> 1
+                    cp < 0x800 -> 2
+                    cp < 0x10000 -> 3
+                    else -> 4
+                }
+                if (bytes + n > maxBytes) break
+                bytes += n
+                i += Character.charCount(cp)
+            }
+            return text.substring(0, i)
+        }
     }
 }

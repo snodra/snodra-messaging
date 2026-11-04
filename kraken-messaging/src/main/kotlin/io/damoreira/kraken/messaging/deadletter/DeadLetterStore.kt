@@ -31,7 +31,7 @@ import java.util.concurrent.TimeUnit
  * and the indexes. The documents are written with the plain driver, field by field, so their shape is exactly the ADR's
  * table: no `_class`, an absent field instead of null, Int32 `partition`, Int64 `offset`, dates and BinData.
  */
-class DeadLetterStore(
+open class DeadLetterStore(
     private val mongo: MongoTemplate,
     private val retention: Duration,
     private val clock: Clock = Clock.systemUTC(),
@@ -79,7 +79,7 @@ class DeadLetterStore(
         letter(processor, record, DeadLetterReason.SEQUENCED, DeadLetterError.sequenced(headId), attempts = 0, blockedBy = headId)
 
     /** Inserts [letter] (outside any transaction): true when parked now, false when it was parked already. Throws when MongoDB fails. */
-    fun park(letter: Document): Boolean = try {
+    open fun park(letter: Document): Boolean = try {
         collection.insertOne(letter)
         true
     } catch (e: MongoWriteException) {
