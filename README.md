@@ -40,6 +40,7 @@ Repo conventions: `../kraken/docs/04-repositories.md`.
 - [Subscription queries](#subscription-queries)
 - [Event processors](#event-processors)
 - [Dead letters](#dead-letters)
+- [Processor control](#processor-control)
 - [Sagas](#sagas)
 - [Test helpers (`kraken-messaging-test`)](#test-helpers-kraken-messaging-test)
 - [Examples](#examples)
@@ -91,6 +92,17 @@ The published POM and Gradle module metadata carry resolved versions for every d
 POM also imports the Spring Boot BOM, so consumers do not need to manage them. Builder call.
 
 ## Upgrading
+
+**To processor control (P6b).** Nothing changes until someone pauses or resets a processor through a P6b hub (or the
+`ProcessorControl` bean). New: the hub capability `processor-control` (declared always; a hub before P6b never sends a
+`ControlRequest`), the collection `processor_control` (one document per processor, created on the first pause or reset), the bean
+`ProcessorControl` next to `EventProcessors` (its consumers now start as their documents say: paused, or not at all while a reset
+holds the lock), `@ResetHandler`, `@DisallowReplay`, `ResetContext`. Stage-1 markers written by a Kafka consumer (and by a
+dead-letter retry) now also carry `processor`, `topic`, `partition` and `offset`; markers written before the upgrade have none,
+so only a reset to `earliest` replays their records (see [Processor control](#processor-control)). `EventConsumer.topic` is
+public; `LocalEventDispatcher.dispatchIn` and `runStage1` take an optional position (and `dispatchIn` a replay flag),
+`HandlerInvoker.invokeEvent` a replay flag, `EventProcessors` an optional `ProcessorControl`, `HubConnection` and `HubConnections`
+an optional `ControlInbound`.
 
 **To event processors and dead letters (P6a).** The unnamed processor keeps its consumer group and its markers, so an upgrade
 re-handles nothing. **Behaviour change:** a record that fails every attempt is now parked in `dead_letters` (mode `collection`, the
@@ -1110,6 +1122,8 @@ class Notifier {                         // no annotation: processor "default"
   processor uses `<that group>.<name>` (`orders-service.orders`), so it starts from the earliest offset the first time it runs.
 - **Markers.** `default` keeps `<eventId>` in `processed_events`; a named processor writes `processor:<name>:<eventId>`. So an
   upgrade re-handles nothing in `default`, and one event type handled in two processors is handled by both, each exactly once.
+  Since P6b a marker a processor writes for a Kafka record also carries `processor`, `topic`, `partition` (Int32) and `offset`
+  (Int64): a reset deletes exactly the markers of its replay range ([Processor control](#processor-control)).
 - **Sagas run only in `default`** (their stage 2 follows the default processor's stage 1, as before). A named processor runs
   only its handlers.
 - **Which processors start.** At startup, one consumer per processor that has a handler; `default` also when sagas run. A
@@ -1129,7 +1143,8 @@ processor, or commit the new group's offsets at the end of the topic before you 
 `kafka-consumer-groups --bootstrap-server <broker> --group <group>.<name> --topic <events topic> --reset-offsets --to-latest --execute`
 (`<group>` is `kraken.messaging.kafka.group-id` or the service name; the group must have no running member). Records produced
 between that reset and the moment the old instances stop are handled twice, once by the old `default` and once by the new
-processor, so reset right before the rollout. A start position per processor is a candidate for P6b.
+processor, so reset right before the rollout. Once it runs, a reset to `latest` through the hub does the same without a shell
+([Processor control](#processor-control)), but by then it has already run once over the topic.
 
 **Status at the hub.** Every status report (`hub.status-interval`, 5 s) carries one `ProcessorStatus` per started processor to
 every hub whose `RegisterAck` lists the capability `processors` (the P6a hub; an older hub is never sent the field): name, group,
@@ -1142,7 +1157,11 @@ dead-letter mode. The hub shows them in `/topology`, `GET /api/v1/processors` an
 | `STARTING` | started, no assignment yet (an assignment of zero partitions counts: an idle group member is `RUNNING`), or between a revocation and the next assignment |
 | `RUNNING` | otherwise |
 | `FAILING` | for 60 s after a record exhausted its attempts, or a record could not be acknowledged (its letter could not be parked, the DLT could not be reached); wins over `STARTING` and `RUNNING` |
-| `STOPPED` | the processor is stopping or stopped |
+| `PAUSED` | paused through processor control (P6b): still in its group, consuming nothing; wins over `FAILING`, `STARTING` and `RUNNING` |
+| `STOPPED` | the processor is stopping or stopped; also while a reset holds its lock (P6b), with `operation_id` set |
+
+Since P6b a report also carries `operation_id` (the reset holding the processor's lock, empty when none), `replaying` (a replay
+range is open on this instance's partitions) and per partition `replay_until` (the end of its open replay range, 0 when none).
 
 The report is built from memory and never waits: the assignment comes from the rebalance listener, the position from the last
 acknowledged record (`-1` until one), the committed offsets and high watermarks from one Kafka `Admin` client (same connection
@@ -1229,6 +1248,85 @@ The document (the same from the Rust library; no `_class`, an absent field is ab
 | `parkedAt`, `lastAttemptAt`, `expireAt` | Date | `expireAt = parkedAt + retention` (TTL index) |
 
 Indexes: `dead_letters_processor_key_offset`, `dead_letters_processor_parked`, `dead_letters_expire` (TTL), created at startup.
+
+## Processor control
+
+A P6b hub (`processor-control`, ADR 0023 in the umbrella repo) pauses, resumes and resets a processor of a service **on every
+instance**, and lists, retries and discards its dead letters, from its dashboard or HTTP API (writes need the hub's write token
+or an ACL credential with `control = true`; see the hub's documentation). The hub keeps nothing: the state of each processor is a
+document in the service's own MongoDB, `processor_control`, which every instance reads at start (before its consumers poll) and
+every 5 s, so a pause outlives every hub and restart and reaches instances that start later. A `ControlRequest` is only the fast
+path. The bean `ProcessorControl` does all of it; its `pause(processor)` and `resume(processor)` do the same from your own code
+(`pausedBy: "local"`).
+
+- **Pause** stops consuming every assigned partition **without leaving the consumer group** (no rebalance): the record in hand
+  finishes, nothing else starts, partitions assigned later start paused. The status says `PAUSED`. **Resume** undoes it. A pause
+  holds only Kafka consumption: the local dispatch of external sources, webhooks and saga notices still runs the processor's
+  handlers, and the `DeadLetters` admin calls keep working.
+- **Reset** moves the processor's consumer group to `earliest`, `latest`, a timestamp or explicit offsets per partition, as a
+  **leased operation**: every instance is prepared (it takes the processor's lock in `processor_control` for a 30 s lease, the hub
+  renews it every 10 s, and leaves the group: `STOPPED` with the operation id), one executes, every one is finished (it releases
+  the lock and consumes again, still paused if it was). An instance whose lease passes without a renewal (the hub died) releases it
+  and resumes by itself; an instance that starts while the lock is held stays out of the group until it clears. A second reset
+  while one holds the lock is refused (`LOCKED`).
+- **The execute** resolves the target per partition (Kafka `Admin.listOffsets`; a timestamp past the last record means the end),
+  reads the group's committed offsets ("before"), refuses while the group has any active member (`GROUP_NOT_EMPTY`, nothing
+  changed), runs the processor's `@ResetHandler`s, deletes the processor's markers in the replay ranges, writes the ranges to the
+  document and only then commits the target offsets (`Admin.alterConsumerGroupOffsets`).
+- **A reset to anything but `latest` is a replay**: per partition, the records from the target up to where the group was
+  (`[target, before)`) are handled again, by whichever instance owns the partition, exactly once overall (their markers were
+  deleted). In the range **the sagas never run** (stage 2 is skipped) and **handlers marked `@DisallowReplay` do not run**; past
+  the range everything is as usual. Once an instance has consumed past the end of a range it removes the range; the status shows
+  `replaying` until then. A reset does not touch the processor's dead letters.
+
+```kotlin
+@Component
+@ProcessingGroup("orders")
+class OrdersProjection(private val orders: OrderRepository) {
+    @EventHandler fun on(event: OrderPlaced) = orders.insert(event.toRow())
+
+    // Once per reset that replays something, on the instance that executes it, before any marker or offset changes.
+    // Throwing fails the reset (RESET_HANDLER_FAILED) and changes nothing. No parameter, or a ResetContext.
+    @ResetHandler fun clear(ctx: ResetContext) {
+        if (ctx.target == ResetTarget.Earliest) orders.deleteAll() // the whole topic replays: rebuild from scratch
+    }
+}
+
+@Component
+@ProcessingGroup("orders")
+class OrderMails(private val mail: Mail) {
+    @DisallowReplay                      // or on the class: a replay never sends these again
+    @EventHandler fun on(event: OrderPlaced) = mail.confirm(event)
+}
+```
+
+`ResetContext(processor, operationId, target, ranges)`: `target` is `ResetTarget.Earliest`, `Latest`, `Timestamp(timestampMs)` or
+`Offsets(map of partition to offset)`; `ranges` the `ReplayRange(topic, partition, from, until)` the reset replays (never empty: a
+reset that replays nothing runs no reset handler). A `@ResetHandler` belongs to its class's processor (`@ProcessingGroup`, else
+`default`) and may suspend.
+
+**Markers written before P6b carry no position.** A reset deletes the markers of its ranges by position, so the records of those
+older markers would be skipped as duplicates. A reset to `earliest` therefore also deletes the processor's markers without a
+position: for a named processor those whose `_id` is `processor:<name>:<id>`, for `default` those whose `_id` has no `:` at
+all (an event id; every other marker family, sagas, ingress, failure notices, external sources, has a colon). Any other target
+keeps them, and the records they mark are not replayed; neither is an event whose `id` header contains a `:`. Within the
+idempotency retention (`idempotency.retention`, 30 days) this limitation fades on its own.
+
+The `processor_control` document (the same from the Rust library; every field is always written):
+
+| Field | Type | |
+|---|---|---|
+| `_id` | string | the processor name |
+| `paused` | bool | |
+| `pausedAt`, `pausedBy` | Date, string | null when not paused; `pausedBy` is the hub's control id, or `local` |
+| `operation` | `{id, kind: "reset", leaseUntil, preparedAt}` | the reset holding the lock, null when none; expired once `leaseUntil` passed |
+| `replay` | array of `{topic, partition: Int32, from: Int64, until: Int64}` | the open replay ranges, `[]` when none |
+| `updatedAt` | Date | |
+
+Every control request is logged at INFO with its control id, processor, action and result. Requests run off the hub stream, one
+at a time per processor (a renewal of the lease this instance holds is answered at once, and the instance executing a reset
+extends its own lease while it runs). Dead letters through the hub map to `DeadLetters` one to one (`list` without payloads or
+headers, `retry`, `retryAll`, `discard`); an instance answers only for the processors it runs and only in mode `collection`.
 
 ## Sagas
 
@@ -1587,7 +1685,9 @@ adapter against a fake of the partner, the controller with a mock request and a 
   silent unless it was the last (`HANDLER_DISCONNECTED`), `maxSubscriptionsPerInstance` (1024) refuses with
   `RESOURCE_EXHAUSTED`, `maxSubscriptionDuration` (off) ends with `CANCELLED`, and the gates are the real hub's;
   `subscription = false` emulates the P4b hub, and `openSubscriptions()`, `subscriptionTargetsOf(instanceId)`,
-  `subscriptionCreditOf(requestId)` and `bufferedUpdatesOf(requestId)` observe it.
+  `subscriptionCreditOf(requestId)` and `bufferedUpdatesOf(requestId)` observe it. Processor control (P6b):
+  `control(instanceId, request)` sends a `ControlRequest` to the instance's session and awaits its `ControlReply` from that
+  session, `controlRepliesFrom(instanceId)` lists every reply; `processorControl = false` emulates a hub before P6b.
 - `InProcessHub.auth` (P5a): `HubAuth.enforce(tokens)`, `HubAuth.permissive(tokens)` or `HubAuth.OFF` (default), with `tokens` a
   map from the plain test token to `AclEntry(service, handle, send)` (patterns: exact, `prefix.*`, `*`), answers like the real
   hub: in `enforce` the first `Register` is closed with `UNAUTHENTICATED` (no credentials, an empty token, a `jwt` on a hub
