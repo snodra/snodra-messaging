@@ -56,8 +56,9 @@ open class DeadLetterStore(
             .append("partition", record.partition())
             .append("offset", record.offset())
         record.key()?.let { doc["key"] = it }
-        headers.getString(ID_HEADER)?.let { doc["eventId"] = it }
-        headers.getString(TYPE_HEADER)?.let { doc["eventType"] = it }
+        // A blank id or type is no id or type (as the consumer reads it): absent, never "".
+        headers.getString(ID_HEADER)?.takeIf { it.isNotBlank() }?.let { doc["eventId"] = it }
+        headers.getString(TYPE_HEADER)?.takeIf { it.isNotBlank() }?.let { doc["eventType"] = it }
         doc["headers"] = headers
         val value = record.value() ?: ByteArray(0)
         if (value.isNotEmpty()) {

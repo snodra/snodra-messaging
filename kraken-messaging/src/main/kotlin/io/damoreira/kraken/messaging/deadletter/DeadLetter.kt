@@ -55,9 +55,9 @@ data class DeadLetter(
     val offset: Long,
     /** The record's key (lossy UTF-8), null when it had none. */
     val key: String?,
-    /** The `id` header, null when the record had none. */
+    /** The `id` header, null when the record had none or a blank one. */
     val eventId: String?,
-    /** The `type` header, null when the record had none. */
+    /** The `type` header, null when the record had none or a blank one. */
     val eventType: String?,
     /** All record headers (lossy UTF-8; a repeated name keeps its last value). */
     val headers: Map<String, String>,
