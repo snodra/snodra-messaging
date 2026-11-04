@@ -89,18 +89,23 @@ class ProcessorControl(
     private var leases: ScheduledExecutorService? = null
 
     /**
-     * Takes over starting [consumers]: reads their documents (a failure fails the start: a pause must not be missed), starts
-     * each as its document says, and polls the documents from then on.
+     * Takes over starting [consumers]: reads their documents, starts each as its document says, and polls the documents from
+     * then on. When the documents cannot be read no consumer starts (a pause must not be missed); the polls retry.
      */
     @Synchronized
     fun attach(consumers: List<EventConsumer>) {
-        val docs = if (consumers.isEmpty()) emptyMap() else store.read(consumers.map { it.processor })
+        val docs = try {
+            if (consumers.isEmpty()) emptyMap() else store.read(consumers.map { it.processor })
+        } catch (e: Exception) {
+            log.warn("Could not read the processor control documents: no event processor starts until a poll reads them: {}", e.toString())
+            null
+        }
         val attached = consumers.associate { it.processor to Slot(it) }
         val now = clock.instant()
         leases = Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "kraken-control-lease").apply { isDaemon = true } }
         slots = attached
         try {
-            for (slot in attached.values) converge(slot, docs[slot.consumer.processor], now, failFast = true)
+            if (docs != null) for (slot in attached.values) converge(slot, docs[slot.consumer.processor], now, failFast = true)
         } catch (e: Exception) {
             detach()
             throw e
@@ -262,6 +267,10 @@ class ProcessorControl(
                     partitions.associateWith { tp -> found[tp]?.takeIf { it >= 0 } ?: high.getValue(tp) } // no record that late: the end
                 }
                 is ResetTarget.Offsets -> {
+                    if (wire.offsets.offsetsCount == 0) return refused(request, ControlRefusal.CONTROL_REFUSAL_INVALID, "the offsets target lists no partition")
+                    if (target.offsets.size != wire.offsets.offsetsCount) {
+                        return refused(request, ControlRefusal.CONTROL_REFUSAL_INVALID, "the offsets target names a partition twice")
+                    }
                     val high = offsets { OffsetSpec.latest() }
                     val known = partitions.associateBy { it.partition() }
                     for ((p, o) in target.offsets) {

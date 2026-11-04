@@ -454,6 +454,8 @@ class ProcessorControlTest {
         assertEquals(ControlRefusal.CONTROL_REFUSAL_INVALID, reset("op-2", offsets(0 to -1L)).refusal())
         assertEquals(ControlRefusal.CONTROL_REFUSAL_INVALID, reset("op-3", offsets(0 to 7L)).refusal(), "past the high watermark")
         assertEquals(ControlRefusal.CONTROL_REFUSAL_INVALID, reset("op-4", WireTarget.getDefaultInstance()).refusal())
+        assertEquals(ControlRefusal.CONTROL_REFUSAL_INVALID, reset("op-5", offsets()).refusal(), "no offsets")
+        assertEquals(ControlRefusal.CONTROL_REFUSAL_INVALID, reset("op-6", offsets(0 to 1L, 0 to 2L)).refusal(), "a partition twice")
         awaitRunning(a)
         assertEquals(6L, support.committed(group)[0])
     }
