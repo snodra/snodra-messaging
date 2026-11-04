@@ -12,6 +12,8 @@
 #        is the fake printer's address;
 #        SKIP_BANNER=1 skips the Rust saga steps 25-25e (service-c's banner printer), ONLY_BANNER=1 runs only them,
 #        C=http://localhost:8094 is service-c's HTTP address;
+#        SKIP_AUDIT=1 skips the named-processor and dead-letter steps 26-26h (the `audit` processor of service-b and
+#        service-c), ONLY_AUDIT=1 runs only them;
 #        SECURE=1 runs against the secure sandbox (kraken/infra/compose.secure.yaml, secrets from
 #        kraken/infra/scripts/dev-hub-pki.sh): the hub calls are https with the dev CA and carry the dashboard token, every
 #        other step runs unchanged, and the security steps 21 and 21b are added; SKIP_SECURE=1 skips those two, ONLY_SECURE=1
@@ -270,6 +272,12 @@ if command -v jq >/dev/null; then
   in_flight() {
     jq -r '"\(.totals.inFlight // 0) \([.services[].instances[] | (.inFlightAsHandler // 0) + (.inFlightAsSender // 0)] | add // 0)"' 2>/dev/null || true
   }
+  # /api/v1/processors -> "<state> <groupId> <deadLetters> <assignedPartitions> <instancesReporting>" of the processor named $2
+  # of the service named $1; empty while it is not listed.
+  processor_summary() {
+    jq -r --arg s "$1" --arg p "$2" '.services[] | select(.serviceName == $s) | .processors[] | select(.name == $p)
+      | "\(.state) \(.groupId) \(.deadLetters) \(.assignedPartitions) \(.instancesReporting)"' 2>/dev/null || true
+  }
 elif command -v python3 >/dev/null; then
   hub_id_of() { python3 -I -c 'import json,sys
 try: print(json.load(sys.stdin).get("hubId") or "")
@@ -327,6 +335,14 @@ try:
     per = sum((i.get("inFlightAsHandler") or 0) + (i.get("inFlightAsSender") or 0) for s in t.get("services", []) for i in s.get("instances", []))
     print((t.get("totals") or {}).get("inFlight") or 0, per)
 except Exception: pass' || true; }
+  processor_summary() { python3 -I -c 'import json,sys
+try:
+    for s in json.load(sys.stdin).get("services", []):
+        if s.get("serviceName") == sys.argv[1]:
+            for p in s.get("processors", []):
+                if p.get("name") == sys.argv[2]:
+                    print(p["state"], p["groupId"], p["deadLetters"], p["assignedPartitions"], p["instancesReporting"])
+except Exception: pass' "$1" "$2" || true; }
 else
   hub_id_of() { fail "jq or python3 needed for the two-hub steps (or set SKIP_HA=1)"; }
   example_instances() { hub_id_of; }
@@ -339,6 +355,7 @@ else
   counter_summary() { type_owners; }
   open_summary() { type_owners; }
   in_flight() { rows_summary; }
+  processor_summary() { fail "jq or python3 needed for the processor steps (or set SKIP_AUDIT=1)"; }
 fi
 
 # Succeeds (prints nothing) when both hubs list the same instances of service-a, service-b and service-c, each of
@@ -824,6 +841,214 @@ banner_steps() {
   done
 }
 
+# P6a (ADR 0022): service-b (Kotlin) and service-c (Rust) each run a named event processor, `audit` (consumer group
+# `<service>.audit`, markers `processor:audit:<eventId>`), next to their `default` one. It handles an audit note published
+# under a key (`POST <service>/audit/notes {"key","text"}`, service-b's AuditNote and service-c's ShoutAudit) and fails
+# on demand: while `POST <service>/audit/failing?on=true` is on, a note whose text starts with `poison` fails. The example
+# admin endpoints over the library's DeadLetters (`GET /audit/dead-letters`, `POST /audit/dead-letters/{id}/retry`,
+# `POST /audit/dead-letters/retry-all`, `DELETE /audit/dead-letters/{id}`) are the same in both. Step 26: both audit
+# processors run (RUNNING, with partitions) on the hub's `GET /api/v1/processors`, next to `default`, and no letters are
+# left over. 26b / 26c: with the failure on, service-b / service-c get two poison notes under one key and a fine note under
+# another: the first is parked HANDLER_FAILED, the second SEQUENCED behind it, the other key is handled. 26d: the hub shows
+# both processors FAILING with their two dead letters (sampled by the service, so within a minute). 26e: retrying the head
+# while the failure is on answers Failed, retrying the sequenced letter answers Blocked behind the head. 26f: with the
+# failure off, retrying drains the key in order (service-b: the head, then retryAll; service-c: the head, then the second)
+# and no letter is left. 26g: a poison note is parked and discarded (a second discard is a 404), and its key flows again.
+# 26h: the hub's dead-letter count is back to 0. SKIP_AUDIT=1 skips these steps, ONLY_AUDIT=1 runs only them.
+
+# The `audit` letters at <base> (service-b's or service-c's HTTP address), one per line, oldest first:
+# "<id> <key> <reason> <attempts> <blockedBy or ->". The views are flat JSON objects, so grep and sed read them.
+audit_letters() { # <base>
+  curl -fsS "$1/audit/dead-letters?processor=audit" | { grep -o '{[^{}]*}' || true; } \
+    | sed -En 's/.*"id":"([^"]*)".*"key":("[^"]*"|null).*"reason":"([^"]*)","attempts":([0-9]+).*"blockedBy":("[^"]*"|null).*/\1 \2 \3 \4 \5/p' \
+    | tr -d '"' | sed 's/ null$/ -/'
+}
+
+# Waits until <base> has exactly <count> audit letters and prints them (as audit_letters).
+await_letters() { # <base> <count> <seconds>
+  local base=$1 want=$2 limit=$3 start=$SECONDS letters="" n=0
+  while [ $((SECONDS - start)) -lt "$limit" ]; do
+    letters=$(audit_letters "$base" || true)
+    n=$(printf '%s' "$letters" | grep -c . || true)
+    if [ "$n" -eq "$want" ]; then printf '%s' "$letters"; return 0; fi
+    sleep 1
+  done
+  fail "$base: expected $want dead letter(s) within ${limit}s, got $n: $letters"
+}
+
+# The texts the audit processor at <base> handled for <key>, in handling order, comma-separated (empty for none).
+audit_handled() { # <base> <key>
+  curl -fsS "$1/audit/handled" | { grep -o '{[^{}]*}' || true; } | grep "\"key\":\"$2\"" \
+    | sed 's/.*"text":"\([^"]*\)".*/\1/' | paste -sd, - || true
+}
+
+# Waits until the texts handled for <key> at <base> are exactly <texts> (comma-separated).
+await_handled() { # <base> <key> <texts> <seconds>
+  local start=$SECONDS got=""
+  while [ $((SECONDS - start)) -lt "$4" ]; do
+    got=$(audit_handled "$1" "$2" || true)
+    [ "$got" = "$3" ] && return 0
+    sleep 1
+  done
+  fail "$1: expected the audit processor to have handled '$3' for key $2 within ${4}s, got '$got'"
+}
+
+audit_note() { # <base> <key> <text>
+  curl -fsS -X POST "$1/audit/notes" -H 'content-type: application/json' -d "{\"key\":\"$2\",\"text\":\"$3\"}" >/dev/null \
+    || fail "POST $1/audit/notes ($2, $3) failed"
+}
+
+audit_failing() { # <base> <true|false>
+  curl -fsS -X POST "$1/audit/failing?on=$2" | grep -q "\"failing\":$2" || fail "POST $1/audit/failing?on=$2 did not switch the failure $2"
+}
+
+# A JSON string field of a flat reply: audit_field '{"result":"Failed"}' result -> Failed.
+audit_field() { # <json> <field>
+  printf '%s' "$1" | sed -n "s/.*\"$2\":\"\([^\"]*\)\".*/\1/p"
+}
+
+audit_retry() { # <base> <letter id> -> the reply
+  curl -fsS -X POST "$1/audit/dead-letters/$2/retry" || fail "POST $1/audit/dead-letters/$2/retry failed"
+}
+
+audit_count() { # <base>
+  curl -fsS "$1/audit/dead-letters/count?processor=audit" | sed -n 's/.*"count":\([0-9]*\).*/\1/p'
+}
+
+# Waits until the hub lists <service>'s <processor> with a state and a dead-letter count matching those patterns (and the group
+# <group>) and prints its summary: "<state> <groupId> <deadLetters> <assignedPartitions> <instancesReporting>".
+await_processor() { # <service> <processor> <group> <state pattern> <dead letters pattern> <seconds>
+  local start=$SECONDS sum=""
+  while [ $((SECONDS - start)) -lt "$6" ]; do
+    sum=$(curl -fsS "$HUB/api/v1/processors" 2>/dev/null | processor_summary "$1" "$2" || true)
+    if printf '%s' "$sum" | grep -Eq "^($4) $3 ($5) "; then printf '%s' "$sum"; return 0; fi
+    sleep 1
+  done
+  fail "$HUB/api/v1/processors: expected $1's processor $2 (group $3) in state $4 with $5 dead letters within ${6}s, got '${sum:-not listed}'"
+}
+
+# Leaves nothing behind when a step fails: the failure off on both services.
+audit_off() {
+  trap - EXIT
+  command curl -fsS -X POST "$B/audit/failing?on=false" >/dev/null 2>&1 || true
+  command curl -fsS -X POST "$C/audit/failing?on=false" >/dev/null 2>&1 || true
+}
+
+# Parks a poison note under <key>-1 twice and puts a fine note under another key at <base>; checks what the processor made of them.
+audit_park() { # <label> <base> <run>
+  local label=$1 base=$2 run=$3 letters head second id key reason attempts blocked id2 key2 reason2 attempts2 blocked2
+  audit_failing "$base" true
+  audit_note "$base" "k1-$run" poison-1
+  audit_note "$base" "k1-$run" poison-2
+  audit_note "$base" "k2-$run" "fine-$run"
+  letters=$(await_letters "$base" 2 90)
+  head=$(printf '%s\n' "$letters" | sed -n 1p); second=$(printf '%s\n' "$letters" | sed -n 2p)
+  read -r id key reason attempts blocked <<< "$head"
+  [ "$key" = "k1-$run" ] && [ "$reason" = "HANDLER_FAILED" ] && [ "$attempts" -ge 1 ] && [ "$blocked" = "-" ] \
+    || fail "$label: the first poison note should be parked HANDLER_FAILED under k1-$run, got '$head'"
+  read -r id2 key2 reason2 attempts2 blocked2 <<< "$second"
+  [ "$key2" = "k1-$run" ] && [ "$reason2" = "SEQUENCED" ] && [ "$attempts2" = "0" ] && [ "$blocked2" = "$id" ] \
+    || fail "$label: the second poison note should be parked SEQUENCED behind $id, got '$second'"
+  await_handled "$base" "k2-$run" "fine-$run" 30
+  [ -z "$(audit_handled "$base" "k1-$run")" ] || fail "$label: a note of k1-$run was handled although its key is parked"
+  echo "   $label: $id HANDLER_FAILED after $attempts attempts, $id2 SEQUENCED behind it, k2-$run handled"
+}
+
+audit_steps() {
+  local run letters id id2 n sum reply base label
+  run=$(date +%s)
+  trap audit_off EXIT
+
+  echo "26. both audit processors run (group <service>.audit) next to default on the hub's /api/v1/processors; no letters left over ..."
+  for label in "service-b $B" "service-c $C"; do
+    read -r label base <<< "$label"
+    sum=$(await_processor "$label" audit "$label\.audit" RUNNING '[0-9]+' 150)
+    echo "   $label audit: $sum"
+    [ "$(printf '%s' "$sum" | cut -d' ' -f4)" -ge 1 ] || fail "$label's audit processor has no partition assigned: $sum"
+    sum=$(await_processor "$label" default "$label" 'RUNNING|STARTING|FAILING' '[0-9]+' 30)
+    echo "   $label default: $sum"
+    audit_failing "$base" false
+    curl -fsS -X POST "$base/audit/dead-letters/retry-all?processor=audit" >/dev/null || fail "retry-all of $label's leftover letters failed"
+    for id in $(audit_letters "$base" | cut -d' ' -f1); do
+      curl -fsS -X DELETE "$base/audit/dead-letters/$id" >/dev/null || fail "discarding the leftover letter $id of $label failed"
+    done
+    [ "$(audit_count "$base")" = "0" ] || fail "$label still has audit letters after the clean-up"
+  done
+
+  echo "26b. service-b (Kotlin): failure on; two poison notes under one key, a fine note under another: HANDLER_FAILED, SEQUENCED, handled ..."
+  audit_park service-b "$B" "$run"
+  echo "26c. service-c (Rust): the same ..."
+  audit_park service-c "$C" "$run"
+
+  echo "26d. the hub shows both audit processors FAILING with two dead letters each, and default still there ..."
+  for label in service-b service-c; do
+    sum=$(await_processor "$label" audit "$label\.audit" FAILING 2 90)
+    echo "   $label audit: $sum"
+    sum=$(curl -fsS "$HUB/api/v1/processors" | processor_summary "$label" default)
+    printf '%s' "$sum" | grep -Eq "^[A-Z]+ $label [0-9]+ " || fail "$label's default processor is not listed with group $label: '$sum'"
+  done
+
+  echo "26e. the failure still on: retrying the head answers Failed (attempts grow), retrying the sequenced letter answers Blocked ..."
+  for label in "service-b $B" "service-c $C"; do
+    read -r label base <<< "$label"
+    letters=$(audit_letters "$base" | grep " k1-$run ")
+    read -r id _ _ n _ <<< "$(printf '%s\n' "$letters" | sed -n 1p)"
+    id2=$(printf '%s\n' "$letters" | sed -n 2p | cut -d' ' -f1)
+    reply=$(audit_retry "$base" "$id")
+    [ "$(audit_field "$reply" result)" = "Failed" ] && printf '%s' "$reply" | grep -q 'failing on demand' \
+      || fail "$label: retrying the head while failing should answer Failed (failing on demand), got: $reply"
+    [ "$(audit_letters "$base" | grep "^$id " | cut -d' ' -f4)" -gt "$n" ] || fail "$label: the head's attempts did not grow after a failed retry"
+    reply=$(audit_retry "$base" "$id2")
+    [ "$(audit_field "$reply" result)" = "Blocked" ] && [ "$(audit_field "$reply" detail)" = "$id" ] \
+      || fail "$label: retrying the sequenced letter should answer Blocked behind $id, got: $reply"
+    echo "   $label: head -> Failed, sequenced -> Blocked behind $id"
+  done
+
+  echo "26f. the failure off: retrying drains each key in order and leaves no letter (service-b: head, then retryAll; service-c: head, then the second) ..."
+  audit_failing "$B" false; audit_failing "$C" false
+  for label in "service-b $B" "service-c $C"; do
+    read -r label base <<< "$label"
+    letters=$(audit_letters "$base" | grep " k1-$run ")
+    id=$(printf '%s\n' "$letters" | sed -n 1p | cut -d' ' -f1); id2=$(printf '%s\n' "$letters" | sed -n 2p | cut -d' ' -f1)
+    reply=$(audit_retry "$base" "$id")
+    [ "$(audit_field "$reply" result)" = "Retried" ] || fail "$label: retrying the head with the failure off should answer Retried, got: $reply"
+    if [ "$label" = "service-b" ]; then
+      reply=$(curl -fsS -X POST "$base/audit/dead-letters/retry-all?processor=audit")
+      printf '%s' "$reply" | grep -q '"retried":1,"failed":0,"blocked":0' || fail "$label: retryAll should retry the one letter left, got: $reply"
+    else
+      reply=$(audit_retry "$base" "$id2")
+      [ "$(audit_field "$reply" result)" = "Retried" ] || fail "$label: retrying the second letter should answer Retried, got: $reply"
+    fi
+    await_handled "$base" "k1-$run" "poison-1,poison-2" 10
+    [ "$(audit_count "$base")" = "0" ] || fail "$label: letters are left after the retries: $(audit_letters "$base")"
+    echo "   $label: k1-$run handled as poison-1,poison-2, no letter left"
+  done
+
+  echo "26g. discard: a parked poison note is discarded (the second discard is a 404), gone from the list, and its key flows again ..."
+  for label in "service-b $B" "service-c $C"; do
+    read -r label base <<< "$label"
+    audit_failing "$base" true
+    audit_note "$base" "k3-$run" poison-3
+    id=$(await_letters "$base" 1 90 | cut -d' ' -f1)
+    curl -fsS -X DELETE "$base/audit/dead-letters/$id" >/dev/null || fail "$label: discarding $id failed"
+    n=$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE "$base/audit/dead-letters/$id") || fail "$label: the second discard failed"
+    [ "$n" = "404" ] || fail "$label: discarding $id again should be a 404, got $n"
+    [ "$(audit_count "$base")" = "0" ] || fail "$label: the discarded letter is still counted"
+    audit_failing "$base" false
+    audit_note "$base" "k3-$run" after-discard
+    await_handled "$base" "k3-$run" "after-discard" 30
+    [ "$(audit_count "$base")" = "0" ] || fail "$label: the note after the discard became a letter"
+    echo "   $label: $id discarded, k3-$run unblocked (after-discard handled, no letter)"
+  done
+
+  echo "26h. the hub's dead-letter count of both audit processors is back to 0 ..."
+  for label in service-b service-c; do
+    sum=$(await_processor "$label" audit "$label\.audit" 'RUNNING|FAILING' 0 90)
+    echo "   $label audit: $sum"
+  done
+  audit_off
+}
+
 # P5a (ADR 0018), only with SECURE=1 against the secure sandbox (kraken/infra/compose.secure.yaml). Step 21: a service
 # with a token the ACL does not know, and one with a valid token that grants only another service name, are refused by
 # both hubs and logged by the client as a registration rejection (ERROR once per hub), and never listed on /topology; a
@@ -1211,6 +1436,12 @@ if [ "${ONLY_BANNER:-0}" = "1" ]; then
   exit 0
 fi
 
+if [ "${ONLY_AUDIT:-0}" = "1" ]; then
+  audit_steps
+  echo "SMOKE OK (audit steps only)"
+  exit 0
+fi
+
 if [ "${ONLY_SECURE:-0}" = "1" ]; then
   [ "$SECURE" = "1" ] || fail "ONLY_SECURE=1 needs SECURE=1"
   secure_steps
@@ -1318,6 +1549,7 @@ echo "   delivered: $TEXTS"
 [ "${SKIP_SUBSCRIBE:-0}" = "1" ] || subscribe_steps
 [ "${SKIP_POSTCARD:-0}" = "1" ] || postcard_steps
 [ "${SKIP_BANNER:-0}" = "1" ] || banner_steps
+[ "${SKIP_AUDIT:-0}" = "1" ] || audit_steps
 if [ "$SECURE" = "1" ] && [ "${SKIP_SECURE:-0}" != "1" ]; then secure_steps; fi
 if [ "$JWT" = "1" ] && [ "${SKIP_JWT:-0}" != "1" ]; then jwt_steps; fi
 if [ "$MTLS" = "1" ] && [ "${SKIP_MTLS:-0}" != "1" ]; then mtls_steps; fi
