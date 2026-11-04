@@ -19,7 +19,7 @@ import java.time.Instant
  * and the webhook ingress ([dispatch]).
  *
  * Stage 1 runs per event processor (ADR 0022): the processor's idempotency marker ([ProcessedEventDocument], id
- * [Processors.markerId]: the dedupe id itself for `default`, `processor:<name>:<dedupeId>` for a named one) is inserted and
+ * [Processors.markerId]: `processor:<name>:<dedupeId>`, `default` included) is inserted and
  * the processor's handlers run inside one Mongo transaction; a duplicate marker (from the marker insert only) skips the
  * processor, a handler failure rolls the marker back. Handlers run via `runBlocking` on the calling thread so the
  * thread-bound transaction wraps them. Stage 2 runs only for the `default` processor, after stage 1 committed, with markers

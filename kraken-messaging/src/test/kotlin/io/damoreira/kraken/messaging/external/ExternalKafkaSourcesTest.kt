@@ -203,7 +203,7 @@ class ExternalKafkaSourcesTest {
         awaitSaga("j1")
         assertEquals(listOf("j1"), handlers.seen.toList(), "the ordinary handler saw it too")
         // The dedupe id is the source, the partition and the offset; both stages' markers carry it.
-        assertTrue(mongo.exists(Query(Criteria.where("_id").`is`("printer:0:0")), "processed_events"))
+        assertTrue(mongo.exists(Query(Criteria.where("_id").`is`("processor:default:printer:0:0")), "processed_events"))
         assertTrue(mongo.exists(Query(Criteria.where("_id").`is`("saga:ek.Job:printer:0:0")), "processed_events"))
     }
 
@@ -217,7 +217,7 @@ class ExternalKafkaSourcesTest {
         assertEquals(2, translator.calls.get())
         assertEquals(listOf("j2"), handlers.seen.toList())
         assertEquals(null, sagaOf("skipped"))
-        assertEquals(0, mongo.count(Query(Criteria.where("_id").`is`("printer:0:0")), "processed_events"), "an ignored record leaves no marker")
+        assertEquals(0, mongo.count(Query(Criteria.where("_id").`is`("processor:default:printer:0:0")), "processed_events"), "an ignored record leaves no marker")
     }
 
     @Test
@@ -229,7 +229,7 @@ class ExternalKafkaSourcesTest {
 
         awaitSaga("j3", replies = 2)
         assertEquals(listOf("j3", "j3"), handlers.seen.toList(), "evt-1 once, evt-2 once")
-        assertTrue(mongo.exists(Query(Criteria.where("_id").`is`("printer:evt-1")), "processed_events"))
+        assertTrue(mongo.exists(Query(Criteria.where("_id").`is`("processor:default:printer:evt-1")), "processed_events"))
         assertTrue(mongo.exists(Query(Criteria.where("_id").`is`("saga:ek.Job:printer:evt-2")), "processed_events"))
     }
 

@@ -38,7 +38,7 @@ private class RecordingStage(private val interest: Boolean, private val mongo: M
 
     override fun process(type: String, payload: ByteArray, ctx: MessageContext): Boolean {
         // Outside any transaction, so a marker that is visible here has been committed.
-        val committed = mongo.count(Query(Criteria.where("_id").`is`(ctx.messageId)), "processed_events") == 1L
+        val committed = mongo.count(Query(Criteria.where("_id").`is`("processor:default:${ctx.messageId}")), "processed_events") == 1L
         calls += Call(type, payload, ctx, committed, handlers.seen.toList())
         return true
     }

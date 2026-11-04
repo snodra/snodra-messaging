@@ -207,14 +207,14 @@ class KafkaEventsAutoConfiguration {
             DeadLetterMode.TOPIC -> DeadLetterSink.Topic(kafka)
             DeadLetterMode.LOG -> DeadLetterSink.Log
         }
-        val defaultGroup = properties.kafka.defaultGroupId(properties.serviceName)
+        val serviceGroup = properties.kafka.serviceGroupId(properties.serviceName)
         return EventProcessors(
             dispatcher,
             consumerFor = { processor ->
                 EventConsumer(
                     consumerFactory,
                     topic = properties.kafka.topic,
-                    groupId = Processors.groupId(defaultGroup, processor),
+                    groupId = Processors.groupId(serviceGroup, processor),
                     registry = registry,
                     invoker = invoker,
                     tx = tx,

@@ -114,7 +114,7 @@ class ProcessorDispatchTest {
     private fun markerIds() = mongo.findAll(Document::class.java, "processed_events").map { it.getString("_id") }.toSet()
     private fun rows() = mongo.findAll(Document::class.java, "projection").map { it.getString("_id") }.toSet()
 
-    @Test fun `a named processor runs only its handlers under its own marker family, default keeps the plain marker`() {
+    @Test fun `every processor runs only its handlers under its own marker family, default included`() {
         val d = dispatcher()
         assertEquals(Outcome.HANDLED, d.dispatchIn("orders", "e-1", "test.Happened", payload("e-1"), ctx("e-1")))
         assertEquals(listOf("e-1"), orders.seen.toList())
@@ -123,7 +123,7 @@ class ProcessorDispatchTest {
 
         assertEquals(Outcome.HANDLED, d.dispatchIn("default", "e-1", "test.Happened", payload("e-1"), ctx("e-1")))
         assertEquals(listOf("e-1"), plain.seen.toList())
-        assertEquals(setOf("processor:orders:e-1", "e-1"), markerIds())
+        assertEquals(setOf("processor:orders:e-1", "processor:default:e-1"), markerIds())
 
         // Each processor deduplicates on its own marker only.
         assertEquals(Outcome.DUPLICATE, d.dispatchIn("orders", "e-1", "test.Happened", payload("e-1"), ctx("e-1")))
@@ -136,7 +136,7 @@ class ProcessorDispatchTest {
         orders.failing = true
         assertFailsWith<IllegalStateException> { d.dispatchIn("orders", "f-1", "test.Happened", payload("f-1"), ctx("f-1")) }
         assertEquals(Outcome.HANDLED, d.dispatchIn("default", "f-1", "test.Happened", payload("f-1"), ctx("f-1")))
-        assertEquals(setOf("f-1"), markerIds(), "the failed processor's marker rolled back")
+        assertEquals(setOf("processor:default:f-1"), markerIds(), "the failed processor's marker rolled back")
         assertEquals(setOf("default:f-1"), rows(), "the failed processor's write rolled back")
     }
 
@@ -164,7 +164,7 @@ class ProcessorDispatchTest {
         val stage = CountingStage()
         val d = dispatcher(stage)
         assertEquals(Outcome.HANDLED, d.dispatch("printer:k-1", "test.Happened", payload("x-1"), ctx("printer:k-1")))
-        assertEquals(setOf("printer:k-1", "processor:orders:printer:k-1"), markerIds())
+        assertEquals(setOf("processor:default:printer:k-1", "processor:orders:printer:k-1"), markerIds())
         assertEquals(listOf("x-1"), plain.seen.toList())
         assertEquals(listOf("x-1"), orders.seen.toList())
         assertEquals(listOf("printer:k-1"), stage.calls.toList())
@@ -172,7 +172,7 @@ class ProcessorDispatchTest {
         // One processor failing: the others still commit, the sagas still run, the failure is thrown.
         orders.failing = true
         assertFailsWith<IllegalStateException> { d.dispatch("printer:k-2", "test.Happened", payload("x-2"), ctx("printer:k-2")) }
-        assertTrue("printer:k-2" in markerIds())
+        assertTrue("processor:default:printer:k-2" in markerIds())
         assertFalse("processor:orders:printer:k-2" in markerIds())
         assertEquals(listOf("printer:k-1", "printer:k-2"), stage.calls.toList())
     }
@@ -181,7 +181,7 @@ class ProcessorDispatchTest {
         val d = dispatcher(CountingStage(failing = true))
         val e = assertFailsWith<SagaStageException> { d.dispatchIn("default", "t-1", "test.Happened", payload("t-1"), ctx("t-1")) }
         assertEquals("saga store down", e.cause!!.message)
-        assertEquals(setOf("t-1"), markerIds(), "stage 1 committed")
+        assertEquals(setOf("processor:default:t-1"), markerIds(), "stage 1 committed")
 
         plain.failing = true
         val first = assertFailsWith<IllegalStateException> { d.dispatchIn("default", "t-2", "test.Happened", payload("t-2"), ctx("t-2")) }
@@ -214,7 +214,7 @@ class ProcessorDispatchTest {
         val m = marker("processor:orders:p-1")
         assertEquals(listOf<Any?>("orders", "kraken.events", 2, 41L), listOf(m["processor"], m["topic"], m["partition"], m["offset"]))
         d.dispatch("printer:k-9", "test.Happened", payload("x-9"), ctx("printer:k-9"))
-        for (id in listOf("printer:k-9", "processor:orders:printer:k-9")) {
+        for (id in listOf("processor:default:printer:k-9", "processor:orders:printer:k-9")) {
             assertEquals(setOf("_id", "type", "processedAt"), marker(id).keys - "_class", "$id has no position")
         }
         d.runStage1("orders", "r-9", "test.Happened", payload("r-9"), ctx("r-9"), RecordPosition("kraken.events", 0, 7L)) {}

@@ -121,6 +121,8 @@ class ProcessorControlTest {
     private val mongo = support.mongo
     private lateinit var topic: String
     private lateinit var group: String
+    /** The consumer group of processor `default`. */
+    private val defaultGroup: String get() = Processors.groupId(group, Processors.DEFAULT)
     private lateinit var projection: ReplayedProjection
     private lateinit var once: OnceOnly
     private lateinit var resets: DefaultResets
@@ -205,7 +207,7 @@ class ProcessorControlTest {
         PartitionOffsets.newBuilder().addAllOffsets(o.map { PartitionOffset.newBuilder().setPartition(it.first).setOffset(it.second).build() }),
     ).build()
 
-    private fun members(group: String = this.group): Int = support.admin().use {
+    private fun members(group: String = defaultGroup): Int = support.admin().use {
         try {
             it.describeConsumerGroups(listOf(group)).all().get()[group]!!.members().size
         } catch (e: java.util.concurrent.ExecutionException) {
@@ -319,7 +321,7 @@ class ProcessorControlTest {
         val reply = a.ask(execute("op-1", latest))
         assertTrue(reply.hasReset(), reply.toString())
         assertEquals(0, reply.reset.rangesCount)
-        assertEquals(2L, support.committed(group)[0])
+        assertEquals(2L, support.committed(defaultGroup)[0])
         assertTrue(a.ask(finish("op-1")).hasOk())
         awaitRunning(a)
         Thread.sleep(1000)
@@ -347,14 +349,14 @@ class ProcessorControlTest {
         val a = instance(projection, resets)
         val old = instance(projection, controlled = false) // an instance without processor control keeps consuming
         repeat(3) { support.send(topic, "g-$it") }
-        await().atMost(Duration.ofSeconds(30)).until { projection.seen.size == 3 && support.committed(group)[0] == 3L }
+        await().atMost(Duration.ofSeconds(30)).until { projection.seen.size == 3 && support.committed(defaultGroup)[0] == 3L }
         val before = markers()
         assertTrue(a.ask(prepare("op-1")).hasOk())
         await().atMost(Duration.ofSeconds(30)).until { members() == 1 }
         val reply = a.ask(execute("op-1", earliest))
         assertEquals(ControlRefusal.CONTROL_REFUSAL_GROUP_NOT_EMPTY, reply.refusal())
         assertTrue("1 active member" in reply.refused.message, reply.refused.message)
-        assertEquals(3L, support.committed(group)[0])
+        assertEquals(3L, support.committed(defaultGroup)[0])
         assertEquals(before, markers())
         assertEquals(emptyList(), control()!!.replay)
         assertEquals(emptyList(), resets.contexts.toList())
@@ -368,9 +370,9 @@ class ProcessorControlTest {
         val b = instance()
         for (p in 0..1) repeat(3) { support.send(topic, "r-$p-$it", partition = p) }
         await().atMost(Duration.ofSeconds(30)).until { projection.seen.size == 6 && audit.seen.size == 6 && sagas.calls.size == 6 }
-        await().atMost(Duration.ofSeconds(20)).until { support.committed(group) == mapOf(0 to 3L, 1 to 3L) }
+        await().atMost(Duration.ofSeconds(20)).until { support.committed(defaultGroup) == mapOf(0 to 3L, 1 to 3L) }
         // Markers without a position (a saga's, an external source's, a dispatch outside Kafka) and of another processor.
-        val others = listOf("saga:Order:r-0-0", "processor:audit:other-1", "printer:k-1", "other-2")
+        val others = listOf("saga:Order:r-0-0", "processor:audit:other-1", "processor:default:printer:k-1", "processor:default:other-2")
         others.forEach { mongo.insert(Document(mapOf("_id" to it, "type" to "test.Happened", "processedAt" to java.util.Date())), "processed_events") }
         val auditMarkers = markers().filter { it.startsWith("processor:audit:r-") }.toSet()
         assertEquals(6, auditMarkers.size)
@@ -388,7 +390,7 @@ class ProcessorControlTest {
         assertEquals("op-1", ctx.operationId)
         assertEquals(listOf(ReplayRange(topic, 0, 0, 3), ReplayRange(topic, 1, 0, 3)), ctx.ranges)
         assertEquals(0, audit.resets, "another processor's reset handler does not run")
-        assertEquals(mapOf(0 to 0L, 1 to 0L), support.committed(group))
+        assertEquals(mapOf(0 to 0L, 1 to 0L), support.committed(defaultGroup))
         assertTrue(markers().containsAll(auditMarkers + others), "only default's markers in the range went")
         assertEquals(listOf(ReplayRange(topic, 0, 0, 3), ReplayRange(topic, 1, 0, 3)), control()!!.replay)
 
@@ -411,7 +413,7 @@ class ProcessorControlTest {
         val a = instance(projection)
         support.send(topic, "k-0", partition = 0)
         support.send(topic, "k-1", partition = 0)
-        await().atMost(Duration.ofSeconds(30)).until { projection.seen.size == 2 && support.committed(group)[0] == 2L }
+        await().atMost(Duration.ofSeconds(30)).until { projection.seen.size == 2 && support.committed(defaultGroup)[0] == 2L }
         assertTrue(a.ask(pause()).hasOk())
         assertTrue(a.ask(prepare("op-1")).hasOk())
         assertTrue(a.ask(execute("op-1", earliest)).hasReset())
@@ -437,7 +439,7 @@ class ProcessorControlTest {
         val cut = Instant.now().toEpochMilli()
         Thread.sleep(50)
         repeat(3) { support.send(topic, "t-${it + 3}") }
-        await().atMost(Duration.ofSeconds(30)).until { projection.seen.size == 6 && support.committed(group)[0] == 6L }
+        await().atMost(Duration.ofSeconds(30)).until { projection.seen.size == 6 && support.committed(defaultGroup)[0] == 6L }
 
         fun reset(op: String, target: WireTarget): ControlReply {
             assertTrue(a.ask(prepare(op)).hasOk())
@@ -470,14 +472,14 @@ class ProcessorControlTest {
         assertEquals(ControlRefusal.CONTROL_REFUSAL_INVALID, reset("op-5", offsets()).refusal(), "no offsets")
         assertEquals(ControlRefusal.CONTROL_REFUSAL_INVALID, reset("op-6", offsets(0 to 1L, 0 to 2L)).refusal(), "a partition twice")
         awaitRunning(a)
-        assertEquals(6L, support.committed(group)[0])
+        assertEquals(6L, support.committed(defaultGroup)[0])
     }
 
     @Test fun `a failing reset handler fails the reset, says it ran, and touches no marker or offset`() {
         topic = support.newTopic("kraken.events.ctl", partitions = 1)
         val a = instance(projection, resets)
         repeat(2) { support.send(topic, "f-$it") }
-        await().atMost(Duration.ofSeconds(30)).until { projection.seen.size == 2 && support.committed(group)[0] == 2L }
+        await().atMost(Duration.ofSeconds(30)).until { projection.seen.size == 2 && support.committed(defaultGroup)[0] == 2L }
         val before = markers()
         resets.failing = true
         assertTrue(a.ask(prepare("op-1")).hasOk())
@@ -485,7 +487,7 @@ class ProcessorControlTest {
         assertEquals(ControlRefusal.CONTROL_REFUSAL_RESET_HANDLER_FAILED, reply.refusal())
         assertTrue("cannot clear the projection" in reply.refused.message, reply.refused.message)
         assertTrue("reset handlers ran (1), no markers deleted, offsets not moved" in reply.refused.message, reply.refused.message)
-        assertEquals(2L, support.committed(group)[0])
+        assertEquals(2L, support.committed(defaultGroup)[0])
         assertEquals(before, markers())
         assertEquals(emptyList(), control()!!.replay)
         assertTrue(a.ask(finish("op-1", aborted = true)).hasOk())
@@ -496,7 +498,7 @@ class ProcessorControlTest {
         topic = support.newTopic("kraken.events.ctl", partitions = 1)
         val a = instance(projection, resets)
         support.send(topic, "w-1")
-        await().atMost(Duration.ofSeconds(30)).until { support.committed(group)[0] == 1L }
+        await().atMost(Duration.ofSeconds(30)).until { support.committed(defaultGroup)[0] == 1L }
         assertTrue(a.ask(prepare("op-1", leaseMs = 1500)).hasOk())
         resets.gate = CountDownLatch(1)
         val executed = CompletableFuture<ControlReply>()
@@ -594,7 +596,7 @@ class ProcessorControlTest {
         topic = support.newTopic("kraken.events.ctl", partitions = 1)
         val a = instance(projection, resets)
         repeat(2) { support.send(topic, "s-$it") }
-        await().atMost(Duration.ofSeconds(30)).until { projection.seen.size == 2 && support.committed(group)[0] == 2L }
+        await().atMost(Duration.ofSeconds(30)).until { projection.seen.size == 2 && support.committed(defaultGroup)[0] == 2L }
         val before = markers()
         val store = ProcessorControlStore(mongo)
         // Another instance cleared the passed lease and took the lock.
@@ -605,7 +607,7 @@ class ProcessorControlTest {
         for (said in listOf("lease lost", "reset handlers ran (1)", "no markers deleted", "offsets not moved")) {
             assertTrue(said in reply.refused.message, "$said: ${reply.refused.message}")
         }
-        assertEquals(2L, support.committed(group)[0])
+        assertEquals(2L, support.committed(defaultGroup)[0])
         assertEquals(before, markers())
         assertEquals(emptyList(), control()!!.replay)
     }
@@ -614,14 +616,14 @@ class ProcessorControlTest {
         topic = support.newTopic("kraken.events.ctl", partitions = 1)
         val a = instance(projection, resets, executeLeaseLimit = Duration.ofSeconds(1))
         support.send(topic, "c-0")
-        await().atMost(Duration.ofSeconds(30)).until { support.committed(group)[0] == 1L }
+        await().atMost(Duration.ofSeconds(30)).until { support.committed(defaultGroup)[0] == 1L }
         val before = markers()
         resets.during = { Thread.sleep(1500) }
         assertTrue(a.ask(prepare("op-1")).hasOk())
         val reply = a.ask(execute("op-1", earliest))
         assertEquals(ControlRefusal.CONTROL_REFUSAL_FAILED, reply.refusal(), reply.toString())
         assertTrue("lease lost: the reset ran longer than 1 s" in reply.refused.message, reply.refused.message)
-        assertEquals(1L, support.committed(group)[0])
+        assertEquals(1L, support.committed(defaultGroup)[0])
         assertEquals(before, markers())
         assertTrue(a.ask(finish("op-1", aborted = true)).hasOk())
     }
@@ -630,7 +632,7 @@ class ProcessorControlTest {
         topic = support.newTopic("kraken.events.ctl", partitions = 1)
         val a = instance(projection, resets)
         support.send(topic, "e-0")
-        await().atMost(Duration.ofSeconds(30)).until { support.committed(group)[0] == 1L }
+        await().atMost(Duration.ofSeconds(30)).until { support.committed(defaultGroup)[0] == 1L }
         resets.during = { TODO("the projection reset") }
         assertTrue(a.ask(prepare("op-1")).hasOk())
         val reply = a.ask(execute("op-1", earliest), Duration.ofSeconds(15))
@@ -645,7 +647,7 @@ class ProcessorControlTest {
         val flaky = FlakyProjection()
         val a = instance(flaky, once)
         support.send(topic, "x-1")
-        await().atMost(Duration.ofSeconds(30)).until { "x-1" in once.seen && support.committed(group)[0] == 1L }
+        await().atMost(Duration.ofSeconds(30)).until { "x-1" in once.seen && support.committed(defaultGroup)[0] == 1L }
         flaky.failing = "x-1"
         assertTrue(a.ask(prepare("op-1")).hasOk())
         assertTrue(a.ask(execute("op-1", earliest)).hasReset())

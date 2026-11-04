@@ -225,8 +225,8 @@ data class KrakenMessagingProperties(
         /** Events topic. */
         val topic: String = "kraken.events",
         /**
-         * Consumer group of the `default` event processor; unset: the service name. A named processor (`@ProcessingGroup`)
-         * uses `<this group>.<name>` (ADR 0022). Changing it on a running deployment starts the group from the earliest offset.
+         * The service's consumer group; unset: the service name. Every event processor, `default` included, uses
+         * `<this group>.<name>` (ADR 0022). Changing it on a running deployment starts the groups from the earliest offset.
          */
         val groupId: String? = null,
         val consumer: Consumer = Consumer(),
@@ -236,8 +236,8 @@ data class KrakenMessagingProperties(
             require(groupId == null || groupId.isNotBlank()) { "kraken.messaging.kafka.group-id must not be blank" }
         }
 
-        /** The `default` processor's consumer group: [groupId], else [serviceName]. */
-        fun defaultGroupId(serviceName: String): String = groupId ?: serviceName
+        /** The service's consumer group, the prefix of every processor's: [groupId], else [serviceName]. */
+        fun serviceGroupId(serviceName: String): String = groupId ?: serviceName
     }
 
     /** `kafka.dead-letter.*` (P6a, ADR 0022): what an event processor does with a record it cannot handle. */

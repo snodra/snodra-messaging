@@ -234,7 +234,7 @@ class EventConsumerTest {
         send("good-1", "test.Happened")
         awaitSeen("good-1")
         assertEquals(5, handlers.seen.count { it == "poison-1" })
-        assertEquals(0, mongo.count(Query(org.springframework.data.mongodb.core.query.Criteria.where("_id").`is`("poison-1")), "processed_events"))
+        assertEquals(0, mongo.count(Query(org.springframework.data.mongodb.core.query.Criteria.where("_id").`is`("processor:default:poison-1")), "processed_events"))
         Thread.sleep(500)
         assertEquals(5, handlers.seen.count { it == "poison-1" })
         consumer!!.stop()

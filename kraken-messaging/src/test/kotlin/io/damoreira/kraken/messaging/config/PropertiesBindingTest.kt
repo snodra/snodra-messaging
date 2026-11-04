@@ -227,7 +227,7 @@ class PropertiesBindingTest {
         runner.withPropertyValues(*required).run { context ->
             val p = context.getBean(KrakenMessagingProperties::class.java)
             assertEquals(null, p.kafka.groupId)
-            assertEquals("orders", p.kafka.defaultGroupId("orders"))
+            assertEquals("orders", p.kafka.serviceGroupId("orders"))
             assertEquals(io.damoreira.kraken.messaging.deadletter.DeadLetterMode.COLLECTION, p.kafka.deadLetter.mode)
             assertEquals(Duration.ofDays(30), p.kafka.deadLetter.retention)
         }
@@ -237,7 +237,7 @@ class PropertiesBindingTest {
                 val p = context.getBean(KrakenMessagingProperties::class.java)
                 assertEquals(mode.lowercase(), p.kafka.deadLetter.mode.wireName)
                 assertEquals(Duration.ofSeconds(1), p.kafka.deadLetter.retention)
-                assertEquals("orders-v2", p.kafka.defaultGroupId("orders"))
+                assertEquals("orders-v2", p.kafka.serviceGroupId("orders"))
             }
         }
     }

@@ -145,7 +145,7 @@ class ProcessorsEndToEndTest {
             assertEquals(listOf("p6a.OrderPlaced"), orders["eventTypes"].nodes().map { it.asString() })
             assertTrue(orders["lastError"]["message"].asString().contains("cannot project o-2"))
             val default = processors.getValue("default")
-            assertEquals("svc-p6a", default["groupId"].asString())
+            assertEquals("svc-p6a.default", default["groupId"].asString())
             assertEquals("RUNNING", default["state"].asString())
             assertEquals(3, default["processedTotal"].asInt())
             assertEquals(0, default["lag"].asInt())

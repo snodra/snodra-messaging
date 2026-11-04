@@ -115,7 +115,7 @@ class WebhookIngressTest {
         assertEquals(ExternalEventIngress.Result.ACCEPTED, result)
         assertEquals(1, sagaOf("j1")?.stateDoc?.getInteger("hooks"))
         assertEquals(listOf("j1"), handlers.seen.toList())
-        assertTrue(mongo.exists(Query(Criteria.where("_id").`is`("printer:evt-1")), "processed_events"), "the dedupe id is <source>:<dedupeKey>")
+        assertTrue(mongo.exists(Query(Criteria.where("_id").`is`("processor:default:printer:evt-1")), "processed_events"), "the dedupe id is <source>:<dedupeKey>")
         assertTrue(mongo.exists(Query(Criteria.where("_id").`is`("saga:wh.Job:printer:evt-1")), "processed_events"))
     }
 

@@ -54,6 +54,13 @@ class ProcessingGroupTest {
         assertTrue(registry.commandHandler("test.Ping") != null)
     }
 
+    @Test fun `every processor, default included, has the group of its name and the markers of its name`() {
+        assertEquals("svc.default", Processors.groupId("svc", Processors.DEFAULT))
+        assertEquals("svc.orders", Processors.groupId("svc", "orders"))
+        assertEquals("processor:default:e-1", Processors.markerId(Processors.DEFAULT, "e-1"))
+        assertEquals("processor:orders:printer:k-1", Processors.markerId("orders", "printer:k-1"))
+    }
+
     @Test fun `a 48 character name is accepted`() {
         @ProcessingGroup("a23456789012345678901234567890123456789012345678") class MaxLength { @EventHandler fun on(event: Happened) {} }
         registry.register(MaxLength())

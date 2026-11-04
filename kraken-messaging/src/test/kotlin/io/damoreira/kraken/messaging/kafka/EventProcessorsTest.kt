@@ -94,11 +94,11 @@ class EventProcessorsTest {
     @Test fun `each processor has its own group and marker family, and both get the event`() {
         val p = processors(plain, orders).also { it.start() }
         assertEquals(listOf("default", "orders"), p.consumers().map { it.processor })
-        assertEquals(listOf(group, "$group.orders"), p.consumers().map { it.group })
+        assertEquals(listOf("$group.default", "$group.orders"), p.consumers().map { it.group })
         support.send(topic, "e-1", key = "k1", partition = 0)
         await().atMost(Duration.ofSeconds(20)).until { plain.seen.size == 1 && orders.seen.size == 1 }
-        await().atMost(Duration.ofSeconds(10)).until { support.committed(group)[0] == 1L && support.committed("$group.orders")[0] == 1L }
-        assertEquals(setOf("e-1", "processor:orders:e-1"), markers())
+        await().atMost(Duration.ofSeconds(10)).until { support.committed("$group.default")[0] == 1L && support.committed("$group.orders")[0] == 1L }
+        assertEquals(setOf("processor:default:e-1", "processor:orders:e-1"), markers())
     }
 
     @Test fun `stage-1 markers carry the processor and the record's position (P6b)`() {
@@ -112,7 +112,7 @@ class EventProcessorsTest {
         assertEquals(topic, marker["topic"])
         assertEquals(1, marker["partition"], "Int32")
         assertEquals(offset, marker["offset"], "Int64")
-        val plainMarker = mongo.findById("e-1", Document::class.java, "processed_events")!!
+        val plainMarker = mongo.findById("processor:default:e-1", Document::class.java, "processed_events")!!
         assertEquals(listOf("default", topic, 0, 0L), listOf(plainMarker["processor"], plainMarker["topic"], plainMarker["partition"], plainMarker["offset"]))
         assertEquals("test.Happened", plainMarker["type"])
         p.stop()

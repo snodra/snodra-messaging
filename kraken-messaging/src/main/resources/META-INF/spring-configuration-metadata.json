@@ -333,7 +333,7 @@
     {
       "name": "kraken.messaging.kafka.group-id",
       "type": "java.lang.String",
-      "description": "Consumer group of the default event processor; unset: the service name. A named processor (@ProcessingGroup) uses <this group>.<name>.",
+      "description": "The service's consumer group; unset: the service name. Every event processor, default included, uses <this group>.<name>.",
       "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Kafka"
     },
     {
