@@ -35,6 +35,12 @@ class KafkaMongoSupport(database: String) {
     private val factory = SimpleMongoClientDatabaseFactory(MongoClients.create(mongoContainer.connectionString + "/?directConnection=true"), database)
     val mongo = MongoTemplate(factory)
     val tx = TransactionTemplate(MongoTransactionManager(factory))
+
+    init {
+        // As MessagingIndexes does at startup: two processors' first transactions must not both create the collection
+        // implicitly (MongoDB makes the second wait for the first's lock, stalling both consumers).
+        for (name in listOf("processed_events", "dead_letters")) if (!mongo.collectionExists(name)) mongo.createCollection(name)
+    }
     val codec = JsonCodec()
     val bootstrapServers: String = kafkaContainer.getBootstrapServers()
     private val producerFactory = DefaultKafkaProducerFactory(
