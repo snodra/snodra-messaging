@@ -1,0 +1,16 @@
+{
+  "_id": "default:kraken.events:1:3",
+  "processor": "default",
+  "topic": "kraken.events",
+  "partition": 1,
+  "offset": {"$numberLong": "3"},
+  "key": "k-3",
+  "eventType": "examples.OrderPlaced",
+  "headers": {"type": "examples.OrderPlaced"},
+  "reason": "INVALID",
+  "error": {"type": "InvalidMessage", "message": "payload is not a JSON object"},
+  "attempts": 0,
+  "parkedAt": {"$date": "2026-11-04T10:00:00Z"},
+  "lastAttemptAt": {"$date": "2026-11-04T10:00:00Z"},
+  "expireAt": {"$date": "2026-12-04T10:00:00Z"}
+}
