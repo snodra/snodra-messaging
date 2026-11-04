@@ -202,7 +202,7 @@ flow_steps() {
   flow_demo_off
 }
 
-# F1 (P0): a frozen handler is evicted after the 10 s v2 heartbeat timeout, so a call to it fails in ~10 s
+# F1 (P0): a frozen handler is evicted after the hub's 10 s heartbeat timeout, so a call to it fails in ~10 s
 # instead of the 30 s it took before (and instead of burning a 5 s TIMEOUT: compose.local.yaml gives
 # examples.CountGreetings a 20 s per-type override). SKIP_PAUSE=1 skips this step; ONLY_PAUSE=1 runs only this step.
 pause_step() {

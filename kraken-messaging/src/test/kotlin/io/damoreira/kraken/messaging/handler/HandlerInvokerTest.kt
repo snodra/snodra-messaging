@@ -306,7 +306,7 @@ class HandlerInvokerTest {
         assertEquals(Balance(70), codec.decode(initial.payload, Balance::class))
         val failed = assertIs<InvocationResult.Failure>(invoker.invokeQuery("test.WatchAccount", codec.encode(WatchAccount(-1)), ctx("test.WatchAccount"), null, subscriptionInitial = true))
         assertEquals(ErrorCode.HANDLER_ERROR to "IllegalStateException: no such account", failed.code to failed.message)
-        // The flag only lets a subscription handler answer: a plain query handler is invoked as before, a streaming one refused as before.
+        // The flag only lets a subscription handler answer: a plain query handler is still invoked, a streaming one still refused.
         registry.register(InvokerHandlers())
         registry.register(object { @QueryHandler fun handle(query: GetCount): Count = Count(1) })
         assertIs<InvocationResult.Success>(invoker.invokeQuery("test.GetCount", codec.encode(GetCount("k")), ctx("test.GetCount"), null, subscriptionInitial = true))
