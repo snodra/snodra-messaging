@@ -42,9 +42,10 @@ import org.springframework.util.backoff.FixedBackOff
  * consumer group is `groupId`, default `<serviceName>.external.<name>`; its consumer properties are the source's
  * `properties` on top of `auto.offset.reset=earliest`, with servers, group, deserializers and auto-commit fixed by the library.
  *
- * The source names `processor`, `saga`, `ingress` and `failed` are refused (construction fails naming the key): their dedupe ids
- * would collide with the library's marker families (ADR 0021, ADR 0022). The local dispatch reaches the handlers of every event
- * processor, each under its own marker (`processor:<name>:<dedupeId>` for a named one); these records are never dead-lettered.
+ * The local dispatch reaches the handlers of every event processor, each under its own marker `processor:<name>:<dedupeId>`
+ * (`default` included); these records are never dead-lettered. The source names `processor`, `saga`, `ingress` and `failed` are
+ * refused (construction fails naming the key; ADR 0021, ADR 0022): a dedupe id `failed:...` is the one of a failed notice, and
+ * the other names stay free for the library's own marker families.
  *
  * Starts and stops with the event processors (same lifecycle phase).
  */
@@ -66,7 +67,7 @@ class ExternalKafkaSources(
     init {
         require(maxAttempts >= 1) { "maxAttempts must be >= 1" }
         for (name in sources.keys) {
-            // The dedupe id `<name>:...` keys markers in processed_events, next to the families saga:, ingress:, failed: and processor:.
+            // The dedupe id `<name>:...` must not look like a failed notice's (`failed:<id>`) or a marker family of the library.
             check(name !in Processors.RESERVED_SOURCE_NAMES) {
                 "kraken.messaging.external.kafka.sources.$name: the source name '$name' is reserved (its markers would collide with " +
                     "the library's own marker families ${Processors.RESERVED_SOURCE_NAMES.sorted()}): choose another name"

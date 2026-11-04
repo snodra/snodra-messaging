@@ -1106,7 +1106,7 @@ Indexes: `dead_letters_processor_key_offset`, `dead_letters_processor_parked`, `
 
 ## Processor control
 
-A P6b hub (`processor-control`, ADR 0023 in the umbrella repo) pauses, resumes and resets a processor of a service **on every
+The hub (ADR 0023 in the umbrella repo) pauses, resumes and resets a processor of a service **on every
 instance**, and lists, retries and discards its dead letters, from its dashboard or HTTP API (writes need the hub's write token
 or an ACL credential with `control = true`; see the hub's documentation). The hub keeps nothing: the state of each processor is a
 document in the service's own MongoDB, `processor_control`, which every instance reads at start (before its consumers poll) and

@@ -96,7 +96,7 @@ import kotlin.reflect.KClass
  * stream as [io.damoreira.kraken.messaging.HubConnectionLostException]. The caller's bearer token and trace context
  * are read when [stream] is called, as for [scatterGatherFlow].
  *
- * Subscription queries ([subscribe], P4c, ADR 0017) always go through the hub, to one live hub that lists `subscription`.
+ * Subscription queries ([subscribe], P4c, ADR 0017) always go through the hub, to one live hub.
  * [subscribe] returns once the initial result arrived (decoded as the query's `I`); `timeout_ms` bounds only that
  * request, so the call retries like a unary query (the retry budget, the remaining time per attempt) and never after the
  * initial result. A `ReplyEnd` with an error, or an `Error`, before the initial result fails the call exactly like a unary

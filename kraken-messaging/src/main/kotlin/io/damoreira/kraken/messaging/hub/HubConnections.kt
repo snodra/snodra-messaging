@@ -124,8 +124,8 @@ class HubConnections(
     /** The random source of the wait before a rollover: a value in [0, 1). Replaced in tests. */
     private val rolloverRandom: () -> Double = { ThreadLocalRandom.current().nextDouble() },
     /**
-     * The status of this instance's event processors (P6a, ADR 0022), read once per report and sent to the hubs whose ack lists
-     * `processors`. Must return at once from in-memory state; one that throws sends the report without processors.
+     * The status of this instance's event processors (P6a, ADR 0022), read once per report and sent to every live hub. Must
+     * return at once from in-memory state; one that throws sends the report without processors.
      */
     private val processors: () -> List<ProcessorStatus> = { emptyList() },
     /** Serves the `ControlRequest`s of every hub (P6b, ADR 0023); see [HubConnection]. */
