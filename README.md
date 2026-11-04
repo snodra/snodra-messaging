@@ -1521,8 +1521,7 @@ adapter against a fake of the partner, the controller with a mock request and a 
   `typeTimeouts`); `emitTimeouts = false` emulates a hub that loses requests. Flow control as the real hub: a first
   `Register` without permits is `INVALID_ARGUMENT`, permits, a per-instance queue by priority (`queueCapacity`, full:
   `RESOURCE_EXHAUSTED`), `permitsGrantedBy(...)`, `permitMessagesFrom(...)`, `permitsAvailable(...)`, `queuedFor(...)`,
-  `forwardedOrder()`; permits never exceed the session's cap (`initial_permits`, raised by `Permits.grant`);
-  `permitCap = false` drops the cap. Multi-hub: `lastStatusFrom(...)` (with the processors), `statusMessagesFrom(...)`,
+  `forwardedOrder()`; permits never exceed the session's cap (`initial_permits`, raised by `Permits.grant`). Multi-hub: `lastStatusFrom(...)` (with the processors), `statusMessagesFrom(...)`,
   `requestsFrom(...)`, `sessionsOf(...)`,
   and `pauseReading = true` stops reading every stream. Like the real hub it keeps one session per instance id: a new
   stream registering an id replaces the older one (`sessionsReplacedOf(...)`, `streamsOpenedBy(...)`;

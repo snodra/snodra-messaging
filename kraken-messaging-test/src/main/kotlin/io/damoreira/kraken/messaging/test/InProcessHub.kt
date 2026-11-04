@@ -63,8 +63,8 @@ import java.util.concurrent.TimeUnit
  * request is forwarded only while the handler's session has permits (one per forward), otherwise queued per instance
  * ordered by `Request.priority` (higher first) then arrival, keeping its own deadline. `Permits` messages add permits and
  * drain the queue; like kraken-hub, a session never holds more than its cap, which starts at `initial_permits` and is
- * raised (never lowered) to `Permits.grant` when a grant is above it (P3 multi-hub top-up). Set [permitCap] false to drop
- * the cap (permits add up without bound). A full queue ([queueCapacity]) answers `RESOURCE_EXHAUSTED`.
+ * raised (never lowered) to `Permits.grant` when a grant is above it (P3 multi-hub top-up). A full queue ([queueCapacity])
+ * answers `RESOURCE_EXHAUSTED`.
  *
  * Multi-hub status (P3): the `InstanceStatus` reports of every session are kept ([lastStatusFrom], with their
  * `processors`) and counted ([statusMessagesFrom]). [pauseReading] stops reading every stream (what clients write stays
@@ -179,13 +179,6 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
     /** Set false to never send `TIMEOUT` (a hub that loses requests), so the client's local guard is what fires. */
     @Volatile
     var emitTimeouts: Boolean = true
-
-    /**
-     * True (the default, as the real hub): a session never holds more than its cap (`initial_permits`, raised by
-     * `Permits.grant`). False lets permits add up without bound.
-     */
-    @Volatile
-    var permitCap: Boolean = true
 
     /** Bound on a streaming query's whole life (`KRAKEN_HUB_MAX_STREAM_DURATION`): `ReplyEnd{CANCELLED}` and a cancel. */
     @Volatile
@@ -1125,7 +1118,7 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
         synchronized(lock) {
             if (!session.registered) return
             session.cap = maxOf(session.cap, grant)
-            session.permits = if (permitCap) minOf(session.permits + count, session.cap) else session.permits + count
+            session.permits = minOf(session.permits + count, session.cap)
             while (session.permits > 0 && session.queue.isNotEmpty()) {
                 val next = session.queue.removeAt(0)
                 if (next.request.id in pending) deliver(session, next.request) // skip entries that already timed out
