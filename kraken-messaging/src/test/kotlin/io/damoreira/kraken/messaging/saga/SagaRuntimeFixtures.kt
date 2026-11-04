@@ -146,6 +146,23 @@ class RtOrderSaga {
     }
 }
 
+@MessageType("rt.HandedOver")
+data class RtHandedOver(val orderId: String) : Event
+
+/** Starts by `orderId` and at once hands its routing over to `paymentRef`: its start handler removes the start association. */
+@Saga(name = "rt.Handover")
+class RtHandoverSaga {
+    var orderId: String? = null
+
+    @StartSaga
+    @SagaEventHandler(associationProperty = "orderId")
+    fun on(e: RtHandedOver, saga: SagaLifecycle) {
+        orderId = e.orderId
+        saga.associateWith("paymentRef", "pay-${e.orderId}")
+        saga.removeAssociationWith("orderId", e.orderId)
+    }
+}
+
 /** Throws on every event, as a broken saga type does. */
 @Saga(name = "rt.Broken")
 class RtBrokenSaga {

@@ -356,6 +356,21 @@ class SagaRuntimeTest {
     }
 
     @Test
+    fun `a start handler that removes its own start association leaves no start key, so the next start event creates a new instance`() {
+        val handover = runtime(RtHandoverSaga::class)
+        deliver(RtHandedOver("o32"), on = handover)
+
+        val first = sagas("rt.Handover").single()
+        assertEquals(listOf(Association("paymentRef", "pay-o32")), first.associations)
+        assertEquals(null, first.startKey, "the start association went in the start handler, and the start key with it")
+
+        deliver(RtHandedOver("o32"), on = handover) // no live instance is associated with orderId=o32
+
+        assertEquals(2, sagas("rt.Handover").size, "a second instance started under the same key")
+        assertEquals(0, mongo.count(Query(), "saga_failures"), "nothing was parked on a duplicate start key")
+    }
+
+    @Test
     fun `a saga type whose handler always throws is parked within well under a second, after two attempts`() {
         val broken = SagaRuntime(
             types = SagaModelScanner(resolver, codec).scan(listOf(RtBrokenSaga::class)), mongo = mongo, tx = tx, codec = codec, typeResolver = resolver,

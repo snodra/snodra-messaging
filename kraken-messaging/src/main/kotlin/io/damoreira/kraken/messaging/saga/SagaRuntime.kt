@@ -21,7 +21,8 @@ import kotlin.reflect.KClass
  * Per (event, saga type) (S1 plan R1) one transaction runs: the marker `processed_events` id `saga:<sagaType>:<eventId>`
  * is inserted first (an existing one skips the event); the live instances associated with the event are resolved per
  * handler (`keyName = value`); when none matches, a `@StartSaga` handler creates one with `startKey =
- * "<type>|<key>=<value>"` (a `forceNew` handler always creates one, without a start key); each instance's handlers run
+ * "<type>|<key>=<value>"` (a `forceNew` handler always creates one, without a start key; the key is kept only while the
+ * instance keeps that association, from its start handler on); each instance's handlers run
  * in the scanner's order, a handler running only on instances associated with its own key and value. Handlers see
  * recording objects ([SagaLifecycle], [SagaCommands], [DeadlineManager]); once every handler returned, the state is
  * written with an optimistic version check (`version + 1`; a version of 0 means just created), the recorded dispatch
@@ -326,12 +327,13 @@ class SagaRuntime(
             val ended = lifecycle.endRequested
             val state = String(codec.encode(saga), Charsets.UTF_8)
             // The start key lives and dies with its association: remove that one and the key is free for a new instance (as in Axon).
-            val keptStartKey = doc?.startKey?.takeIf { key -> lifecycle.associations.any { "${sagaType.name}|${it.k}=${it.v}" == key } }
+            // That holds from the first handler on: a start handler that removes its own start association reserves no key.
+            val keptStartKey = (if (doc == null) startKey else doc.startKey)?.takeIf { key -> lifecycle.associations.any { "${sagaType.name}|${it.k}=${it.v}" == key } }
             val next = doc?.copy(
                 state = state, associations = lifecycle.associations.toList(), startKey = keptStartKey, ended = ended,
                 endedAt = if (ended) now else null, version = version, updatedAt = now,
             ) ?: SagaDocument(
-                id = sagaId, type = sagaType.name, state = state, associations = lifecycle.associations.toList(), startKey = startKey,
+                id = sagaId, type = sagaType.name, state = state, associations = lifecycle.associations.toList(), startKey = keptStartKey,
                 ended = ended, endedAt = if (ended) now else null, version = 0, createdAt = now, updatedAt = now,
             )
             return Planned(next, doc?.version, commands.entries, deadlines.ops, created = doc == null)
