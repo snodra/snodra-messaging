@@ -291,7 +291,7 @@ class EventConsumer(
         }
         // The sagas see it even though stage 1 waits (ADR 0021 ruling 26), unless it is replayed (sagas never replay, P6b).
         if (processor == Processors.DEFAULT && !replay) stage2(record, type, payload, ctx)
-        val letter = store.sequenced(processor, record, head)
+        val letter = store.sequenced(processor, record, head, replay)
         log.info("Record {}-{}@{} of type {} parked SEQUENCED in processor {} behind {}", record.topic(), partition, record.offset(), type, processor, head)
         toSink(record, ack) { if (store.park(letter)) parkedSinceSample.set(true) }
         return true
@@ -345,10 +345,12 @@ class EventConsumer(
             if (attempts >= maxAttempts) break
             if (!pause(backOffMs)) throw failure // stopping: not acknowledged, redelivered after the restart or to the new owner
         }
-        exhausted(record, ack, id, type, failure, attempts)
+        exhausted(record, ack, id, type, failure, attempts, replay)
     }
 
-    private fun exhausted(record: ConsumerRecord<String, ByteArray>, ack: Acknowledgment, id: String, type: String, failure: Exception, attempts: Int) {
+    private fun exhausted(
+        record: ConsumerRecord<String, ByteArray>, ack: Acknowledgment, id: String, type: String, failure: Exception, attempts: Int, replay: Boolean,
+    ) {
         failedTotal.incrementAndGet()
         val cause = if (failure is SagaStageException) failure.cause ?: failure else failure
         val error = DeadLetterError.of(cause)
@@ -363,7 +365,7 @@ class EventConsumer(
         }
         when (val sink = deadLetters) {
             is DeadLetterSink.Collection -> {
-                val letter = sink.store.letter(processor, record, DeadLetterReason.HANDLER_FAILED, error, attempts)
+                val letter = sink.store.letter(processor, record, DeadLetterReason.HANDLER_FAILED, error, attempts, replay = replay)
                 log.error(
                     "Event type={} id={} at {}-{}@{} failed {} attempts in processor {}, parked as dead letter {}: {}: {}",
                     type, id, record.topic(), record.partition(), record.offset(), attempts, processor, letter["_id"], cause::class.java.name, cause.message,
@@ -395,7 +397,7 @@ class EventConsumer(
         val error = DeadLetterError.invalid(why)
         when (val sink = deadLetters) {
             is DeadLetterSink.Collection -> {
-                val letter = sink.store.letter(processor, record, DeadLetterReason.INVALID, error, attempts = 0)
+                val letter = sink.store.letter(processor, record, DeadLetterReason.INVALID, error, attempts = 0, replay = inReplay(record))
                 log.warn("Record {} of type {} at {}-{}@{} is invalid ({}), parked as dead letter {}", id, type, record.topic(), record.partition(), record.offset(), why, letter["_id"])
                 toSink(record, ack) { if (sink.store.park(letter)) parkedSinceSample.set(true) }
             }

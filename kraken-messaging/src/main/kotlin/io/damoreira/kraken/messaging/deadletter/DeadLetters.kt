@@ -124,7 +124,8 @@ class DeadLetters(
         )
         return try {
             val position = RecordPosition(letter.topic, letter.partition, letter.offset) // it is that record's stage 1 (P6b)
-            val outcome = dispatcher.runStage1(letter.processor, dedupeId, type, letter.value(), ctx, position) {
+            // A letter parked during a replay is retried as one: without its @DisallowReplay handlers (P6b).
+            val outcome = dispatcher.runStage1(letter.processor, dedupeId, type, letter.value(), ctx, position, letter.replay) {
                 if (!store.deleteInTransaction(letter.id)) throw Gone // retried or discarded meanwhile: roll the handling back
             }
             when (outcome) {

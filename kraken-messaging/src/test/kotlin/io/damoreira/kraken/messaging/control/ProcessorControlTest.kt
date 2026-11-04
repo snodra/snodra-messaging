@@ -77,6 +77,15 @@ class DefaultResets {
     }
 }
 
+class FlakyProjection {
+    val seen = CopyOnWriteArrayList<String>()
+    @Volatile var failing: String? = null
+    @EventHandler fun on(event: Happened) {
+        seen += event.id
+        if (event.id == failing) throw IllegalStateException("the projection cannot take ${event.id}")
+    }
+}
+
 @ProcessingGroup("audit")
 class AuditTrail {
     val seen = CopyOnWriteArrayList<String>()
@@ -547,5 +556,27 @@ class ProcessorControlTest {
         assertEquals(ControlRefusal.CONTROL_REFUSAL_INVALID, a.ask(request("audit") { deadLetterList = DeadLetterList.newBuilder().setLimit(0).build() }).refusal())
         assertEquals(ControlRefusal.CONTROL_REFUSAL_INVALID, a.ask(request("audit") {}).refusal(), "no action")
         assertEquals(listOf("d-1", "d-2"), audit.seen.toList())
+    }
+
+    @Test fun `a letter parked during a replay is retried as a replay, without its DisallowReplay handlers`() {
+        topic = support.newTopic("kraken.events.ctl", partitions = 1)
+        val flaky = FlakyProjection()
+        val a = instance(flaky, once)
+        support.send(topic, "x-1")
+        await().atMost(Duration.ofSeconds(30)).until { "x-1" in once.seen && support.committed(group)[0] == 1L }
+        flaky.failing = "x-1"
+        assertTrue(a.ask(prepare("op-1")).hasOk())
+        assertTrue(a.ask(execute("op-1", earliest)).hasReset())
+        assertTrue(a.ask(finish("op-1")).hasOk())
+        await().atMost(Duration.ofSeconds(30)).until { a.deadLetters.count("default") == 1L }
+        val id = DeadLetterStore.id("default", topic, 0, 0)
+        val parked = mongo.db.getCollection(DeadLetterStore.COLLECTION).find(Document("_id", id)).first()!!
+        assertEquals(true, parked.getBoolean("replay"), parked.toJson())
+        assertTrue(a.deadLetters.get(id)!!.replay)
+        flaky.failing = null
+        val retried = a.ask(request("default") { deadLetterRetry = DeadLetterRetry.newBuilder().setLetterId(id).build() }).retry
+        assertEquals("Retried", retried.result, retried.detail)
+        assertEquals(4, flaky.seen.count { it == "x-1" }, "handled, failed twice in the replay, retried")
+        assertEquals(1, once.seen.count { it == "x-1" }, "the retry of a replayed record is a replay")
     }
 }

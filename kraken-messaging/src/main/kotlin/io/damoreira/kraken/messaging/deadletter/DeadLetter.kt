@@ -73,6 +73,8 @@ data class DeadLetter(
     val lastAttemptAt: Instant,
     /** When the TTL index deletes it (`parkedAt` + retention), which also unblocks its key. */
     val expireAt: Instant,
+    /** It was parked while its processor replayed the record (P6b): its retry is a replay too. `replay: true`, else absent. */
+    val replay: Boolean = false,
 ) {
     /** The record's value. */
     fun value(): ByteArray = payload?.toByteArray(Charsets.UTF_8) ?: payloadBinary ?: ByteArray(0)
@@ -82,7 +84,7 @@ data class DeadLetter(
         eventId == other.eventId && eventType == other.eventType && headers == other.headers && payload == other.payload &&
         (payloadBinary?.contentEquals(other.payloadBinary ?: return false) ?: (other.payloadBinary == null)) &&
         reason == other.reason && error == other.error && blockedBy == other.blockedBy && attempts == other.attempts &&
-        parkedAt == other.parkedAt && lastAttemptAt == other.lastAttemptAt && expireAt == other.expireAt
+        parkedAt == other.parkedAt && lastAttemptAt == other.lastAttemptAt && expireAt == other.expireAt && replay == other.replay
 
     override fun hashCode(): Int = id.hashCode()
 }

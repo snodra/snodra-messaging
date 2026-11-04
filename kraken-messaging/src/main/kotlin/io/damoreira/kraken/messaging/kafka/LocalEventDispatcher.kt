@@ -116,14 +116,15 @@ class LocalEventDispatcher(
     /**
      * Runs [processor]'s stage 1 for the event and then [inTransaction], all in the marker transaction: a dead letter's
      * retry deletes the letter there, so handling and deletion commit together or not at all. Throws what the handlers or
-     * [inTransaction] throw (everything rolled back).
+     * [inTransaction] throw (everything rolled back). [replay]: the record was parked while its processor replayed it, so its
+     * `@DisallowReplay` handlers are left out (P6b).
      */
     fun runStage1(
         processor: String, dedupeId: String, type: String, payload: ByteArray, ctx: MessageContext, position: RecordPosition? = null,
-        inTransaction: () -> Unit,
+        replay: Boolean = false, inTransaction: () -> Unit,
     ): Stage1 {
         if (!hasStage1(processor, type)) return Stage1.NO_HANDLER
-        return if (stage1(processor, dedupeId, type, payload, ctx, position, replay = false, inTransaction)) Stage1.HANDLED else Stage1.DUPLICATE
+        return if (stage1(processor, dedupeId, type, payload, ctx, position, replay, inTransaction)) Stage1.HANDLED else Stage1.DUPLICATE
     }
 
     private fun run(

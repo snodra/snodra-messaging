@@ -42,10 +42,10 @@ open class DeadLetterStore(
 
     private val collection: MongoCollection<Document> get() = mongo.db.getCollection(COLLECTION)
 
-    /** The letter of [record] in [processor], as a document ready to [park]. */
+    /** The letter of [record] in [processor], as a document ready to [park]; [replay]: parked while the processor replays it. */
     fun letter(
         processor: String, record: ConsumerRecord<out String?, out ByteArray?>, reason: DeadLetterReason, error: DeadLetterError,
-        attempts: Int, blockedBy: String? = null,
+        attempts: Int, blockedBy: String? = null, replay: Boolean = false,
     ): Document {
         val now = Date.from(clock.instant())
         val headers = Document()
@@ -72,12 +72,13 @@ open class DeadLetterStore(
         doc["parkedAt"] = now
         doc["lastAttemptAt"] = now
         doc["expireAt"] = Date.from(clock.instant().plus(retention))
+        if (replay) doc["replay"] = true
         return doc
     }
 
     /** The SEQUENCED letter of [record] waiting behind [headId]. */
-    fun sequenced(processor: String, record: ConsumerRecord<out String?, out ByteArray?>, headId: String): Document =
-        letter(processor, record, DeadLetterReason.SEQUENCED, DeadLetterError.sequenced(headId), attempts = 0, blockedBy = headId)
+    fun sequenced(processor: String, record: ConsumerRecord<out String?, out ByteArray?>, headId: String, replay: Boolean = false): Document =
+        letter(processor, record, DeadLetterReason.SEQUENCED, DeadLetterError.sequenced(headId), attempts = 0, blockedBy = headId, replay = replay)
 
     /** Inserts [letter] (outside any transaction): true when parked now, false when it was parked already. Throws when MongoDB fails. */
     open fun park(letter: Document): Boolean = try {
@@ -181,6 +182,7 @@ open class DeadLetterStore(
             parkedAt = d.getDate("parkedAt").toInstant(),
             lastAttemptAt = (d.getDate("lastAttemptAt") ?: d.getDate("parkedAt")).toInstant(),
             expireAt = d.getDate("expireAt").toInstant(),
+            replay = d.getBoolean("replay") ?: false,
         )
     }
 

@@ -33,7 +33,8 @@ import kotlin.test.assertTrue
  * The storage contract of `dead_letters` (ADR 0022): the documents this library writes are exactly the hand-written
  * fixtures in `src/test/resources/dead_letters_contract` (written from the ADR's table, and byte for byte the Rust library's
  * `tests/fixtures/dead_letters_contract`), types included (Int32 `partition`, Int64 `offset`, BinData, dates), with no
- * `_class`, no null, and a blank `id` or `type` header absent as `eventId` or `eventType`; every fixture document, as the
+ * `_class`, no null, a blank `id` or `type` header absent as `eventId` or `eventType`, and `replay` (P6b: parked while the
+ * processor replayed the record) written only when true; every fixture document, as the
  * other library writes it, reads back through this library's store and admin API; the indexes have the ADR's names.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
@@ -104,6 +105,15 @@ class DeadLetterContractTest {
         assertEquals(fixture("invalid_blank_headers"), stored("default:kraken.events:0:8"))
     }
 
+    @Test fun `a letter parked during a replay is the fixture, replay written only then`() {
+        val r = record(1, 44, "order-8", """{"orderId":"o-8"}""".toByteArray(),
+            "type" to "examples.OrderPlaced".toByteArray(), "id" to "evt-9".toByteArray())
+        val at = storeAt("2026-11-04T10:04:00Z")
+        assertTrue(at.park(at.letter("orders", r, DeadLetterReason.HANDLER_FAILED, DeadLetterError("IllegalStateException", "boom"), attempts = 5, replay = true)))
+        assertEquals(fixture("replayed"), stored("orders:kraken.events:1:44"))
+        assertFalse("replay" in fixture("handler_failed"), "absent when false")
+    }
+
     @Test fun `parking is idempotent - the same record parks once`() {
         val r = record(2, 41, "order-7", "{}".toByteArray(), "type" to "t".toByteArray())
         assertTrue(store.park(store.letter("orders", r, DeadLetterReason.HANDLER_FAILED, DeadLetterError("X", "first"), attempts = 1)))
@@ -145,6 +155,8 @@ class DeadLetterContractTest {
         assertNull(blank.eventId)
         assertNull(blank.eventType)
         assertEquals(mapOf("type" to "  ", "id" to ""), blank.headers)
+        assertFalse(failed.replay)
+        assertTrue(store.get("orders:kraken.events:1:44")!!.replay)
         assertNull(store.get("missing"))
         assertEquals("orders:kraken.events:1:42", store.head("orders", "order-7"))
 
@@ -153,11 +165,14 @@ class DeadLetterContractTest {
         val admin = DeadLetters(DeadLetterMode.COLLECTION, store, dispatcher)
         val listed = admin.list(null, 100)
         assertEquals(
-            listOf("orders:kraken.events:1:42", "orders:kraken.events:1:43", "default:kraken.events:0:7", "orders:kraken.events:2:9", "default:kraken.events:0:8"),
+            listOf(
+                "orders:kraken.events:1:42", "orders:kraken.events:1:43", "default:kraken.events:0:7", "orders:kraken.events:2:9",
+                "default:kraken.events:0:8", "orders:kraken.events:1:44",
+            ),
             listed.map { it.id }, "by parkedAt",
         )
         assertEquals(listed, FIXTURES.map { name -> admin.get(fixture(name).getString("_id").value)!! })
-        assertEquals(5L, admin.count(null))
+        assertEquals(6L, admin.count(null))
     }
 
     @Test fun `the indexes have the ADR's names, keys and TTL`() {
@@ -180,4 +195,4 @@ class DeadLetterContractTest {
 }
 
 /** Every shared fixture, in `parkedAt` order. */
-private val FIXTURES = listOf("handler_failed", "sequenced", "invalid_binary", "invalid_empty", "invalid_blank_headers")
+private val FIXTURES = listOf("handler_failed", "sequenced", "invalid_binary", "invalid_empty", "invalid_blank_headers", "replayed")
