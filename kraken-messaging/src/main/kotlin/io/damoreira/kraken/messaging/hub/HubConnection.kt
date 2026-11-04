@@ -1096,9 +1096,14 @@ class HubConnection(
             .addAllConnectedHubIds(connectedHubIds)
             .setHandlersInFlight(handlersInFlight.coerceAtLeast(0))
             .apply { if (HubProtocol.PROCESSORS in ack.capabilitiesList) addAllProcessors(processors) }
-        return stream.out.trySend(ClientMessage.newBuilder().setStatus(status).build()).isSuccess
-            .also { if (it) statusReports.incrementAndGet() }
+        val message = status.build()
+        return stream.out.trySend(ClientMessage.newBuilder().setStatus(message).build()).isSuccess
+            .also { if (it) { statusReports.incrementAndGet(); lastStatus = message } }
     }
+
+    /** The last `InstanceStatus` written to this hub (tests: what an older hub was sent). */
+    @Volatile internal var lastStatus: InstanceStatus? = null
+        private set
 
     /**
      * Tops the live stream up to [share] permits offered in total (`initial_permits` plus earlier top-ups; multi-hub: a
