@@ -97,7 +97,7 @@ class ProcessorControl(
     private fun ended(slot: Slot, op: String, lease: Duration) {
         val now = System.nanoTime()
         slot.finished.values.removeIf { it - now <= 0 }
-        slot.finished[op] = now + maxOf(FINISHED_KEPT, lease.multipliedBy(2)).toNanos()
+        slot.finished[op] = now + minOf(maxOf(FINISHED_KEPT, lease.multipliedBy(2)), FINISHED_KEPT_MAX).toNanos()
     }
 
     private fun hasEnded(slot: Slot, op: String): Boolean = slot.finished[op]?.let { it - System.nanoTime() > 0 } ?: false
@@ -658,5 +658,8 @@ class ProcessorControl(
 
         /** For how long at least an operation that ended here is remembered (twice its lease when that is longer). */
         val FINISHED_KEPT: Duration = Duration.ofSeconds(60)
+
+        /** ... and at most this long (a lease of years would overflow the clock). */
+        private val FINISHED_KEPT_MAX: Duration = Duration.ofDays(1)
     }
 }
