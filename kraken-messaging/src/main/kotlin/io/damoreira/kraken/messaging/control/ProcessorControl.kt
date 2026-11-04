@@ -32,6 +32,7 @@ import org.slf4j.LoggerFactory
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -57,6 +58,10 @@ import java.util.concurrent.TimeUnit
  *    `@ResetHandler`s run (any range only), 5. the markers in the ranges are deleted (legacy ones too for `earliest`), the
  *    ranges written, then the offsets committed (`alterConsumerGroupOffsets`). While it runs the executor extends its own
  *    lease. Every action is logged at INFO with the control id, processor, action and result.
+ *
+ * An operation that ended here (finished, aborted, its lease passed or its lock lost) is remembered for
+ * max(2 x lease, [FINISHED_KEPT]): a prepare of it is a renewal that came too late and is refused NOT_PREPARED without
+ * taking the lock, and a renewal whose lock is gone is refused NOT_PREPARED "lock lost", never turned into a prepare.
  */
 class ProcessorControl(
     private val store: ProcessorControlStore,
@@ -82,7 +87,18 @@ class ProcessorControl(
         val queue: ExecutorService = Executors.newSingleThreadExecutor { r -> Thread(r, "kraken-control-${consumer.processor}").apply { isDaemon = true } }
         @Volatile var held: Held? = null
         @Volatile var executing = false
+        /** The operations that ended here, with the [System.nanoTime] until which they are remembered. */
+        val finished = ConcurrentHashMap<String, Long>()
     }
+
+    /** Remembers that [op] ended on [slot] (see the class docs). */
+    private fun ended(slot: Slot, op: String, lease: Duration) {
+        val now = System.nanoTime()
+        slot.finished.values.removeIf { it - now <= 0 }
+        slot.finished[op] = now + maxOf(FINISHED_KEPT, lease.multipliedBy(2)).toNanos()
+    }
+
+    private fun hasEnded(slot: Slot, op: String): Boolean = slot.finished[op]?.let { it - System.nanoTime() > 0 } ?: false
 
     @Volatile private var slots: Map<String, Slot> = emptyMap()
     private var poller: ScheduledExecutorService? = null
@@ -157,10 +173,7 @@ class ProcessorControl(
         val prepare = request.resetPrepare
         if (request.hasResetPrepare() && prepare.leaseMs > 0 && slot.held?.id == prepare.operationId) {
             // A renewal of the operation held here: answered at once, never behind an execute of it (ADR 0023).
-            Thread.ofVirtual().name("kraken-control-renew").start {
-                val renewed = runCatching { store.renew(request.processor, prepare.operationId, Duration.ofMillis(prepare.leaseMs)) }.getOrDefault(false)
-                if (renewed) answer(ok(request, "lease renewed")) else queued() // lost meanwhile: a prepare like any other
-            }
+            Thread.ofVirtual().name("kraken-control-renew").start { answer(guarded(request) { renew(slot, request) }) }
         } else {
             queued()
         }
@@ -191,10 +204,23 @@ class ProcessorControl(
 
     // --- reset ---
 
+    /** The renewal of the operation held on [slot]. One whose lock is gone is refused, never turned into a prepare. */
+    private fun renew(slot: Slot, request: ControlRequest): ControlReply {
+        val op = request.resetPrepare.operationId
+        val lease = Duration.ofMillis(request.resetPrepare.leaseMs)
+        val processor = slot.consumer.processor
+        if (store.renew(processor, op, lease)) return ok(request, "lease renewed")
+        // Its lease passed and was cleared, or it finished meanwhile: a late renewal must not take the free lock (ADR 0023).
+        synchronized(slot) { if (slot.held?.id == op) slot.held = null }
+        ended(slot, op, lease)
+        return refused(request, ControlRefusal.CONTROL_REFUSAL_NOT_PREPARED, "lock lost: operation $op no longer holds the lock of processor $processor")
+    }
+
     private fun prepare(slot: Slot, request: ControlRequest): ControlReply {
         val op = request.resetPrepare.operationId
         val leaseMs = request.resetPrepare.leaseMs
         if (op.isBlank() || leaseMs <= 0) return refused(request, ControlRefusal.CONTROL_REFUSAL_INVALID, "a prepare needs an operation id and a positive lease")
+        if (hasEnded(slot, op)) return refused(request, ControlRefusal.CONTROL_REFUSAL_NOT_PREPARED, "operation $op already finished on this instance")
         val lease = Duration.ofMillis(leaseMs)
         val processor = slot.consumer.processor
         return when (val lock = store.lock(processor, op, lease)) {
@@ -357,6 +383,7 @@ class ProcessorControl(
     private fun finish(slot: Slot, request: ControlRequest): ControlReply {
         val op = request.resetFinish.operationId
         val processor = slot.consumer.processor
+        ended(slot, op, slot.held?.takeIf { it.id == op }?.lease ?: Duration.ZERO)
         if (slot.held?.id == op) {
             store.release(processor, op)
             synchronized(slot) { slot.held = null }
@@ -414,10 +441,12 @@ class ProcessorControl(
         if (held != null) {
             if (operation == null || operation.id != held.id) {
                 slot.held = null // released (another instance's finish) or taken over after it expired
+                ended(slot, held.id, held.lease)
             } else if (operation.expired(now) && !slot.executing) {
                 if (!store.release(processor, held.id, expiredOnly = true)) return@synchronized // renewed meanwhile: next poll
                 log.warn("The lease of reset operation {} on processor {} passed without a renewal: released it, consuming again", held.id, processor)
                 slot.held = null
+                ended(slot, held.id, held.lease)
                 operation = null
             }
         }
@@ -572,5 +601,8 @@ class ProcessorControl(
 
         /** Refusal messages and retry details are cut to this many UTF-8 bytes. */
         const val MAX_TEXT_BYTES = 512
+
+        /** For how long at least an operation that ended here is remembered (twice its lease when that is longer). */
+        val FINISHED_KEPT: Duration = Duration.ofSeconds(60)
     }
 }

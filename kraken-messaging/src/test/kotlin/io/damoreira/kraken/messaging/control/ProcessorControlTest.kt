@@ -579,4 +579,31 @@ class ProcessorControlTest {
         assertEquals(4, flaky.seen.count { it == "x-1" }, "handled, failed twice in the replay, retried")
         assertEquals(1, once.seen.count { it == "x-1" }, "the retry of a replayed record is a replay")
     }
+
+    @Test fun `a late renewal never takes the lock again`() {
+        topic = support.newTopic("kraken.events.ctl", partitions = 1)
+        val a = instance(projection)
+        awaitRunning(a)
+        assertTrue(a.ask(prepare("op-1")).hasOk())
+        assertTrue(a.ask(finish("op-1")).hasOk())
+        val late = a.ask(prepare("op-1"))
+        assertEquals(ControlRefusal.CONTROL_REFUSAL_NOT_PREPARED, late.refusal(), late.toString())
+        assertTrue("op-1 already finished" in late.refused.message, late.refused.message)
+        assertNull(control()!!.operation)
+        awaitRunning(a)
+
+        // The lock is cleared under the held operation (another instance cleared its passed lease).
+        assertTrue(a.ask(prepare("op-2")).hasOk())
+        ProcessorControlStore(mongo).release("default", "op-2")
+        val lost = a.ask(prepare("op-2"))
+        assertEquals(ControlRefusal.CONTROL_REFUSAL_NOT_PREPARED, lost.refusal(), lost.toString())
+        assertTrue("lock lost" in lost.refused.message, lost.refused.message)
+        assertNull(control()!!.operation)
+        assertEquals(ControlRefusal.CONTROL_REFUSAL_NOT_PREPARED, a.ask(prepare("op-2")).refusal(), "and so is every later one")
+        awaitRunning(a)
+
+        assertTrue(a.ask(prepare("op-3")).hasOk(), "a first prepare still locks")
+        assertEquals("op-3", control()!!.operation!!.id)
+        assertTrue(a.ask(finish("op-3")).hasOk())
+    }
 }
