@@ -141,7 +141,8 @@ class EventConsumer(
             setAckMode(ContainerProperties.AckMode.MANUAL_IMMEDIATE)
             setMessageListener(AcknowledgingMessageListener<String, ByteArray> { record, ack -> handle(record, ack!!) })
             setConsumerRebalanceListener(Rebalance())
-            // A pause (P6b) takes effect after the record in hand: the rest of the poll's records are sought back, not handled.
+            // A pause (P6b) takes effect after the record in hand: the container keeps the rest of the poll's records in memory
+            // and hands them to the listener on resume.
             setPauseImmediate(true)
         }
         // Only what the listener throws reaches it: a sink that could not take the record, or a stop in the middle of the

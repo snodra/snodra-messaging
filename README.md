@@ -1246,6 +1246,7 @@ The document (the same from the Rust library; no `_class`, an absent field is ab
 | `blockedBy` | string | `SEQUENCED` only: the head letter when it was parked |
 | `attempts` | Int32 | handler attempts so far |
 | `parkedAt`, `lastAttemptAt`, `expireAt` | Date | `expireAt = parkedAt + retention` (TTL index) |
+| `replay` | bool | `true` when parked while its processor replayed the record (P6b): its retry is a replay too; absent otherwise |
 
 Indexes: `dead_letters_processor_key_offset`, `dead_letters_processor_parked`, `dead_letters_expire` (TTL), created at startup.
 
@@ -1268,16 +1269,23 @@ path. The bean `ProcessorControl` does all of it; its `pause(processor)` and `re
   renews it every 10 s, and leaves the group: `STOPPED` with the operation id), one executes, every one is finished (it releases
   the lock and consumes again, still paused if it was). An instance whose lease passes without a renewal (the hub died) releases it
   and resumes by itself; an instance that starts while the lock is held stays out of the group until it clears. A second reset
-  while one holds the lock is refused (`LOCKED`).
+  while one holds the lock is refused (`LOCKED`). A renewal that arrives after the finish never takes the lock again: an
+  operation that ended on an instance (finished, aborted, its lease passed, its lock lost) is remembered for at least
+  max(2 x lease, 60 s), and a prepare of it, or a renewal whose lock is gone, is refused `NOT_PREPARED`.
 - **The execute** resolves the target per partition (Kafka `Admin.listOffsets`; a timestamp past the last record means the end),
   reads the group's committed offsets ("before"), refuses while the group has any active member (`GROUP_NOT_EMPTY`, nothing
   changed), runs the processor's `@ResetHandler`s, deletes the processor's markers in the replay ranges, writes the ranges to the
-  document and only then commits the target offsets (`Admin.alterConsumerGroupOffsets`).
+  document and only then commits the target offsets (`Admin.alterConsumerGroupOffsets`). Right after the reset handlers and
+  again before the commit, the executor must still extend its lease (and be within 120 s): otherwise it stops with `FAILED`
+  "lease lost: ...", before touching markers or offsets. **A refusal after the reset handlers ran is not "nothing changed"**:
+  their effects stay, and the message says what else happened, e.g. `reset handlers ran (2), 37 markers deleted, offsets not
+  moved: retry the reset`. Retry the reset (the handlers run again), or check the projection.
 - **A reset to anything but `latest` is a replay**: per partition, the records from the target up to where the group was
   (`[target, before)`) are handled again, by whichever instance owns the partition, exactly once overall (their markers were
   deleted). In the range **the sagas never run** (stage 2 is skipped) and **handlers marked `@DisallowReplay` do not run**; past
   the range everything is as usual. Once an instance has consumed past the end of a range it removes the range; the status shows
-  `replaying` until then. A reset does not touch the processor's dead letters.
+  `replaying` until then. A reset does not touch the processor's dead letters. A record parked while it was replayed keeps that
+  in its letter (`replay: true`), so its retry runs stage 1 as a replay too: without its `@DisallowReplay` handlers.
 
 ```kotlin
 @Component
@@ -1286,7 +1294,8 @@ class OrdersProjection(private val orders: OrderRepository) {
     @EventHandler fun on(event: OrderPlaced) = orders.insert(event.toRow())
 
     // Once per reset that replays something, on the instance that executes it, before any marker or offset changes.
-    // Throwing fails the reset (RESET_HANDLER_FAILED) and changes nothing. No parameter, or a ResetContext.
+    // Throwing (an Error too) fails the reset (RESET_HANDLER_FAILED) before any marker or offset changes; what the handlers
+    // that ran did stays, and the refusal says how many ran. No parameter, or a ResetContext.
     @ResetHandler fun clear(ctx: ResetContext) {
         if (ctx.target == ResetTarget.Earliest) orders.deleteAll() // the whole topic replays: rebuild from scratch
     }
