@@ -55,7 +55,7 @@ fail() { echo "SMOKE FAILED: $*" >&2; exit 1; }
 INFRA=${INFRA_DIR:-$(cd "$(dirname "$0")/../../kraken/infra" 2>/dev/null && pwd || true)}
 COMPOSE_FILES=(-f compose.yaml -f compose.local.yaml)
 
-# SECURE=1: the hubs speak TLS with the dev CA and want the dashboard token on /topology and /api/v1/*, and the
+# SECURE=1: the hubs speak TLS with the dev CA and want the dashboard token on /api/v1/*, and the
 # sandbox is the compose.secure.yaml overlay. Every step below keeps calling plain `curl "$HUB/..."`: this wrapper adds the
 # CA and the token (through a curl config on a pipe, so the token never shows in a process list) to calls aimed at a hub
 # and leaves every other call (service-a, service-b) alone.
@@ -105,11 +105,11 @@ recreate_b_and_c() { # <permits pattern> [extra compose file ...]
   (cd "$INFRA" && docker compose "${files[@]}" --profile examples up -d --no-deps --no-build service-b service-c) \
     >/dev/null 2>&1 || fail "docker compose could not recreate service-b and service-c in $INFRA"
   for i in $(seq 1 120); do
-    topo=$(curl -fsS "$HUB/topology" 2>/dev/null || true)
+    topo=$(curl -fsS "$HUB/api/v1/topology" 2>/dev/null || true)
     b=$(instance_fields "$topo" service-b)
     c=$(instance_fields "$topo" service-c)
     if echo "$b" | grep -Eq "\"permitsAvailable\":$pattern," && echo "$c" | grep -Eq "\"permitsAvailable\":$pattern," \
-       && echo "$topo" | grep -q '"type":"examples.CountGreetings","kind":"QUERY","ownerService":"service-b","liveInstances":1'; then
+       && echo "$topo" | grep -q '"type":"examples.CountGreetings","kind":"QUERY","liveInstances":1,[^}]*"ownerServices":\["service-b"\]'; then
       return 0
     fi
     sleep 1
@@ -148,22 +148,22 @@ parallel_calls() { # <n> <method> <url> [body]: prints one HTTP code per line
 now_ms() { perl -MTime::HiRes=time -e 'printf "%d\n", time * 1000'; }
 
 # The fields of <service>'s first instance on the hub topology, on one line ("instanceId": ... up to "tags":).
-# Splitting at '{' keeps it to grep and tr: the type arrays before "flowControlled" rule out a single regex.
+# Splitting at '{' keeps it to grep and tr: the type arrays before "permitsAvailable" rule out a single regex.
 # Empty (never a failure, which pipefail and set -e would turn into a silent exit) while the service is not listed.
 instance_fields() { # <topology json> <service>
   printf '%s' "$1" | tr '{' '\n' | { grep -A1 "^\"serviceName\":\"$2\"" || true; } | tail -n 1
 }
 
-# After a burst the permits must come back (a lost permit would stall the instance): flow-controlled, permits
-# available (the sandbox's one), nothing queued.
+# After a burst the permits must come back (a lost permit would stall the instance): permits available (the
+# sandbox's one), nothing queued.
 expect_permit_back() { # <service>
   local i fields
   for i in $(seq 1 20); do
-    fields=$(instance_fields "$(curl -fsS "$HUB/topology" 2>/dev/null || true)" "$1")
-    if echo "$fields" | grep -q '"flowControlled":true,"permitsAvailable":[1-9][0-9]*,"queued":0'; then return 0; fi
+    fields=$(instance_fields "$(curl -fsS "$HUB/api/v1/topology" 2>/dev/null || true)" "$1")
+    if echo "$fields" | grep -q '"permitsAvailable":[1-9][0-9]*,"queued":0'; then return 0; fi
     sleep 0.1
   done
-  fail "$1 is not flow-controlled with its permit back on the hub: $fields"
+  fail "$1 does not have its permit back on the hub: $fields"
 }
 
 flow_steps() {
@@ -175,7 +175,7 @@ flow_steps() {
   parallel_calls 20 GET "$A/greetings/Ada/count" > "$out" &
   pid=$!
   while kill -0 "$pid" 2>/dev/null; do
-    queued=$(instance_fields "$(curl -fsS "$HUB/topology" 2>/dev/null || true)" service-b \
+    queued=$(instance_fields "$(curl -fsS "$HUB/api/v1/topology" 2>/dev/null || true)" service-b \
       | sed -n 's/.*"queued":\([0-9]*\).*/\1/p')
     if [ "${queued:-0}" -gt "$max_queued" ]; then max_queued=$queued; fi
     sleep 0.1
@@ -272,7 +272,7 @@ if command -v jq >/dev/null; then
   open_summary() {
     jq -r '"\(.instances | length) \([.instances[].open] | add // 0) \([.instances[] | "\(.service)=\(.open)"] | sort | join(","))"' 2>/dev/null || true
   }
-  # /topology -> "<totals.inFlight> <sum over every instance of inFlightAsHandler + inFlightAsSender>".
+  # /api/v1/topology -> "<totals.inFlight> <sum over every instance of inFlightAsHandler + inFlightAsSender>".
   in_flight() {
     jq -r '"\(.totals.inFlight // 0) \([.services[].instances[] | (.inFlightAsHandler // 0) + (.inFlightAsSender // 0)] | add // 0)"' 2>/dev/null || true
   }
@@ -396,11 +396,11 @@ fi
 # them at least once, and every instance reports both hub ids as connected; else prints why.
 both_hubs_problem() {
   local t1 t2 id1 id2 l1 l2 svc
-  t1=$(curl -fsS --max-time 3 "$HUB/topology" 2>/dev/null || true)
-  t2=$(curl -fsS --max-time 3 "$HUB2/topology" 2>/dev/null || true)
+  t1=$(curl -fsS --max-time 3 "$HUB/api/v1/topology" 2>/dev/null || true)
+  t2=$(curl -fsS --max-time 3 "$HUB2/api/v1/topology" 2>/dev/null || true)
   id1=$(printf '%s' "$t1" | hub_id_of); id2=$(printf '%s' "$t2" | hub_id_of)
-  [ -n "$id1" ] || { echo "$HUB/topology unreachable"; return; }
-  [ -n "$id2" ] || { echo "$HUB2/topology unreachable"; return; }
+  [ -n "$id1" ] || { echo "$HUB/api/v1/topology unreachable"; return; }
+  [ -n "$id2" ] || { echo "$HUB2/api/v1/topology unreachable"; return; }
   l1=$(printf '%s' "$t1" | example_instances | sort); l2=$(printf '%s' "$t2" | example_instances | sort)
   for svc in service-a service-b service-c; do
     echo "$l1" | grep -q "^$svc " || { echo "$svc missing on $id1"; return; }
@@ -440,7 +440,7 @@ ha_loop() { # <out> <stop file> <t0>
 
 # permitsAvailable of <service>'s (first) instance on <hub>, empty when it is not listed.
 permits_on() { # <hub url> <service>
-  instance_fields "$(curl -fsS "$1/topology" 2>/dev/null || true)" "$2" | sed -n 's/.*"permitsAvailable":\([0-9]*\).*/\1/p'
+  instance_fields "$(curl -fsS "$1/api/v1/topology" 2>/dev/null || true)" "$2" | sed -n 's/.*"permitsAvailable":\([0-9]*\).*/\1/p'
 }
 
 ha_steps() {
@@ -451,7 +451,7 @@ ha_steps() {
 
   echo "15. both hubs ($HUB, $HUB2) list every example instance, each reporting both hub ids ..."
   secs=$(await_both_hubs 15)
-  echo "   on both hubs after ${secs}s: $(curl -fsS "$HUB/topology" | example_instances | cut -d' ' -f1,3 | sort | uniq -c | tr -s ' ' | tr '\n' ';')"
+  echo "   on both hubs after ${secs}s: $(curl -fsS "$HUB/api/v1/topology" | example_instances | cut -d' ' -f1,3 | sort | uniq -c | tr -s ' ' | tr '\n' ';')"
 
   echo "16. $HUB2/api/v1/version lists both dashboards as peers ..."
   peers=$(curl -fsS "$HUB2/api/v1/version" | peers_of) || fail "GET $HUB2/api/v1/version failed"
@@ -592,7 +592,7 @@ stream_steps() {
   echo "   $count rows from $svc, then cancelled"
   for h in "${hubs[@]}"; do
     for i in $(seq 1 20); do
-      t=$(curl -fsS "$h/topology" 2>/dev/null | in_flight)
+      t=$(curl -fsS "$h/api/v1/topology" 2>/dev/null | in_flight)
       [ "$t" = "0 0" ] && break
       [ "$i" -eq 20 ] && fail "$h still has requests in flight 10 s after the cancelled stream (totals.inFlight, per-instance sum: '$t')"
       sleep 0.5
@@ -698,7 +698,7 @@ subscribe_steps() {
   # see a subscription left behind (the owners' counts above do); it catches a stuck initial request or a stuck permit.
   for h in "${hubs[@]}"; do
     for i in $(seq 1 20); do
-      t=$(curl -fsS "$h/topology" 2>/dev/null | in_flight)
+      t=$(curl -fsS "$h/api/v1/topology" 2>/dev/null | in_flight)
       [ "$t" = "0 0" ] && break
       [ "$i" -eq 20 ] && fail "$h still has requests in flight after the subscription was cancelled (totals.inFlight, per-instance sum: '$t')"
       sleep 0.5
@@ -999,7 +999,7 @@ audit_steps() {
     sum=$(await_processor "$label" audit "$label\.audit" RUNNING '[0-9]+' 150)
     echo "   $label audit: $sum"
     [ "$(printf '%s' "$sum" | cut -d' ' -f4)" -ge 1 ] || fail "$label's audit processor has no partition assigned: $sum"
-    sum=$(await_processor "$label" default "$label" 'RUNNING|STARTING|FAILING' '[0-9]+' 30)
+    sum=$(await_processor "$label" default "$label\.default" 'RUNNING|STARTING|FAILING' '[0-9]+' 30)
     echo "   $label default: $sum"
     audit_failing "$base" false
     curl -fsS -X POST "$base/audit/dead-letters/retry-all?processor=audit" >/dev/null || fail "retry-all of $label's leftover letters failed"
@@ -1019,7 +1019,7 @@ audit_steps() {
     sum=$(await_processor "$label" audit "$label\.audit" FAILING 2 90)
     echo "   $label audit: $sum"
     sum=$(curl -fsS "$HUB/api/v1/processors" | processor_summary "$label" default)
-    printf '%s' "$sum" | grep -Eq "^[A-Z]+ $label [0-9]+ " || fail "$label's default processor is not listed with group $label: '$sum'"
+    printf '%s' "$sum" | grep -Eq "^[A-Z]+ $label\.default [0-9]+ " || fail "$label's default processor is not listed with group $label.default: '$sum'"
   done
 
   echo "26e. the failure still on: retrying the head answers Failed (attempts grow), retrying the sequenced letter answers Blocked ..."
@@ -1292,7 +1292,7 @@ control_steps() {
 
 # P5a (ADR 0018), only with SECURE=1 against the secure sandbox (kraken/infra/compose.secure.yaml). Step 21: a service
 # with a token the ACL does not know, and one with a valid token that grants only another service name, are refused by
-# both hubs and logged by the client as a registration rejection (ERROR once per hub), and never listed on /topology; a
+# both hubs and logged by the client as a registration rejection (ERROR once per hub), and never listed on /api/v1/topology; a
 # request outside service-a's `send` patterns answers 403 AccessDeniedException. Step 21b: the dashboard API wants the
 # dashboard token. SKIP_SECURE=1 skips them, ONLY_SECURE=1 runs only them.
 INTRUDER=kraken-smoke-intruder
@@ -1339,7 +1339,7 @@ await_refusals() { # <pattern> <before hub> <before hub-2> <attempts>
 not_on_topology() { # <service name>
   local h
   for h in "$HUB" "$HUB2"; do
-    if curl -fsS "$h/topology" | grep -q "\"serviceName\":\"$1\""; then fail "$1 is listed on $h/topology although it was refused"; fi
+    if curl -fsS "$h/api/v1/topology" | grep -q "\"serviceName\":\"$1\""; then fail "$1 is listed on $h/api/v1/topology although it was refused"; fi
   done
 }
 
@@ -1350,7 +1350,7 @@ secure_steps() {
   docker inspect "$h2" >/dev/null 2>&1 || fail "container $h2 not found (set HUB2_CONTAINER, or SKIP_SECURE=1)"
   trap remove_intruder EXIT
 
-  echo "21. an unknown token is refused by both hubs: UNAUTHENTICATED, ERROR once per hub in the client's log, never on /topology ..."
+  echo "21. an unknown token is refused by both hubs: UNAUTHENTICATED, ERROR once per hub in the client's log, never on /api/v1/topology ..."
   wrong="smoke-wrong-token-$(date +%s)-$RANDOM"
   b1=$(refusals "$h1" smoke-intruder); b2=$(refusals "$h2" smoke-intruder)
   start_intruder smoke-intruder "$wrong"
@@ -1366,7 +1366,7 @@ secure_steps() {
   docker logs "$h2" 2>&1 | grep 'register refused' | grep smoke-intruder | tail -n 1 | sed 's/^/   hub-2:  /'
   echo "   both hubs refused it at least twice; the client logged the rejection $errors time(s) (ERROR once per hub, DEBUG after)"
   not_on_topology smoke-intruder
-  echo "   smoke-intruder is absent from $HUB/topology and $HUB2/topology"
+  echo "   smoke-intruder is absent from $HUB/api/v1/topology and $HUB2/api/v1/topology"
 
   echo "21. a valid token that grants another service name is refused: PERMISSION_DENIED when claiming service-a ..."
   b1=$(refusals "$h1" 'is not allowed to register as service service-a'); b2=$(refusals "$h2" 'is not allowed to register as service service-a')
@@ -1392,7 +1392,7 @@ secure_steps() {
 
   echo "21b. the dashboard API wants the dashboard token: 401 without it (or with a wrong one), 200 with it, on both hubs ..."
   for h in "$HUB" "$HUB2"; do
-    for path in /topology /api/v1/types; do
+    for path in /api/v1/topology /api/v1/types; do
       code=$(command curl -s -o /dev/null -w '%{http_code}' --cacert "$SECRETS/ca.pem" "$h$path" || true)
       [ "$code" = "401" ] || fail "GET $h$path without the token: expected 401, got $code"
       code=$(command curl -s -o /dev/null -w '%{http_code}' --cacert "$SECRETS/ca.pem" -H 'Authorization: Bearer wrong-dashboard-token' "$h$path" || true)
@@ -1403,7 +1403,7 @@ secure_steps() {
     done
   done
   # Plain text to the TLS port never gets an answer.
-  code=$(command curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://${HUB#https://}/topology" || true)
+  code=$(command curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://${HUB#https://}/api/v1/topology" || true)
   [ "$code" = "000" ] || fail "plain-text HTTP to the TLS port ${HUB#https://} answered $code, expected the connection to fail"
   echo "   plain-text HTTP to the TLS port gets no answer"
   trap - EXIT
@@ -1423,7 +1423,7 @@ secure_steps() {
 # instance_fields stops at "tags":{} (it splits at '{'), before authKind and expiresAt: cut at each instanceId instead and take
 # the chunk that follows the service's name.
 session_fields() { # <hub url> <service>
-  curl -fsS "$1/topology" 2>/dev/null | sed 's/"instanceId"/\n"instanceId"/g' \
+  curl -fsS "$1/api/v1/topology" 2>/dev/null | sed 's/"instanceId"/\n"instanceId"/g' \
     | awk -v s="\"serviceName\":\"$2\"" 'index($0, s) { f = 1; next } f && /^"instanceId"/ { print; exit }' || true
 }
 
@@ -1446,7 +1446,7 @@ await_auth_kind() { # <hub url> <service> <kind>
     if [ "$(echo "$sess" | cut -d' ' -f3)" = "$3" ]; then echo "$sess"; return 0; fi
     sleep 1
   done
-  fail "$2 does not show authKind $3 on $1/topology within 60s (last: '$sess')"
+  fail "$2 does not show authKind $3 on $1/api/v1/topology within 60s (last: '$sess')"
 }
 
 # How many lines of <container>'s log contain <pattern>; with <since> (an RFC 3339 time) only the lines logged from then on.
@@ -1550,7 +1550,7 @@ await_cert() { # <hub url> <service> <fingerprint> <seconds>
     fi
     sleep 1
   done
-  fail "$2 does not show authKind certificate with fingerprint $3 on $1/topology within $4 s (last: '$sess')"
+  fail "$2 does not show authKind certificate with fingerprint $3 on $1/api/v1/topology within $4 s (last: '$sess')"
 }
 
 mtls_steps() {
@@ -1629,8 +1629,8 @@ done
 
 echo "1b. waiting for service-b to own examples.CountGreetings on the hub ($HUB) ..."
 for i in $(seq 1 90); do
-  TOPO=$(curl -fsS "$HUB/topology" 2>/dev/null || true)
-  if echo "$TOPO" | grep -q '"type":"examples.CountGreetings","kind":"QUERY","ownerService":"service-b","liveInstances":[1-9]'; then break; fi
+  TOPO=$(curl -fsS "$HUB/api/v1/topology" 2>/dev/null || true)
+  if echo "$TOPO" | grep -q '"type":"examples.CountGreetings","kind":"QUERY","liveInstances":[1-9][0-9]*,[^}]*"ownerServices":\["service-b"\]'; then break; fi
   [ "$i" -eq 90 ] && fail "service-b did not register on the hub in 90s; topology: $TOPO"
   sleep 1
 done
@@ -1745,7 +1745,7 @@ echo "$COUNT" | grep -q "\"count\":$((BEFORE + 2))" || fail "expected \"count\":
 echo "   $COUNT"
 
 echo "5. hub topology ..."
-TOPOLOGY=$(curl -fsS "$HUB/topology") || fail "GET $HUB/topology failed"
+TOPOLOGY=$(curl -fsS "$HUB/api/v1/topology") || fail "GET $HUB/api/v1/topology failed"
 echo "$TOPOLOGY"
 echo "$TOPOLOGY" | grep -q '"service-a"' || fail "service-a missing from topology"
 echo "$TOPOLOGY" | grep -q '"service-b"' || fail "service-b missing from topology"
@@ -1758,9 +1758,9 @@ EDGE='"from":"service:service-a","to":"type:examples.CountGreetings","role":"sen
 
 echo "6. waiting for service-c to own examples.Shout and examples.Reverse on the hub ..."
 for i in $(seq 1 90); do
-  TOPO=$(curl -fsS "$HUB/topology" 2>/dev/null || true)
-  if echo "$TOPO" | grep -q '"type":"examples.Reverse","kind":"QUERY","ownerService":"service-c","liveInstances":[1-9]' \
-     && echo "$TOPO" | grep -q '"type":"examples.Shout","kind":"COMMAND","ownerService":"service-c","liveInstances":[1-9]'; then break; fi
+  TOPO=$(curl -fsS "$HUB/api/v1/topology" 2>/dev/null || true)
+  if echo "$TOPO" | grep -q '"type":"examples.Reverse","kind":"QUERY","liveInstances":[1-9][0-9]*,[^}]*"ownerServices":\["service-c"\]' \
+     && echo "$TOPO" | grep -q '"type":"examples.Shout","kind":"COMMAND","liveInstances":[1-9][0-9]*,[^}]*"ownerServices":\["service-c"\]'; then break; fi
   [ "$i" -eq 90 ] && fail "service-c did not register on the hub in 90s; topology: $TOPO"
   sleep 1
 done
