@@ -1,16 +1,21 @@
 package io.damoreira.kraken.messaging.kafka
 
+import io.damoreira.kraken.messaging.deadletter.DeadLetterStore
 import org.springframework.beans.factory.InitializingBean
 import org.springframework.data.domain.Sort
 import org.springframework.data.mongodb.core.MongoTemplate
 import org.springframework.data.mongodb.core.index.Index
 import java.time.Duration
 
-/** Ensures the outbox relay index and the TTL indexes of `outbox` and `processed_events` exist. Idempotent. */
+/**
+ * Ensures the outbox relay index, the TTL indexes of `outbox` and `processed_events`, and (mode `collection`) the indexes of
+ * `dead_letters` exist. Idempotent.
+ */
 class MessagingIndexes(
     private val mongo: MongoTemplate,
     private val outboxRetention: Duration,
     private val idempotencyRetention: Duration,
+    private val deadLetters: DeadLetterStore? = null,
 ) : InitializingBean {
     override fun afterPropertiesSet() {
         mongo.indexOps("outbox").createIndex(
@@ -24,5 +29,6 @@ class MessagingIndexes(
         mongo.indexOps("processed_events").createIndex(
             Index().on("processedAt", Sort.Direction.ASC).expire(idempotencyRetention).named("processedAt_ttl"),
         )
+        deadLetters?.ensureIndexes()
     }
 }

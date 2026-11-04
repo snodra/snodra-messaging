@@ -21,6 +21,7 @@ import io.damoreira.kraken.messaging.hub.HubSettings
 import io.damoreira.kraken.messaging.hub.HubTargets
 import io.damoreira.kraken.messaging.hub.InboundRequestDispatcher
 import io.damoreira.kraken.messaging.hub.SubscriptionRegistry
+import io.damoreira.kraken.messaging.kafka.ProcessorStatusSource
 import io.damoreira.kraken.messaging.security.ForwardedIdentityResolver
 import io.damoreira.kraken.messaging.tracing.TraceHeaders
 import kotlinx.coroutines.CoroutineName
@@ -110,6 +111,7 @@ class HubAutoConfiguration {
         subscriptions: SubscriptionRegistry,
         environment: Environment,
         certificate: ObjectProvider<HubClientCertificate>,
+        processorStatus: ObjectProvider<ProcessorStatusSource>,
     ): HubLifecycle {
         val hub = properties.hub
         // First: a client certificate next to a token or OAuth2 fails with that message, before any token file is read.
@@ -140,6 +142,8 @@ class HubAutoConfiguration {
             inboundStream = dispatcher::dispatchStream,
             subscriptions = subscriptions,
             inboundSubscription = dispatcher::dispatchSubscription,
+            // Looked up per report: the event processors (KafkaEventsAutoConfiguration) may not exist, or not yet.
+            processors = { processorStatus.getIfAvailable()?.processorStatuses().orEmpty() },
         )
         return HubLifecycle(connections, registry, scope, handlerDispatcher, subscriptions = subscriptions)
     }

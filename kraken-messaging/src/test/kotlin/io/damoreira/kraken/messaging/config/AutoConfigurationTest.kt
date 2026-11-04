@@ -329,11 +329,37 @@ class AutoConfigurationTest {
             assertEquals(1, context.getBeansOfType(MessagingIndexes::class.java).size)
             assertEquals(1, context.getBeansOfType(TransactionTemplate::class.java).size)
             assertTrue(context.getBeansOfType(OutboxPublisher::class.java).isEmpty()) // outbox.enabled=false
-            assertTrue(context.getBeansOfType(EventConsumer::class.java).isEmpty()) // kafka.consumer.enabled=false
+            assertTrue(context.getBeansOfType(io.damoreira.kraken.messaging.kafka.EventProcessors::class.java).isEmpty()) // kafka.consumer.enabled=false
+            // The admin API exists without the consumer (an admin-only instance), in mode collection by default.
+            assertNotNull(context.getBean(io.damoreira.kraken.messaging.deadletter.DeadLetters::class.java))
             // ordered before Boot's TransactionAutoConfiguration: @Transactional support sees the MongoTransactionManager
             assertIs<MongoTransactionManager>(context.getBean(PlatformTransactionManager::class.java))
             assertTrue(context.containsBean(TransactionManagementConfigUtils.TRANSACTION_ADVISOR_BEAN_NAME))
         }
+    }
+
+    @Test fun `event processors and dead letters are wired, and the hub reads their status (P6a)`() {
+        runner.withUserConfiguration(MongoMockConfig::class.java)
+            .withConfiguration(AutoConfigurations.of(TransactionAutoConfiguration::class.java))
+            .withPropertyValues("kraken.messaging.kafka.bootstrap-servers=localhost:9", "kraken.messaging.kafka.consumer.enabled=true")
+            .run { context ->
+                assertEquals(null, context.startupFailure)
+                val processors = context.getBean(io.damoreira.kraken.messaging.kafka.EventProcessors::class.java)
+                assertTrue(processors.isRunning)
+                assertEquals(emptyList(), processors.consumers(), "no @EventHandler and no saga: no processor starts")
+                assertEquals(emptyList(), context.getBean(io.damoreira.kraken.messaging.kafka.ProcessorStatusSource::class.java).processorStatuses())
+                assertEquals(1, context.getBeansOfType(io.damoreira.kraken.messaging.deadletter.DeadLetterStore::class.java).size)
+            }
+        runner.withUserConfiguration(MongoMockConfig::class.java)
+            .withConfiguration(AutoConfigurations.of(TransactionAutoConfiguration::class.java))
+            .withPropertyValues("kraken.messaging.kafka.bootstrap-servers=localhost:9", "kraken.messaging.kafka.dead-letter.mode=log")
+            .run { context ->
+                assertEquals(null, context.startupFailure)
+                assertTrue(context.getBeansOfType(io.damoreira.kraken.messaging.deadletter.DeadLetterStore::class.java).isEmpty())
+                val e = kotlin.runCatching { context.getBean(io.damoreira.kraken.messaging.deadletter.DeadLetters::class.java).count() }.exceptionOrNull()
+                assertIs<IllegalStateException>(e)
+                assertTrue(e.message!!.contains("mode log"), e.message)
+            }
     }
 
     @Test fun `starts without JwtDecoder`() {

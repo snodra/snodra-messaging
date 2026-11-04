@@ -4,6 +4,7 @@ import io.damoreira.kraken.messaging.MessageContext
 import io.damoreira.kraken.messaging.api.Event
 import io.damoreira.kraken.messaging.codec.JsonCodec
 import io.damoreira.kraken.messaging.codec.MessageTypeResolver
+import io.damoreira.kraken.messaging.handler.Processors
 import io.damoreira.kraken.messaging.kafka.EventHeaders
 import io.damoreira.kraken.messaging.kafka.LocalEventDispatcher
 import io.damoreira.kraken.messaging.kafka.ProcessedEventDocument
@@ -49,6 +50,9 @@ class ExternalEventIngress(
     @JvmOverloads
     fun accept(source: String, dedupeKey: String, event: Event, headers: Map<String, String> = emptyMap()): Result {
         require(source.isNotBlank()) { "source must not be blank" }
+        require(source !in Processors.RESERVED_SOURCE_NAMES) {
+            "source '$source' is reserved (its markers would collide with the library's marker families ${Processors.RESERVED_SOURCE_NAMES.sorted()}): choose another name"
+        }
         require(dedupeKey.isNotBlank()) { "dedupeKey must not be blank" }
         val dedupeId = "$source:$dedupeKey"
         val marker = "$MARKER_PREFIX$dedupeId"

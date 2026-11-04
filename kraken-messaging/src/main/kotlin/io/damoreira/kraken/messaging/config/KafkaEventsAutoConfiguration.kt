@@ -5,7 +5,13 @@ import io.damoreira.kraken.messaging.codec.JsonCodec
 import io.damoreira.kraken.messaging.codec.MessageTypeResolver
 import io.damoreira.kraken.messaging.handler.HandlerInvoker
 import io.damoreira.kraken.messaging.handler.HandlerRegistry
+import io.damoreira.kraken.messaging.deadletter.DeadLetterMode
+import io.damoreira.kraken.messaging.deadletter.DeadLetterStore
+import io.damoreira.kraken.messaging.deadletter.DeadLetters
+import io.damoreira.kraken.messaging.handler.Processors
+import io.damoreira.kraken.messaging.kafka.DeadLetterSink
 import io.damoreira.kraken.messaging.kafka.EventConsumer
+import io.damoreira.kraken.messaging.kafka.EventProcessors
 import io.damoreira.kraken.messaging.kafka.LocalEventDispatcher
 import io.damoreira.kraken.messaging.kafka.MessagingIndexes
 import io.damoreira.kraken.messaging.kafka.OutboxEventBus
@@ -38,7 +44,8 @@ import org.springframework.transaction.support.TransactionTemplate
 
 /**
  * Events over Kafka with the transactional outbox: [OutboxEventBus] as the [EventBus], [OutboxPublisher] relaying the
- * `outbox` collection to the topic, [EventConsumer] running `@EventHandler`s, and the TTL/relay indexes.
+ * `outbox` collection to the topic, [EventProcessors] running the `@EventHandler`s (one [EventConsumer] per processor, ADR
+ * 0022), the dead letters ([DeadLetterStore], [DeadLetters]), and the TTL/relay indexes.
  *
  * Needs the application's [MongoTemplate] (Boot's Mongo auto-configuration provides it when
  * `spring.mongodb.uri` is set; Spring Boot 4 no longer binds `spring.data.mongodb.uri`), hence ordered after it.
@@ -138,11 +145,30 @@ class KafkaEventsAutoConfiguration {
         sagaStage: ObjectProvider<SagaStage>,
     ) = LocalEventDispatcher(registry, invoker, tx, mongo, sagaStage.getIfAvailable { SagaStage.NONE })
 
+    /** The `dead_letters` collection (mode `collection`, the default). */
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "kraken.messaging.kafka.dead-letter", name = ["mode"], havingValue = "collection", matchIfMissing = true)
+    fun deadLetterStore(mongo: MongoTemplate, properties: KrakenMessagingProperties) =
+        DeadLetterStore(mongo, properties.kafka.deadLetter.retention)
+
+    /** The dead letters' admin API; in modes `topic` and `log` every call fails naming the mode. */
+    @Bean
+    @ConditionalOnMissingBean
+    fun deadLetters(properties: KrakenMessagingProperties, store: ObjectProvider<DeadLetterStore>, dispatcher: LocalEventDispatcher) =
+        DeadLetters(properties.kafka.deadLetter.mode, store.getIfAvailable(), dispatcher)
+
+    /**
+     * The event processors (ADR 0022): one consumer per processor that runs here, `default` in `kafka.group-id` (else the
+     * service name), a named one in `<that group>.<name>`. The `Admin` client of their status shares the consumer factory's
+     * connection settings.
+     */
     @Bean
     @ConditionalOnMissingBean
     @ConditionalOnProperty(prefix = "kraken.messaging.kafka.consumer", name = ["enabled"], havingValue = "true", matchIfMissing = true)
-    fun eventConsumer(
+    fun eventProcessors(
         @Qualifier(CONSUMER_FACTORY) consumerFactory: ConsumerFactory<String, ByteArray>,
+        @Qualifier(KAFKA_TEMPLATE) kafka: KafkaTemplate<String, ByteArray>,
         registry: HandlerRegistry,
         invoker: HandlerInvoker,
         tx: TransactionTemplate,
@@ -150,23 +176,40 @@ class KafkaEventsAutoConfiguration {
         codec: JsonCodec,
         dispatcher: LocalEventDispatcher,
         properties: KrakenMessagingProperties,
-    ) = EventConsumer(
-        consumerFactory,
-        topic = properties.kafka.topic,
-        groupId = properties.serviceName,
-        registry = registry,
-        invoker = invoker,
-        tx = tx,
-        mongo = mongo,
-        maxAttempts = properties.kafka.consumer.maxAttempts,
-        codec = codec,
-        dispatcher = dispatcher,
-    )
+        store: ObjectProvider<DeadLetterStore>,
+    ): EventProcessors {
+        val sink = when (properties.kafka.deadLetter.mode) {
+            DeadLetterMode.COLLECTION -> DeadLetterSink.Collection(store.getObject())
+            DeadLetterMode.TOPIC -> DeadLetterSink.Topic(kafka)
+            DeadLetterMode.LOG -> DeadLetterSink.Log
+        }
+        val defaultGroup = properties.kafka.defaultGroupId(properties.serviceName)
+        return EventProcessors(
+            dispatcher,
+            consumerFor = { processor ->
+                EventConsumer(
+                    consumerFactory,
+                    topic = properties.kafka.topic,
+                    groupId = Processors.groupId(defaultGroup, processor),
+                    registry = registry,
+                    invoker = invoker,
+                    tx = tx,
+                    mongo = mongo,
+                    maxAttempts = properties.kafka.consumer.maxAttempts,
+                    codec = codec,
+                    dispatcher = dispatcher,
+                    processor = processor,
+                    deadLetters = sink,
+                )
+            },
+            adminConfig = consumerFactory.configurationProperties,
+        )
+    }
 
     @Bean
     @ConditionalOnMissingBean
-    fun messagingIndexes(mongo: MongoTemplate, properties: KrakenMessagingProperties) =
-        MessagingIndexes(mongo, properties.outbox.retention, properties.idempotency.retention)
+    fun messagingIndexes(mongo: MongoTemplate, properties: KrakenMessagingProperties, deadLetterStore: ObjectProvider<DeadLetterStore>) =
+        MessagingIndexes(mongo, properties.outbox.retention, properties.idempotency.retention, deadLetterStore.getIfAvailable())
 
     companion object {
         const val PRODUCER_FACTORY = "krakenKafkaProducerFactory"

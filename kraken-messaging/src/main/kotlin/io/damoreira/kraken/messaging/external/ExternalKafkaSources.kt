@@ -5,6 +5,7 @@ import io.damoreira.kraken.messaging.MessageContext
 import io.damoreira.kraken.messaging.codec.JsonCodec
 import io.damoreira.kraken.messaging.codec.MessageTypeResolver
 import io.damoreira.kraken.messaging.config.KrakenMessagingProperties
+import io.damoreira.kraken.messaging.handler.Processors
 import io.damoreira.kraken.messaging.kafka.EventConsumer
 import io.damoreira.kraken.messaging.kafka.EventHeaders
 import io.damoreira.kraken.messaging.kafka.LocalEventDispatcher
@@ -41,7 +42,11 @@ import org.springframework.util.backoff.FixedBackOff
  * consumer group is `groupId`, default `<serviceName>.external.<name>`; its consumer properties are the source's
  * `properties` on top of `auto.offset.reset=earliest`, with servers, group, deserializers and auto-commit fixed by the library.
  *
- * Starts and stops with the [EventConsumer] (same lifecycle phase).
+ * The source names `processor`, `saga`, `ingress` and `failed` are refused (construction fails naming the key): their dedupe ids
+ * would collide with the library's marker families (ADR 0021, ADR 0022). The local dispatch reaches the handlers of every event
+ * processor, each under its own marker (`processor:<name>:<dedupeId>` for a named one); these records are never dead-lettered.
+ *
+ * Starts and stops with the event processors (same lifecycle phase).
  */
 class ExternalKafkaSources(
     private val sources: Map<String, KrakenMessagingProperties.Source>,
@@ -61,6 +66,11 @@ class ExternalKafkaSources(
     init {
         require(maxAttempts >= 1) { "maxAttempts must be >= 1" }
         for (name in sources.keys) {
+            // The dedupe id `<name>:...` keys markers in processed_events, next to the families saga:, ingress:, failed: and processor:.
+            check(name !in Processors.RESERVED_SOURCE_NAMES) {
+                "kraken.messaging.external.kafka.sources.$name: the source name '$name' is reserved (its markers would collide with " +
+                    "the library's own marker families ${Processors.RESERVED_SOURCE_NAMES.sorted()}): choose another name"
+            }
             check(translators[name] != null) {
                 "kraken.messaging.external.kafka.sources.$name has no ExternalRecordTranslator bean named '$name': define one " +
                     "(for example @Component(\"$name\") or a @Bean method called $name) that turns the partner's records into events"
