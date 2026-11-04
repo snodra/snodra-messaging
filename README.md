@@ -1120,6 +1120,17 @@ class Notifier {                         // no annotation: processor "default"
   `processor`, `saga`, `ingress` and `failed` are refused (a partner source at startup, a webhook at the call): their markers
   would collide with the library's own.
 
+**Moving an existing handler into a named processor runs it again over the whole topic.** The named processor's group is new,
+so it starts at the earliest offset the topic still holds, and its markers (`processor:<name>:<eventId>`) are a new family,
+so none of those records is a duplicate to it: the handler runs once more for every event in the topic's retention. A
+projection that rebuilds idempotently may want exactly that; a handler with effects outside MongoDB (an email, a payment
+call) repeats every one of them. For such code either leave the handler where it is and put only new handlers in the named
+processor, or commit the new group's offsets at the end of the topic before you deploy it:
+`kafka-consumer-groups --bootstrap-server <broker> --group <group>.<name> --topic <events topic> --reset-offsets --to-latest --execute`
+(`<group>` is `kraken.messaging.kafka.group-id` or the service name; the group must have no running member). Records produced
+between that reset and the moment the old instances stop are handled twice, once by the old `default` and once by the new
+processor, so reset right before the rollout. A start position per processor is a candidate for P6b.
+
 **Status at the hub.** Every status report (`hub.status-interval`, 5 s) carries one `ProcessorStatus` per started processor to
 every hub whose `RegisterAck` lists the capability `processors` (the P6a hub; an older hub is never sent the field): name, group,
 topic, state, the partitions assigned to this instance with position, committed offset, high watermark and lag, records processed
