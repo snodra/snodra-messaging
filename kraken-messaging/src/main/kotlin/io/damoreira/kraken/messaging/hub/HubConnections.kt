@@ -134,6 +134,8 @@ class HubConnections(
      * `processors`. Must return at once from in-memory state; one that throws sends the report without processors.
      */
     private val processors: () -> List<ProcessorStatus> = { emptyList() },
+    /** Serves the `ControlRequest`s of every hub (P6b, ADR 0023); see [HubConnection]. */
+    private val control: ControlInbound = NO_PROCESSOR_CONTROL,
 ) : HubTransport {
     private val log = LoggerFactory.getLogger(HubConnections::class.java)
 
@@ -448,6 +450,7 @@ class HubConnections(
                     subscriptions = subscriptions,
                     inboundSubscription = inboundSubscription,
                     onCredentialsRefreshSent = { refreshesSent.incrementAndGet() },
+                    control = control,
                 )
                 self = connection
                 types?.let { connection.register(it.commands, it.queries, it.shared) }

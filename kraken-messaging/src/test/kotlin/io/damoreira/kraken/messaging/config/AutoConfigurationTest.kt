@@ -272,7 +272,7 @@ class AutoConfigurationTest {
             assertEquals(null, context.startupFailure)
             val connections = context.getBean(HubConnections::class.java)
             await atMost Duration.ofSeconds(5) until { connections.connected.value && "test.WatchAccount" in connection.registeredTypes() }
-            assertEquals(listOf("flow-control", "instance-status", "scatter-gather", "streaming", "subscription", "credentials-refresh", "processors"), connection.lastRegisterFrom(connections.instanceId)!!.capabilitiesList)
+            assertEquals(listOf("flow-control", "instance-status", "scatter-gather", "streaming", "subscription", "credentials-refresh", "processors", "processor-control"), connection.lastRegisterFrom(connections.instanceId)!!.capabilitiesList)
 
             // The QueryBus bean applications inject is a facade over HubBus: it forwards subscribe.
             val facade = runBlocking { context.getBean(QueryBus::class.java).subscribe(WatchAccount(8), SubscriptionOptions(timeout = Duration.ofSeconds(5))) }
@@ -330,6 +330,7 @@ class AutoConfigurationTest {
             assertEquals(1, context.getBeansOfType(TransactionTemplate::class.java).size)
             assertTrue(context.getBeansOfType(OutboxPublisher::class.java).isEmpty()) // outbox.enabled=false
             assertTrue(context.getBeansOfType(io.damoreira.kraken.messaging.kafka.EventProcessors::class.java).isEmpty()) // kafka.consumer.enabled=false
+            assertTrue(context.getBeansOfType(io.damoreira.kraken.messaging.control.ProcessorControl::class.java).isEmpty())
             // The admin API exists without the consumer (an admin-only instance), in mode collection by default.
             assertNotNull(context.getBean(io.damoreira.kraken.messaging.deadletter.DeadLetters::class.java))
             // ordered before Boot's TransactionAutoConfiguration: @Transactional support sees the MongoTransactionManager
@@ -338,7 +339,7 @@ class AutoConfigurationTest {
         }
     }
 
-    @Test fun `event processors and dead letters are wired, and the hub reads their status (P6a)`() {
+    @Test fun `event processors, their control and dead letters are wired, and the hub reads their status (P6a, P6b)`() {
         runner.withUserConfiguration(MongoMockConfig::class.java)
             .withConfiguration(AutoConfigurations.of(TransactionAutoConfiguration::class.java))
             .withPropertyValues("kraken.messaging.kafka.bootstrap-servers=localhost:9", "kraken.messaging.kafka.consumer.enabled=true")
@@ -349,6 +350,9 @@ class AutoConfigurationTest {
                 assertEquals(emptyList(), processors.consumers(), "no @EventHandler and no saga: no processor starts")
                 assertEquals(emptyList(), context.getBean(io.damoreira.kraken.messaging.kafka.ProcessorStatusSource::class.java).processorStatuses())
                 assertEquals(1, context.getBeansOfType(io.damoreira.kraken.messaging.deadletter.DeadLetterStore::class.java).size)
+                // P6b: the processors' control, which the hub connection asks per control request.
+                assertNotNull(context.getBean(io.damoreira.kraken.messaging.control.ProcessorControl::class.java))
+                assertNotNull(context.getBean(io.damoreira.kraken.messaging.control.ProcessorControlStore::class.java))
             }
         runner.withUserConfiguration(MongoMockConfig::class.java)
             .withConfiguration(AutoConfigurations.of(TransactionAutoConfiguration::class.java))

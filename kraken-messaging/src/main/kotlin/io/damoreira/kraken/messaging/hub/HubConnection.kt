@@ -4,6 +4,10 @@ import com.google.protobuf.ByteString
 import io.damoreira.kraken.hub.v1.Cancel
 import io.damoreira.kraken.hub.v1.Credentials
 import io.damoreira.kraken.hub.v1.ClientMessage
+import io.damoreira.kraken.hub.v1.ControlRefusal
+import io.damoreira.kraken.hub.v1.ControlRefused
+import io.damoreira.kraken.hub.v1.ControlReply
+import io.damoreira.kraken.hub.v1.ControlRequest
 import io.damoreira.kraken.hub.v1.Error
 import io.damoreira.kraken.hub.v1.Flow
 import io.damoreira.kraken.hub.v1.ErrorCode
@@ -27,6 +31,7 @@ import io.damoreira.kraken.messaging.InvalidMessageException
 import io.damoreira.kraken.messaging.MessageTimeoutException
 import io.damoreira.kraken.messaging.MessagingException
 import io.damoreira.kraken.messaging.UnsupportedByHubException
+import io.damoreira.kraken.messaging.kafka.EventConsumer
 import io.grpc.ManagedChannel
 import io.grpc.Status
 import kotlinx.coroutines.CancellationException
@@ -210,6 +215,11 @@ internal object ReconnectBackoff {
  * in order) and then admitted by [inboundSubscription], which makes it live or refuses it; a hub `Cancel` removes it, the
  * stream closing removes every subscription the stream carried, and the update emitter writes its parts and its end on the
  * stream it arrived on. The initial result is an ordinary unary request (id `<id>#0`).
+ *
+ * Processor control (P6b, ADR 0023): `Register` declares `processor-control`. A `ControlRequest` from a hub whose ack lists it
+ * goes to [control] in arrival order from one lane per stream, never from the read loop (a control handler that blocks holds
+ * up only the control requests behind it, not the stream), and its `ControlReply` is written on the stream it arrived on. A
+ * `ControlRequest` from a hub whose ack does not list the capability is dropped.
  */
 class HubConnection(
     private val channelFactory: () -> ManagedChannel,
@@ -235,6 +245,8 @@ class HubConnection(
     private val inboundSubscription: SubscriptionInbound = NO_SUBSCRIPTION_HANDLERS,
     /** Called for every `ClientMessage.credentials` this connection writes ([HubConnections] keeps the process-wide, monotonic total). */
     private val onCredentialsRefreshSent: () -> Unit = {},
+    /** Serves the hub's `ControlRequest`s (P6b); without event processors every one is `UNKNOWN_PROCESSOR`. */
+    private val control: ControlInbound = NO_PROCESSOR_CONTROL,
 ) : HubTransport {
     private val log = LoggerFactory.getLogger(HubConnection::class.java)
 
@@ -319,6 +331,8 @@ class HubConnection(
         val closed = CompletableDeferred<Unit>()
         /** A rollover (P5c) told the hub this instance is stopping: every `Register` of the stream carries no types from now on. */
         @Volatile var draining = false
+        /** The `ControlRequest`s read on this stream and not yet handed to the control (P6b), in arrival order. */
+        val controls = Channel<ControlRequest>(Channel.UNLIMITED)
     }
 
     private val lock = Any() // guards registration, generation and current
@@ -1054,8 +1068,28 @@ class HubConnection(
                 if (settings.tokenProvider == null) refreshCredentials(stream) // a rotated token file reaches the hub without a reconnect
             }
         }
+        // One lane per stream for the control requests (P6b): in order, and never on the read loop below.
+        val controls = launch(handlerDispatcher) {
+            for (request in stream.controls) serveControl(stream, request)
+        }
         HubGrpcKt.HubCoroutineStub(channel).connect(stream.out.receiveAsFlow()).collect { message -> handle(stream, message) }
         heartbeats.cancel()
+        controls.cancel()
+    }
+
+    /** Hands [request] to the control; its answer goes back on [stream] (dropped when the stream is gone by then: the hub failed it). */
+    private fun serveControl(stream: Stream, request: ControlRequest) {
+        val reply = { answer: ControlReply -> stream.out.trySend(ClientMessage.newBuilder().setControlReply(answer).build()); Unit }
+        try {
+            control.handle(request, reply)
+        } catch (e: Exception) {
+            log.warn("Control request {} on processor {} failed: {}", request.controlId, request.processor, e.toString())
+            reply(
+                ControlReply.newBuilder().setControlId(request.controlId).setRefused(
+                    ControlRefused.newBuilder().setCode(ControlRefusal.CONTROL_REFUSAL_FAILED).setMessage(EventConsumer.utf8Cut(e.toString(), 512)),
+                ).build(),
+            )
+        }
     }
 
     private fun buildRegister(commandTypes: Set<String>, queryTypes: Set<String>, sharedQueryTypes: Set<String>): Register = Register.newBuilder()
@@ -1163,6 +1197,13 @@ class HubConnection(
                 // its cancellation (see serveSubscription) and one already registered is found here.
                 if (subscriptions.cancel(stream, message.cancel.requestId)) {
                     log.debug("Hub cancelled subscription {}: {}", message.cancel.requestId, message.cancel.reason)
+                }
+            }
+            message.hasControl() -> {
+                if (stream.handshake.supports(HubProtocol.PROCESSOR_CONTROL)) {
+                    stream.controls.trySend(message.control)
+                } else {
+                    log.debug("ControlRequest {} from a hub that did not acknowledge processor-control ignored", message.control.controlId)
                 }
             }
             message.hasRegisterAck() -> onAck(stream, message.registerAck)

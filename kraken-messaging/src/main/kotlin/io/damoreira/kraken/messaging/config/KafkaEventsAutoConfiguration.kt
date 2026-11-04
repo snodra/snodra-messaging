@@ -3,6 +3,8 @@ package io.damoreira.kraken.messaging.config
 import io.damoreira.kraken.messaging.EventBus
 import io.damoreira.kraken.messaging.codec.JsonCodec
 import io.damoreira.kraken.messaging.codec.MessageTypeResolver
+import io.damoreira.kraken.messaging.control.ProcessorControl
+import io.damoreira.kraken.messaging.control.ProcessorControlStore
 import io.damoreira.kraken.messaging.handler.HandlerInvoker
 import io.damoreira.kraken.messaging.handler.HandlerRegistry
 import io.damoreira.kraken.messaging.deadletter.DeadLetterMode
@@ -45,7 +47,8 @@ import org.springframework.transaction.support.TransactionTemplate
 /**
  * Events over Kafka with the transactional outbox: [OutboxEventBus] as the [EventBus], [OutboxPublisher] relaying the
  * `outbox` collection to the topic, [EventProcessors] running the `@EventHandler`s (one [EventConsumer] per processor, ADR
- * 0022), the dead letters ([DeadLetterStore], [DeadLetters]), and the TTL/relay indexes.
+ * 0022), the dead letters ([DeadLetterStore], [DeadLetters]), the processor control ([ProcessorControlStore], [ProcessorControl],
+ * P6b), and the TTL/relay indexes.
  *
  * Needs the application's [MongoTemplate] (Boot's Mongo auto-configuration provides it when
  * `spring.mongodb.uri` is set; Spring Boot 4 no longer binds `spring.data.mongodb.uri`), hence ordered after it.
@@ -158,6 +161,26 @@ class KafkaEventsAutoConfiguration {
     fun deadLetters(properties: KrakenMessagingProperties, store: ObjectProvider<DeadLetterStore>, dispatcher: LocalEventDispatcher) =
         DeadLetters(properties.kafka.deadLetter.mode, store.getIfAvailable(), dispatcher)
 
+    /** The `processor_control` collection (P6b, ADR 0023): pause, the reset lock and the replay ranges of each processor. */
+    @Bean
+    @ConditionalOnMissingBean
+    fun processorControlStore(mongo: MongoTemplate) = ProcessorControlStore(mongo)
+
+    /**
+     * The control of the event processors (P6b, ADR 0023): what their `processor_control` documents say, applied at start and
+     * every 5 s, and the hub's control requests (pause, resume, reset, dead letters). Its Kafka `Admin` client (a reset's
+     * offsets) shares the consumer factory's connection settings.
+     */
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "kraken.messaging.kafka.consumer", name = ["enabled"], havingValue = "true", matchIfMissing = true)
+    fun processorControl(
+        @Qualifier(CONSUMER_FACTORY) consumerFactory: ConsumerFactory<String, ByteArray>,
+        store: ProcessorControlStore,
+        registry: HandlerRegistry,
+        deadLetters: DeadLetters,
+    ) = ProcessorControl(store, registry, deadLetters, consumerFactory.configurationProperties)
+
     /**
      * The event processors (ADR 0022): one consumer per processor that runs here, `default` in `kafka.group-id` (else the
      * service name), a named one in `<that group>.<name>`. The `Admin` client of their status shares the consumer factory's
@@ -177,6 +200,7 @@ class KafkaEventsAutoConfiguration {
         dispatcher: LocalEventDispatcher,
         properties: KrakenMessagingProperties,
         store: ObjectProvider<DeadLetterStore>,
+        control: ObjectProvider<ProcessorControl>,
     ): EventProcessors {
         val sink = when (properties.kafka.deadLetter.mode) {
             DeadLetterMode.COLLECTION -> DeadLetterSink.Collection(store.getObject())
@@ -203,6 +227,7 @@ class KafkaEventsAutoConfiguration {
                 )
             },
             adminConfig = consumerFactory.configurationProperties,
+            control = control.getIfAvailable(),
         )
     }
 

@@ -89,7 +89,7 @@ class ProcessorControl(
      */
     @Synchronized
     fun attach(consumers: List<EventConsumer>) {
-        val docs = store.read(consumers.map { it.processor })
+        val docs = if (consumers.isEmpty()) emptyMap() else store.read(consumers.map { it.processor })
         val attached = consumers.associate { it.processor to Slot(it) }
         val now = clock.instant()
         slots = attached

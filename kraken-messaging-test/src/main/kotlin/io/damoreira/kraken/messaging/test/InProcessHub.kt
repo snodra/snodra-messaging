@@ -3,6 +3,8 @@ package io.damoreira.kraken.messaging.test
 import io.damoreira.kraken.hub.v1.Cancel
 import io.damoreira.kraken.hub.v1.Credentials
 import io.damoreira.kraken.hub.v1.ClientMessage
+import io.damoreira.kraken.hub.v1.ControlReply
+import io.damoreira.kraken.hub.v1.ControlRequest
 import io.damoreira.kraken.hub.v1.Error
 import io.damoreira.kraken.hub.v1.ErrorCode
 import io.damoreira.kraken.hub.v1.Flow
@@ -23,6 +25,7 @@ import io.grpc.Server
 import io.grpc.Status
 import io.grpc.inprocess.InProcessChannelBuilder
 import io.grpc.inprocess.InProcessServerBuilder
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -34,6 +37,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
 import java.time.Duration
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -151,6 +155,11 @@ import java.util.concurrent.TimeUnit
  * is recorded ([credentialsSeenFrom]) and judged like a `Register`'s against the session's own service (an invalid one or one for
  * another service closes the stream in `enforce`); [jwtsSeenFrom] lists the JWTs of the `Register`s.
  *
+ * Processor control (P6b, ADR 0023, capability `processor-control`): a registrant that declares it gets it in the ack
+ * ([processorControl] false emulates a hub before P6b); [control] writes a `ControlRequest` to an instance's session that
+ * negotiated it and waits for the `ControlReply` with its `control_id` from that session; every reply received is kept
+ * ([controlRepliesFrom]), the unmatched ones too.
+ *
  * It does not implement consistent hashing on `routing_key`, metrics, or the real hub's owner grace period and
  * heartbeat expiry.
  */
@@ -216,6 +225,10 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
      */
     @Volatile
     var processors: Boolean = true
+
+    /** Set false to emulate a hub before P6b (ADR 0023): no `processor-control` capability in the ack, [control] fails. */
+    @Volatile
+    var processorControl: Boolean = true
 
     /** Set false to emulate the P3 hub: no `scatter-gather` capability in the ack, `shared_query_types` ignored. */
     @Volatile
@@ -332,6 +345,7 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
         @Volatile var flowControl = false
         /** Negotiated `instance-status` (fixed by the stream's first Register). */
         @Volatile var instanceStatus = false
+        @Volatile var processorControl = false
         /** The ack of the Register just handled, written by the stream's collector (after [ackDelay]). */
         var ack: ServerMessage? = null
         /** Remaining permits; null = unlimited (not permit-managed). Guarded by [lock]. */
@@ -415,6 +429,8 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
     private val requestsBySender = ConcurrentHashMap<String, Int>()
     private val statusMessages = ConcurrentHashMap<String, Int>()
     private val lastStatuses = ConcurrentHashMap<String, InstanceStatus>()
+    private val controlReplies = ConcurrentHashMap<String, CopyOnWriteArrayList<ControlReply>>()
+    private val controlWaiters = ConcurrentHashMap<String, Pair<Session, CompletableDeferred<ControlReply>>>()
     private val streamsOpened = ConcurrentHashMap<String, Int>()
     private val streamsReplaced = ConcurrentHashMap<String, Int>()
     private val tokensSeen = ConcurrentHashMap<String, CopyOnWriteArrayList<String?>>()
@@ -514,6 +530,27 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
         sessions.filter { it.registered && it.instanceId == instanceId }.sumOf { it.queue.size }
     }
 
+    /**
+     * Sends [request] to the live session of [instanceId] (it must have negotiated `processor-control`) and waits up to
+     * [timeout] for its `ControlReply` from that session.
+     */
+    suspend fun control(instanceId: String, request: ControlRequest, timeout: Duration = Duration.ofSeconds(10)): ControlReply {
+        val session = sessions.lastOrNull { it.registered && it.instanceId == instanceId }
+            ?: throw IllegalStateException("no live session of $instanceId")
+        check(session.processorControl) { "$instanceId did not negotiate processor-control" }
+        val answer = CompletableDeferred<ControlReply>()
+        controlWaiters[request.controlId] = session to answer
+        session.out.trySend(ServerMessage.newBuilder().setControl(request).build())
+        return try {
+            withTimeout(timeout.toMillis()) { answer.await() }
+        } finally {
+            controlWaiters.remove(request.controlId)
+        }
+    }
+
+    /** Every `ControlReply` [instanceId] sent, in order. */
+    fun controlRepliesFrom(instanceId: String): List<ControlReply> = controlReplies[instanceId]?.toList().orEmpty()
+
     /** Writes [message] to the stream of [instanceId] as if the hub had sent it (for example a part nobody waits for). */
     fun inject(instanceId: String, message: ServerMessage) {
         sessions.filter { it.registered && it.instanceId == instanceId }.forEach { it.out.trySend(message) }
@@ -559,6 +596,7 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
                 SUBSCRIPTION.takeIf { subscription && it in capabilities },
                 CREDENTIALS_REFRESH.takeIf { credentialsRefresh && it in capabilities },
                 PROCESSORS.takeIf { processors && it in capabilities },
+                PROCESSOR_CONTROL.takeIf { processorControl && it in capabilities },
             ),
         )
         .setHubId(hubId)
@@ -620,6 +658,14 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
             msg.hasFlow() -> relayFlow(session, msg.flow)
             msg.hasCancel() -> onCancel(session, msg.cancel)
             msg.hasCredentials() -> refreshCredentials(session, msg.credentials)
+            msg.hasControlReply() -> {
+                controlReplies.computeIfAbsent(session.instanceId) { CopyOnWriteArrayList() } += msg.controlReply
+                val waiter = controlWaiters[msg.controlReply.controlId]
+                // Like the real hub: only the session the request went to answers it.
+                if (waiter != null && waiter.first === session && controlWaiters.remove(msg.controlReply.controlId, waiter)) {
+                    waiter.second.complete(msg.controlReply)
+                }
+            }
             msg.hasStatus() -> {
                 statusMessages.merge(session.instanceId, 1, Int::plus)
                 if (session.instanceStatus) lastStatuses[session.instanceId] = msg.status
@@ -687,6 +733,7 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
                 session.streaming = !legacy && streaming && reg.protocolVersion >= 2 && STREAMING in reg.capabilitiesList
                 session.subscription = !legacy && subscription && reg.protocolVersion >= 2 && SUBSCRIPTION in reg.capabilitiesList
                 session.credentialsRefresh = !legacy && credentialsRefresh && reg.protocolVersion >= 2 && CREDENTIALS_REFRESH in reg.capabilitiesList
+                session.processorControl = !legacy && processorControl && reg.protocolVersion >= 2 && PROCESSOR_CONTROL in reg.capabilitiesList
                 session.protocolVersion = if (legacy) 0 else reg.protocolVersion
             }
             session.serviceName = reg.serviceName
@@ -1480,6 +1527,7 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
         const val SUBSCRIPTION = "subscription"
         const val CREDENTIALS_REFRESH = "credentials-refresh"
         const val PROCESSORS = "processors"
+        const val PROCESSOR_CONTROL = "processor-control"
     }
 
     private fun error(requestId: String, code: ErrorCode, message: String): Error =

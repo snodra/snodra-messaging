@@ -49,8 +49,14 @@ object HubProtocol {
      */
     const val PROCESSORS = "processors"
 
+    /**
+     * Capability name of processor control (P6b, ADR 0023): `ServerMessage.control` (pause, resume, the leased reset, the dead
+     * letters) answered by `ClientMessage.control_reply`, only on a stream whose ack lists it.
+     */
+    const val PROCESSOR_CONTROL = "processor-control"
+
     /** `Register.capabilities`: optional protocol features this client supports. */
-    val CAPABILITIES: List<String> = listOf(FLOW_CONTROL, INSTANCE_STATUS, SCATTER_GATHER, STREAMING, SUBSCRIPTION, CREDENTIALS_REFRESH, PROCESSORS)
+    val CAPABILITIES: List<String> = listOf(FLOW_CONTROL, INSTANCE_STATUS, SCATTER_GATHER, STREAMING, SUBSCRIPTION, CREDENTIALS_REFRESH, PROCESSORS, PROCESSOR_CONTROL)
 
     /** `Request.initial_credit` the hub assumes when a sender sends 0; the library always sends at least 1. */
     const val DEFAULT_INITIAL_CREDIT = 64

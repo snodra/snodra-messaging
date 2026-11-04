@@ -1,11 +1,17 @@
 package io.damoreira.kraken.messaging.hub
 
 import com.google.protobuf.ByteString
+import io.damoreira.kraken.hub.v1.ControlOk
+import io.damoreira.kraken.hub.v1.ControlRefusal
+import io.damoreira.kraken.hub.v1.ControlReply
+import io.damoreira.kraken.hub.v1.ControlRequest
 import io.damoreira.kraken.hub.v1.Error
 import io.damoreira.kraken.hub.v1.ErrorCode
+import io.damoreira.kraken.hub.v1.ProcessorPause
 import io.damoreira.kraken.hub.v1.Reply
 import io.damoreira.kraken.hub.v1.Request
 import io.damoreira.kraken.hub.v1.RequestKind
+import io.damoreira.kraken.hub.v1.ServerMessage
 import io.damoreira.kraken.messaging.HubConnectionLostException
 import io.damoreira.kraken.messaging.HubRegistrationRejectedException
 import io.damoreira.kraken.messaging.HubUnavailableException
@@ -34,7 +40,10 @@ import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Test
 import java.time.Duration
 import java.util.UUID
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -70,9 +79,11 @@ class HubConnectionTest {
         settings: HubSettings = fast,
         hubName: String = hub.name,
         handlerDispatcher: CoroutineDispatcher = kotlinx.coroutines.Dispatchers.IO,
+        control: ControlInbound = NO_PROCESSOR_CONTROL,
         inbound: suspend (Request) -> Reply = { req -> errorReply(req.id, ErrorCode.HANDLER_ERROR, "unexpected") },
     ) = HubConnection(
         { InProcessChannelBuilder.forName(hubName).build() }, serviceName, instanceId, settings, inbound, scope, handlerDispatcher,
+        control = control,
     ).also { connections += it }
 
     private fun flowConnection(
@@ -96,11 +107,11 @@ class HubConnectionTest {
         conn.start()
         assertTrue(conn.awaitRegistered(wait))
         val reg = hub.lastRegisterFrom("a")!!
-        assertEquals(listOf("flow-control", "instance-status", "scatter-gather", "streaming", "subscription", "credentials-refresh", "processors"), reg.capabilitiesList)
+        assertEquals(listOf("flow-control", "instance-status", "scatter-gather", "streaming", "subscription", "credentials-refresh", "processors", "processor-control"), reg.capabilitiesList)
         assertEquals(4, reg.initialPermits)
         assertEquals(150, reg.loadFactor)
         assertEquals(mapOf("zone" to "eu-1"), reg.tagsMap)
-        assertEquals(listOf("flow-control", "instance-status", "scatter-gather", "streaming", "subscription", "credentials-refresh", "processors"), assertIs<HubHandshake.V2>(conn.handshake.value).ack.capabilitiesList)
+        assertEquals(listOf("flow-control", "instance-status", "scatter-gather", "streaming", "subscription", "credentials-refresh", "processors", "processor-control"), assertIs<HubHandshake.V2>(conn.handshake.value).ack.capabilitiesList)
     }
 
     @Test fun `fewer than one handler or a negative load factor is rejected`() {
@@ -186,6 +197,7 @@ class HubConnectionTest {
         hub.subscription = false
         hub.credentialsRefresh = false
         hub.processors = false
+        hub.processorControl = false
         val handler = flowConnection("b", maxConcurrentHandlers = 4) { req -> payloadReply(req.id, "{}") }
         handler.register(setOf("test.Ping"), emptySet())
         handler.start()
@@ -446,7 +458,7 @@ class HubConnectionTest {
 
         val reg = assertNotNull(hub.lastRegisterFrom("a"))
         assertEquals(2, reg.protocolVersion)
-        assertEquals(listOf("flow-control", "instance-status", "scatter-gather", "streaming", "subscription", "credentials-refresh", "processors"), reg.capabilitiesList)
+        assertEquals(listOf("flow-control", "instance-status", "scatter-gather", "streaming", "subscription", "credentials-refresh", "processors", "processor-control"), reg.capabilitiesList)
         assertTrue(reg.clientVersion.startsWith("kraken-messaging/"), reg.clientVersion)
         assertFalse(reg.clientVersion.endsWith("/unknown"), reg.clientVersion)
         val handshake = assertIs<HubHandshake.V2>(conn.handshake.value)
@@ -662,4 +674,61 @@ class HubConnectionTest {
 
     private fun errorReply(id: String, code: ErrorCode, message: String): Reply =
         Reply.newBuilder().setRequestId(id).setError(Error.newBuilder().setRequestId(id).setCode(code).setMessage(message)).build()
+
+    // --- processor control (P6b, ADR 0023) ---
+
+    private fun pause(id: String) = ControlRequest.newBuilder().setControlId(id).setProcessor("audit")
+        .setPause(ProcessorPause.getDefaultInstance()).build()
+
+    private fun ok(request: ControlRequest) = ControlReply.newBuilder().setControlId(request.controlId).setOk(ControlOk.getDefaultInstance()).build()
+
+    @Test fun `control requests are served off the read loop and answered on the stream they arrived on`() = runBlocking {
+        val gate = CountDownLatch(1)
+        val seen = CopyOnWriteArrayList<String>()
+        val control = ControlInbound { request, reply ->
+            seen += request.controlId
+            if (request.controlId == "c-1") gate.await(10, TimeUnit.SECONDS) // a control handler that blocks: the stream must not
+            reply(ok(request))
+        }
+        val handler = connection("h", control = control, inbound = { req -> payloadReply(req.id, "{}") })
+        handler.register(setOf("test.Ping"), emptySet())
+        handler.start()
+        val sender = connection("s")
+        sender.start()
+        assertTrue(handler.awaitRegistered(wait) && sender.awaitRegistered(wait))
+        assertTrue("processor-control" in assertIs<HubHandshake.V2>(handler.handshake.value).ack.capabilitiesList)
+
+        val first = async(Dispatchers.Default) { hub.control("h", pause("c-1"), Duration.ofSeconds(30)) }
+        await atMost Duration.ofSeconds(5) until { "c-1" in seen }
+        val second = async(Dispatchers.Default) { hub.control("h", pause("c-2"), Duration.ofSeconds(30)) }
+        val heartbeats = hub.heartbeatsFrom("h")
+        assertTrue(sender.send(request()).hasReply(), "requests still reach the handler")
+        await atMost Duration.ofSeconds(15) until { hub.heartbeatsFrom("h") > heartbeats }
+        assertEquals(listOf("c-1"), seen.toList(), "control requests keep their order")
+        gate.countDown()
+        assertTrue(first.await().hasOk())
+        assertTrue(second.await().hasOk())
+        assertEquals(listOf("c-1", "c-2"), hub.controlRepliesFrom("h").map { it.controlId })
+    }
+
+    @Test fun `a hub that does not list processor-control is never answered`() = runBlocking {
+        hub.processorControl = false
+        val seen = CopyOnWriteArrayList<String>()
+        val handler = connection("h", control = { request, reply -> seen += request.controlId; reply(ok(request)) })
+        handler.start()
+        assertTrue(handler.awaitRegistered(wait))
+        assertTrue("processor-control" in hub.lastRegisterFrom("h")!!.capabilitiesList, "declared all the same")
+        hub.inject("h", ServerMessage.newBuilder().setControl(pause("c-1")).build())
+        delay(500)
+        assertEquals(emptyList(), seen.toList())
+        assertEquals(emptyList(), hub.controlRepliesFrom("h"))
+    }
+
+    @Test fun `without event processors every control request is UNKNOWN_PROCESSOR`() = runBlocking {
+        val handler = connection("h")
+        handler.start()
+        assertTrue(handler.awaitRegistered(wait))
+        val reply = hub.control("h", pause("c-1"))
+        assertEquals(ControlRefusal.CONTROL_REFUSAL_UNKNOWN_PROCESSOR, reply.refused.code)
+    }
 }
