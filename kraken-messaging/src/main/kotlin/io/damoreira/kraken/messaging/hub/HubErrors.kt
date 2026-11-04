@@ -34,8 +34,6 @@ object HubErrors {
         ErrorCode.PERMISSION_DENIED -> AccessDeniedException(message)
         // A subscription's RESOURCE_EXHAUSTED says why (a subscriber buffer overflow, an instance's subscription limit).
         ErrorCode.RESOURCE_EXHAUSTED -> HandlerBusyException(type, message.takeIf { feature == HubProtocol.SUBSCRIPTION && it.isNotEmpty() })
-        // A request mode the hub does not implement, or one this session did not declare (ADR 0017).
-        ErrorCode.UNSUPPORTED -> UnsupportedByHubException(feature, message.ifEmpty { "unsupported by the hub" })
         // A streaming query or subscription the hub ended for outliving its maximum duration (P4b, P4c).
         ErrorCode.CANCELLED -> StreamCancelledException(message.ifEmpty { "cancelled by the hub" })
         else -> RemoteHandlerException(type, message, details, code.name)

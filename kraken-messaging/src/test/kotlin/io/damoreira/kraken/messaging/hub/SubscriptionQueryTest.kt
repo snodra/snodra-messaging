@@ -206,7 +206,6 @@ class SubscriptionQueryTest {
 
     @Test fun `register declares subscription and the connection reports the capability`() = runBlocking {
         val x = owner("svc-x", "x-1", AccountWatcher())
-        assertEquals(listOf("flow-control", "instance-status", "scatter-gather", "streaming", "subscription", "credentials-refresh", "processors", "processor-control"), hub.lastRegisterFrom("x-1")!!.capabilitiesList)
         assertTrue(x.connection.supportsSubscription)
         hub.subscription = false
         val old = owner("svc-y", "y-1", PlainCountOwner())
@@ -824,7 +823,6 @@ class SubscriptionQueryTest {
             ErrorCode.PERMISSION_DENIED to { assertEquals("PERMISSION_DENIED says", assertIs<AccessDeniedException>(it).message) },
             ErrorCode.RESOURCE_EXHAUSTED to { assertTrue(assertIs<HandlerBusyException>(it).message!!.contains("RESOURCE_EXHAUSTED says"), it.message) },
             ErrorCode.CANCELLED to { assertEquals("CANCELLED says", assertIs<StreamCancelledException>(it).message) },
-            ErrorCode.UNSUPPORTED to { assertEquals("subscription", assertIs<UnsupportedByHubException>(it).feature) },
         )
         for ((code, check) in expectations) {
             val result = bus.subscribe(WatchAccount(1))
@@ -999,8 +997,8 @@ class SubscriptionQueryTest {
             }
             send(
                 ClientMessage.newBuilder().setRegister(
-                    Register.newBuilder().setServiceName("svc-raw").setInstanceId(instanceId).setProtocolVersion(2)
-                        .addCapabilities("subscription").addCapabilities("streaming"),
+                    Register.newBuilder().setServiceName("svc-raw").setInstanceId(instanceId)
+                        ,
                 ).build(),
             )
         }

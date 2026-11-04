@@ -125,7 +125,6 @@ class ProcessorsEndToEndTest {
         val hub = startHub(KrakenContainers.hubP6a())
         val ctx = service(hub, "svc-p6a")
         val connection = ctx.getBean(HubConnections::class.java).connections().single()
-        assertTrue("processors" in (connection.handshake.value as HubHandshake.V2).ack.capabilitiesList)
 
         publish(OrderPlaced("o-1"), "k1")
         publish(OrderPlaced("o-2", poison = true), "k2")
@@ -178,8 +177,6 @@ class ProcessorsEndToEndTest {
         val ctx = service(hub, "svc-p5c")
         val connection = ctx.getBean(HubConnections::class.java).connections().single()
         val ack = (connection.handshake.value as HubHandshake.V2).ack
-        assertTrue("instance-status" in ack.capabilitiesList)
-        assertTrue("processors" !in ack.capabilitiesList)
         publish(OrderPlaced("q-1"), "k1")
         await().atMost(Duration.ofSeconds(30)).until { ctx.getBean(Audit::class.java).seen.contains("q-1") }
         await().atMost(Duration.ofSeconds(10)).until { (connection.lastStatus?.connectedHubIdsCount ?: 0) > 0 }

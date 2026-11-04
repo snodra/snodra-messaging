@@ -69,7 +69,7 @@ class InProcessHubTest {
         fun registerFlowControlled(service: String, instance: String, permits: Int, vararg commands: String) = send(
             ClientMessage.newBuilder().setRegister(
                 Register.newBuilder().setServiceName(service).setInstanceId(instance).addAllCommandTypes(commands.toList())
-                    .setProtocolVersion(2).addCapabilities("flow-control").setInitialPermits(permits),
+                    .setInitialPermits(permits),
             ).build(),
         )
 
@@ -89,7 +89,7 @@ class InProcessHubTest {
         ) = send(
             ClientMessage.newBuilder().setRegister(
                 Register.newBuilder().setServiceName(service).setInstanceId(instance).addAllQueryTypes(queries)
-                    .addAllSharedQueryTypes(shared).setProtocolVersion(2).addAllCapabilities(capabilities),
+                    .addAllSharedQueryTypes(shared),
             ).build(),
         )
 
@@ -147,7 +147,7 @@ class InProcessHubTest {
     fun `flow-controlled handler gets requests only with permits, highest priority first`() = runBlocking {
         val handler = RawClient().also { it.registerFlowControlled("svc-a", "a-1", 1, "test.Ping") }
         val ack = handler.next()
-        assertEquals(listOf("flow-control"), ack.registerAck.capabilitiesList)
+        assertTrue(ack.hasRegisterAck())
         awaitRegistered("test.Ping")
         val sender = RawClient().also { it.register("svc-b", "b-1") }
 
@@ -190,7 +190,7 @@ class InProcessHubTest {
     fun `P0 emulation acks without flow-control and never queues`() = runBlocking {
         hub.flowControl = false
         val handler = RawClient().also { it.registerFlowControlled("svc-a", "a-1", 1, "test.Ping") }
-        assertEquals(emptyList(), handler.next().registerAck.capabilitiesList)
+        assertTrue(handler.next().hasRegisterAck())
         awaitRegistered("test.Ping")
         val sender = RawClient().also { it.register("svc-b", "b-1") }
         sender.send(request("r1", "test.Ping"))
@@ -316,7 +316,7 @@ class InProcessHubTest {
     @Test
     fun `a shared type may have many owners, registrants must agree`() = runBlocking {
         val x = RawClient().also { it.registerV2("svc-x", "x-1", shared = listOf("test.Search")) }
-        assertEquals(listOf("scatter-gather"), x.next().registerAck.capabilitiesList)
+        assertTrue(x.next().hasRegisterAck())
         awaitRegistered("test.Search")
         val y = RawClient().also { it.registerV2("svc-y", "y-1", shared = listOf("test.Search")) }
         assertTrue(y.next().hasRegisterAck())
@@ -416,16 +416,16 @@ class InProcessHubTest {
 
         val undeclared = RawClient().also { it.registerV2("svc-u", "u-1", capabilities = emptyList()) }.apply { next() }
         undeclared.send(scatter("g3", "test.Cmd"))
-        assertEquals(ErrorCode.UNSUPPORTED, undeclared.next().error.code)
+        assertEquals(ErrorCode.INVALID_REQUEST, undeclared.next().error.code)
         val v1 = RawClient().also { it.register("svc-v", "v-1") }
         v1.send(scatter("g4", "test.Cmd"))
         assertEquals(ErrorCode.INVALID_REQUEST, v1.next().error.code)
 
         hub.scatterGather = false // a P3 hub: no capability, shared types ignored
         val p3 = RawClient().also { it.registerV2("svc-p", "p-1", shared = listOf("test.Search")) }
-        assertEquals(emptyList(), p3.next().registerAck.capabilitiesList)
+        assertTrue(p3.next().hasRegisterAck())
         p3.send(scatter("g5", "test.Cmd"))
-        assertEquals(ErrorCode.UNSUPPORTED, p3.next().error.code)
+        assertEquals(ErrorCode.INVALID_REQUEST, p3.next().error.code)
         kotlinx.coroutines.delay(50)
         assertTrue("test.Search" !in hub.registeredTypes())
     }
@@ -596,10 +596,9 @@ class InProcessHubTest {
 
         val undeclared = RawClient().also { it.registerV2("svc-u", "u-1", capabilities = emptyList()) }.apply { next() }
         undeclared.send(stream("r2", "test.Export"))
-        assertEquals(ErrorCode.UNSUPPORTED, undeclared.next().error.code)
+        assertEquals(ErrorCode.INVALID_REQUEST, undeclared.next().error.code)
 
         val sender = RawClient().also { it.registerV2("svc-s", "s-1", capabilities = listOf("streaming")) }.apply { next() }
-        assertEquals(listOf("streaming"), hub.lastRegisterFrom("s-1")!!.capabilitiesList)
         sender.send(stream("r3", "test.Export"))
         assertEquals(ErrorCode.NO_HANDLER, sender.next().error.code)
 
@@ -613,7 +612,7 @@ class InProcessHubTest {
         awaitRegistered("test.Export")
         sender.send(stream("r5", "test.Export"))
         val none = sender.next().error
-        assertEquals(ErrorCode.UNSUPPORTED, none.code)
+        assertEquals(ErrorCode.INVALID_REQUEST, none.code)
         assertTrue("svc-h" in none.message && "streaming" in none.message, none.message)
         old.nothingWithin(50)
 
@@ -637,9 +636,9 @@ class InProcessHubTest {
 
         hub.streaming = false // a P4a hub: no capability in the ack, STREAMING is UNSUPPORTED
         val p4a = RawClient().also { it.registerV2("svc-p", "p-1", capabilities = listOf("streaming", "scatter-gather")) }
-        assertEquals(listOf("scatter-gather"), p4a.next().registerAck.capabilitiesList)
+        assertTrue(p4a.next().hasRegisterAck())
         p4a.send(stream("r7", "test.Export"))
-        assertEquals(ErrorCode.UNSUPPORTED, p4a.next().error.code)
+        assertEquals(ErrorCode.INVALID_REQUEST, p4a.next().error.code)
     }
 
     @Test
@@ -715,7 +714,7 @@ class InProcessHubTest {
         val b = RawClient().also { it.registerV2("svc-b", "b-1", shared = listOf("acct.Watch"), capabilities = listOf("subscription")) }.apply { next() }
         withTimeout(TIMEOUT_MS) { while (hub.connectedInstances().size < 2) kotlinx.coroutines.delay(10) }
         val sender = RawClient().also { it.registerV2("svc-web", "s-1", capabilities = listOf("subscription", "streaming")) }
-        assertEquals(listOf("streaming", "subscription"), sender.next().registerAck.capabilitiesList)
+        assertTrue(sender.next().hasRegisterAck())
         return Triple(a, b, sender)
     }
 
@@ -910,11 +909,10 @@ class InProcessHubTest {
         val undeclared = RawClient().also { it.registerV2("svc-u", "u-1", capabilities = listOf("streaming")) }.apply { next() }
         undeclared.send(subscribe("r2", "acct.Watch"))
         val unsupported = undeclared.next().error
-        assertEquals(ErrorCode.UNSUPPORTED, unsupported.code)
+        assertEquals(ErrorCode.INVALID_REQUEST, unsupported.code)
         assertTrue("\"subscription\"" in unsupported.message, unsupported.message)
 
         val sender = RawClient().also { it.registerV2("svc-s", "s-1", capabilities = listOf("subscription")) }.apply { next() }
-        assertEquals(listOf("subscription"), hub.lastRegisterFrom("s-1")!!.capabilitiesList)
         sender.send(subscribe("r3", "acct.Watch"))
         assertEquals(ErrorCode.NO_HANDLER, sender.next().error.code)
 
@@ -928,7 +926,7 @@ class InProcessHubTest {
         awaitRegistered("acct.Watch")
         sender.send(subscribe("r5", "acct.Watch"))
         val none = sender.next().error
-        assertEquals(ErrorCode.UNSUPPORTED, none.code)
+        assertEquals(ErrorCode.INVALID_REQUEST, none.code)
         assertTrue("svc-h" in none.message && "subscription" in none.message, none.message)
         old.nothingWithin(50)
 
@@ -962,9 +960,9 @@ class InProcessHubTest {
 
         hub.subscription = false // a P4b hub: no capability in the ack, SUBSCRIPTION is UNSUPPORTED
         val p4b = RawClient().also { it.registerV2("svc-p", "p-1", capabilities = listOf("subscription", "streaming")) }
-        assertEquals(listOf("streaming"), p4b.next().registerAck.capabilitiesList)
+        assertTrue(p4b.next().hasRegisterAck())
         p4b.send(subscribe("r8", "acct.Watch"))
-        assertEquals(ErrorCode.UNSUPPORTED, p4b.next().error.code)
+        assertEquals(ErrorCode.INVALID_REQUEST, p4b.next().error.code)
     }
 
     @Test

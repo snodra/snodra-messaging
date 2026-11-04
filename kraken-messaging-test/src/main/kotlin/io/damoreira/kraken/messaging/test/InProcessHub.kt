@@ -585,22 +585,9 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
     /** Updates the hub holds for the subscription [requestId] (beyond the credit, or before its initial part); 0 when it is not open. */
     fun bufferedUpdatesOf(requestId: String): Int = synchronized(lock) { subscriptions[requestId]?.buffer?.size ?: 0 }
 
-    /** The ack this hub sends to a v2 registrant that declared [capabilities]. */
-    fun registerAck(capabilities: List<String> = emptyList()): RegisterAck = RegisterAck.newBuilder()
-        .addAllCapabilities(
-            listOfNotNull(
-                FLOW_CONTROL.takeIf { flowControl && it in capabilities },
-                INSTANCE_STATUS.takeIf { instanceStatus && it in capabilities },
-                SCATTER_GATHER.takeIf { scatterGather && it in capabilities },
-                STREAMING.takeIf { streaming && it in capabilities },
-                SUBSCRIPTION.takeIf { subscription && it in capabilities },
-                CREDENTIALS_REFRESH.takeIf { credentialsRefresh && it in capabilities },
-                PROCESSORS.takeIf { processors && it in capabilities },
-                PROCESSOR_CONTROL.takeIf { processorControl && it in capabilities },
-            ),
-        )
+    /** The ack this hub sends to a v2 registrant. */
+    fun registerAck(): RegisterAck = RegisterAck.newBuilder()
         .setHubId(hubId)
-        .setProtocolVersion(2)
         .setHeartbeatIntervalMs(heartbeatInterval.toMillis().toInt())
         .setHeartbeatTimeoutMs(heartbeatTimeout.toMillis().toInt())
         .setDefaultTimeoutMs(replyTimeout.toMillis().toInt())
@@ -725,16 +712,16 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
                 emptyList()
             }
             if (first) { // like the real hub: the first Register of a stream fixes flow control
-                session.flowControl = !legacy && flowControl && reg.protocolVersion >= 2 && FLOW_CONTROL in reg.capabilitiesList
+                session.flowControl = !legacy && flowControl
                 session.permits = if (session.flowControl && reg.initialPermits > 0) reg.initialPermits else null
                 session.cap = reg.initialPermits
-                session.instanceStatus = !legacy && instanceStatus && reg.protocolVersion >= 2 && INSTANCE_STATUS in reg.capabilitiesList
-                session.scatterGather = !legacy && scatterGather && reg.protocolVersion >= 2 && SCATTER_GATHER in reg.capabilitiesList
-                session.streaming = !legacy && streaming && reg.protocolVersion >= 2 && STREAMING in reg.capabilitiesList
-                session.subscription = !legacy && subscription && reg.protocolVersion >= 2 && SUBSCRIPTION in reg.capabilitiesList
-                session.credentialsRefresh = !legacy && credentialsRefresh && reg.protocolVersion >= 2 && CREDENTIALS_REFRESH in reg.capabilitiesList
-                session.processorControl = !legacy && processorControl && reg.protocolVersion >= 2 && PROCESSOR_CONTROL in reg.capabilitiesList
-                session.protocolVersion = if (legacy) 0 else reg.protocolVersion
+                session.instanceStatus = !legacy && instanceStatus
+                session.scatterGather = !legacy && scatterGather
+                session.streaming = !legacy && streaming
+                session.subscription = !legacy && subscription
+                session.credentialsRefresh = !legacy && credentialsRefresh
+                session.processorControl = !legacy && processorControl
+                session.protocolVersion = if (legacy) 0 else 2
             }
             session.serviceName = reg.serviceName
             session.instanceId = reg.instanceId
@@ -753,9 +740,9 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
         }
         registrations.merge(reg.instanceId, 1, Int::plus)
         lastRegisters[reg.instanceId] = reg
-        if (!legacy && reg.protocolVersion >= 2) {
+        if (!legacy) {
             // Written before this stream's next message is handled, so it precedes the echo of the following heartbeat.
-            session.ack = ServerMessage.newBuilder().setRegisterAck(registerAck(reg.capabilitiesList)).build()
+            session.ack = ServerMessage.newBuilder().setRegisterAck(registerAck()).build()
             acks.merge(reg.instanceId, 1, Int::plus)
         }
     }
@@ -906,7 +893,7 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
         if (!maySend(sender, req)) return
         if (req.mode != RequestMode.UNARY) {
             // A v1 session cannot know UNSUPPORTED: it gets INVALID_REQUEST, like from the real hub.
-            val refusal = if (sender.protocolVersion >= 2) ErrorCode.UNSUPPORTED else ErrorCode.INVALID_REQUEST
+            val refusal = ErrorCode.INVALID_REQUEST
             when {
                 req.mode == RequestMode.SCATTER_GATHER && !sender.scatterGather ->
                     sender.fail(req.id, refusal, "scatter-gather needs the $SCATTER_GATHER capability")
@@ -1080,7 +1067,7 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
             val capable = owners.filter { it.streaming }
             if (capable.isEmpty()) {
                 val services = owners.map { it.serviceName }.distinct().sorted().joinToString(", ")
-                sender.fail(req.id, ErrorCode.UNSUPPORTED, "no live instance of $services serving ${req.type} negotiated the \"$STREAMING\" capability")
+                sender.fail(req.id, ErrorCode.INVALID_REQUEST, "no live instance of $services serving ${req.type} negotiated the \"$STREAMING\" capability")
                 return
             }
             val targetId = "${req.id}#1"
@@ -1354,7 +1341,7 @@ class InProcessHub(val name: String = "kraken-hub-" + UUID.randomUUID()) : AutoC
             val capable = owners.filter { it.subscription }
             if (capable.isEmpty()) {
                 val services = owners.map { it.serviceName }.distinct().sorted().joinToString(", ")
-                sender.fail(req.id, ErrorCode.UNSUPPORTED, "no live instance of $services serving ${req.type} negotiated the \"$SUBSCRIPTION\" capability")
+                sender.fail(req.id, ErrorCode.INVALID_REQUEST, "no live instance of $services serving ${req.type} negotiated the \"$SUBSCRIPTION\" capability")
                 return
             }
             val initialId = "${req.id}#0"

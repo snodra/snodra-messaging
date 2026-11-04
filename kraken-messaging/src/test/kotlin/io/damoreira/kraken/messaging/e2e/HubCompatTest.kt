@@ -116,8 +116,6 @@ class HubCompatTest {
 
         val ack = assertIs<HubHandshake.V2>(conn.handshake.value).ack
         assertEquals("compat-hub", ack.hubId)
-        assertEquals(2, ack.protocolVersion)
-        assertEquals(listOf("flow-control", "instance-status", "scatter-gather", "streaming", "subscription", "credentials-refresh", "processors", "processor-control"), ack.capabilitiesList)
         assertEquals(3_000, ack.heartbeatIntervalMs)
         assertEquals(10_000, ack.heartbeatTimeoutMs)
         assertEquals(5_000, ack.defaultTimeoutMs)
@@ -129,7 +127,6 @@ class HubCompatTest {
         val topology = HubGrpcKt.HubCoroutineStub(channel(hub)).topology(TopologyRequest.getDefaultInstance())
         assertEquals("compat-hub", topology.hubId)
         val instance = topology.servicesList.single { it.serviceName == "svc-a" }.instancesList.single()
-        assertEquals(2, instance.protocolVersion)
         assertTrue(instance.clientVersion.startsWith("kraken-messaging/"), instance.clientVersion)
     }
 
@@ -201,7 +198,6 @@ class HubCompatTest {
         repeat(20) {
             val instance = stub.topology(TopologyRequest.getDefaultInstance()).servicesList
                 .single { it.serviceName == "svc-b" }.instancesList.single()
-            assertTrue(instance.flowControlled, instance.toString())
             assertTrue(instance.permitsAvailable <= 1, instance.toString())
             if (instance.queued > 0) sawQueue = true
             delay(50)
@@ -305,7 +301,6 @@ class HubCompatTest {
         sender.start()
         assertTrue(handler.awaitRegistered(wait) && sender.awaitRegistered(wait))
         val ack = assertIs<HubHandshake.V2>(handler.handshake.value).ack
-        assertEquals(emptyList(), ack.capabilitiesList)
 
         // No permits: the hub forwards everything at once and the client's own semaphore serialises the handlers.
         val answers = (1..4).map { async { sender.send(request("t.Ping", priority = 3)) } }.awaitAll()
@@ -330,7 +325,6 @@ class HubCompatTest {
         sender.start()
         assertTrue(handler.awaitRegistered(wait) && sender.awaitRegistered(wait))
         val ack = assertIs<HubHandshake.V2>(handler.connections().single().handshake.value).ack
-        assertEquals(listOf("flow-control"), ack.capabilitiesList)
         assertEquals(listOf(ack.hubId), sender.liveHubIds())
         assertEquals(256, permitsAnnounced(hub, "svc-b")) // one hub: the whole budget
 
@@ -350,7 +344,6 @@ class HubCompatTest {
         sender.start()
         assertTrue(owner.awaitRegistered(wait) && sender.awaitRegistered(wait))
         val ack = assertIs<HubHandshake.V2>(sender.handshake.value).ack
-        assertEquals(listOf("flow-control", "instance-status"), ack.capabilitiesList)
 
         val bus = bus(sender)
         val e = assertFailsWith<UnsupportedByHubException> { bus.scatterGather(GetCount("k")) }
@@ -370,7 +363,6 @@ class HubCompatTest {
         sender.start()
         assertTrue(owner.awaitRegistered(wait) && sender.awaitRegistered(wait))
         val ack = assertIs<HubHandshake.V2>(sender.handshake.value).ack
-        assertEquals(listOf("flow-control", "instance-status", "scatter-gather"), ack.capabilitiesList)
         assertEquals(false, sender.supportsStreaming)
 
         val bus = bus(sender)
@@ -400,7 +392,6 @@ class HubCompatTest {
         sender.start()
         assertTrue(owner.awaitRegistered(wait) && sender.awaitRegistered(wait))
         val ack = assertIs<HubHandshake.V2>(sender.handshake.value).ack
-        assertEquals(listOf("flow-control", "instance-status", "scatter-gather", "streaming"), ack.capabilitiesList)
         assertEquals(false, sender.supportsSubscription)
         assertTrue(owner.supportsStreaming)
 

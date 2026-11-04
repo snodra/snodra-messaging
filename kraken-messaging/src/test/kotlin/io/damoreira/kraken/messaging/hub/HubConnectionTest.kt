@@ -107,11 +107,9 @@ class HubConnectionTest {
         conn.start()
         assertTrue(conn.awaitRegistered(wait))
         val reg = hub.lastRegisterFrom("a")!!
-        assertEquals(listOf("flow-control", "instance-status", "scatter-gather", "streaming", "subscription", "credentials-refresh", "processors", "processor-control"), reg.capabilitiesList)
         assertEquals(4, reg.initialPermits)
         assertEquals(150, reg.loadFactor)
         assertEquals(mapOf("zone" to "eu-1"), reg.tagsMap)
-        assertEquals(listOf("flow-control", "instance-status", "scatter-gather", "streaming", "subscription", "credentials-refresh", "processors", "processor-control"), assertIs<HubHandshake.V2>(conn.handshake.value).ack.capabilitiesList)
     }
 
     @Test fun `fewer than one handler or a negative load factor is rejected`() {
@@ -204,7 +202,6 @@ class HubConnectionTest {
         val sender = connection("a")
         sender.start()
         assertTrue(handler.awaitRegistered(wait) && sender.awaitRegistered(wait))
-        assertEquals(emptyList(), assertIs<HubHandshake.V2>(handler.handshake.value).ack.capabilitiesList)
         repeat(5) { sender.send(request()) }
         delay(300)
         assertEquals(0, hub.permitMessagesFrom("b"))
@@ -457,13 +454,10 @@ class HubConnectionTest {
         assertTrue(conn.awaitRegistered(wait))
 
         val reg = assertNotNull(hub.lastRegisterFrom("a"))
-        assertEquals(2, reg.protocolVersion)
-        assertEquals(listOf("flow-control", "instance-status", "scatter-gather", "streaming", "subscription", "credentials-refresh", "processors", "processor-control"), reg.capabilitiesList)
         assertTrue(reg.clientVersion.startsWith("kraken-messaging/"), reg.clientVersion)
         assertFalse(reg.clientVersion.endsWith("/unknown"), reg.clientVersion)
         val handshake = assertIs<HubHandshake.V2>(conn.handshake.value)
         assertEquals(hub.hubId, handshake.ack.hubId)
-        assertEquals(2, handshake.ack.protocolVersion)
         assertEquals(3_000, handshake.ack.heartbeatIntervalMs)
         assertEquals(10_000, handshake.ack.heartbeatTimeoutMs)
         assertEquals("default", handshake.ack.context)
@@ -696,7 +690,6 @@ class HubConnectionTest {
         val sender = connection("s")
         sender.start()
         assertTrue(handler.awaitRegistered(wait) && sender.awaitRegistered(wait))
-        assertTrue("processor-control" in assertIs<HubHandshake.V2>(handler.handshake.value).ack.capabilitiesList)
 
         val first = async(Dispatchers.Default) { hub.control("h", pause("c-1"), Duration.ofSeconds(30)) }
         await atMost Duration.ofSeconds(5) until { "c-1" in seen }
@@ -717,7 +710,6 @@ class HubConnectionTest {
         val handler = connection("h", control = { request, reply -> seen += request.controlId; reply(ok(request)) })
         handler.start()
         assertTrue(handler.awaitRegistered(wait))
-        assertTrue("processor-control" in hub.lastRegisterFrom("h")!!.capabilitiesList, "declared all the same")
         hub.inject("h", ServerMessage.newBuilder().setControl(pause("c-1")).build())
         delay(500)
         assertEquals(emptyList(), seen.toList())

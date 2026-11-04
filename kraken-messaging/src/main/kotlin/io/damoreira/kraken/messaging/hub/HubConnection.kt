@@ -842,7 +842,7 @@ class HubConnection(
     }
 
     private fun HubHandshake?.supports(capability: String): Boolean =
-        this is HubHandshake.V2 && capability in ack.capabilitiesList
+        this is HubHandshake.V2 && capability in HubProtocol.CAPABILITIES
 
     /** The request as written to [handshake]'s stream, and the local guard in milliseconds. */
     private fun prepare(request: Request, handshake: HubHandshake): Pair<Request, Long> = when (handshake) {
@@ -1103,8 +1103,6 @@ class HubConnection(
         .addAllCommandTypes(commandTypes.sorted())
         .addAllQueryTypes(queryTypes.sorted())
         .addAllSharedQueryTypes(sharedQueryTypes.sorted())
-        .setProtocolVersion(HubProtocol.PROTOCOL_VERSION)
-        .addAllCapabilities(HubProtocol.CAPABILITIES)
         .setClientVersion(HubProtocol.CLIENT_VERSION)
         .setLoadFactor(loadFactor)
         .putAllTags(tags)
@@ -1129,12 +1127,11 @@ class HubConnection(
      */
     fun reportStatus(connectedHubIds: List<String>, handlersInFlight: Int, processors: List<ProcessorStatus> = emptyList()): Boolean {
         val stream = current ?: return false
-        val ack = (stream.handshake as? HubHandshake.V2)?.ack ?: return false
-        if (HubProtocol.INSTANCE_STATUS !in ack.capabilitiesList) return false
+        if (stream.handshake !is HubHandshake.V2) return false
         val status = InstanceStatus.newBuilder()
             .addAllConnectedHubIds(connectedHubIds)
             .setHandlersInFlight(handlersInFlight.coerceAtLeast(0))
-            .apply { if (HubProtocol.PROCESSORS in ack.capabilitiesList) addAllProcessors(processors) }
+            .addAllProcessors(processors)
         val message = status.build()
         return stream.out.trySend(ClientMessage.newBuilder().setStatus(message).build()).isSuccess
             .also { if (it) { statusReports.incrementAndGet(); lastStatus = message } }
@@ -1240,7 +1237,7 @@ class HubConnection(
 
     private fun completeHandshake(stream: Stream, handshake: HubHandshake) {
         if (handshake is HubHandshake.V2) applyAck(stream, handshake.ack)
-        val flowControl = handshake is HubHandshake.V2 && HubProtocol.FLOW_CONTROL in handshake.ack.capabilitiesList
+        val flowControl = handshake is HubHandshake.V2
         // Grants of requests completed before the handshake (requests may arrive before the ack) are decided or dropped now.
         apply(stream, stream.permits.handshake(flowControl))
         stream.handshake = handshake
@@ -1251,7 +1248,7 @@ class HubConnection(
             when (handshake) {
                 is HubHandshake.V2 -> log.info(
                     "Connected to hub {} as {} ({}): protocol v{}, heartbeat every {} ms",
-                    handshake.ack.hubId, serviceName, instanceId, handshake.ack.protocolVersion, stream.heartbeatIntervalMs,
+                    handshake.ack.hubId, serviceName, instanceId, HubProtocol.PROTOCOL_VERSION, stream.heartbeatIntervalMs,
                 )
                 HubHandshake.Legacy -> log.info(
                     "Connected to a legacy (protocol v1) hub as {} ({}): heartbeat every {} ms", serviceName, instanceId, stream.heartbeatIntervalMs,
@@ -1274,8 +1271,7 @@ class HubConnection(
      */
     private fun refreshCredentials(stream: Stream) {
         if (current !== stream || settings.clientCertificate != null) return
-        val ack = (stream.handshake as? HubHandshake.V2)?.ack ?: return
-        if (HubProtocol.CREDENTIALS_REFRESH !in ack.capabilitiesList) return
+        if (stream.handshake !is HubHandshake.V2) return
         val provider = settings.tokenProvider
         val wanted = (if (provider != null) provider.current.value?.let { Credentials.newBuilder().setJwt(it.value).build() } else staticCredentials()) ?: return
         val changed = synchronized(stream) { (wanted != stream.credentials).also { if (it) stream.credentials = wanted } }

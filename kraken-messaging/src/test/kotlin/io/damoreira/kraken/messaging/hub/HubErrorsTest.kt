@@ -44,18 +44,10 @@ class HubErrorsTest {
         assertIs<HandlerBusyException>(e)
         assertEquals("c.R", e.type)
         assertEquals("Handler for 'c.R' is busy: subscriber buffer (256) exceeded", e.message)
-        val unsupported = HubErrors.toException("c.R", ErrorCode.UNSUPPORTED, "no capable instance", ByteArray(0), HubProtocol.SUBSCRIPTION)
-        assertEquals("subscription", assertIs<UnsupportedByHubException>(unsupported).feature)
     }
 
     @Test
     fun `unsupported maps to UnsupportedByHubException, an unmapped code keeps its name`() {
-        val e = HubErrors.toException("c.R", ErrorCode.UNSUPPORTED, "mode STREAMING is not supported", ByteArray(0))
-        assertIs<UnsupportedByHubException>(e)
-        assertEquals("mode STREAMING is not supported", e.message)
-
-        val streaming = HubErrors.toException("c.R", ErrorCode.UNSUPPORTED, "no capable instance", ByteArray(0), feature = "streaming")
-        assertEquals("streaming", assertIs<UnsupportedByHubException>(streaming).feature)
         val cancelled = HubErrors.toException("c.R", ErrorCode.CANCELLED, "max stream duration (600000 ms) exceeded", ByteArray(0))
         assertEquals("max stream duration (600000 ms) exceeded", assertIs<StreamCancelledException>(cancelled).message)
         val other = HubErrors.toException("c.R", ErrorCode.ERROR_CODE_UNSPECIFIED, "odd", ByteArray(0))

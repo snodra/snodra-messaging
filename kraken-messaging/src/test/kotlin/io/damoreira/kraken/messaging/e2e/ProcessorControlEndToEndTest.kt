@@ -131,7 +131,6 @@ class ProcessorControlEndToEndTest {
 
     @Test fun `pause, resume, reset and dead letters through the P6b hub's HTTP API`() {
         val connection = ctx.getBean(HubConnections::class.java).connections().single()
-        assertTrue("processor-control" in (connection.handshake.value as HubHandshake.V2).ack.capabilitiesList)
         val catalog = ctx.getBean(Catalog::class.java)
         val notifier = ctx.getBean(Notifier::class.java)
         val ledger = ctx.getBean(Ledger::class.java)

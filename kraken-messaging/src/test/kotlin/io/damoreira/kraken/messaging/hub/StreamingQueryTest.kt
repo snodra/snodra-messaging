@@ -291,7 +291,6 @@ class StreamingQueryTest {
         conn.register(emptySet(), setOf("test.ExportRows"))
         conn.start()
         assertTrue(conn.awaitRegistered(wait))
-        assertEquals(listOf("flow-control", "instance-status", "scatter-gather", "streaming", "subscription", "credentials-refresh", "processors", "processor-control"), hub.lastRegisterFrom("a")!!.capabilitiesList)
         assertTrue(conn.supportsStreaming)
         hub.streaming = false
         val old = connection("b")
@@ -745,7 +744,6 @@ class StreamingQueryTest {
             ErrorCode.PERMISSION_DENIED to { assertEquals("PERMISSION_DENIED says", assertIs<AccessDeniedException>(it).message) },
             ErrorCode.RESOURCE_EXHAUSTED to { assertEquals("test.ExportRows", assertIs<HandlerBusyException>(it).type) },
             ErrorCode.CANCELLED to { assertEquals("CANCELLED says", assertIs<StreamCancelledException>(it).message) },
-            ErrorCode.UNSUPPORTED to { assertEquals("streaming", assertIs<UnsupportedByHubException>(it).feature) },
         )
         var previous: String? = null
         for ((code, check) in expectations) {
@@ -863,7 +861,7 @@ class StreamingQueryTest {
             }
             send(
                 ClientMessage.newBuilder().setRegister(
-                    Register.newBuilder().setServiceName("svc-raw").setInstanceId(instanceId).setProtocolVersion(2).addCapabilities("streaming"),
+                    Register.newBuilder().setServiceName("svc-raw").setInstanceId(instanceId),
                 ).build(),
             )
         }
