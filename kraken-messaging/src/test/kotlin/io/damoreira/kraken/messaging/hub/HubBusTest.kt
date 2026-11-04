@@ -333,7 +333,7 @@ class HubBusTest {
         assertTrue(headers["correlationId"]!!.isNotBlank())
     }
 
-    @Test fun `unset request-timeout sends timeout 0 to a v2 hub and a set one is sent as is`() = runBlocking {
+    @Test fun `unset request-timeout sends timeout 0 to the hub and a set one is sent as is`() = runBlocking {
         val configured = connectedBus(commandTypes = setOf("test.Ping"))
         withTimeout(5_000) { configured.send(Ping("x")) }
         assertEquals(2_000, hub.lastRequest()!!.timeoutMs)

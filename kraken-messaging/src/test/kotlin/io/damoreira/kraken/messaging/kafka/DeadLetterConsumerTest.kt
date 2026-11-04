@@ -245,7 +245,7 @@ class DeadLetterConsumerTest {
         assertEquals(listOf("t-1", "t-1", "t-2"), handlers.seen.toList(), "not sequenced")
     }
 
-    @Test fun `mode log logs and skips as before, nothing is parked`() {
+    @Test fun `mode log logs and skips, nothing is parked`() {
         handlers.failAlways.set("g-1")
         start(mode = DeadLetterMode.LOG, maxAttempts = 2)
         support.send(topic, "g-1", key = "k1")
