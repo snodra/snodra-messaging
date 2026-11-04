@@ -184,7 +184,7 @@ class HubSecurityEndToEndTest {
         assertTrue(sender.connected.value)
     }
 
-    @Test fun `permissive lets a service without a token register and send, which is the rollout mode`() = runBlocking {
+    @Test fun `permissive lets a service without a token register and send, refusing nothing`() = runBlocking {
         val hub = hub(mode = "permissive")
         val owner = startOwner(hub, null) // with its token: fine either way
         val anonymous = connection(hub, "someone-else", null, null).also { it.start() }

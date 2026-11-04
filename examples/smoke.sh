@@ -1509,7 +1509,7 @@ jwt_steps() {
   registered_after=$(log_count "$c" 'registered with the hub')
   [ "$registered_before" = "$registered_after" ] \
     || fail "service-c logged $((registered_after - registered_before)) new 'registered with the hub' line(s) while its token was renewed"
-  echo "   service-c's log has no new 'registered with the hub' line ($registered_after, as before)"
+  echo "   service-c's log has no new 'registered with the hub' line (still $registered_after after the renewal)"
   expired=$(( $(log_count "$h1" 'credentials expired' "$jwt_started") + $(log_count "$h2" 'credentials expired' "$jwt_started") ))
   [ "$expired" -eq 0 ] || fail "the hubs logged 'credentials expired' $expired time(s) since $jwt_started"
   echo "   neither hub logged 'credentials expired' since $jwt_started"
