@@ -115,7 +115,7 @@ curl -s localhost:8091/subscribe/open                    # how many subscription
 # {"instances":[{"service":"service-b","instance":"<container id>","open":0},{"service":"service-c",...,"open":0}],"failed":0}
 
 # who is registered for what (service-c owns examples.Shout and examples.Reverse; examples.Inventory and examples.Rows are shared)
-curl -s localhost:7001/topology
+curl -s localhost:7001/api/v1/topology
 curl -s localhost:7001/api/v1/types   # examples.Inventory, examples.Rows, examples.WatchCounter: "shared":true, "owners":["service-b","service-c"]
 ```
 
@@ -161,8 +161,8 @@ waits for both events, asserts the count grew by two, asserts both services are 
 service-c, shouts and reverses a per-run unique text and waits for both text events to reach A). It asserts only
 what A exposes over HTTP: B's and C's log lines and the order in which the text events arrive are not asserted;
 read them in the logs. Last, it freezes service-b with `docker pause` during a `CountGreetings` call and expects
-`503 HandlerDisconnectedException` after about 10 s: the hub evicts a v2 session after 10 s without heartbeats (it
-took 30 s before protocol v2), and the sandbox hub gives `examples.CountGreetings` a 20 s per-type timeout
+`503 HandlerDisconnectedException` after about 10 s: the hub evicts a session after 10 s without heartbeats, and the
+sandbox hub gives `examples.CountGreetings` a 20 s per-type timeout
 (`KRAKEN_HUB_TIMEOUT_OVERRIDES` in `compose.local.yaml`) so the call outlives the eviction instead of ending in a 5 s
 `TIMEOUT`. It then waits for service-b to answer again. Finally it checks flow control (P1). The sandbox runs every
 service with the libraries' default concurrency; the one-permit demo is the opt-in override
@@ -172,14 +172,14 @@ service with the libraries' default concurrency; the one-permit demo is the opt-
 sends 20 parallel counts: all must answer 200, one at a time (at least 4 s; about 4.5 s, since a one-permit instance
 gets each permit back at once), with the topology showing requests queued for service-b while they wait. Step 13
 sends 10 parallel shouts from Kotlin service-a to Rust service-c: all must answer 200. After each burst the topology
-must show the instance `flowControlled` with its permit back and nothing queued. Step 14 recreates both with the
+must show the instance with its permit back and nothing queued. Step 14 recreates both with the
 default concurrency again (also when a step failed). `SERVICE_B_MAX_CONCURRENT_HANDLERS`,
 `SERVICE_C_MAX_CONCURRENT_HANDLERS` and `EXAMPLES_COUNT_DELAY` tune the demo (the smoke expects its defaults);
 `INFRA_DIR` points the smoke at `kraken/infra` when the checkouts are not siblings. With two hubs each gets
 `ceil(1 / 2) = 1` permit of the one-permit instances, but an instance still runs one handler at a time, so step 12
 stays serialised (step 5b looks for its graph edge on either hub, since requests alternate between them).
 
-The two-hub steps (P3, ADR 0016) come last: step 15 waits up to 15 s until both hubs' `/topology` list the same
+The two-hub steps (P3, ADR 0016) come last: step 15 waits up to 15 s until both hubs' `/api/v1/topology` list the same
 service-a, service-b and service-c instances, each reporting both hub ids in `connectedHubIds`; step 16 checks that
 hub-2's `/api/v1/version` lists both dashboards as peers; step 17 runs a loop of calls through service-a (alternating
 `CountGreetings` to service-b and `Reverse` to service-c), stops `kraken-hub-2` after 2 s and keeps calling for 4 s:
@@ -197,7 +197,7 @@ expects both services among the answerers (one round-robin pool over both owners
 The streaming-query steps (P4b, ADR 0017) come last: step 19 calls `GET /stream/rows?count=1000&credit=8` (up to
 twelve times, until both owners streamed once) and expects 1000 rows numbered 1..1000 in order, all from one
 service and instance; step 19b adds `take=50` (service-a cancels the collection after 50 rows, which cancels the
-handler through the hub) and expects 50 rows and both hubs' `/topology` in-flight counts (`totals.inFlight` and every
+handler through the hub) and expects 50 rows and both hubs' `/api/v1/topology` in-flight counts (`totals.inFlight` and every
 instance's `inFlightAsHandler` + `inFlightAsSender`) back at 0 within 10 s; step 19c calls
 `GET /stream/rows?count=10&failAt=3` and expects `502 {"error":"RemoteHandlerException","message":"...Rows failed at
 row 3"}` (the two rows streamed before the failure are not reported: the endpoint returns the error only).
@@ -211,7 +211,7 @@ subscription, bumps the counter twice through service-b (`POST $B/counters/<name
 twice through service-c (`POST /counters/<name>/increment` on service-a) and expects the initial result (value 0 to 2: an increment may land on the answering service before it reads its counter, and is then also delivered as an update) and four
 updates, `1,2` from each service in order; step 20b checks that no subscription is left behind once the request returned,
 **black-box** (the hub has no metrics endpoint): both owners' open-subscription counts are back to what they were before
-step 20 (the proof that the hub's `Cancel` reached every target; the hubs' `/topology` in-flight counts, 0, are only a
+step 20 (the proof that the hub's `Cancel` reached every target; the hubs' `/api/v1/topology` in-flight counts, 0, are only a
 secondary sanity check, as the hub does not count a subscription as in flight after its initial part), and a follow-up subscription (initial value 2 from either owner)
 is cancelled and leaves the counts at the baseline again; step 20c subscribes to a name nobody incremented and expects the
 initial result with value 0. `SKIP_SUBSCRIBE=1` skips them, `ONLY_SUBSCRIBE=1` runs only them.
@@ -284,7 +284,7 @@ TLS-only, so by hand:
 
 ```bash
 curl --cacert ../kraken/infra/.secrets/ca.pem -H "Authorization: Bearer $(cat ../kraken/infra/.secrets/dashboard.token)" \
-  https://localhost:7001/topology
+  https://localhost:7001/api/v1/topology
 curl -s localhost:8091/forbidden-send      # 403 {"error":"AccessDeniedException","message":"service service-a is not allowed to send type examples.ForbiddenProbe"}
 ```
 
@@ -298,10 +298,10 @@ existing step unchanged (the flow and HA steps recreate containers with the over
 - **Step 21**: a throwaway container `kraken-smoke-intruder` from the service-a image (removed afterwards, also on failure), with
   the Kafka consumer and the outbox off. First with a wrong token under the name `smoke-intruder`: both hubs log
   `register refused: unknown token` at least twice, the client logs `Hub rejected the registration of smoke-intruder ...
-  UNAUTHENTICATED unknown token` once per hub (the registration rejection: ERROR once, DEBUG after) and `/topology` of both hubs never
+  UNAUTHENTICATED unknown token` once per hub (the registration rejection: ERROR once, DEBUG after) and `/api/v1/topology` of both hubs never
   lists it. Then with the `smoke-intruder` token claiming `service-a`: `PERMISSION_DENIED` (`token ... is not allowed to register as
   service service-a`), and the real service-a keeps answering. Last `GET /forbidden-send` must answer 403 `AccessDeniedException`.
-- **Step 21b**: `/topology` and `/api/v1/types` on both hubs answer 401 without the dashboard token (and with a wrong one) and 200 with
+- **Step 21b**: `/api/v1/topology` and `/api/v1/types` on both hubs answer 401 without the dashboard token (and with a wrong one) and 200 with
   it, and plain-text HTTP to the TLS port gets no answer.
 
 `SECRETS_DIR` (default `KRAKEN_SECRETS_DIR`, else `INFRA_DIR/.secrets`) names the secrets directory; `HUB_CONTAINER`, `HUB2_CONTAINER` and
@@ -314,7 +314,7 @@ The secure sandbox with service-b (Kotlin) and service-c (Rust) authenticating b
 `kraken/infra/compose.jwt.yaml` on top of the secure one, with a throwaway Keycloak (`hub-idp`, container `kraken-hub-idp`, its own
 realm `kraken-hub-dev`, tokens that live 30 s). service-a keeps its static token, so both credential kinds run side by side. The
 identity provider, the realm and the client secrets are dev only; the secrets come from `dev-hub-pki.sh` into the git-ignored
-`kraken/infra/.secrets/` (rerun it with `--force` once if that directory predates P5b).
+`kraken/infra/.secrets/`.
 
 ```bash
 # from kraken/infra
@@ -339,7 +339,7 @@ Their static token variables and mounts are removed, because a static token toge
 `SECURE=1 JWT=1 bash examples/smoke.sh` (JWT needs SECURE) runs every step above unchanged (the flow steps recreate service-b and
 service-c with the JWT overlay as well) and adds, last:
 
-- **Step 22**: on both hubs' `/topology`, service-b and service-c have `authKind` `jwt` and an `expiresAt` (epoch milliseconds) and
+- **Step 22**: on both hubs' `/api/v1/topology`, service-b and service-c have `authKind` `jwt` and an `expiresAt` (epoch milliseconds) and
   service-a has `token` and none. (The hub's `kraken_hub_jwt_validations_total` goes out over OTLP only, which the examples closure
   runs no collector for; `authKind` `jwt` is the hub saying it validated the token.)
 - **Step 22b**: within ~45 s `expiresAt` advances on both hubs for both services (a new 30 s token, renewed at about 80 % of its life)
@@ -355,7 +355,7 @@ The secure sandbox with service-a (Kotlin) and service-c (Rust) authenticating w
 overlay `kraken/infra/compose.mtls.yaml` on top of the secure one. service-b keeps its static token (the hubs run
 `KRAKEN_HUB_TLS_CLIENT_AUTH=optional`), so both kinds run side by side. It is not combined with the JWT overlay. The client CA, the
 certificates (EC P-256, 30 days, exactly one URI SAN `kraken://service/<name>`) and their keys come from `dev-hub-pki.sh` into the
-git-ignored `kraken/infra/.secrets/` (rerun it with `--force` once if that directory predates P5c).
+git-ignored `kraken/infra/.secrets/`.
 
 ```bash
 # from kraken/infra
@@ -378,7 +378,7 @@ single-file bind mount would not show. The ACL has a `[[service]]` table for ser
 `SECURE=1 MTLS=1 bash examples/smoke.sh` (MTLS needs SECURE and excludes JWT) runs every step above unchanged (the flow steps recreate
 service-b and service-c with the mTLS overlay as well) and adds, last:
 
-- **Step 23**: on both hubs' `/topology`, service-a and service-c have `authKind` `certificate`, a `certFingerprint` equal to the
+- **Step 23**: on both hubs' `/api/v1/topology`, service-a and service-c have `authKind` `certificate`, a `certFingerprint` equal to the
   first 8 hex characters of the SHA-256 of the certificate in their directory, and an `expiresAt` (the certificate's `notAfter`);
   service-b has `token` and no fingerprint.
 - **Step 23b**: `dev-hub-pki.sh --rotate service-c` replaces service-c's certificate and key on disk while a steady trickle of calls goes
@@ -417,7 +417,6 @@ service-b and service-c with the mTLS overlay as well) and adds, last:
 | owner disconnected mid-request | 503 | `{"error":"HandlerDisconnectedException", ...}` |
 | no reply within the request timeout | 504 | `{"error":"MessageTimeoutException", ...}` |
 | the hub's access control refused the request: the type is outside the token's `send` patterns (`GET /forbidden-send` does it on purpose) | 403 | `{"error":"AccessDeniedException","message":"..."}` |
-| the hub does not offer scatter-gather, streaming or subscriptions (a P3 / P4a / P4b or older hub) | 501 | `{"error":"UnsupportedByHubException", ...}` |
 | the handler's flow failed (`/stream/rows?failAt=n`) | 502 | `{"error":"RemoteHandlerException","message":"...Rows failed at row n"}` (the rows before it are not reported) |
 | the hub ended a stream or a subscription for outliving its maximum duration | 502 | `{"error":"StreamCancelledException", ...}` |
 | an owner at its subscription limit, or the subscriber's buffer overflowed | 503 | `{"error":"HandlerBusyException", ...}` |
@@ -486,7 +485,7 @@ service-b (Kotlin) and service-c (Rust) each run a **named event processor**, `a
 "Event processors and dead letters"), next to their `default` one: service-b with `@ProcessingGroup("audit")` on `AuditHandler`
 (`service-b/.../Audit.kt`), service-c with `builder.event_in::<ShoutAudit, _, _>("audit", ...)` (`service-c/src/audit.rs`). The
 processor is its own Kafka consumer on `kraken.events`, consumer group `service-b.audit` / `service-c.audit` (the `default`
-processors keep `service-b` / `service-c`), idempotency markers `processor:audit:<eventId>` and its own dead letters. It handles
+processors use `service-b.default` / `service-c.default`), idempotency markers `processor:audit:<eventId>` and its own dead letters. It handles
 an audit note (service-b's `examples.AuditNote`, service-c's `examples.ShoutAudit`: `{key, text, at}`; two types, so each service
 audits only its own) and records what it handled, in memory.
 

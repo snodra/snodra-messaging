@@ -31,7 +31,6 @@ Repo conventions: `../kraken/docs/04-repositories.md`.
 - [Modules](#modules)
 - [Requirements](#requirements)
 - [Build, test, publish](#build-test-publish)
-- [Upgrading](#upgrading)
 - [Using the starter](#using-the-starter)
 - [Semantics worth knowing](#semantics-worth-knowing)
 - [Multiple hubs](#multiple-hubs)
@@ -90,131 +89,6 @@ Locally, set `KRAKEN_GITLAB_MAVEN_URL` and `KRAKEN_GITLAB_TOKEN` and run `./grad
 
 The published POM and Gradle module metadata carry resolved versions for every dependency (Gradle `versionMapping`), and the
 POM also imports the Spring Boot BOM, so consumers do not need to manage them. Builder call.
-
-## Upgrading
-
-**To processor control (P6b).** Nothing changes until someone pauses or resets a processor through a P6b hub (or the
-`ProcessorControl` bean). New: the hub capability `processor-control` (declared always; a hub before P6b never sends a
-`ControlRequest`), the collection `processor_control` (one document per processor, created on the first pause or reset), the bean
-`ProcessorControl` next to `EventProcessors` (its consumers now start as their documents say: paused, or not at all while a reset
-holds the lock), `@ResetHandler`, `@DisallowReplay`, `ResetContext`. Stage-1 markers written by a Kafka consumer (and by a
-dead-letter retry) now also carry `processor`, `topic`, `partition` and `offset`; markers written before the upgrade have none,
-so only a reset to `earliest` replays their records (see [Processor control](#processor-control)). `EventConsumer.topic` is
-public; `LocalEventDispatcher.dispatchIn` and `runStage1` take an optional position (and `dispatchIn` a replay flag),
-`HandlerInvoker.invokeEvent` a replay flag, `EventProcessors` an optional `ProcessorControl`, `HubConnection` and `HubConnections`
-an optional `ControlInbound`.
-
-**To event processors and dead letters (P6a).** The unnamed processor keeps its consumer group and its markers, so an upgrade
-re-handles nothing. **Behaviour change:** a record that fails every attempt is now parked in `dead_letters` (mode `collection`, the
-default) instead of being logged and skipped, and **the later records of its Kafka key wait behind it** (parked `SEQUENCED`) until it
-is retried or discarded through the `DeadLetters` bean, or expires (`kafka.dead-letter.retention`, 30 days); a record without a `type`
-header or with a value that is not a JSON object is parked `INVALID` (it blocks nothing). Set `kraken.messaging.kafka.dead-letter.mode:
-log` for the old behaviour. A record is no longer acknowledged before its letter exists: with MongoDB down a failing record waits
-(it was skipped before). The `eventConsumer` bean is replaced by `eventProcessors` (`EventProcessors`, one `EventConsumer` per
-processor); a service with no `@EventHandler` and no saga starts no consumer. New: `@ProcessingGroup`, `DeadLetters`, the keys
-`kafka.group-id`, `kafka.dead-letter.mode` and `kafka.dead-letter.retention`, the collection `dead_letters` (created on first start
-in mode `collection`), the hub capability `processors` (status sent only to a P6a hub). External source names `processor`, `saga`,
-`ingress` and `failed` are refused. `HandlerInvoker.invokeEvent` takes an optional processor, `EventConsumer` an optional processor,
-`DeadLetterSink` and clock, `HubConnections` an optional processor status supplier.
-
-**To sagas (S1).** Nothing breaks: a service with no `@Saga` class and no `@IdempotentHandler` method gets none of the new beans or
-collections. What changes: `EventConsumer` now runs events through a shared `LocalEventDispatcher` (ordinary handlers first, as
-before; then the saga stage); a record that no `@EventHandler` wants but a saga does is processed instead of skipped.
-`kraken-messaging` exposes `kafka-clients` as an `api` dependency (the translator signature), and `kraken-messaging-test` depends
-on spring-data-mongodb (`SagaTestFixture`). `SendOptions` gained `headers` (default empty; `authorization`, `traceparent`,
-`tracestate`, `correlation-id` and `correlationId` are reserved). New keys: `sagas.*`, `deadlines.*` and `external.*`. New
-collections, created on first start of a service that uses them: `sagas`, `saga_dispatch`, `saga_dispatch_leases`, `deadlines`,
-`saga_failures`, `external_calls`. A `HandlerInvoker` built by hand takes an optional `IdempotencyInterceptor`; the
-`EventConsumer` an optional `LocalEventDispatcher`.
-
-**To client certificates (P5c).** Nothing breaks: a service that sets no `hub.tls.client-cert-file` behaves as before. New settings (both
-or neither): `kraken.messaging.hub.tls.client-cert-file`, `kraken.messaging.hub.tls.client-key-file`; a client certificate implies TLS
-and cannot be combined with a static token or OAuth2 (the startup fails naming both). `HubConnections.authStatus()` gained the kind
-`CERTIFICATE` (an exhaustive `when` over `HubAuthKind` needs the new branch) and the fields `certificateFingerprint`,
-`certificateExpiresAt`, `certificateRotations` (with defaults, so constructing `HubAuthStatus` still compiles). `HubTls` and `HubSettings`
-gained `clientCertificate`; `HubConnections` three optional timing parameters. **Behaviour change for every service:** a unary send that
-gets `NO_HANDLER` from one hub now tries the other live hubs before answering `NO_HANDLER` (when no hub has a handler the answer is the
-same and as fast as before). `InProcessHub.dropInstance(instanceId, status)` ends a stream with a given status, and
-`KrakenContainers.hubMtls(...)` starts the hub image with a client CA.
-
-**To JWT authentication (P5b).** Nothing breaks: a service that sets no `hub.oauth2.token-uri` behaves as before (static token or
-none). `Register` now declares the capability `credentials-refresh` (a hub that does not know it ignores it); with a static
-token file the new token is also sent on live streams when the file changes. To switch a service to Keycloak, remove its
-`hub.token`/`token-file` and set `hub.oauth2.*` (both together fail the startup). `InProcessHub` changes: `HubAuth.enforce` and
-`permissive` take an optional `services` list; a `jwt` credential is now accepted when `services` is set (before, every `jwt` was
-refused), and the ack lists `credentials-refresh` for a registrant that declared it. `HubSettings` gained `tokenProvider`.
-
-**To hub access control and TLS (P5a).** Nothing breaks while the hub runs with `KRAKEN_HUB_AUTH_MODE=off` (the
-default) or `permissive`, and without TLS: configuration and behaviour are as before. New settings (all optional):
-`hub.token`, `hub.token-file`, `hub.tls.enabled`, `hub.tls.ca-file` and `hub.tls.server-name`; the environment forms are
-`KRAKEN_MESSAGING_HUB_TOKEN` (relaxed binding) and, when the property is unset, `KRAKEN_HUB_TOKEN` (likewise
-`..._TOKEN_FILE`). What changes for existing code:
-
-- A stream the hub closes with `UNAUTHENTICATED` or `PERMISSION_DENIED` is now a **registration rejection**, like
-  `ALREADY_EXISTS` and `INVALID_ARGUMENT` always were: `HubConnection.lastRejection` holds the status,
-  `awaitRegistered` throws `HubRegistrationRejectedException`, reconnects wait the backoff cap (`hub.reconnect-backoff.max`)
-  instead of restarting from the floor, and the rejection is logged at `ERROR` once per distinct message, then at `DEBUG`
-  (that applies to the two older codes as well, which used to log an `ERROR` line per attempt). Before, these two codes
-  were ordinary stream closures retried from the floor. `lastRejection` is cleared once a stream completes its handshake
-  again, so a fixed token or ACL is not held against the connection.
-- A request the hub answers `Error{PERMISSION_DENIED}` (type outside the token's `send`) was already an
-  `AccessDeniedException` and is never retried; nothing changes there.
-- A stream that fails before any handshake in the way a TLS mismatch fails (plain text to a TLS hub, TLS to a plain hub)
-  now says so in the `WARN` line.
-- Roll out in this order: hub in `permissive`, services with their tokens, watch the hub's violation counter, then `enforce`
-  (see [Hub security](#hub-security-token-acl-and-tls)). A client with a token works against every older hub, which ignores it.
-- API: `HubSettings` gained a last, defaulted parameter `token` (a `HubToken`, redacted in `toString`); `KrakenMessagingProperties.Hub`
-  gained `token`, `tokenFile` and `tls`; the default `krakenHubChannelFactory` bean is now a `DefaultHubChannelFactory` built
-  from `hub.tls.*` (an override bean of that name still replaces it); `HubChannelFactory` and `HubConnection(s)` are
-  unchanged. `InProcessHub` gained `auth`, `KrakenContainers` gained `hubP5a(...)` and `TestCertificates` is new (see
-  [Test helpers](#test-helpers-kraken-messaging-test)). `spring-boot-actuator` is an optional (`compileOnly`) dependency:
-  with it on the classpath the token is masked in `configprops` and `env`.
-
-**To subscription queries (P4c).** Nothing breaks: existing handlers, senders and configuration behave as before. On the
-wire `Register` also declares the `subscription` capability (an older hub ignores it), so a P4b hub or older makes
-`QueryBus.subscribe` throw `UnsupportedByHubException("subscription")` while everything else keeps working. New setting
-`hub.max-subscriptions` (1024). Two beans are new and need no configuration: `SubscriptionRegistry` and the
-`QueryUpdateEmitter` that services inject to push updates (both exist even with `hub.enabled=false`; emitting without
-subscribers is a no-op). `QueryBus` gained `subscribe` with a default body (a custom `QueryBus` compiles and throws
-`UnsupportedOperationException` until it overrides it); `HubTransport` gained `subscribe` the same way;
-`HubConnection` and `HubConnections` gained two optional last constructor parameters (`subscriptions`,
-`inboundSubscription`); `HandlerMethod` gained `subscription`; `HandlerBusyException` gained an optional `detail`;
-`InProcessHub` serves subscriptions too (see [Test helpers](#test-helpers-kraken-messaging-test)). A subscription holds no
-handler permit and does not count against `max-concurrent-handlers`.
-
-**To streaming queries (P4b).** Nothing breaks: existing handlers, senders and configuration behave as before. On the
-wire `Register` also declares the `streaming` capability (an older hub ignores it). Two behaviours are new for
-existing code: the hub may now send `Cancel` for a unary handler whose answer is no longer wanted (a scatter-gather
-target past `maxResults` or past the deadline, or whose sender disconnected), which this library honours by cancelling
-the handler's coroutine (a suspending handler sees a `CancellationException` at its next suspension point; a blocking,
-non-`suspend` handler is **not** interrupted, it runs to its end and its reply is dropped; a handler that must not be
-interrupted mid-way wraps that part in `withContext(NonCancellable)`); and the permit of an incoming request goes back
-to the hub when its handler coroutine completes, whichever way. New setting `hub.stream-credit-timeout` (10 min): a
-streaming handler waiting that long for credit ends its stream with `TIMEOUT`. `QueryBus` gained `stream`
-with a default body (a custom `QueryBus` compiles and throws `UnsupportedOperationException` until it overrides it);
-`HubConnection` and `HubConnections` gained an optional last constructor parameter `inboundStream`; `HubSettings` gained
-`streamCreditTimeout` (defaulted); `HubErrors.toException` gained an optional `feature` parameter; `HandlerMethod`
-gained `streaming`.
-
-**To scatter-gather (P4a).** Nothing breaks: existing handlers, senders and configuration behave as before. What
-changes on the wire: `Register` also declares the `scatter-gather` capability (an older hub ignores it) and lists
-`@QueryHandler(shared = true)` types in `shared_query_types`. Before marking a type shared, make sure every hub runs P4a
-(a P3 hub ignores `shared_query_types`, so the type is simply not registered there) and switch every owner at once:
-the hub refuses a mix of exclusive and shared registrants (`ALREADY_EXISTS`). `QueryBus` gained `scatterGather` and
-`scatterGatherFlow` with default bodies, so a custom `QueryBus` implementation still compiles (it throws
-`UnsupportedOperationException` until it overrides them). `RemoteHandlerException` gained a `code` property (default
-`HANDLER_ERROR`).
-
-**To the multi-hub client (P3).** The version stays `0.1.0-SNAPSHOT` (nothing has been published beyond local
-`mavenLocal()` installs yet), so re-run `./gradlew publishToMavenLocal` here and rebuild the services. Two beans changed
-type:
-
-- The hub transport bean is `HubConnections` (one connection per hub), no longer a single `HubConnection`. Replace
-  `context.getBean(HubConnection::class.java)` with `context.getBean(HubConnections::class.java)`; `awaitRegistered`,
-  `register`, `connected` and `instanceId` keep their meaning, and `connections()` lists the per-hub `HubConnection`s.
-- `krakenHubChannelFactory` is a `HubChannelFactory` (`target -> ManagedChannel`, called with each hub's `host:port`)
-  instead of `() -> ManagedChannel`. An override bean of that name must take the target, for example
-  `HubChannelFactory { _ -> InProcessChannelBuilder.forName(hub.name).build() }` for one in-process hub.
 
 ## Using the starter
 
@@ -276,15 +150,14 @@ All keys (`kraken.messaging.*`; durations accept `200ms`, `5s`, `7d`; relaxed bi
 | `hub.enabled` | `true` | Connect to the hub and expose the hub-backed `CommandBus`/`QueryBus` (addition beyond the spec table). |
 | `hub.address` | `static://kraken-hub:7000` | The hub or hubs: one gRPC target (`host:port`, optional `static://` prefix), a comma-separated list of them (`hub-1:7000,hub-2:7000`, one connection per hub), or one `dns:///name:port` whose addresses are re-resolved every 30 s. See [Multiple hubs](#multiple-hubs). A malformed value fails the startup. |
 | `hub.status-interval` | `5s` | Period of the `InstanceStatus` report (connected hub ids, handlers in flight) sent to every hub whose ack lists `instance-status`; also sent whenever the set of live hubs changes. Must be positive. |
-| `hub.request-timeout` | unset | Per-request timeout sent as `timeout_ms`. Unset: a v2 hub applies its default (5 s) or its per-type override (`KRAKEN_HUB_TIMEOUT_OVERRIDES`), a legacy hub gets 5 s. Also bounds the wait for a hub stream (5 s when unset). `0s` counts as unset. |
-| `hub.heartbeat-interval` | `10s` | Fallback heartbeat period, used only when the hub does not announce one (legacy hubs); a v2 hub announces 3 s in its `RegisterAck`. |
+| `hub.request-timeout` | unset | Per-request timeout sent as `timeout_ms`. Unset: the hub applies its default (5 s) or its per-type override (`KRAKEN_HUB_TIMEOUT_OVERRIDES`). Also bounds the wait for a hub stream (5 s when unset). `0s` counts as unset. |
 | `hub.reconnect-backoff.min` | `500ms` | Initial reconnect delay when the stream drops; doubles per failed attempt. Must be positive and not above `max`, or the startup fails naming the property. |
 | `hub.reconnect-backoff.max` | `5s` | Maximum reconnect delay. Every wait is jittered by ±20 % and capped at this value (at the cap: 80-100 % of it); the delay resets to `min` once an attempt reached the hub's handshake. Must be positive (a zero would hot-loop handshakes against a refusing hub): checked at binding, a bad value fails the startup naming the property. |
 | `hub.max-subscriptions` | `1024` | Subscription queries this instance serves at once, over every hub (at least 1). The next one is refused with `RESOURCE_EXHAUSTED` ("subscription limit (N) reached"), which the subscriber sees as a `HandlerBusyException`. A subscription holds no handler permit, so `max-concurrent-handlers` does not bound it; the default equals the hub's own `KRAKEN_HUB_MAX_SUBSCRIPTIONS_PER_INSTANCE`. |
 | `hub.stream-credit-timeout` | `10m` | The longest a streaming handler of this instance waits for credit from the collector before it ends the stream with `TIMEOUT` ("no credit within ...") and frees its handler slot and hub permit (a hub that forgot the stream would otherwise leave them held forever). Must be positive; the default is the hub's default maximum stream duration (`KRAKEN_HUB_MAX_STREAM_DURATION`). |
 | `hub.token` | none | Static token sent in `Register.credentials.token` of **every** hub stream (hub access control, [Hub security](#hub-security-token-acl-and-tls)). Optional; an empty or blank value is the same as none. Never logged, redacted in `toString` and in the actuator's `configprops` and `env`. Environment: `KRAKEN_MESSAGING_HUB_TOKEN`, or `KRAKEN_HUB_TOKEN` when this key is unset. |
 | `hub.token-file` | none | File holding the token (a container secret such as `/run/secrets/kraken-hub-token`; surrounding whitespace ignored). Read at startup (an unreadable file fails it, naming the file) and **again on every reconnect**, so a rotated secret is picked up without a restart. After a first non-empty read, an unreadable or empty file (a non-atomic rotation caught half way) keeps the last token read and logs one `WARN`; at startup an empty file means no token. **Wins over `hub.token` when both are set.** Environment: `KRAKEN_MESSAGING_HUB_TOKEN_FILE`, or `KRAKEN_HUB_TOKEN_FILE` when this key is unset. |
-| `hub.tls.enabled` | `false` | Talk TLS to the hub, for every `hub.address` form (a list of targets and `dns:///`). Off: plain text, as before. The hub must serve TLS on that port (`KRAKEN_HUB_TLS_CERT` / `KRAKEN_HUB_TLS_KEY`). |
+| `hub.tls.enabled` | `false` | Talk TLS to the hub, for every `hub.address` form (a list of targets and `dns:///`). Off: plain text. The hub must serve TLS on that port (`KRAKEN_HUB_TLS_CERT` / `KRAKEN_HUB_TLS_KEY`). |
 | `hub.tls.ca-file` | JVM system roots | PEM file with the CA certificate(s) that signed the hub's certificate (a self-signed hub certificate is its own CA). Read on every connection attempt; a file that cannot be used fails the startup. Set without `hub.tls.enabled` it is ignored with a warning. |
 | `hub.tls.server-name` | the address's host | Name to verify the hub's certificate against, for when the address is an IP or an alias the certificate does not list. |
 | `hub.oauth2.token-uri` | none | Setting it turns Keycloak client-credentials authentication on (P5b, [JWT](#authenticating-with-a-jwt-keycloak-client-credentials)): the token endpoint, for example `https://keycloak/realms/kraken/protocol/openid-connect/token`. `http` is allowed and warns once unless the host is loopback or a single-label name. Cannot be combined with `hub.token` or `hub.token-file` (the startup fails naming both). Environment: `KRAKEN_MESSAGING_HUB_OAUTH2_TOKEN_URI`, or `KRAKEN_HUB_OAUTH2_TOKEN_URI` when this key is unset. |
@@ -305,9 +178,9 @@ All keys (`kraken.messaging.*`; durations accept `200ms`, `5s`, `7d`; relaxed bi
 | `kafka.bootstrap-servers` | `broker:19092` | Kafka bootstrap servers. |
 | `kafka.topic` | `kraken.events` | Events topic. |
 | `kafka.consumer.enabled` | `true` | Set `false` in tools that only publish. |
-| `kafka.group-id` | `service-name` | Consumer group of the `default` event processor; a named processor uses `<this>.<name>`. See [Event processors](#event-processors). |
+| `kafka.group-id` | `service-name` | The service's consumer group: every event processor, `default` included, uses `<this>.<name>`. See [Event processors](#event-processors). |
 | `kafka.consumer.max-attempts` | `5` | Handler invocations per record (first try included, 1 s apart) before the record goes to the dead letters; shared by every processor. |
-| `kafka.dead-letter.mode` | `collection` | What a processor does with a record it cannot handle: `collection` (park it in `dead_letters`, sequence its key, `DeadLetters` admin API), `topic` (produce it to `<topic>.dlt`) or `log` (log and skip, as before P6a). Case-insensitive; anything else fails the startup. See [Dead letters](#dead-letters). |
+| `kafka.dead-letter.mode` | `collection` | What a processor does with a record it cannot handle: `collection` (park it in `dead_letters`, sequence its key, `DeadLetters` admin API), `topic` (produce it to `<topic>.dlt`) or `log` (log and skip: nothing is parked). Case-insensitive; anything else fails the startup. See [Dead letters](#dead-letters). |
 | `kafka.dead-letter.retention` | `30d` | A letter is deleted this long after it was parked (TTL index on `expireAt`), which also unblocks its key. At least `1s`. |
 | `outbox.enabled` | `true` | Run the outbox publisher that relays `outbox` documents to Kafka. |
 | `outbox.poll-interval` | `200ms` | Outbox poll period. |
@@ -429,8 +302,8 @@ The token goes in `Register.credentials.token` of every stream (read once per st
 `Register` only). It is never logged, `HubSettings.toString()` and `KrakenMessagingProperties.toString()` print `****`, and with
 `spring-boot-actuator` on the classpath the starter contributes a `SanitizingFunction` that masks it (and
 `KRAKEN_HUB_TOKEN`) in `/actuator/configprops` and `/actuator/env` even with `show-values=ALWAYS` and whatever
-sanitization the application configured. An empty token is no token (a v1-style `Register` without credentials, which
-`off` and `permissive` hubs accept). **`token-file` wins when both are set** (it is the source that can rotate); the
+sanitization the application configured. An empty token is no token (a `Register` without credentials, which `off` and
+`permissive` hubs accept). **`token-file` wins when both are set** (it is the source that can rotate); the
 file is read at startup, where a missing file fails the startup, and on every reconnect, so replacing the secret and
 letting the connection reconnect (or fail once) is a rotation. **An empty file after a first good read** (a rotation that
 replaces the file non-atomically can be caught half way) is treated like an unreadable one: the last token read is kept
@@ -472,8 +345,7 @@ necessarily the very first attempt: a hub that was still starting is a plain ref
 `kraken.messaging.hub.tls.enabled` and `tls.ca-file`; later attempts log it at `DEBUG`. A client certificate (mTLS, P5c) is
 [its own section](#authenticating-with-a-client-certificate-mtls); `DefaultHubChannelFactory.customizeTls` stays a hook for a subclass.
 
-**Rollout.** Hub first, clients second, `enforce` last (any order is safe because an older client or hub simply ignores
-the credentials): (1) run the hub with `KRAKEN_HUB_AUTH_MODE=permissive` and an ACL file; (2) give every service its
+**Turning it on.** `enforce` last: (1) run the hub with `KRAKEN_HUB_AUTH_MODE=permissive` and an ACL file; (2) give every service its
 token (and the CA, if the hub serves TLS); (3) watch `kraken_hub_auth_violations_total{reason,service}` and the dashboard until
 it stays flat; (4) switch the hub to `enforce`; (5) turn on TLS before tokens cross an untrusted network. A service
 whose token is missing or wrong in `enforce` fails visibly (`HubRegistrationRejectedException`, an `ERROR` line) instead of
@@ -514,9 +386,8 @@ without a token URI: a stray client id or secret would otherwise leave the servi
   point: margin = 20 % of the lifetime, at least 5 s, and at most half of it (a 6 s token is renewed after 3 s; the Rust library
   uses the same rule). A lifetime over 10 years (a huge `expires_in`) is cut to 10 years. The renewer looks at the wall clock at
   least every 5 s, so a clock that jumped ahead while the machine slept does not postpone the renewal. The renewal goes to every live
-  stream as `ClientMessage.credentials`, when the stream's ack lists `credentials-refresh` (every `Register` declares it, static
-  token sessions too). The hub closes a JWT session at `exp` plus `KRAKEN_HUB_JWT_EXPIRY_GRACE` (30 s) without one. A stream
-  whose ack lacks the capability gets nothing: its next reconnect uses the new token.
+  stream (one that has its ack) as `ClientMessage.credentials`. The hub closes a JWT session at `exp` plus
+  `KRAKEN_HUB_JWT_EXPIRY_GRACE` (30 s) without one.
 - A renewal that fails keeps the current token and retries with a back-off from 1 s to 30 s (one `WARN` per distinct error).
 - A stream the hub closes (or a `Register` it refuses) with `UNAUTHENTICATED` ("token expired", "unknown signing key",
   "credentials expired", a refused refresh) drops the cached token: the reconnect fetches a new one instead of presenting the
@@ -528,8 +399,8 @@ without a token URI: a stray client id or secret would otherwise leave the servi
   `error_description`, clipped to 200 characters), the connection retries with the normal reconnect back-off, logs `ERROR` once
   per distinct error and then `DEBUG`, and recovers by itself when the endpoint does. A hub that is not ready (`UNAVAILABLE`
   "jwks not loaded yet") is an ordinary reconnect.
-- With a static `hub.token-file` the same capability rotates the token without a reconnect: when the file's content changes the new
-  token is sent as `ClientMessage.credentials` on streams that acked the capability (checked once per heartbeat).
+- With a static `hub.token-file` the same message rotates the token without a reconnect: when the file's content changes the new
+  token is sent as `ClientMessage.credentials` on every live stream (checked once per heartbeat).
 - The client secret and the access tokens never appear in logs, exception messages, `toString()` or the actuator's `configprops`
   and `env` (the starter's `SanitizingFunction` masks `hub.oauth2.client-secret` and `KRAKEN_HUB_OAUTH2_CLIENT_SECRET`).
 
@@ -734,31 +605,30 @@ val quick = queryBus.sendBlocking(GetWorkout(id), SendOptions(retry = RetryPolic
 - **Shutdown.** The hub connection, outbox publisher and Kafka consumer start before the web server accepts traffic and
   stop after its graceful drain. On stop the instance first announces an empty registration so the hub stops routing to
   it, waits up to 5 s for incoming handlers still running, then closes the stream.
-- **Handshake.** `Register` announces protocol version 2 (`HubProtocol`), the `flow-control` capability and `client_version`
-  `kraken-messaging/<version>`. A v2 hub answers with a `RegisterAck` (hub id, heartbeat interval and timeout, default,
-  maximum and per-type request timeouts) before the echo of the first heartbeat; a hub whose echo arrives first is a
-  legacy (v1) hub and the connection keeps the pre-v2 behaviour (10 s heartbeats, `timeout_ms` always sent).
-  `HubConnection.handshake` tells which (per hub: `HubConnections.connections()`).
+- **Handshake.** `Register` carries `initial_permits` and `client_version` `kraken-messaging/<version>`. The hub answers
+  every accepted `Register` with a `RegisterAck` (hub id, heartbeat interval and timeout, default, maximum and per-type
+  request timeouts) before the echo of the heartbeat that follows it; the ack of the stream's first `Register` completes
+  the handshake and its heartbeat interval is the stream's. A stream without an ack within 10 s
+  (`HubProtocol.HANDSHAKE_TIMEOUT`) fails ("registration not confirmed in time") and the connection reconnects.
+  `HubConnection.ack` holds the latest ack (per hub: `HubConnections.connections()`). The hub, the protocol and this
+  library ship together: a hub and a client of different builds are not supported.
 - **Timeouts.** Unless `hub.request-timeout` is set, requests go out with `timeout_ms = 0` and the hub decides (default
   or per-type override). The client gives up locally only when the hub never answers: after the hub's deadline bound
   from the ack (`min(timeout, override or max)`, or `override or max` for 0) plus 1 s, with `MessageTimeoutException`.
-- **Dead connections.** A hub stream whose heartbeats stay unanswered for three heartbeat intervals (9 s against a v2
-  hub) is closed and re-established; HTTP/2 keepalive pings (every 10 s, 5 s timeout, also without calls) run on the
+- **Dead connections.** A hub stream whose heartbeats stay unanswered for three heartbeat intervals (9 s with the hub's
+  default of 3 s) is closed and re-established; HTTP/2 keepalive pings (every 10 s, 5 s timeout, also without calls) run on the
   channel.
 - **Lost connections.** A request the stream never accepted (including one still queued on the client when the stream
   broke) fails with `HubUnavailableException` (the handler did not run, retrying is safe; with several hubs it is sent to
   another hub first). A request written to a stream that broke before the answer fails with
   `HubConnectionLostException`: the outcome is unknown, as with a timeout.
-- **Flow control.** `Register` declares the `flow-control` capability with `initial_permits = hub.max-concurrent-handlers`.
-  A hub that shares it (its ack lists `flow-control`) forwards to this instance only against permits and queues the rest
-  per instance, highest `Request.priority` first, each request keeping its own deadline; every completed handler pays
+- **Flow control.** `Register` carries `initial_permits = hub.max-concurrent-handlers` (at least 1). The hub forwards to
+  this instance only against permits and queues the rest per instance, highest `Request.priority` first, each request keeping its own deadline; every completed handler pays
   one permit back on the stream the request arrived on. Permits go back at once while the hub holds at most
   `min(16, initial_permits / 2)` of them for the stream (so a single permit is never held back), otherwise batched (one
-  `Permits` message per 16 grants or 50 ms). A slow handler therefore means latency, not timeouts or `handler busy`. Against a hub without the capability (P0 or older)
-  nothing changes and no `Permits` are sent.
+  `Permits` message per 16 grants or 50 ms). A slow handler therefore means latency, not timeouts.
 - **Busy handlers.** A full hub queue or session buffer answers `HandlerBusyException` (`RESOURCE_EXHAUSTED`): the
-  request was rejected before any handler ran, so retrying later is safe. Older clients get `RemoteHandlerException`
-  "handler busy" instead.
+  request was rejected before any handler ran, so retrying later is safe.
 - **Retry** (opt-in, `hub.retry.*` or `SendOptions.retry`). Only errors `RetryClassification.isRetryable` allows are
   retried: for commands `HubUnavailableException`, `NoHandlerException`, `HandlerBusyException`; for queries also
   `HandlerDisconnectedException`, `MessageTimeoutException`, `HubConnectionLostException`. A command is never retried after
@@ -780,7 +650,7 @@ kraken.messaging.hub.address: static://hub-1:7000,static://hub-2:7000   # or: dn
 ```
 
 - **One connection per hub.** `HubConnections` opens one `Connect` stream per target, each with its own handshake,
-  heartbeat, reconnect backoff and legacy detection, and sends the identical `Register` on every one (re-sent on every
+  heartbeat and reconnect backoff, and sends the identical `Register` on every one (re-sent on every
   reconnect). One target behaves exactly like the single-hub client.
 - **Targets.** A comma-separated list (blank entries and repeats dropped, order kept), or a single `dns:///name:port`
   (port required, not combinable with other entries) resolved at start and every 30 s: a new address gets a connection,
@@ -789,8 +659,7 @@ kraken.messaging.hub.address: static://hub-1:7000,static://hub-2:7000   # or: dn
   family is used (rule shared with the Rust library): the IPv4 addresses when the answer has any, else the IPv6 ones,
   repeats dropped; a dual-stack name lists every hub under both families, and two streams to one hub with the same
   instance id would replace each other. A failed or empty resolution keeps the current connections.
-- **Hub identity.** A hub is its `RegisterAck.hub_id`; a legacy (v1) hub, or an ack with an empty id, is its target
-  id: the bare `host:port` without `static://` (a resolved IPv6 address as `[ip]:port`, without zone; rule shared with
+- **Hub identity.** A hub is its `RegisterAck.hub_id`; an ack with an empty id is its target id: the bare `host:port` without `static://` (a resolved IPv6 address as `[ip]:port`, without zone; rule shared with
   the Rust library). When
   two targets answer the same id, the one that acknowledged first owns it for as long as it is kept, live or
   reconnecting, and the other is closed and parked (logged once). The hub keeps one session per instance id, so the
@@ -814,23 +683,22 @@ kraken.messaging.hub.address: static://hub-1:7000,static://hub-2:7000   # or: dn
   call has one deadline: its own timeout (`SendOptions.timeout`, else `hub.request-timeout`; 5 s when neither is set);
   waiting ends there with `HubUnavailableException`, and a request sent again carries what is left of its
   `timeout_ms`, so failover never stretches a call beyond its timeout. A request already written fails with `HubConnectionLostException` (or the hub's `HandlerDisconnectedException`), and the retry policy
-  applies as before. With no live hub at all: `HubUnavailableException`, as with one hub.
+  applies. With no live hub at all: `HubUnavailableException`, as with one hub.
 - **Permits.** A stream announces `ceil(hub.max-concurrent-handlers / N)` initial permits, where N = 1 (the hub being
   registered on) + the other hubs that are live or still on their first connect attempt (a hub down after a failed
   attempt is not counted). Whenever that count changes, every live stream is topped up to its current share:
   `Permits{count = max(0, ceil(max / N) - offered), grant = ceil(max / N)}`, offered = the stream's `initial_permits`
   plus its earlier top-ups; the grant raises the hub's permit cap on the session (otherwise its `initial_permits`) so
-  the hub keeps the top-up (a hub that predates `Permits.grant` ignores it and clamps the top-up). So with two hubs the
+  the hub keeps the top-up. So with two hubs the
   survivor of an outage (or of a hub that failed its first attempt) serves at full capacity, flaps never add up, a hub
   that joins or returns gets `ceil(max / N)` on its new stream, and nothing is ever revoked (rule shared with the Rust
-  library). Locally at most `hub.max-concurrent-handlers` handlers run in total, whichever hub sent the requests. Permits are paid back per stream as before.
+  library). Locally at most `hub.max-concurrent-handlers` handlers run in total, whichever hub sent the requests. Permits are paid back per stream.
 - **Readiness.** `HubConnections.awaitRegistered(timeout)` is true only once **every** kept hub confirmed the latest
   registration; while one configured hub is down it returns false at the timeout, although the instance is already
   served by the others (`connected` / `liveHubIds()` tell that). The Rust library's equivalent may differ; see its
   README.
-- **Status.** Every `hub.status-interval`, and whenever the live set changes, each live hub whose ack lists the
-  `instance-status` capability gets an `InstanceStatus`: `connected_hub_ids` (the ids of the live protocol v2 hubs) and
-  `handlers_in_flight` (over all hubs). A hub without the capability (P2 or older, legacy) never gets one. The hub shows
+- **Status.** Every `hub.status-interval`, and whenever the live set changes, each live hub gets an `InstanceStatus`:
+  `connected_hub_ids` (the ids of the live hubs), `handlers_in_flight` (over all hubs) and the event processors. The hub shows
   the report in its topology (`connectedHubIds`, `statusAgeMs`) and the dashboard flags instances missing a hub.
 - **Shutdown** announces the empty registration on every hub, waits for the handlers, then closes every stream.
 
@@ -878,11 +746,9 @@ queryBus.scatterGatherFlow(SearchEverything("legs")).collect { part -> render(pa
 - **Options.** `timeout` is the deadline of the whole gather (same rules as `SendOptions.timeout`: default
   `request-timeout`, else the hub's default; zero is unset). `maxResults > 0` ends the gather after that many
   successful parts. `priority` applies to every target request.
-- **Errors.** No owner: `NoHandlerException`; a command type: `InvalidMessageException`; a hub without the
-  `scatter-gather` capability (a P3 or older hub, or a legacy v1 hub): `UnsupportedByHubException`, thrown before
-  anything is sent. With several hubs a gather goes to one hub that lists the capability (round-robin); only when none
-  of the live hubs does is it `UnsupportedByHubException`. If the stream to that hub breaks before the end the call
-  fails with `HubConnectionLostException`.
+- **Errors.** No owner: `NoHandlerException`; a command type: `InvalidMessageException`. With several hubs a gather
+  goes to one hub (round-robin). If the stream to that hub breaks before the end the call fails with
+  `HubConnectionLostException`.
 - **Retry.** The configured or per-call `RetryPolicy` applies to the whole gather with the query rules
   (`HubConnectionLostException`, `NoHandlerException`, ... are retryable). A retried gather is a new gather: its result
   holds only its own parts. The flow retries only until its first part; after that an error ends the flow, so no part
@@ -930,8 +796,7 @@ queryBus.stream(ExportWorkouts(ownerId), StreamOptions(initialCredit = 32, timeo
   library ends it with `TIMEOUT` ("no credit within ... ms"), the flow seeing a `CancellationException` as at a hub
   `Cancel`, and frees the handler slot and the hub permit.
 - **Routing.** Always through the hub, also when this instance owns the type: one instance of the owner (one of every
-  owner's instances on a shared type), chosen like a point query but only among the instances that negotiated
-  `streaming`. A `StreamingQuery` is not a `Query`: it cannot be sent with `send` or gathered, and a unary request
+  owner's instances on a shared type), chosen like a point query. A `StreamingQuery` is not a `Query`: it cannot be sent with `send` or gathered, and a unary request
   that reaches a streaming handler is answered `INVALID_REQUEST`.
 - **Credits.** `initialCredit` is the window: the handler may run that many parts ahead of the collector. Each time
   the collector consumed half of the window the library grants `initialCredit / 2` more (a `Flow` message), so a
@@ -945,10 +810,7 @@ queryBus.stream(ExportWorkouts(ownerId), StreamOptions(initialCredit = 32, timeo
   ends the stream after that many parts (the hub cancels the handler). `priority` is the forwarded request's. The hub
   also bounds a stream's whole life (`KRAKEN_HUB_MAX_STREAM_DURATION`, 10 min by default): `CANCELLED`.
 - **Errors.** Before any part, as for a unary query: no owner `NoHandlerException`, a command type
-  `InvalidMessageException`, a hub without `streaming` (a P4a or older hub, or a legacy v1 hub)
-  `UnsupportedByHubException` on collection, before anything is sent; with several hubs the stream goes to one hub that
-  lists the capability, and only when none of the live hubs does is it unsupported. Owners whose live instances all
-  lack `streaming` are `UnsupportedByHubException` too (the hub's message names them). An end with an error fails the
+  `InvalidMessageException`; with several hubs the stream goes to one hub (round-robin). An end with an error fails the
   flow **exactly like a unary `send` fails on the same hub code**: `HANDLER_ERROR` (the handler's flow failed)
   `RemoteHandlerException`, `TIMEOUT` (idle) `MessageTimeoutException`, `HANDLER_DISCONNECTED` (the instance left
   mid-stream: a stream never moves to another instance) `HandlerDisconnectedException`, `RESOURCE_EXHAUSTED` (the
@@ -974,14 +836,10 @@ queryBus.stream(ExportWorkouts(ownerId), StreamOptions(initialCredit = 32, timeo
   end with an error as to an error before any part (`HandlerDisconnectedException`, `MessageTimeoutException`,
   `HandlerBusyException`, `NoHandlerException`, `HubConnectionLostException`, ... are retried; handler errors,
   `StreamCancelledException` and the rest are not): a retried stream is a new request (fresh id; with several hubs,
-  round-robin to another capable one), so no part is ever emitted twice. After the first part nothing is retried: the
+  round-robin to another one), so no part is ever emitted twice. After the first part nothing is retried: the
   flow throws, a broken hub stream as `HubConnectionLostException`. The budget covers the attempts up to the first part
   (and the wait for a live hub); every attempt sends the chosen `timeout` whole as its idle timeout, never what is
   left of the budget.
-- **Compatibility.** Against a P3 or P4a hub `stream` throws `UnsupportedByHubException` while unary queries and
-  gathers keep working. Handlers must run this version: the hub streams only to instances that negotiated `streaming`,
-  so during a rolling upgrade of an owner the old instances are simply never picked (owners with instances but none
-  capable are `UnsupportedByHubException` for the caller).
 
 ## Subscription queries
 
@@ -1025,7 +883,7 @@ result.updates.collect { change -> render(change) }   // completes when the hand
   token and trace context are read when `subscribe` is called, not when the flow is collected.
 - **Handler.** `@QueryHandler` (plain or `shared = true`) on `fun handle(q: SubscriptionQuery<I, U>[, ctx: MessageContext]): I`
   answers the **initial result**; a handler returning a `Flow`, or `@CommandHandler` on a subscription query, fails at
-  startup. The hub sends every capable instance of the type a `SUBSCRIPTION` request, and the library registers the
+  startup. The hub sends every live instance of the type a `SUBSCRIPTION` request, and the library registers the
   subscription (the decoded query, its request id and the hub stream it came from); the initial result is a separate
   ordinary request answered by the same method, which the library recognises by the hub's request id (`<id>#0`). A unary
   request for the type is answered `INVALID_REQUEST` ("is a subscription query: send it with QueryBus.subscribe"), a
@@ -1044,12 +902,12 @@ result.updates.collect { change -> render(change) }   // completes when the hand
   so a subscriber never sees an update of data that was never committed; the open subscriptions and the filter are
   evaluated at delivery, after the commit, and a failure there is logged, never thrown at the committer. Outside a
   transaction delivery is immediate, and a reactive (Reactor-context) transaction is not seen.
-- **Targets, and the at-most-once caveat.** Every live instance of every owner that negotiated `subscription`, **as they are
+- **Targets, and the at-most-once caveat.** Every live instance of every owner, **as they are
   when the subscription opens**: an instance that registers later is never added (an update emitted on a new instance is
   lost to that subscriber), a target that leaves is not replaced, and the hub never resubscribes. After a rolling
   restart a subscription listens to fewer instances than serve the type, silently until the last one leaves
-  (`HandlerDisconnectedException`); a subscriber that needs every instance resubscribes. One of the capable instances,
-  chosen like a point query, answers the initial result. A subscription is passive: it holds no handler permit, waits in
+  (`HandlerDisconnectedException`); a subscriber that needs every instance resubscribes. One of them, chosen like a point
+  query, answers the initial result. A subscription is passive: it holds no handler permit, waits in
   no hub queue and is not counted as an in-flight request after the initial result.
 - **Credits and the hub's buffer.** `initialCredit` is the window: the hub relays that many parts (the initial result
   included) before the collector consumed any, and holds further updates for the subscriber, at most 256
@@ -1066,8 +924,7 @@ result.updates.collect { change -> render(change) }   // completes when the hand
   and cancels the handlers' side. `priority` is the initial request's. The hub may bound a subscription's whole life
   (`KRAKEN_HUB_MAX_SUBSCRIPTION_DURATION`, off by default): `StreamCancelledException`.
 - **Errors.** `subscribe` fails before the initial result as a unary query does: no owner `NoHandlerException`, a command type
-  `InvalidMessageException`, no live hub (or owner instance) with `subscription` `UnsupportedByHubException("subscription")`
-  before anything is sent, the initial request failing `RemoteHandlerException` / `MessageTimeoutException` /
+  `InvalidMessageException`, the initial request failing `RemoteHandlerException` / `MessageTimeoutException` /
   `HandlerDisconnectedException`, an instance already serving its limit (the hub's, or this library's
   `hub.max-subscriptions`) `HandlerBusyException`. After it, `updates` completes on a clean end and throws what a unary
   error with the same code throws: `HANDLER_ERROR` (`completeExceptionally`, or a failing target) `RemoteHandlerException`,
@@ -1086,14 +943,10 @@ result.updates.collect { change -> render(change) }   // completes when the hand
 - **Retries.** The configured or per-call `RetryPolicy` applies with the query rules only until the initial result, to an
   end with an error and to a gate `Error` as to an error before any part (`NoHandlerException`, `HandlerBusyException`,
   `HandlerDisconnectedException`, `MessageTimeoutException`, ... are retried; handler errors and the rest are not): a retried
-  subscription is a new request with a fresh id (with several hubs, round-robin to another capable one), so no update is
+  subscription is a new request with a fresh id (with several hubs, round-robin to another one), so no update is
   delivered twice. After the initial result nothing is retried; resubscribing is the caller's call (it gets a fresh
   initial result).
-- **Compatibility.** Against a P4b hub or older `subscribe` throws `UnsupportedByHubException("subscription")` while
-  unary queries, gathers and streams keep working. With several hubs a subscription goes to one hub that lists the
-  capability. Handlers must run this version: the hub subscribes only instances that negotiated `subscription`, so during
-  a rolling upgrade of an owner the old instances are simply never targets (owners with instances but none capable are
-  `UnsupportedByHubException` for the caller).
+- **Several hubs.** A subscription goes to one hub (round-robin), chosen and failed over like a gather.
 
 ## Event processors
 
@@ -1118,13 +971,14 @@ class Notifier {                         // no annotation: processor "default"
 - **Names.** `@ProcessingGroup("name")` on a handler class; the name matches `^[a-z0-9][a-z0-9-]{0,47}$` and is not `default`. A
   bad name fails the startup naming the handler. Classes without the annotation are in processor `default`. Command and query
   handlers of an annotated class are not affected.
-- **Groups.** `default` keeps the group the service always had: `kraken.messaging.kafka.group-id`, else the service name. A named
-  processor uses `<that group>.<name>` (`orders-service.orders`), so it starts from the earliest offset the first time it runs.
-- **Markers.** `default` keeps `<eventId>` in `processed_events`; a named processor writes `processor:<name>:<eventId>`. So an
-  upgrade re-handles nothing in `default`, and one event type handled in two processors is handled by both, each exactly once.
-  Since P6b a marker a processor writes for a Kafka record also carries `processor`, `topic`, `partition` (Int32) and `offset`
-  (Int64): a reset deletes exactly the markers of its replay range ([Processor control](#processor-control)).
-- **Sagas run only in `default`** (their stage 2 follows the default processor's stage 1, as before). A named processor runs
+- **Groups.** Every processor, `default` included, uses `<service group>.<name>`, the service group being
+  `kraken.messaging.kafka.group-id`, else the service name (`orders-service.default`, `orders-service.orders`), so a processor
+  starts from the earliest offset the first time it runs.
+- **Markers.** Every processor, `default` included, writes `processor:<name>:<eventId>` in `processed_events`, so one event type
+  handled in two processors is handled by both, each exactly once. A marker a processor writes for a Kafka record also carries
+  `processor`, `topic`, `partition` (Int32) and `offset` (Int64): a reset deletes exactly the markers of its replay range
+  ([Processor control](#processor-control)).
+- **Sagas run only in `default`** (their stage 2 follows the default processor's stage 1). A named processor runs
   only its handlers.
 - **Which processors start.** At startup, one consumer per processor that has a handler; `default` also when sagas run. A
   service with no `@EventHandler` and no saga starts no consumer.
@@ -1147,10 +1001,10 @@ processor, so reset right before the rollout. Once it runs, a reset to `latest` 
 ([Processor control](#processor-control)), but by then it has already run once over the topic.
 
 **Status at the hub.** Every status report (`hub.status-interval`, 5 s) carries one `ProcessorStatus` per started processor to
-every hub whose `RegisterAck` lists the capability `processors` (the P6a hub; an older hub is never sent the field): name, group,
+every hub: name, group,
 topic, state, the partitions assigned to this instance with position, committed offset, high watermark and lag, records processed
 and failed since start, the dead-letter count, the last error (message only, never a payload), the event types and the
-dead-letter mode. The hub shows them in `/topology`, `GET /api/v1/processors` and the dashboard's Processors page. The states:
+dead-letter mode. The hub shows them in `GET /api/v1/topology`, `GET /api/v1/processors` and the dashboard's Processors page. The states:
 
 | State | When |
 |---|---|
@@ -1160,7 +1014,7 @@ dead-letter mode. The hub shows them in `/topology`, `GET /api/v1/processors` an
 | `PAUSED` | paused through processor control (P6b): still in its group, consuming nothing; wins over `FAILING`, `STARTING` and `RUNNING` |
 | `STOPPED` | the processor is stopping or stopped; also while a reset holds its lock (P6b), with `operation_id` set |
 
-Since P6b a report also carries `operation_id` (the reset holding the processor's lock, empty when none), `replaying` (a replay
+A report also carries `operation_id` (the reset holding the processor's lock, empty when none), `replaying` (a replay
 range is open on this instance's partitions) and per partition `replay_until` (the end of its open replay range, 0 when none).
 
 The report is built from memory and never waits: the assignment comes from the rebalance listener, the position from the last
@@ -1172,7 +1026,7 @@ application that wants it.
 
 ## Dead letters
 
-A record a processor cannot handle is no longer only logged: by default (`kraken.messaging.kafka.dead-letter.mode: collection`)
+A record a processor cannot handle is not only logged: by default (`kraken.messaging.kafka.dead-letter.mode: collection`)
 it is **parked** in the service's MongoDB collection `dead_letters`, the later records of the same Kafka key wait behind it, and an
 operator retries or discards it through the `DeadLetters` bean.
 
@@ -1182,7 +1036,7 @@ operator retries or discards it through the `DeadLetters` bean.
 | `SEQUENCED` | an earlier letter of its key is parked in this processor: stage 1 did not run (**the sagas still saw it** in `default`) | yes | yes |
 | `INVALID` | no `type` header, or a value that is not a JSON object | no | no (discard) |
 
-A type the processor does not handle is skipped as before, not a letter. A record without a key is never sequenced. A record that
+A type the processor does not handle is skipped, not a letter. A record without a key is never sequenced. A record that
 only failed in the saga stage (stage 1 done, the saga store down on every attempt) is logged and skipped: stage 1 has nothing to
 retry, and parked saga events have their own `saga_failures`.
 
@@ -1228,7 +1082,7 @@ mode.
 **Mode `topic`** produces the failed or `INVALID` record to `<topic>.dlt` (same key, value and headers, plus `kraken-dlt-processor`,
 `kraken-dlt-reason`, `kraken-dlt-error`, `kraken-dlt-original-topic`, `-partition` and `-offset`) and acknowledges it only after the
 broker did. Nothing is sequenced and there is no admin API: the topic belongs to your tooling. **The DLT must exist, or broker
-auto-creation must be on.** **Mode `log`** is the behaviour before P6a: log (never the payload) and skip.
+auto-creation must be on.** **Mode `log`** logs (never the payload) and skips: nothing is parked.
 
 The document (the same from the Rust library; no `_class`, an absent field is absent):
 
@@ -1313,13 +1167,6 @@ class OrderMails(private val mail: Mail) {
 `Offsets(map of partition to offset)`; `ranges` the `ReplayRange(topic, partition, from, until)` the reset replays (never empty: a
 reset that replays nothing runs no reset handler). A `@ResetHandler` belongs to its class's processor (`@ProcessingGroup`, else
 `default`) and may suspend.
-
-**Markers written before P6b carry no position.** A reset deletes the markers of its ranges by position, so the records of those
-older markers would be skipped as duplicates. A reset to `earliest` therefore also deletes the processor's markers without a
-position: for a named processor those whose `_id` is `processor:<name>:<id>`, for `default` those whose `_id` has no `:` at
-all (an event id; every other marker family, sagas, ingress, failure notices, external sources, has a colon). Any other target
-keeps them, and the records they mark are not replayed; neither is an event whose `id` header contains a `:`. Within the
-idempotency retention (`idempotency.retention`, 30 days) this limitation fades on its own.
 
 The `processor_control` document (the same from the Rust library; every field is always written):
 
@@ -1632,8 +1479,8 @@ adapter against a fake of the partner, the controller with a mock request and a 
   your saga's state, with the same conventions; an `ObjectMapper` of your own may read the same JSON differently.
 - **A saga only sees events consumed after it is deployed.** There is no replay of past events into a new saga type.
 - **Ordinary `@EventHandler`s run first, and a failing one does not hide the event from the sagas.** The saga stage runs even
-  when an ordinary handler failed, and the failure is then thrown, so the consumer retries and then skips the record as it
-  always did; the sagas have applied the event once by then (their own markers make the redeliveries safe).
+  when an ordinary handler failed, and the failure is then thrown, so the consumer retries and then dead-letters the record by its
+  mode ([Dead letters](#dead-letters)); the sagas have applied the event once by then (their own markers make the redeliveries safe).
 - **A step that must not run after the step before it failed** is sent from the handler of the event that says the previous step
   succeeded, not recorded in the same handling: the relay sends a saga's later steps after a permanently failed one.
 - **Leases need synchronised clocks.** The relay, deadline and `external_calls` leases are timestamps compared across instances;
@@ -1669,34 +1516,33 @@ adapter against a fake of the partner, the controller with a mock request and a 
   URI SAN and a seconds-long validity at once).
 - `InProcessHub`: in-JVM stand-in for the hub (`start()`, `channel()`, `dropInstance(...)` (also with a `Status`), `lastRequestHeaders()`,
   `lastRequest()`, `registrationsFrom(...)`, `lastRegisterFrom(...)`, `acksSentTo(...)`, `echoHeartbeats = false` to
-  simulate a hub that stopped answering), for hub-client tests without a container. It speaks protocol v2 (a
-  `RegisterAck` with `heartbeatInterval`, `heartbeatTimeout`, `replyTimeout` as default, `maxTimeout`, `typeTimeouts`);
-  `legacy = true` emulates a v1 hub, `emitTimeouts = false` a hub that loses requests. Flow control as the real hub:
-  permits, a per-instance queue by priority (`queueCapacity`), `RESOURCE_EXHAUSTED` or "handler busy" by sender capability,
-  `permitsGrantedBy(...)`, `permitMessagesFrom(...)`, `permitsAvailable(...)`, `queuedFor(...)`, `forwardedOrder()`;
-  permits never exceed the session's cap (`initial_permits`, raised by `Permits.grant`); `permitCap = false` drops the
-  cap, `permitGrants = false` emulates a hub that predates the grant;
-  `flowControl = false` emulates the P0 hub (v2 without flow control). Multi-hub: `instanceStatus = false` emulates the
-  P2 hub (no `instance-status`), `lastStatusFrom(...)`, `statusMessagesFrom(...)`, `requestsFrom(...)`, `sessionsOf(...)`,
+  simulate a hub that stopped answering), for hub-client tests without a container. It answers every
+  `Register` with a `RegisterAck` (`heartbeatInterval`, `heartbeatTimeout`, `replyTimeout` as default, `maxTimeout`,
+  `typeTimeouts`); `emitTimeouts = false` emulates a hub that loses requests. Flow control as the real hub: a first
+  `Register` without permits is `INVALID_ARGUMENT`, permits, a per-instance queue by priority (`queueCapacity`, full:
+  `RESOURCE_EXHAUSTED`), `permitsGrantedBy(...)`, `permitMessagesFrom(...)`, `permitsAvailable(...)`, `queuedFor(...)`,
+  `forwardedOrder()`; permits never exceed the session's cap (`initial_permits`, raised by `Permits.grant`);
+  `permitCap = false` drops the cap. Multi-hub: `lastStatusFrom(...)` (with the processors), `statusMessagesFrom(...)`,
+  `requestsFrom(...)`, `sessionsOf(...)`,
   and `pauseReading = true` stops reading every stream. Like the real hub it keeps one session per instance id: a new
   stream registering an id replaces the older one (`sessionsReplacedOf(...)`, `streamsOpenedBy(...)`;
   `replaceSessions = false` keeps both), and `ackDelay` delays each `RegisterAck` as network latency would. Query modes
-  (P4a): shared query types, scatter-gather with parts, end, `max_results` and the deadline as the real hub;
-  `scatterGather = false` emulates the P3 hub (no capability, `shared_query_types` ignored), and `inject(instanceId,
-  message)` writes any server message to an instance's stream. Streaming queries (P4b): one capable target, credits
+  (P4a): shared query types, scatter-gather with parts, end, `max_results`, the deadline and a `Cancel` to every forwarded
+  target of a gather that ends early, as the real hub; an unknown request mode is `INVALID_REQUEST`, and `inject(instanceId,
+  message)` writes any server message to an instance's stream. Streaming queries (P4b): one target, credits
   (`uint32`) and `Flow`, parts and ends relayed, `max_results`, the idle timeout (paused while the credit is 0),
-  `maxStreamDuration`, cancels both ways and the gates as the real hub; `streaming = false` emulates the P4a hub,
+  `maxStreamDuration`, cancels both ways and the gates as the real hub (a unary `Reply` to the target is ignored),
   `dropParts` drops relayed parts by `seq` (the real hub's full-buffer drop), and `openStreams()`,
   `creditOf(requestId)`, `flowsFrom(instanceId)` and `cancelsFrom(instanceId)` observe it. Subscription queries (P4c):
-  every capable instance is a target as they are at the open, the initial request goes out as `<id>#0` through a
+  every live instance of the type is a target as they are at the open, the initial request goes out as `<id>#0` through a
   permit and the queue, updates are renumbered behind the initial part under the sender's credit and the buffer
   (`subscriptionBuffer`, 256: one more ends it), `max_results` counts updates, cancels fan out both ways, a target leaving is
   silent unless it was the last (`HANDLER_DISCONNECTED`), `maxSubscriptionsPerInstance` (1024) refuses with
   `RESOURCE_EXHAUSTED`, `maxSubscriptionDuration` (off) ends with `CANCELLED`, and the gates are the real hub's;
-  `subscription = false` emulates the P4b hub, and `openSubscriptions()`, `subscriptionTargetsOf(instanceId)`,
+  `openSubscriptions()`, `subscriptionTargetsOf(instanceId)`,
   `subscriptionCreditOf(requestId)` and `bufferedUpdatesOf(requestId)` observe it. Processor control (P6b):
   `control(instanceId, request)` sends a `ControlRequest` to the instance's session and awaits its `ControlReply` from that
-  session, `controlRepliesFrom(instanceId)` lists every reply; `processorControl = false` emulates a hub before P6b.
+  session, `controlRepliesFrom(instanceId)` lists every reply.
 - `InProcessHub.auth` (P5a): `HubAuth.enforce(tokens)`, `HubAuth.permissive(tokens)` or `HubAuth.OFF` (default), with `tokens` a
   map from the plain test token to `AclEntry(service, handle, send)` (patterns: exact, `prefix.*`, `*`), answers like the real
   hub: in `enforce` the first `Register` is closed with `UNAUTHENTICATED` (no credentials, an empty token, a `jwt` on a hub
@@ -1712,27 +1558,19 @@ adapter against a fake of the partner, the controller with a mock request and a 
   tables as `AclEntry(service, handle, send)`. A `jwt` credential whose `azp` is the registering service and that has such an
   entry is accepted with its rights; another `azp` or a service without an entry is `PERMISSION_DENIED`, a token that is not three
   segments with an `azp` is `UNAUTHENTICATED`, and without `services` the hub answers "jwt credentials are not configured". The
-  signature and `exp` are **not** checked (use the real hub image for that). The ack offers `credentials-refresh` to a registrant
-  that declared it (`credentialsRefresh = false` emulates a hub without it); `jwtsSeenFrom(instanceId)` lists the JWTs of the
+  signature and `exp` are **not** checked (use the real hub image for that). `jwtsSeenFrom(instanceId)` lists the JWTs of the
   `Register`s and `credentialsSeenFrom(instanceId)` the `jwt` or `token` of every `ClientMessage.credentials`, and a refresh is judged
   like a `Register`'s against the session's own service. `KrakenContainers.hubJwt(...)` starts the hub image under test with JWT
   authentication (issuer, JWKS URI, `[[service]]` ACL file, leeway 0 s, expiry grace 2 s).
 - `TestCertificates.generate(dir, names)`: a throwaway self-signed certificate made at test time with the JDK's `keytool`
   (PEM certificate, also the CA a client trusts, and PKCS#8 key; valid for `localhost` and `127.0.0.1` by default).
 - `KrakenContainers`: unstarted Testcontainers definitions. `kafka()`, `mongo()` (single-node replica set, needed for
-  transactions), `hub()` from image `kraken-hub:dev` or the one named by `KRAKEN_HUB_IMAGE`, `hubBaseline()` from the previous hub release
-  `kraken-hub:v1-baseline` or `KRAKEN_HUB_BASELINE_IMAGE` and `hubP0()` from the P0 hub `kraken-hub:p0` or
-  `KRAKEN_HUB_P0_IMAGE`, `hubP2()` from `kraken-hub:p2` or `KRAKEN_HUB_P2_IMAGE` (compatibility tests), `hubP3()` from
-  `kraken-hub:p3-hub` or `KRAKEN_HUB_P3_IMAGE` with ports 7000 and 7001 (two-hub tests), `hubP4a()` from
-  `kraken-hub:p4a-hub` or `KRAKEN_HUB_P4A_IMAGE` with ports 7000 and 7001 (scatter-gather tests), `hubP4b()` from
-  `kraken-hub:p4b-hub` or `KRAKEN_HUB_P4B_IMAGE` with ports 7000 and 7001 (streaming tests), `hubP4c()` from
-  `kraken-hub:p4c-hub` or `KRAKEN_HUB_P4C_IMAGE` with ports 7000 and 7001 (subscription tests), `hubP5a(dir, acl, authMode, tls, env)`
-  from `kraken-hub:p5a-hub` or `KRAKEN_HUB_P5A_IMAGE` (access control and TLS: it writes the ACL file, with the SHA-256 of
-  each token, into `dir` and copies it and the `TestCertificates` into the container, with `KRAKEN_HUB_AUTH_MODE`,
-  `KRAKEN_HUB_ACL_FILE`, `KRAKEN_HUB_TLS_CERT` and `KRAKEN_HUB_TLS_KEY` set), `hub(env)` for the hub
-  under test with extra `KRAKEN_HUB_*` settings, and `hubImageAvailable()` / `hubBaselineImageAvailable()` /
-  `hubP0ImageAvailable()` / `hubP2ImageAvailable()` / `hubP3ImageAvailable()` / `hubP4aImageAvailable()` /
-  `hubP4bImageAvailable()` / `hubP4cImageAvailable()` / `hubP5aImageAvailable()`.
+  transactions), `hub()` from the hub image under test, `kraken-hub:dev` or the one named by `KRAKEN_HUB_IMAGE`, with ports 7000 and 7001
+  (every hub test runs on it: the hub and this library ship together), `hub(env)` for it with extra `KRAKEN_HUB_*`
+  settings, `hubAcl(dir, acl, authMode, tls, env)` for it with access control and TLS (it writes the ACL file, with the
+  SHA-256 of each token, into `dir` and copies it and the `TestCertificates` into the container, with
+  `KRAKEN_HUB_AUTH_MODE`, `KRAKEN_HUB_ACL_FILE`, `KRAKEN_HUB_TLS_CERT` and `KRAKEN_HUB_TLS_KEY` set), `hubJwt(...)` and
+  `hubMtls(...)` (below), and `hubImageAvailable()`.
 - `KrakenTestKafka(bootstrap, typePrefix, topic).awaitEvent<T>()`: reads an event back from the topic.
 - `SagaTestFixture(SagaClass::class, beans…)`: drives one saga with events and time, in memory; see [Testing a saga](#testing-a-saga).
 
