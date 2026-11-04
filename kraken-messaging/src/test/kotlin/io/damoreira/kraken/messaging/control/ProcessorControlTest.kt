@@ -369,9 +369,9 @@ class ProcessorControlTest {
         for (p in 0..1) repeat(3) { support.send(topic, "r-$p-$it", partition = p) }
         await().atMost(Duration.ofSeconds(30)).until { projection.seen.size == 6 && audit.seen.size == 6 && sagas.calls.size == 6 }
         await().atMost(Duration.ofSeconds(20)).until { support.committed(group) == mapOf(0 to 3L, 1 to 3L) }
-        // Markers from before P6b (no position) and of other families.
-        val legacy = listOf("legacy-1", "saga:Order:legacy-1", "processor:audit:legacy-1", "printer:k-1", "processor:default:legacy-2")
-        legacy.forEach { mongo.insert(Document(mapOf("_id" to it, "type" to "test.Happened", "processedAt" to java.util.Date())), "processed_events") }
+        // Markers without a position (a saga's, an external source's, a dispatch outside Kafka) and of another processor.
+        val others = listOf("saga:Order:r-0-0", "processor:audit:other-1", "printer:k-1", "other-2")
+        others.forEach { mongo.insert(Document(mapOf("_id" to it, "type" to "test.Happened", "processedAt" to java.util.Date())), "processed_events") }
         val auditMarkers = markers().filter { it.startsWith("processor:audit:r-") }.toSet()
         assertEquals(6, auditMarkers.size)
 
@@ -381,7 +381,7 @@ class ProcessorControlTest {
         val reply = a.ask(execute("op-1", earliest))
         assertTrue(reply.hasReset(), reply.toString())
         assertEquals(listOf(Triple(0, 0L, 3L), Triple(1, 0L, 3L)), reply.reset.rangesList.map { Triple(it.partition, it.from, it.until) })
-        assertEquals(7, reply.reset.markersDeleted, "six positioned markers and the legacy default marker")
+        assertEquals(6, reply.reset.markersDeleted, "the six positioned markers of default in the range")
         assertEquals(1, reply.reset.resetHandlers)
         val ctx = resets.contexts.single()
         assertEquals(ResetTarget.Earliest, ctx.target)
@@ -389,8 +389,7 @@ class ProcessorControlTest {
         assertEquals(listOf(ReplayRange(topic, 0, 0, 3), ReplayRange(topic, 1, 0, 3)), ctx.ranges)
         assertEquals(0, audit.resets, "another processor's reset handler does not run")
         assertEquals(mapOf(0 to 0L, 1 to 0L), support.committed(group))
-        assertTrue(markers().containsAll(auditMarkers + legacy - "legacy-1"), "only default's markers in the range went")
-        assertFalse("legacy-1" in markers())
+        assertTrue(markers().containsAll(auditMarkers + others), "only default's markers in the range went")
         assertEquals(listOf(ReplayRange(topic, 0, 0, 3), ReplayRange(topic, 1, 0, 3)), control()!!.replay)
 
         assertTrue(a.ask(finish("op-1")).hasOk())

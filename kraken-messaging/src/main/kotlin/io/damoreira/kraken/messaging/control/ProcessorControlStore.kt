@@ -6,7 +6,6 @@ import com.mongodb.client.MongoCollection
 import com.mongodb.client.model.Filters
 import com.mongodb.client.model.UpdateOptions
 import com.mongodb.client.model.Updates
-import io.damoreira.kraken.messaging.handler.Processors
 import org.bson.Document
 import org.bson.conversions.Bson
 import org.springframework.data.mongodb.core.MongoTemplate
@@ -136,10 +135,9 @@ open class ProcessorControlStore(
 
     /**
      * Deletes [processor]'s stage-1 markers (`processed_events`) in [ranges]: `{processor, topic, partition, offset in
-     * [from, until)}` per range, and with [legacy] (a reset to `earliest`) also its markers from before P6b, which carry no
-     * position ([legacyMarkers]). Returns how many were deleted.
+     * [from, until)}` per range. Returns how many were deleted.
      */
-    fun deleteMarkers(processor: String, ranges: List<ReplayRange>, legacy: Boolean): Long {
+    fun deleteMarkers(processor: String, ranges: List<ReplayRange>): Long {
         val markers = mongo.db.getCollection(MARKERS)
         var deleted = 0L
         for (range in ranges) {
@@ -150,7 +148,6 @@ open class ProcessorControlStore(
                 ),
             ).deletedCount
         }
-        if (legacy) deleted += markers.deleteMany(legacyMarkers(processor)).deletedCount
         return deleted
     }
 
@@ -197,19 +194,6 @@ open class ProcessorControlStore(
 
         /** The idempotency markers' collection. */
         const val MARKERS = "processed_events"
-
-        /**
-         * The markers [processor] wrote before P6b (no `processor` field): for a named processor `_id`
-         * `processor:<name>:<dedupe id>`, for `default` the bare dedupe id, in both cases a dedupe id without `:`. Every other
-         * marker family has one there (`saga:`, `ingress:`, `failed:`, `processor:` and the external sources'
-         * `<source>:<partition>:<offset>` / `<source>:<key>`), a Kafka event id (a UUID, or `<topic>-<partition>-<offset>`;
-         * a topic name cannot contain `:`) has none. An event id with a `:` keeps its legacy marker. A processor name is
-         * `[a-z0-9-]` only, so it needs no escaping in the pattern.
-         */
-        fun legacyMarkers(processor: String): Bson = Filters.and(
-            Filters.exists("processor", false),
-            Filters.regex("_id", if (processor == Processors.DEFAULT) "^[^:]+$" else "^processor:$processor:[^:]+$"),
-        )
 
         /** `operation.kind` of a reset, the only kind so far. */
         const val KIND_RESET = "reset"

@@ -55,7 +55,7 @@ import java.util.concurrent.TimeUnit
  * 1. the target becomes per-partition offsets (`Admin.listOffsets`: earliest, latest, for a timestamp; explicit offsets are
  *    checked against the partitions and watermarks), 2. the group's committed offsets are read, a range `[target, before)`
  *    per partition where the target is lower, 3. the group must be empty (`describeConsumerGroups`), 4. the processor's
- *    `@ResetHandler`s run (any range only), 5. the markers in the ranges are deleted (legacy ones too for `earliest`), the
+ *    `@ResetHandler`s run (any range only), 5. the markers in the ranges are deleted, the
  *    ranges written, then the offsets committed (`alterConsumerGroupOffsets`). While it runs the executor extends its own
  *    lease; right after the reset handlers and again before the commit that extension must succeed (and the execute be within
  *    [executeLeaseLimit]), otherwise it stops with FAILED "lease lost". A refusal after the reset handlers ran says what
@@ -383,7 +383,7 @@ class ProcessorControl(
             val replay: List<ReplayRange>
             try {
                 leaseLost(slot, held, until)?.let { return done.told(refused(request, ControlRefusal.CONTROL_REFUSAL_FAILED, it)) }
-                if (ranges.isNotEmpty()) done.markers = store.deleteMarkers(processor, ranges, legacy = target == ResetTarget.Earliest)
+                if (ranges.isNotEmpty()) done.markers = store.deleteMarkers(processor, ranges)
                 replay = open.filter { o -> ranges.none { it.topic == o.topic && it.partition == o.partition } } + ranges
                 if (ranges.isNotEmpty()) store.setReplay(processor, replay)
                 done.ranges = ranges.isNotEmpty()
