@@ -3,6 +3,7 @@ package io.damoreira.kraken.messaging.deadletter
 import io.damoreira.kraken.messaging.MessageContext
 import io.damoreira.kraken.messaging.kafka.EventHeaders
 import io.damoreira.kraken.messaging.kafka.LocalEventDispatcher
+import io.damoreira.kraken.messaging.kafka.RecordPosition
 import org.slf4j.LoggerFactory
 
 /**
@@ -122,7 +123,8 @@ class DeadLetters(
             headers = letter.headers,
         )
         return try {
-            val outcome = dispatcher.runStage1(letter.processor, dedupeId, type, letter.value(), ctx) {
+            val position = RecordPosition(letter.topic, letter.partition, letter.offset) // it is that record's stage 1 (P6b)
+            val outcome = dispatcher.runStage1(letter.processor, dedupeId, type, letter.value(), ctx, position) {
                 if (!store.deleteInTransaction(letter.id)) throw Gone // retried or discarded meanwhile: roll the handling back
             }
             when (outcome) {

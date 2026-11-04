@@ -6,6 +6,7 @@ import io.damoreira.kraken.hub.v1.ProcessorStatus
 import io.damoreira.kraken.messaging.InvalidMessageException
 import io.damoreira.kraken.messaging.MessageContext
 import io.damoreira.kraken.messaging.codec.JsonCodec
+import io.damoreira.kraken.messaging.control.ReplayRange
 import io.damoreira.kraken.messaging.deadletter.DeadLetterError
 import io.damoreira.kraken.messaging.deadletter.DeadLetterMode
 import io.damoreira.kraken.messaging.deadletter.DeadLetterReason
@@ -95,6 +96,8 @@ class EventConsumer(
     private val running = AtomicBoolean(false)
     @Volatile private var started = false
     @Volatile private var container: ConcurrentMessageListenerContainer<String, ByteArray>? = null
+    @Volatile private var pauseRequested = false
+    @Volatile private var replayRanges: List<ReplayRange> = emptyList()
 
     init {
         require(maxAttempts >= 1) { "maxAttempts must be >= 1" }
@@ -132,6 +135,8 @@ class EventConsumer(
             setAckMode(ContainerProperties.AckMode.MANUAL_IMMEDIATE)
             setMessageListener(AcknowledgingMessageListener<String, ByteArray> { record, ack -> handle(record, ack!!) })
             setConsumerRebalanceListener(Rebalance())
+            // A pause (P6b) takes effect after the record in hand: the rest of the poll's records are sought back, not handled.
+            setPauseImmediate(true)
         }
         // Only what the listener throws reaches it: a sink that could not take the record, or a stop in the middle of the
         // attempts. Never recovered (skipped): the record is redelivered until it is handled or parked.
@@ -146,6 +151,7 @@ class EventConsumer(
             ConcurrentMessageListenerContainer(factory, props).apply {
                 concurrency = 1
                 setCommonErrorHandler(errorHandler)
+                if (pauseRequested) pause() // started paused: its partitions are paused as they are assigned
                 start()
             }
         } catch (e: Exception) {
@@ -155,10 +161,50 @@ class EventConsumer(
         }
         container = up
         log.info(
-            "Event processor {} started on topic {} group {} handling {} event types, dead letters: {}",
-            processor, topic, groupId, dispatcher.eventTypes(processor).size, deadLetters.mode.wireName,
+            "Event processor {} started on topic {} group {} handling {} event types, dead letters: {}{}",
+            processor, topic, groupId, dispatcher.eventTypes(processor).size, deadLetters.mode.wireName, if (pauseRequested) ", paused" else "",
         )
     }
+
+    /**
+     * Pauses consumption (P6b): every assigned partition, and those assigned later, without leaving the group; the record in
+     * hand finishes, nothing else starts. Kept across [stop] and [start]. Idempotent.
+     */
+    @Synchronized
+    fun pause() {
+        pauseRequested = true
+        container?.pause()
+    }
+
+    /** Resumes consumption after [pause]. Idempotent. */
+    @Synchronized
+    fun resume() {
+        pauseRequested = false
+        container?.resume()
+    }
+
+    /** Whether consumption is paused (or will start paused). */
+    val paused: Boolean get() = pauseRequested
+
+    /** The reset operation holding this processor's lock (P6b), reported as `operation_id`; empty when none. */
+    @Volatile var operationId: String = ""
+
+    /** Sets the open replay ranges (P6b) from the processor's control document; those of another topic are ignored. */
+    fun replay(ranges: List<ReplayRange>) {
+        replayRanges = ranges.filter { it.topic == topic }
+    }
+
+    /** The open replay ranges of this processor's topic. */
+    fun replayRanges(): List<ReplayRange> = replayRanges
+
+    /** The open ranges of the assigned partitions this instance's acknowledged position or the group's committed offset has reached the end of. */
+    fun passedRanges(): List<ReplayRange> = replayRanges.filter { range ->
+        val track = assigned[range.partition] ?: return@filter false
+        maxOf(track.position.get(), track.committed) >= range.until
+    }
+
+    private fun inReplay(record: ConsumerRecord<*, *>): Boolean =
+        replayRanges.any { it.partition == record.partition() && record.offset() < it.until }
 
     @Synchronized
     override fun stop() {
@@ -206,12 +252,15 @@ class EventConsumer(
             authorization = null,
             headers = headers,
         )
-        if (sequenced(record, ack, type, payload, ctx)) return
-        attempt(record, ack, id, type, payload, ctx)
+        val replay = inReplay(record)
+        if (sequenced(record, ack, type, payload, ctx, replay)) return
+        attempt(record, ack, id, type, payload, ctx, replay)
     }
 
     /** Parks [record] SEQUENCED when its key has a live letter (or acknowledges it when its own letter exists); true when done with it. */
-    private fun sequenced(record: ConsumerRecord<String, ByteArray>, ack: Acknowledgment, type: String, payload: ByteArray, ctx: MessageContext): Boolean {
+    private fun sequenced(
+        record: ConsumerRecord<String, ByteArray>, ack: Acknowledgment, type: String, payload: ByteArray, ctx: MessageContext, replay: Boolean,
+    ): Boolean {
         val store = store ?: return false
         val key = record.key() ?: return false
         if (!dispatcher.hasStage1(processor, type)) return false // only stage 1 is sequenced
@@ -234,7 +283,8 @@ class EventConsumer(
             advance(record, ack)
             return true
         }
-        if (processor == Processors.DEFAULT) stage2(record, type, payload, ctx) // the sagas see it even though stage 1 waits (ADR 0021 ruling 26)
+        // The sagas see it even though stage 1 waits (ADR 0021 ruling 26), unless it is replayed (sagas never replay, P6b).
+        if (processor == Processors.DEFAULT && !replay) stage2(record, type, payload, ctx)
         val letter = store.sequenced(processor, record, head)
         log.info("Record {}-{}@{} of type {} parked SEQUENCED in processor {} behind {}", record.topic(), partition, record.offset(), type, processor, head)
         toSink(record, ack) { if (store.park(letter)) parkedSinceSample.set(true) }
@@ -267,13 +317,16 @@ class EventConsumer(
         }
     }
 
-    private fun attempt(record: ConsumerRecord<String, ByteArray>, ack: Acknowledgment, id: String, type: String, payload: ByteArray, ctx: MessageContext) {
+    private fun attempt(
+        record: ConsumerRecord<String, ByteArray>, ack: Acknowledgment, id: String, type: String, payload: ByteArray, ctx: MessageContext, replay: Boolean,
+    ) {
+        val position = RecordPosition(record.topic(), record.partition(), record.offset())
         var attempts = 0
         var failure: Exception
         while (true) {
             attempts++
             try {
-                dispatcher.dispatchIn(processor, id, type, payload, ctx)
+                dispatcher.dispatchIn(processor, id, type, payload, ctx, position, replay)
                 processedTotal.incrementAndGet()
                 advance(record, ack)
                 return
@@ -450,6 +503,7 @@ class EventConsumer(
         val now = clock.millis()
         val state = when {
             !running.get() -> ProcessorState.PROCESSOR_STOPPED
+            pauseRequested -> ProcessorState.PROCESSOR_PAUSED
             failingSinceMs != 0L && now - failingSinceMs < FAILING_WINDOW_MS -> ProcessorState.PROCESSOR_FAILING
             !assignedOnce || rebalancing -> ProcessorState.PROCESSOR_STARTING
             else -> ProcessorState.PROCESSOR_RUNNING
@@ -466,18 +520,24 @@ class EventConsumer(
             .setLastErrorAtMs(lastErrorAtMs)
             .addAllEventTypes(dispatcher.eventTypes(processor).sorted())
             .setDeadLetterMode(deadLetters.mode.wireName)
+            .setOperationId(operationId)
+        val ranges = replayRanges
+        var replaying = false
         for ((partition, track) in assigned) {
             val position = track.position.get()
             val committed = track.committed
             val high = track.highWatermark
             val base = if (committed >= 0) committed else position
             val lag = if (high < 0 || base < 0) -1L else (high - base).coerceAtLeast(0)
+            // Replaying until this instance (or the group) got past the range's end.
+            val until = ranges.filter { it.partition == partition && maxOf(position, committed) < it.until }.maxOfOrNull { it.until } ?: 0L
+            if (until > 0) replaying = true
             builder.addPartitions(
                 PartitionStatus.newBuilder().setPartition(partition).setPosition(position).setCommitted(committed)
-                    .setHighWatermark(high).setLag(lag),
+                    .setHighWatermark(high).setLag(lag).setReplayUntil(until),
             )
         }
-        return builder.build()
+        return builder.setReplaying(replaying).build()
     }
 
     /** Whether this processor was started (also while it is stopping or stopped: it then reports STOPPED). */

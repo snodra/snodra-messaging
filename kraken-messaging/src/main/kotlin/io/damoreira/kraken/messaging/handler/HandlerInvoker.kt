@@ -114,12 +114,13 @@ class HandlerInvoker(
     }
 
     /**
-     * Calls every handler of [type] in order, only those of [processor] when it is given (ADR 0022); a failing handler does
-     * not stop the others, the first failure is rethrown.
+     * Calls every handler of [type] in order, only those of [processor] when it is given (ADR 0022), and in a [replay] (P6b)
+     * none marked `@DisallowReplay`; a failing handler does not stop the others, the first failure is rethrown.
      */
-    suspend fun invokeEvent(type: String, payload: ByteArray, ctx: MessageContext, processor: String? = null) {
+    suspend fun invokeEvent(type: String, payload: ByteArray, ctx: MessageContext, processor: String? = null, replay: Boolean = false) {
         var first: Throwable? = null
-        val handlers = if (processor == null) registry.eventHandlers(type) else registry.eventHandlers(type, processor)
+        val handlers = (if (processor == null) registry.eventHandlers(type) else registry.eventHandlers(type, processor))
+            .filter { !replay || !it.disallowReplay }
         for (handler in handlers) {
             try {
                 call(handler, codec.decode(payload, handler.messageClass), ctx)

@@ -101,6 +101,23 @@ class EventProcessorsTest {
         assertEquals(setOf("e-1", "processor:orders:e-1"), markers())
     }
 
+    @Test fun `stage-1 markers carry the processor and the record's position (P6b)`() {
+        val p = processors(plain, orders).also { it.start() }
+        support.send(topic, "e-1", key = "k1", partition = 0)
+        val offset = support.send(topic, "e-2", key = "k1", partition = 1)
+        await().atMost(Duration.ofSeconds(20)).until { plain.seen.size == 2 && orders.seen.size == 2 }
+        await().atMost(Duration.ofSeconds(10)).until { mongo.findAll(Document::class.java, "processed_events").size == 4 }
+        val marker = mongo.findById("processor:orders:e-2", Document::class.java, "processed_events")!!
+        assertEquals("orders", marker["processor"])
+        assertEquals(topic, marker["topic"])
+        assertEquals(1, marker["partition"], "Int32")
+        assertEquals(offset, marker["offset"], "Int64")
+        val plainMarker = mongo.findById("e-1", Document::class.java, "processed_events")!!
+        assertEquals(listOf("default", topic, 0, 0L), listOf(plainMarker["processor"], plainMarker["topic"], plainMarker["partition"], plainMarker["offset"]))
+        assertEquals("test.Happened", plainMarker["type"])
+        p.stop()
+    }
+
     @Test fun `a failure in one processor parks there only and does not hold the other`() {
         orders.failing = "bad-1"
         val p = processors(plain, orders).also { it.start() }

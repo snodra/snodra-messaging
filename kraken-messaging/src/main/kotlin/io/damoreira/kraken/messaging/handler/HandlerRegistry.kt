@@ -177,7 +177,11 @@ class HandlerRegistry(private val typeResolver: MessageTypeResolver) {
             }
             IdempotentHandlers.compile(it, labelOf(klass, fn))
         }
-        return HandlerMethod(bean, fn, kind, messageClass, typeResolver.typeNameOf(messageClass), wantsContext, authorization, shared, streaming, subscription, idempotency, processor)
+        val disallowReplay = fn.findAnnotation<DisallowReplay>() != null || klass.findAnnotation<DisallowReplay>() != null
+        return HandlerMethod(
+            bean, fn, kind, messageClass, typeResolver.typeNameOf(messageClass), wantsContext, authorization, shared, streaming, subscription,
+            idempotency, processor, disallowReplay && kind == HandlerKind.EVENT,
+        )
     }
 
     private fun add(handler: HandlerMethod) {

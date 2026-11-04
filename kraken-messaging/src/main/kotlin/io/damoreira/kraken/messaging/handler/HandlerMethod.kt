@@ -33,6 +33,8 @@ class HandlerMethod(
     val idempotency: CompiledIdempotency? = null,
     /** The event processor of an `@EventHandler` (its class's `@ProcessingGroup`, else `default`, ADR 0022); `default` for other kinds. */
     val processor: String = Processors.DEFAULT,
+    /** `@DisallowReplay` on the event handler or its class (P6b): a replayed record does not run it. */
+    val disallowReplay: Boolean = false,
 ) {
     init {
         function.isAccessible = true

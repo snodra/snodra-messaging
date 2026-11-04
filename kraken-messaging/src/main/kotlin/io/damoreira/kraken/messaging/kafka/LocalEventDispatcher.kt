@@ -92,13 +92,18 @@ class LocalEventDispatcher(
     }
 
     /**
-     * Dispatches the event to [processor] only: its stage 1, then (only for `default`) the sagas. Throws stage 1's failure
-     * (stage 2's suppressed in it), or a [SagaStageException] when only stage 2 failed.
+     * Dispatches the event to [processor] only: its stage 1 (its marker carrying [position], the Kafka record's), then (only
+     * for `default`) the sagas. In a [replay] (the record is in a replay range of a reset, P6b) the `@DisallowReplay`
+     * handlers and the sagas are skipped. Throws stage 1's failure (stage 2's suppressed in it), or a [SagaStageException]
+     * when only stage 2 failed.
      */
-    fun dispatchIn(processor: String, dedupeId: String, type: String, payload: ByteArray, ctx: MessageContext): Outcome {
+    fun dispatchIn(
+        processor: String, dedupeId: String, type: String, payload: ByteArray, ctx: MessageContext,
+        position: RecordPosition? = null, replay: Boolean = false,
+    ): Outcome {
         val stage1 = if (hasStage1(processor, type)) listOf(processor) else emptyList()
-        val saga = processor == Processors.DEFAULT && sagaStage.interested(type)
-        return run(stage1, saga, dedupeId, type, payload, ctx, wrapStage2 = true)
+        val saga = !replay && processor == Processors.DEFAULT && sagaStage.interested(type)
+        return run(stage1, saga, dedupeId, type, payload, ctx, wrapStage2 = true, position, replay)
     }
 
     /** Runs only stage 2 (the sagas) for the event, as for a record parked SEQUENCED in `default`; false when no saga is interested. */
@@ -113,20 +118,24 @@ class LocalEventDispatcher(
      * retry deletes the letter there, so handling and deletion commit together or not at all. Throws what the handlers or
      * [inTransaction] throw (everything rolled back).
      */
-    fun runStage1(processor: String, dedupeId: String, type: String, payload: ByteArray, ctx: MessageContext, inTransaction: () -> Unit): Stage1 {
+    fun runStage1(
+        processor: String, dedupeId: String, type: String, payload: ByteArray, ctx: MessageContext, position: RecordPosition? = null,
+        inTransaction: () -> Unit,
+    ): Stage1 {
         if (!hasStage1(processor, type)) return Stage1.NO_HANDLER
-        return if (stage1(processor, dedupeId, type, payload, ctx, inTransaction)) Stage1.HANDLED else Stage1.DUPLICATE
+        return if (stage1(processor, dedupeId, type, payload, ctx, position, replay = false, inTransaction)) Stage1.HANDLED else Stage1.DUPLICATE
     }
 
     private fun run(
         stage1: List<String>, saga: Boolean, dedupeId: String, type: String, payload: ByteArray, ctx: MessageContext, wrapStage2: Boolean,
+        position: RecordPosition? = null, replay: Boolean = false,
     ): Outcome {
         if (stage1.isEmpty() && !saga) return Outcome.NO_INTEREST
         var handled = false
         var failure: Exception? = null
         for (processor in stage1) {
             try {
-                if (stage1(processor, dedupeId, type, payload, ctx) {}) handled = true
+                if (stage1(processor, dedupeId, type, payload, ctx, position, replay) {}) handled = true
             } catch (e: Exception) {
                 // Held until the other processors and stage 2 ran: one failing handler group hides the event from none of them.
                 val first = failure
@@ -152,16 +161,24 @@ class LocalEventDispatcher(
     }
 
     /** One processor's stage 1 in one transaction; true when its handlers ran, false for a duplicate marker. */
-    private fun stage1(processor: String, dedupeId: String, type: String, payload: ByteArray, ctx: MessageContext, inTransaction: () -> Unit): Boolean {
+    private fun stage1(
+        processor: String, dedupeId: String, type: String, payload: ByteArray, ctx: MessageContext, position: RecordPosition?, replay: Boolean,
+        inTransaction: () -> Unit,
+    ): Boolean {
         val marker = Processors.markerId(processor, dedupeId)
         return try {
             tx.executeWithoutResult {
                 try {
-                    mongo.insert(ProcessedEventDocument(marker, type, Instant.now()))
+                    mongo.insert(
+                        ProcessedEventDocument(
+                            marker, type, Instant.now(),
+                            processor.takeIf { position != null }, position?.topic, position?.partition, position?.offset,
+                        ),
+                    )
                 } catch (_: DuplicateKeyException) {
                     throw AlreadyProcessed // only the marker's duplicate means "seen before"; a handler's is a failure
                 }
-                runBlocking(CorrelationContext(ctx.correlationId)) { invoker.invokeEvent(type, payload, ctx, processor) }
+                runBlocking(CorrelationContext(ctx.correlationId)) { invoker.invokeEvent(type, payload, ctx, processor, replay) }
                 inTransaction()
             }
             true
