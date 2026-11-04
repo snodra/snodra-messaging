@@ -223,4 +223,33 @@ class PropertiesBindingTest {
             assertTrue("parameter serviceName" in messages, messages)
         }
     }
+
+    @Test fun `dead-letter mode and retention and the kafka group id default and bind (P6a)`() {
+        runner.withPropertyValues(*required).run { context ->
+            val p = context.getBean(KrakenMessagingProperties::class.java)
+            assertEquals(null, p.kafka.groupId)
+            assertEquals("orders", p.kafka.defaultGroupId("orders"))
+            assertEquals(io.damoreira.kraken.messaging.deadletter.DeadLetterMode.COLLECTION, p.kafka.deadLetter.mode)
+            assertEquals(Duration.ofDays(30), p.kafka.deadLetter.retention)
+        }
+        for (mode in listOf("topic", "TOPIC", "log")) {
+            runner.withPropertyValues(*required, "kraken.messaging.kafka.dead-letter.mode=$mode", "kraken.messaging.kafka.dead-letter.retention=1s",
+                "kraken.messaging.kafka.group-id=orders-v2").run { context ->
+                val p = context.getBean(KrakenMessagingProperties::class.java)
+                assertEquals(mode.lowercase(), p.kafka.deadLetter.mode.wireName)
+                assertEquals(Duration.ofSeconds(1), p.kafka.deadLetter.retention)
+                assertEquals("orders-v2", p.kafka.defaultGroupId("orders"))
+            }
+        }
+    }
+
+    @Test fun `a dead-letter retention below 1 s or an unknown mode fails at startup (P6a)`() {
+        runner.withPropertyValues(*required, "kraken.messaging.kafka.dead-letter.retention=999ms").run { context ->
+            assertNotNull(context.startupFailure)
+            assertTrue(generateSequence(context.startupFailure) { it.cause }.any { it.message?.contains("kraken.messaging.kafka.dead-letter.retention") == true })
+        }
+        runner.withPropertyValues(*required, "kraken.messaging.kafka.dead-letter.mode=queue").run { context ->
+            assertNotNull(context.startupFailure)
+        }
+    }
 }

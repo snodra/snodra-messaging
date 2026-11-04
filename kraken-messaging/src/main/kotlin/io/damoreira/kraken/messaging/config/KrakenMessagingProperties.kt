@@ -1,6 +1,7 @@
 package io.damoreira.kraken.messaging.config
 
 import io.damoreira.kraken.messaging.RetryPolicy
+import io.damoreira.kraken.messaging.deadletter.DeadLetterMode
 import io.damoreira.kraken.messaging.deadline.DeadlineSettings
 import io.damoreira.kraken.messaging.hub.HubTargets
 import io.damoreira.kraken.messaging.saga.RelaySettings
@@ -226,13 +227,38 @@ data class KrakenMessagingProperties(
         val bootstrapServers: String = "broker:19092",
         /** Events topic. */
         val topic: String = "kraken.events",
+        /**
+         * Consumer group of the `default` event processor; unset: the service name. A named processor (`@ProcessingGroup`)
+         * uses `<this group>.<name>` (ADR 0022). Changing it on a running deployment starts the group from the earliest offset.
+         */
+        val groupId: String? = null,
         val consumer: Consumer = Consumer(),
-    )
+        val deadLetter: DeadLetter = DeadLetter(),
+    ) {
+        init {
+            require(groupId == null || groupId.isNotBlank()) { "kraken.messaging.kafka.group-id must not be blank" }
+        }
+
+        /** The `default` processor's consumer group: [groupId], else [serviceName]. */
+        fun defaultGroupId(serviceName: String): String = groupId ?: serviceName
+    }
+
+    /** `kafka.dead-letter.*` (P6a, ADR 0022): what an event processor does with a record it cannot handle. */
+    data class DeadLetter(
+        /** `collection` (park in `dead_letters`, the default), `topic` (produce to `<topic>.dlt`) or `log` (log and skip, as before P6a). */
+        val mode: DeadLetterMode = DeadLetterMode.COLLECTION,
+        /** A letter is deleted this long after it was parked (TTL index on `expireAt`), which also unblocks its key; at least 1 s. */
+        val retention: Duration = Duration.ofDays(30),
+    ) {
+        init {
+            require(retention >= Duration.ofSeconds(1)) { "kraken.messaging.kafka.dead-letter.retention must be at least 1s, was $retention" }
+        }
+    }
 
     data class Consumer(
         /** Set false in tools that only publish. */
         val enabled: Boolean = true,
-        /** Handler invocations per record (first try included) before the record is logged and skipped. */
+        /** Handler invocations per record (first try included) before the record goes to the dead letters (`kafka.dead-letter.mode`). */
         val maxAttempts: Int = 5,
     )
 
