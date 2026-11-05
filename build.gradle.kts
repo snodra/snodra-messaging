@@ -7,9 +7,13 @@ plugins {
     alias(libs.plugins.spring.dependency.management) apply false
 }
 
+val releaseVersion = providers.gradleProperty("version")
+    .orElse(providers.environmentVariable("CI_COMMIT_TAG").map { it.removePrefix("v") })
+    .getOrElse("0.1.0")
+
 allprojects {
     group = "io.damoreira.kraken"
-    version = "0.1.0-SNAPSHOT"
+    version = releaseVersion
 }
 
 subprojects {

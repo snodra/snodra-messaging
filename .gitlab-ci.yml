@@ -1,58 +1,41 @@
-# GitLab CI skeleton; shape follows ../kraken/docs/09-observability-and-testing.md.
-# Registry and GitLab host are placeholders until the kraken group exists.
+# Shell-executor pipeline: the runners have Java 25, Gradle, Docker and buildx installed.
+# Images and services are intentionally not used; Testcontainers talks to the host daemon.
+
 stages:
   - build
   - test
   - publish
-  - docker
+  - release
 
 variables:
   GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.caching=true"
-  GRADLE_USER_HOME: "$CI_PROJECT_DIR/.gradle"
-  REGISTRY: "registry.gitlab.damoreira.ml/kraken-org"
-  # Testcontainers in CI (Docker-in-Docker service)
-  DOCKER_HOST: "tcp://docker:2375"
-  DOCKER_TLS_CERTDIR: ""
   TESTCONTAINERS_RYUK_DISABLED: "true"
-
-default:
-  image: eclipse-temurin:25-jdk
-  cache:
-    key: "$CI_COMMIT_REF_SLUG"
-    paths:
-      - .gradle/wrapper
-      - .gradle/caches
 
 build:
   stage: build
   script:
     - ./gradlew assemble --no-daemon
 
-# kraken-messaging/src/main/proto/hub.proto must stay byte-identical to the umbrella's kraken/protocol/hub.proto.
+# src/main/proto/hub.proto must stay byte-identical to the umbrella's kraken/protocol/hub.proto.
 proto-sync:
   stage: build
-  variables:
-    KRAKEN_PROTO_SYNC_REQUIRED: "true"
-    KRAKEN_PROTO_SOURCE: "$CI_PROJECT_DIR/../kraken/protocol/hub.proto"
-  before_script:
-    - apt-get update -qq && apt-get install -y -qq git > /dev/null
   script:
-    - git clone --depth 1 "${KRAKEN_UMBRELLA_REPO:-https://gitlab.damoreira.ml/kraken-org/kraken.git}" ../kraken
-    - bash scripts/check-proto-sync.sh
+    - |
+      export GIT_ASKPASS="$CI_PROJECT_DIR/.git-askpass"
+      cat > "$GIT_ASKPASS" <<'EOF'
+      #!/bin/sh
+      case "$1" in
+        Username*) echo "$KRAKEN_UMBRELLA_DEPLOY_USER" ;;
+        Password*) echo "$KRAKEN_UMBRELLA_DEPLOY_TOKEN" ;;
+      esac
+      EOF
+      chmod +x "$GIT_ASKPASS"
+      rm -rf "$CI_PROJECT_DIR/../kraken"
+      git clone --depth 1 "https://${CI_SERVER_HOST}/kraken-org/kraken.git" "$CI_PROJECT_DIR/../kraken"
+      KRAKEN_PROTO_SYNC_REQUIRED=true KRAKEN_PROTO_SOURCE="$CI_PROJECT_DIR/../kraken/protocol/hub.proto" bash scripts/check-proto-sync.sh
 
 test:
   stage: test
-  services:
-    - docker:28-dind
-  variables:
-    # The E2E test runs only when the pull in before_script succeeds; otherwise it is skipped.
-    KRAKEN_HUB_IMAGE: "registry.gitlab.damoreira.ml/kraken-org/kraken-hub:latest"
-  before_script:
-    # The job image (eclipse-temurin) has no docker CLI; install it, it talks to the dind service via DOCKER_HOST.
-    # KrakenContainers.hubImageAvailable() only inspects the local daemon, so the image must be pulled here.
-    - apt-get update -qq && apt-get install -y -qq docker.io
-    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY" || true
-    - docker pull "$KRAKEN_HUB_IMAGE" || echo "hub image not available, E2E will be skipped"
   script:
     - ./gradlew test --no-daemon
   artifacts:
@@ -60,10 +43,29 @@ test:
     reports:
       junit: "**/build/test-results/test/TEST-*.xml"
 
-publish-api:
+publish:
   stage: publish
   rules:
-    - if: '$CI_COMMIT_TAG =~ /^api\/v[0-9]+\.[0-9]+\.[0-9]+$/'
+    - if: '$CI_COMMIT_TAG =~ /^v[0-9]+\.[0-9]+\.[0-9]+$/'
   script:
-    - export KRAKEN_GITLAB_MAVEN_URL="$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/maven"
-    - ./gradlew :kraken-messaging-api:publish :kraken-messaging:publish :kraken-messaging-test:publish --no-daemon -Pversion="${CI_COMMIT_TAG#api/v}"
+    - VERSION="${CI_COMMIT_TAG#v}"
+    - ./gradlew :kraken-messaging-api:publish :kraken-messaging:publish :kraken-messaging-test:publish --no-daemon -Pversion="$VERSION"
+
+release:
+  stage: release
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v[0-9]+\.[0-9]+\.[0-9]+$/'
+  script:
+    - |
+      VERSION="${CI_COMMIT_TAG#v}"
+      PAYLOAD=$(jq -n \
+        --arg name "$CI_PROJECT_NAME $CI_COMMIT_TAG" \
+        --arg tag "$CI_COMMIT_TAG" \
+        --arg desc "Maven release $VERSION: io.damoreira.kraken:kraken-messaging, kraken-messaging-api and kraken-messaging-test in Nexus maven-releases." \
+        '{name:$name,tag_name:$tag,description:$desc}')
+      curl --fail --silent --show-error \
+        --request POST \
+        --header "JOB-TOKEN: $CI_JOB_TOKEN" \
+        --header "Content-Type: application/json" \
+        --data "$PAYLOAD" \
+        "$CI_API_V4_URL/projects/$CI_PROJECT_ID/releases"

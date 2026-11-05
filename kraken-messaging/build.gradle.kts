@@ -108,14 +108,13 @@ publishing {
     }
     repositories {
         maven {
-            name = "gitlab"
-            url = uri(System.getenv("KRAKEN_GITLAB_MAVEN_URL")
-                ?: "https://gitlab.damoreira.ml/api/v4/projects/0/packages/maven")
-            credentials(HttpHeaderCredentials::class) {
-                name = if (System.getenv("CI_JOB_TOKEN") != null) "Job-Token" else "Private-Token"
-                value = System.getenv("CI_JOB_TOKEN") ?: System.getenv("KRAKEN_GITLAB_TOKEN") ?: ""
+            name = "nexus"
+            url = uri(System.getenv("NEXUS_MAVEN_RELEASE_URL")
+                ?: "https://nexus.damoreira.ml/repository/maven-releases/")
+            credentials {
+                username = System.getenv("NEXUS_USERNAME")
+                password = System.getenv("NEXUS_PASSWORD")
             }
-            authentication { create<HttpHeaderAuthentication>("header") }
         }
     }
 }

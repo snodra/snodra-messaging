@@ -9,21 +9,21 @@ pluginManagement {
 
 dependencyResolutionManagement {
     repositories {
-        mavenCentral()
-        // Kraken artifacts (kraken-messaging, *-api modules) are published to the self-hosted
-        // GitLab Package Registry. Uncomment once the GitLab group exists; see
-        // ../kraken/docs/04-repositories.md. Until then, publish them to mavenLocal().
-        // maven {
-        //     name = "gitlab"
-        //     url = uri(System.getenv("KRAKEN_GITLAB_MAVEN_URL")
-        //         ?: "https://gitlab.damoreira.ml/api/v4/groups/kraken-org/-/packages/maven")
-        //     credentials(HttpHeaderCredentials::class) {
-        //         name = if (System.getenv("CI_JOB_TOKEN") != null) "Job-Token" else "Private-Token"
-        //         value = System.getenv("CI_JOB_TOKEN") ?: System.getenv("KRAKEN_GITLAB_TOKEN")
-        //     }
-        //     authentication { create<HttpHeaderAuthentication>("header") }
-        // }
+        // In CI the group's Nexus proxy/group is the single entry point for Maven Central and the
+        // kraken artifacts. Locally, fall back to mavenLocal()/mavenCentral() when it is unset.
+        val nexusUrl = System.getenv("NEXUS_MAVEN_PUBLIC_URL")
+        if (nexusUrl != null) {
+            maven {
+                name = "nexus"
+                url = uri(nexusUrl)
+                credentials {
+                    username = System.getenv("NEXUS_USERNAME")
+                    password = System.getenv("NEXUS_PASSWORD")
+                }
+            }
+        }
         mavenLocal()
+        mavenCentral()
     }
 }
 
