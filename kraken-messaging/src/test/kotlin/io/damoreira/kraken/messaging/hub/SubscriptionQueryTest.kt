@@ -366,7 +366,7 @@ class SubscriptionQueryTest {
         assertEquals(ErrorCode.INVALID_REQUEST to "test.WatchAccount is a subscription query: send it with QueryBus.subscribe", unary.code to unary.message)
 
         owner("svc-y", "y-1", PlainCountOwner())
-        sender.send(subscribeRequest("w2", account = 1, type = "test.GetCount"))
+        sender.send(subscribeRequest("w2", account = 1, type = "test.GetCount", payload = "{\"key\":\"x\"}"))
         val end = sender.nextEnd()
         assertEquals(ErrorCode.INVALID_REQUEST, end.error.code)
         assertTrue(end.error.message.contains("no subscription handler") || end.error.message.contains("not a subscription query handler"), end.error.message)
