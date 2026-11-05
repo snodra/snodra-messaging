@@ -18,6 +18,8 @@
 #        processors through the hub's HTTP API with the write token), ONLY_CONTROL=1 runs only them; WRITE_TOKEN_FILE names
 #        the write token, default <secrets directory>/hub-control/dashboard-write.token (kraken/infra/scripts/dev-hub-pki.sh,
 #        in every mode);
+#        SKIP_BROWSER=1 skips the event browser steps 28-28f (search, record, payload rules, tail and consumer groups of
+#        kraken.events through both hubs' HTTP API), ONLY_BROWSER=1 runs only them;
 #        SECURE=1 runs against the secure sandbox (kraken/infra/compose.secure.yaml, secrets from
 #        kraken/infra/scripts/dev-hub-pki.sh): the hub calls are https with the dev CA and carry the dashboard token, every
 #        other step runs unchanged, and the security steps 21 and 21b are added; SKIP_SECURE=1 skips those two, ONLY_SECURE=1
@@ -291,6 +293,20 @@ if command -v jq >/dev/null; then
   reply_field() { jq -r --arg f "$1" 'if has($f) then .[$f] | tostring else empty end' 2>/dev/null || true; }
   # GET .../dead-letters through the hub -> one line per letter, oldest first: "<id> <key> <reason> <attempts>".
   hub_letters() { jq -r '.letters[] | "\(.id) \(.key) \(.reason) \(.attempts)"' 2>/dev/null || true; }
+  # GET /api/v1/events -> one line per result, in the order given: "<partition> <offset> <timestamp> <key> <type> <correlationId>
+  # <id>" ("-" for what the record lacks).
+  event_rows() {
+    jq -r '.results[] | "\(.partition) \(.offset) \(.timestamp // "-") \(.key // "-") \(.headers.type // "-") \(.headers.correlationId // "-") \(.headers.id // "-")"' 2>/dev/null || true
+  }
+  # GET /api/v1/events/<topic>/<partition>/<offset> -> "header <name> <value>" per header in record order, then one payload line:
+  # "payload text <text, newlines as spaces>", "payload hidden <code>", "payload base64" or "payload null".
+  event_detail() {
+    jq -r '((.allHeaders // [])[] | "header \(.name) \(.value // "-")"),
+      (if has("payloadBase64") then "payload base64" elif (.payload | type) == "object" then "payload hidden \(.payload.hidden)"
+       elif (.payload | type) == "string" then "payload text \(.payload | gsub("\n"; " "))" else "payload null" end)' 2>/dev/null || true
+  }
+  # GET /api/v1/consumer-groups -> one line per group, in the order given: "<groupId> <state> <members> <lag>".
+  group_rows() { jq -r '.groups[] | "\(.groupId) \(.state) \(.members) \(.lag)"' 2>/dev/null || true; }
 elif command -v python3 >/dev/null; then
   hub_id_of() { python3 -I -c 'import json,sys
 try: print(json.load(sys.stdin).get("hubId") or "")
@@ -374,6 +390,28 @@ try:
     for l in json.load(sys.stdin).get("letters", []):
         print(l["id"], l["key"], l["reason"], l["attempts"])
 except Exception: pass' || true; }
+  event_rows() { python3 -I -c 'import json,sys
+try:
+    for r in json.load(sys.stdin).get("results", []):
+        h = r.get("headers") or {}; d = lambda v: "-" if v is None else v
+        print(r["partition"], r["offset"], d(r.get("timestamp")), d(r.get("key")), d(h.get("type")), d(h.get("correlationId")), d(h.get("id")))
+except Exception: pass' || true; }
+  event_detail() { python3 -I -c 'import json,sys
+try:
+    r = json.load(sys.stdin)
+    for h in r.get("allHeaders") or []:
+        print("header", h["name"], "-" if h.get("value") is None else h["value"])
+    p = r.get("payload")
+    if "payloadBase64" in r: print("payload base64")
+    elif isinstance(p, dict): print("payload hidden", p.get("hidden"))
+    elif isinstance(p, str): print("payload text", p.replace("\n", " "))
+    else: print("payload null")
+except Exception: pass' || true; }
+  group_rows() { python3 -I -c 'import json,sys
+try:
+    for g in json.load(sys.stdin).get("groups", []):
+        print(g["groupId"], g["state"], g["members"], g["lag"])
+except Exception: pass' || true; }
 else
   hub_id_of() { fail "jq or python3 needed for the two-hub steps (or set SKIP_HA=1)"; }
   example_instances() { hub_id_of; }
@@ -390,6 +428,9 @@ else
   control_state() { fail "jq or python3 needed for the processor-control steps (or set SKIP_CONTROL=1)"; }
   reply_field() { control_state; }
   hub_letters() { control_state; }
+  event_rows() { fail "jq or python3 needed for the event browser steps (or set SKIP_BROWSER=1)"; }
+  event_detail() { event_rows; }
+  group_rows() { event_rows; }
 fi
 
 # Succeeds (prints nothing) when both hubs list the same instances of service-a, service-b and service-c, each of
@@ -1290,6 +1331,198 @@ control_steps() {
   control_off
 }
 
+# P7 (ADR 0025): the hubs' event browser, which reads kraken.events from Kafka, read-only (kraken/infra/compose.yaml gives both
+# hubs KRAKEN_HUB_KAFKA_BOOTSTRAP; compose.secure.yaml, and with it the jwt and mtls overlays, turns payloads on). The events
+# are audit notes the smoke publishes through service-b (`POST $B/audit/notes`: examples.AuditNote under the note's key, with
+# a correlation id of its own that the library makes up and the first search reads back). Step 28: both hubs have the browser
+# on (`/api/v1/version`), payloads only with SECURE=1, where a read without the dashboard token is 401 (the plain hubs' reads
+# are open). 28b: two notes under a key of this run: both hubs find them by key and by type (exact and `examples.Audit*`),
+# newest first (the second note first, timestamps not increasing), and each by its correlation id. 28c: the record shows the
+# library headers; its payload is hidden as `payloads-off` in the plain sandbox and is the note's JSON with the dashboard
+# token in the secure ones (the newest is the second note). 28d: a payload search (`q`) finds the first note by its text with
+# SECURE=1 and is 403 `payloads-off` otherwise. 28e: a tail opened on each hub before a third note is published delivers it.
+# 28f: both hubs list the examples' consumer groups on kraken.events (service-b.default, service-b.audit, service-c.default,
+# service-c.audit) with their lag, and no group of the hub's own. A search reads Kafka as it is: a note is there once
+# service-b's outbox relay published it, so the steps poll. SKIP_BROWSER=1 skips these steps, ONLY_BROWSER=1 runs only them.
+
+# The HTTP code of a GET on <hub>'s API without any credential (the curl wrapper would add the dashboard token).
+anonymous_code() { # <hub> <path and query>
+  local args=(-sS -o /dev/null --max-time 30 -w '%{http_code}')
+  [ "$SECURE" = "1" ] && args+=(--cacert "$SECRETS/ca.pem")
+  command curl "${args[@]}" "$1/api/v1/$2"
+}
+
+# Polls <hub>'s search <query> until it returns at least <count> results and prints them (as event_rows).
+await_events() { # <hub> <query> <count> <seconds>
+  local start=$SECONDS rows="" n=0
+  while [ $((SECONDS - start)) -lt "$4" ]; do
+    rows=$(curl -fsS --max-time 30 "$1/api/v1/events?$2" 2>/dev/null | event_rows || true)
+    n=$(printf '%s' "$rows" | grep -c . || true)
+    [ "$n" -ge "$3" ] && { printf '%s' "$rows"; return 0; }
+    sleep 1
+  done
+  fail "$1/api/v1/events?$2: expected at least $3 result(s) within ${4}s, got $n: $rows"
+}
+
+# Opens a tail of <hub>'s event browser for <key> in the background, the stream going to <file> (curl's pid in TAIL_PID;
+# --max-time bounds it should nothing kill it), and waits for its `event: start`: every record written after it is delivered.
+# The token goes through a curl config on a pipe, as in the curl wrapper.
+tail_open() { # <hub> <key> <file>
+  local args=(-sSN --max-time 120) i
+  if [ "$SECURE" = "1" ]; then
+    command curl "${args[@]}" --cacert "$SECRETS/ca.pem" -K <(printf 'header = "Authorization: Bearer %s"\n' "$DASHBOARD_TOKEN") \
+      "$1/api/v1/events/tail?key=$2" >"$3" 2>&1 &
+  else
+    command curl "${args[@]}" "$1/api/v1/events/tail?key=$2" >"$3" 2>&1 &
+  fi
+  TAIL_PID=$!
+  for i in $(seq 1 40); do
+    grep -q '^event: start' "$3" && return 0
+    sleep 0.5
+  done
+  fail "$1/api/v1/events/tail?key=$2: no 'event: start' within 20 s: $(head -c 300 "$3")"
+}
+
+# Leaves nothing behind: the tails stopped, their output removed.
+browser_off() {
+  trap - EXIT
+  if [ -n "${BROWSER_PIDS:-}" ]; then
+    { kill $BROWSER_PIDS; wait $BROWSER_PIDS; } 2>/dev/null || true
+    BROWSER_PIDS=""
+  fi
+  if [ -n "${BROWSER_DIR:-}" ]; then rm -rf "$BROWSER_DIR"; fi
+}
+
+browser_steps() {
+  local run key h hubs want v code rows p o ts k t corr id p2 o2 ts2 k2 t2 corr2 id2 row detail name line reply i
+  local files=() g state members lag
+  run=$(date +%s)
+  key="ev$run"
+  hubs=("$HUB")
+  [ "${SKIP_HA:-0}" = "1" ] || hubs+=("$HUB2")
+  want=false
+  [ "$SECURE" = "1" ] && want=true
+  BROWSER_DIR=$(mktemp -d); BROWSER_PIDS=""
+  trap browser_off EXIT
+
+  echo "28. both hubs have the event browser on, payloads $want; a read without the dashboard token is $([ "$SECURE" = "1" ] && echo 401 || echo 'open (no dashboard token in this mode)') ..."
+  for h in "${hubs[@]}"; do
+    v=$(curl -fsS "$h/api/v1/version" | reply_field eventBrowser | tr -d ' ')
+    printf '%s' "$v" | grep -q '"enabled":true' && printf '%s' "$v" | grep -q "\"payloads\":$want" \
+      && printf '%s' "$v" | grep -q '"topics":\["kraken.events"\]' \
+      || fail "$h/api/v1/version: expected eventBrowser enabled, payloads $want, topics [kraken.events], got '$v' (KRAKEN_HUB_KAFKA_BOOTSTRAP in kraken/infra/compose.yaml; recreate hub and hub-2)"
+    if [ "$SECURE" = "1" ]; then
+      line=""
+      for name in "events?limit=1" consumer-groups events/tail events/kraken.events/0/0; do
+        code=$(anonymous_code "$h" "$name")
+        [ "$code" = "401" ] || fail "$h/api/v1/$name without the dashboard token: expected 401, got $code"
+        line="$line ${name%%\?*} 401,"
+      done
+      echo "   $h: on, topics [kraken.events], payloads true; no token:${line%,}"
+    else
+      code=$(anonymous_code "$h" "events?limit=1")
+      [ "$code" = "200" ] || fail "$h/api/v1/events without a token: expected 200 (the plain hubs' reads are open), got $code"
+      echo "   $h: on, topics [kraken.events], payloads false; events without a token 200"
+    fi
+  done
+
+  echo "28b. two audit notes under $key through service-b: found by key, by type (exact and prefix) newest first, each by its correlation id ..."
+  audit_note "$B" "$key" "first-$run"
+  audit_note "$B" "$key" "second-$run"
+  for h in "${hubs[@]}"; do
+    rows=$(await_events "$h" "key=$key&limit=2" 2 60)
+    read -r p o ts k t corr id <<< "$(printf '%s\n' "$rows" | sed -n 1p)"
+    read -r p2 o2 ts2 k2 t2 corr2 id2 <<< "$(printf '%s\n' "$rows" | sed -n 2p)"
+    [ "$k" = "$key" ] && [ "$k2" = "$key" ] && [ "$t" = "examples.AuditNote" ] && [ "$t2" = "examples.AuditNote" ] \
+      || fail "$h: the search by key $key should give two examples.AuditNote, got: $rows"
+    [ "$p" = "$p2" ] && [ "$o" -gt "$o2" ] && [ "$ts" -ge "$ts2" ] \
+      || fail "$h: the notes of $key should come newest first (one partition, the higher offset first, timestamps not increasing), got: $rows"
+    [ "$corr" != "-" ] && [ "$corr2" != "-" ] && [ "$corr" != "$corr2" ] && [ "$id" != "-" ] \
+      || fail "$h: each note should carry its own correlationId and an id, got: $rows"
+    for t in examples.AuditNote 'examples.Audit*'; do
+      [ "$(await_events "$h" "type=$t&limit=2" 2 30 | cut -d' ' -f1-4)" = "$(printf '%s\n' "$rows" | cut -d' ' -f1-4)" ] \
+        || fail "$h: the newest two of type $t should be the notes of $key, newest first, got: $(curl -fsS "$h/api/v1/events?type=$t&limit=2" | event_rows)"
+    done
+    for row in "$p $o $corr" "$p2 $o2 $corr2"; do
+      [ "$(await_events "$h" "correlationId=${row##* }&limit=1" 1 30 | cut -d' ' -f1-2,6)" = "$row" ] \
+        || fail "$h: the search by correlationId ${row##* } should find the record at partition/offset ${row% *}"
+    done
+    echo "   $h: key -> p$p/$o, p$p2/$o2 (newest first); type examples.AuditNote and examples.Audit* -> the same two; each by its correlationId"
+  done
+
+  echo "28c. the newest note's record: the library headers, and the payload $([ "$SECURE" = "1" ] && echo 'with the dashboard token' || echo 'hidden (payloads-off)') ..."
+  for h in "${hubs[@]}"; do
+    detail=$(curl -fsS "$h/api/v1/events/kraken.events/$p/$o" | event_detail)
+    for name in "type examples.AuditNote" "id $id" "correlationId $corr" "source service-b" "timestamp "; do
+      printf '%s\n' "$detail" | grep -q "^header $name" || fail "$h: the record p$p/$o should have the header '$name', got: $detail"
+    done
+    line=$(printf '%s\n' "$detail" | grep '^payload ' || true)
+    if [ "$SECURE" = "1" ]; then
+      # The payload is the JSON text as the library wrote it ("key": "...", with a space): compared without spaces.
+      case "$(printf '%s' "$line" | tr -d ' ')" in
+        "payloadtext"*"\"key\":\"$key\""*"\"text\":\"second-$run\""*) ;;
+        *) fail "$h: the record p$p/$o should show the second note's JSON to the dashboard token, got: $line" ;;
+      esac
+      line=$(curl -fsS "$h/api/v1/events/kraken.events/$p2/$o2" | event_detail | grep '^payload ' || true)
+      case "$(printf '%s' "$line" | tr -d ' ')" in *"\"text\":\"first-$run\""*) ;; *) fail "$h: the record p$p2/$o2 should be the first note, got: $line" ;; esac
+      echo "   $h: p$p/$o headers type, id, correlationId, timestamp, source; payload second-$run (and p$p2/$o2 first-$run)"
+    else
+      [ "$line" = "payload hidden payloads-off" ] || fail "$h: the record p$p/$o should hide its payload as payloads-off, got: $line"
+      echo "   $h: p$p/$o headers type, id, correlationId, timestamp, source; payload hidden: payloads-off"
+    fi
+  done
+
+  echo "28d. a payload search (q) $([ "$SECURE" = "1" ] && echo 'finds the first note by its text' || echo 'is 403 payloads-off') ..."
+  for h in "${hubs[@]}"; do
+    if [ "$SECURE" = "1" ]; then
+      row=$(await_events "$h" "q=first-$run&limit=1" 1 30 | cut -d' ' -f1-2,4)
+      [ "$row" = "$p2 $o2 $key" ] || fail "$h: q=first-$run should find p$p2/$o2, got '$row'"
+      echo "   $h: q=first-$run -> p$p2/$o2"
+    else
+      reply=$(curl -sS --max-time 30 -w '\n%{http_code}' "$h/api/v1/events?q=first-$run")
+      code=${reply##*$'\n'}
+      [ "$code" = "403" ] && [ "$(printf '%s' "${reply%$'\n'*}" | reply_field hidden)" = "payloads-off" ] \
+        || fail "$h: q without payloads should be 403 payloads-off, got $code: ${reply%$'\n'*}"
+      echo "   $h: q -> 403 payloads-off"
+    fi
+  done
+
+  echo "28e. a tail opened on each hub before a third note is published delivers it ..."
+  for i in "${!hubs[@]}"; do
+    files+=("$BROWSER_DIR/tail-$i")
+    tail_open "${hubs[$i]}" "t$run" "${files[$i]}"
+    BROWSER_PIDS="$BROWSER_PIDS $TAIL_PID"
+  done
+  audit_note "$B" "t$run" "tailed-$run"
+  for i in "${!hubs[@]}"; do
+    line=""
+    for _ in $(seq 1 60); do
+      line=$(grep -A1 '^event: record' "${files[$i]}" | grep "\"key\":\"t$run\"" | head -1 || true)
+      [ -n "$line" ] && break
+      sleep 1
+    done
+    [ -n "$line" ] || fail "${hubs[$i]}: the tail did not deliver the note t$run within 60 s: $(head -c 500 "${files[$i]}")"
+    printf '%s' "$line" | grep -q '"payload"' && fail "${hubs[$i]}: the tail carries a payload"
+    echo "   ${hubs[$i]}: start, then record $(printf '%s' "$line" | sed -n 's/.*"partition":\([0-9]*\),"offset":\([0-9]*\).*/p\1\/\2/p') key t$run"
+  done
+  browser_off
+
+  echo "28f. both hubs list the examples' consumer groups with their lag, and none of their own ..."
+  for h in "${hubs[@]}"; do
+    reply=$(curl -fsS --max-time 30 "$h/api/v1/consumer-groups") || fail "GET $h/api/v1/consumer-groups failed"
+    rows=$(printf '%s' "$reply" | group_rows)
+    [ "$(printf '%s' "$reply" | reply_field truncated)" = "false" ] || fail "$h: the consumer groups are truncated"
+    line=""
+    for g in service-b.default service-b.audit service-c.default service-c.audit; do
+      read -r _ state members lag <<< "$(printf '%s\n' "$rows" | grep "^$g " || true)"
+      [[ "${lag:-}" =~ ^[0-9]+$ ]] || fail "$h: the group $g should be listed with a lag, got: $rows"
+      line="$line $g $state/$members lag $lag,"
+    done
+    if printf '%s\n' "$rows" | grep -q '^kraken-hub'; then fail "$h lists a consumer group of the hub's own: $rows"; fi
+    echo "   $h: $(printf '%s\n' "$rows" | grep -c .) groups;${line%,}; none kraken-hub*"
+  done
+}
+
 # P5a (ADR 0018), only with SECURE=1 against the secure sandbox (kraken/infra/compose.secure.yaml). Step 21: a service
 # with a token the ACL does not know, and one with a valid token that grants only another service name, are refused by
 # both hubs and logged by the client as a registration rejection (ERROR once per hub), and never listed on /api/v1/topology; a
@@ -1689,6 +1922,12 @@ if [ "${ONLY_CONTROL:-0}" = "1" ]; then
   exit 0
 fi
 
+if [ "${ONLY_BROWSER:-0}" = "1" ]; then
+  browser_steps
+  echo "SMOKE OK (event browser steps only)"
+  exit 0
+fi
+
 if [ "${ONLY_SECURE:-0}" = "1" ]; then
   [ "$SECURE" = "1" ] || fail "ONLY_SECURE=1 needs SECURE=1"
   secure_steps
@@ -1798,6 +2037,7 @@ echo "   delivered: $TEXTS"
 [ "${SKIP_BANNER:-0}" = "1" ] || banner_steps
 [ "${SKIP_AUDIT:-0}" = "1" ] || audit_steps
 [ "${SKIP_CONTROL:-0}" = "1" ] || control_steps
+[ "${SKIP_BROWSER:-0}" = "1" ] || browser_steps
 if [ "$SECURE" = "1" ] && [ "${SKIP_SECURE:-0}" != "1" ]; then secure_steps; fi
 if [ "$JWT" = "1" ] && [ "${SKIP_JWT:-0}" != "1" ]; then jwt_steps; fi
 if [ "$MTLS" = "1" ] && [ "${SKIP_MTLS:-0}" != "1" ]; then mtls_steps; fi
