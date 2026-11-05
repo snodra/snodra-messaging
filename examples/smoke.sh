@@ -19,7 +19,8 @@
 #        the write token, default <secrets directory>/hub-control/dashboard-write.token (kraken/infra/scripts/dev-hub-pki.sh,
 #        in every mode);
 #        SKIP_BROWSER=1 skips the event browser steps 28-28f (search, record, payload rules, tail and consumer groups of
-#        kraken.events through both hubs' HTTP API), ONLY_BROWSER=1 runs only them;
+#        kraken.events through both hubs' HTTP API, and the broker's own group list with the Kafka CLI in KAFKA_CONTAINER,
+#        default kraken-kafka; needs the docker CLI), ONLY_BROWSER=1 runs only them;
 #        SECURE=1 runs against the secure sandbox (kraken/infra/compose.secure.yaml, secrets from
 #        kraken/infra/scripts/dev-hub-pki.sh): the hub calls are https with the dev CA and carry the dashboard token, every
 #        other step runs unchanged, and the security steps 21 and 21b are added; SKIP_SECURE=1 skips those two, ONLY_SECURE=1
@@ -1342,7 +1343,8 @@ control_steps() {
 # token in the secure ones (the newest is the second note). 28d: a payload search (`q`) finds the first note by its text with
 # SECURE=1 and is 403 `payloads-off` otherwise. 28e: a tail opened on each hub before a third note is published delivers it.
 # 28f: both hubs list the examples' consumer groups on kraken.events (service-b.default, service-b.audit, service-c.default,
-# service-c.audit) with their lag, and no group of the hub's own. A search reads Kafka as it is: a note is there once
+# service-c.audit) with their lag, and no group of the hub's own, neither in the API (which lists every group the broker
+# has) nor in the broker's list read with kafka-consumer-groups.sh in the Kafka container. A search reads Kafka as it is: a note is there once
 # service-b's outbox relay published it, so the steps poll. SKIP_BROWSER=1 skips these steps, ONLY_BROWSER=1 runs only them.
 
 # The HTTP code of a GET on <hub>'s API without any credential (the curl wrapper would add the dashboard token).
@@ -1521,6 +1523,14 @@ browser_steps() {
     if printf '%s\n' "$rows" | grep -q '^kraken-hub'; then fail "$h lists a consumer group of the hub's own: $rows"; fi
     echo "   $h: $(printf '%s\n' "$rows" | grep -c .) groups;${line%,}; none kraken-hub*"
   done
+  # The API lists every group the broker has; the broker's own list says the same without the hub in between.
+  local kafka=${KAFKA_CONTAINER:-kraken-kafka} listed
+  command -v docker >/dev/null || fail "docker CLI needed for the consumer-group check (or set SKIP_BROWSER=1)"
+  listed=$(docker exec "$kafka" /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server kafka:19092 --list 2>/dev/null) \
+    || fail "kafka-consumer-groups.sh --list failed in $kafka (set KAFKA_CONTAINER)"
+  printf '%s\n' "$listed" | grep -q '^service-b\.default$' || fail "$kafka: the broker's group list lacks service-b.default: $listed"
+  if printf '%s\n' "$listed" | grep -q '^kraken-hub'; then fail "$kafka: the broker has a consumer group of the hub's own: $listed"; fi
+  echo "   $kafka (kafka-consumer-groups.sh --list): $(printf '%s\n' "$listed" | grep -c .) groups, none kraken-hub*"
 }
 
 # P5a (ADR 0018), only with SECURE=1 against the secure sandbox (kraken/infra/compose.secure.yaml). Step 21: a service

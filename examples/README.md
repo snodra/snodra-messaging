@@ -624,8 +624,10 @@ the newest note's record: the library headers (`type`, `id`, `correlationId`, `t
 first note's text (`q`): found with `SECURE=1`, 403 `payloads-off` otherwise; 28e opens a tail on each hub, waits for its
 `event: start`, publishes a third note and expects each tail to deliver it (a summary, no payload), then stops the tails; 28f
 lists the consumer groups and expects `service-b.default`, `service-b.audit`, `service-c.default` and `service-c.audit` with a lag,
-and no group whose id starts with `kraken-hub`. A note reaches Kafka through service-b's outbox relay, so the searches poll. They
-need `jq` or `python3`; `SKIP_BROWSER=1` skips them, `ONLY_BROWSER=1` runs only them.
+and no group whose id starts with `kraken-hub`, both in the API (which lists every group the broker has) and in the broker's own
+list (`kafka-consumer-groups.sh --list` run in `kraken-kafka`, `KAFKA_CONTAINER` to name another). A note reaches Kafka through
+service-b's outbox relay, so the searches poll. They need `jq` or `python3` and the docker CLI; `SKIP_BROWSER=1` skips them,
+`ONLY_BROWSER=1` runs only them.
 
 ## Tear down
 
