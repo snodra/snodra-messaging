@@ -241,6 +241,8 @@ SKIP_AUDIT=1 bash examples/smoke.sh   # without the named-processor and dead-let
 ONLY_AUDIT=1 bash examples/smoke.sh   # only those steps (needs jq or python3)
 SKIP_CONTROL=1 bash examples/smoke.sh # without the processor-control steps (27 to 27e)
 ONLY_CONTROL=1 bash examples/smoke.sh # only those steps (needs jq or python3 and the write token, see "Event processors and dead letters")
+SKIP_BROWSER=1 bash examples/smoke.sh # without the event browser steps (28 to 28f)
+ONLY_BROWSER=1 bash examples/smoke.sh # only those steps (needs jq or python3, see "Event browser")
 SECURE=1 bash examples/smoke.sh        # against the secure sandbox (see "Secure sandbox"): every step plus 21 and 21b
 SECURE=1 SKIP_SECURE=1 bash examples/smoke.sh  # the secure sandbox without steps 21 and 21b
 SECURE=1 ONLY_SECURE=1 bash examples/smoke.sh  # only steps 21 and 21b (needs the docker CLI)
@@ -586,6 +588,44 @@ poison note, lists it through the hub (`HANDLER_FAILED`, no payload), retries it
 the failure off (`Retried`, the note handled, the list empty), and discards another one through the hub (a second discard is a
 404). The topic holds every note since the sandbox started, so a reset to `earliest` replays them all; the steps check only the
 keys of the run. They need `jq` or `python3`; `SKIP_CONTROL=1` skips them, `ONLY_CONTROL=1` runs only them.
+
+## Event browser
+
+Both hubs read `kraken.events` from Kafka, read-only (P7, ADR 0025, `kraken/docs/05-services/hub.md` "Event browser"):
+`kraken/infra/compose.yaml` gives them `KRAKEN_HUB_KAFKA_BOOTSTRAP=kafka:19092` and `KRAKEN_HUB_EVENT_TOPICS=kraken.events`. They
+search events newest first (by key, type or a `type.*` prefix, source, correlation id, user id, event id, time range), show a
+record with every header, tail new records as server-sent events and list every consumer group on the topic with its lag,
+members or not. The dashboard shows it as the Events and Consumer groups pages. The hubs never join a group of their own and
+start without Kafka (only these routes answer 503 while it is down).
+
+Payloads are shown only with `KRAKEN_HUB_EVENT_BROWSER_PAYLOADS=true` and a dashboard or write token presented by the request:
+the secure overlay (and with it the JWT and mTLS ones) turns the switch on, so there the dashboard token sees them; the plain
+sandbox keeps them hidden (`"payload": {"hidden": "payloads-off", ...}`, and a payload search `q` is 403).
+
+```bash
+# from kraken-messaging, against the plain sandbox (secure modes: https://localhost:7001, --cacert ../kraken/infra/.secrets/ca.pem
+# and the dashboard token on every call; hub-2 is localhost:7011)
+curl -s -X POST localhost:8092/audit/notes -H 'content-type: application/json' -d '{"key":"ada","text":"hello"}'
+curl -s 'localhost:7001/api/v1/events?key=ada&limit=5'          # {"results":[{"partition":p,"offset":o,"key":"ada","headers":{"type":"examples.AuditNote",...}}],...}
+curl -s 'localhost:7001/api/v1/events?type=examples.Audit*&limit=2'   # the newest two notes, newest first
+curl -s 'localhost:7001/api/v1/events?correlationId=<correlationId of a result>'
+curl -s localhost:7001/api/v1/events/kraken.events/<p>/<o>      # every header; "payload":{"hidden":"payloads-off",...} here
+curl -sN 'localhost:7001/api/v1/events/tail?key=ada'            # event: start, then event: record for each new note of ada (Ctrl-C)
+curl -s localhost:7001/api/v1/consumer-groups                   # service-b.default, service-b.audit, service-c.default, ... with lag
+```
+
+Smoke steps 28 to 28f drive it on both hubs, in every sandbox mode: 28 expects the browser on (`/api/v1/version`
+`eventBrowser`), payloads only with `SECURE=1`, and there a read without the dashboard token to be 401 (the plain hubs' reads are
+open); 28b publishes two audit notes under a key of the run through service-b and finds them by key and by type
+(`examples.AuditNote` and `examples.Audit*`) newest first (the second first, one partition, the higher offset first, timestamps
+not increasing), and each by its correlation id (the library makes one up per note, the first search reads it back); 28c reads
+the newest note's record: the library headers (`type`, `id`, `correlationId`, `timestamp`, `source`) and its payload, hidden as
+`payloads-off` in the plain sandbox, the note's JSON with the dashboard token in the secure ones; 28d searches the payloads for the
+first note's text (`q`): found with `SECURE=1`, 403 `payloads-off` otherwise; 28e opens a tail on each hub, waits for its
+`event: start`, publishes a third note and expects each tail to deliver it (a summary, no payload), then stops the tails; 28f
+lists the consumer groups and expects `service-b.default`, `service-b.audit`, `service-c.default` and `service-c.audit` with a lag,
+and no group whose id starts with `kraken-hub`. A note reaches Kafka through service-b's outbox relay, so the searches poll. They
+need `jq` or `python3`; `SKIP_BROWSER=1` skips them, `ONLY_BROWSER=1` runs only them.
 
 ## Tear down
 
