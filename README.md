@@ -1641,7 +1641,7 @@ flowchart LR
 | publish | `publish-api` | only on tags `api/vX.Y.Z` | `kraken-messaging-api`, `kraken-messaging` and `kraken-messaging-test` at `X.Y.Z` in the Package Registry |
 
 Consumers resolve the artifacts from the group endpoint
-`https://gitlab.damoreira.ml/api/v4/groups/kraken-org/-/packages/maven`. No Docker image is built: this
+`https://nexus.damoreira.ml/repository/maven-public/`. No Docker image is built: this
 is a library; the example services are built from source by the sandbox compose.
 
 ## Contributing
