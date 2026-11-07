@@ -393,6 +393,15 @@ service-b and service-c with the mTLS overlay as well) and adds, last:
 `A_CONTAINER`, `HUB_CONTAINER` and `HUB2_CONTAINER` name the containers as for the secure steps. `SKIP_MTLS=1` skips steps 23 and 23b,
 `ONLY_MTLS=1` runs only them (both need `MTLS=1`).
 
+## Metrics
+
+service-a and service-b export their metrics (the library's, listed in the [README](../README.md#metrics), and Boot's own)
+over OTLP/HTTP when `KRAKEN_OTLP_METRICS_ENABLED=true`, to `KRAKEN_OTLP_METRICS_ENDPOINT` (default
+`http://localhost:4318/v1/metrics`, the published port of otel-lgtm; `http://otel-lgtm:4318/v1/metrics` inside the compose
+network) every `KRAKEN_OTLP_METRICS_STEP` (default `60s`). Off by default: the examples closure runs no collector, and an
+export without one would log a failure every step. Each series carries `job` = the service name and `instance` = the
+instance id the hub shows on its topology (`kraken.messaging.instance-id`).
+
 ## Experiments
 
 - **Nobody owns the command (Rust side).** `docker compose ... stop service-c`, then `POST /shouts`: the same 503
