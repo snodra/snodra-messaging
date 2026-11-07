@@ -37,7 +37,7 @@ dependency, so they always exercise the current library. Wire classes live in `e
 | `examples/service-a` | REST caller + event listener; `GET /forbidden-send` sends a type outside its ACL on purpose ([Secure sandbox](#secure-sandbox)) | 8091 |
 | `examples/service-b` | the postcard saga, its printer adapter, webhook and topic translator (`GET /postcards/{jobId}`); owner of the greetings command and query, co-owner of the shared `Inventory`, the streaming `Rows`, the subscription `WatchCounter` and `OpenSubscriptions`; logs the text events; the `audit` processor and its `/audit/...` endpoints | 8092 (`POST /counters/{name}/increment`, `/audit/...` and actuator) |
 | `examples/fake-printer` | a partner, not a kraken service: the fake printer of [the postcard saga](#the-postcard-saga) and [the banner saga](#the-banner-saga) (`POST /jobs`, `GET /jobs/{id}`) | 8093 |
-| `kraken-messaging-rs/examples/service-c` | Rust: owner of `Shout`, `Reverse`, `IncrementCounter` and the banner saga's `PrintBanner` / `PollBannerJob`, co-owner of the shared `Inventory`, `Rows`, `WatchCounter` and `OpenSubscriptions`, publishes the text events, logs `GreetingDelivered`; the banner saga's webhook and `GET /banners/{jobId}`; the `audit` processor and its `/audit/...` endpoints | 8094 |
+| `kraken-messaging-rs/examples/service-c` | Rust: owner of `Shout`, `Reverse`, `IncrementCounter` and the banner saga's `PrintBanner` / `PollBannerJob`, co-owner of the shared `Inventory`, `Rows`, `WatchCounter` and `OpenSubscriptions`, publishes the text events, logs `GreetingDelivered`; the banner saga's webhook and `GET /banners/{jobId}`; `GET /greetings/{name}/count`, service-b's `CountGreetings` sent through the hub (the sandbox's call from Rust to Kotlin); the `audit` processor and its `/audit/...` endpoints | 8094 |
 
 ## Prerequisites
 
@@ -56,7 +56,8 @@ docker compose -f compose.yaml -f compose.local.yaml --profile examples up --bui
 This builds `kraken-hub:dev`, `kraken-examples-service-a:dev`, `kraken-examples-service-b:dev` and
 `kraken-examples-service-c:dev` from source (the first build takes several minutes, Rust compiles librdkafka; later
 ones are cached) and starts only what the three apps need: both hubs (`hub`, `hub-2`), Kafka,
-the topic init job and MongoDB. Keycloak, RustFS and Grafana stay down. The hub's gRPC port is published on host
+the topic init job, MongoDB and otel-lgtm (Grafana on <http://localhost:3000/>, see [Metrics](#metrics)). Keycloak and
+RustFS stay down. The hub's gRPC port is published on host
 **7002** (macOS AirPlay owns 7000) and its topology view and dashboard on **7001**; `hub-2` uses **7012** and
 **7011**. Every example connects to both hubs (`KRAKEN_HUB_ADDRESS=static://hub:7000,hub-2:7000`, ADR 0016): it
 registers on each, sends unkeyed requests round-robin over them and keeps working when one stops.
@@ -243,6 +244,8 @@ SKIP_CONTROL=1 bash examples/smoke.sh # without the processor-control steps (27 
 ONLY_CONTROL=1 bash examples/smoke.sh # only those steps (needs jq or python3 and the write token, see "Event processors and dead letters")
 SKIP_BROWSER=1 bash examples/smoke.sh # without the event browser steps (28 to 28f)
 ONLY_BROWSER=1 bash examples/smoke.sh # only those steps (needs jq or python3, see "Event browser")
+SKIP_OBS=1 bash examples/smoke.sh     # without the metric and dashboard steps (29 to 29e)
+ONLY_OBS=1 bash examples/smoke.sh     # only those steps, after a full run (needs jq or python3, see "Metrics")
 SECURE=1 bash examples/smoke.sh        # against the secure sandbox (see "Secure sandbox"): every step plus 21 and 21b
 SECURE=1 SKIP_SECURE=1 bash examples/smoke.sh  # the secure sandbox without steps 21 and 21b
 SECURE=1 ONLY_SECURE=1 bash examples/smoke.sh  # only steps 21 and 21b (needs the docker CLI)
@@ -278,7 +281,8 @@ The ACL gives each example exactly what it registers and sends: service-a handle
 `CountGreetings`, `Shout`, `Reverse`, `Inventory`, `Rows`, `WatchCounter`, `IncrementCounter` and `OpenSubscriptions`;
 service-b handles `SendGreeting`, `CountGreetings`, `Inventory`, `Rows`, `WatchCounter`, `OpenSubscriptions` and the
 postcard adapter's `PrintPostcard` and `PollPrintJob` and sends nothing; service-c (Rust) handles `Shout`, `Reverse`,
-`IncrementCounter`, the same shared types and the banner adapter's `PrintBanner` and `PollBannerJob` and sends nothing; a
+`IncrementCounter`, the same shared types and the banner adapter's `PrintBanner` and `PollBannerJob` and sends `CountGreetings`
+(its `GET /greetings/{name}/count`, see [Metrics](#metrics)); a
 `smoke-intruder` token may register as `smoke-intruder` and do nothing. The services read their token from a file
 (`KRAKEN_MESSAGING_HUB_TOKEN_FILE` for the Kotlin ones, `KRAKEN_HUB_TOKEN_FILE` for service-c) and trust the dev CA
 (`KRAKEN_MESSAGING_HUB_TLS_ENABLED` / `KRAKEN_MESSAGING_HUB_TLS_CA_FILE`, `KRAKEN_HUB_TLS` / `KRAKEN_HUB_TLS_CA`). The hub ports are
@@ -342,8 +346,8 @@ Their static token variables and mounts are removed, because a static token toge
 service-c with the JWT overlay as well) and adds, last:
 
 - **Step 22**: on both hubs' `/api/v1/topology`, service-b and service-c have `authKind` `jwt` and an `expiresAt` (epoch milliseconds) and
-  service-a has `token` and none. (The hub's `kraken_hub_jwt_validations_total` goes out over OTLP only, which the examples closure
-  runs no collector for; `authKind` `jwt` is the hub saying it validated the token.)
+  service-a has `token` and none. (`authKind` `jwt` is the hub saying it validated the token; its
+  `kraken_hub_jwt_validations_total` shows on Grafana's Hub dashboard, JWT validations.)
 - **Step 22b**: within ~45 s `expiresAt` advances on both hubs for both services (a new 30 s token, renewed at about 80 % of its life)
   while the instance id and `connectedSinceMs` stay the same, so the token reached the live stream as `ClientMessage.credentials` and
   there was no reconnect. service-c's log has no new `registered with the hub` line and neither hub logged `credentials expired`.
@@ -395,12 +399,51 @@ service-b and service-c with the mTLS overlay as well) and adds, last:
 
 ## Metrics
 
-service-a and service-b export their metrics (the library's, listed in the [README](../README.md#metrics), and Boot's own)
-over OTLP/HTTP when `KRAKEN_OTLP_METRICS_ENABLED=true`, to `KRAKEN_OTLP_METRICS_ENDPOINT` (default
-`http://localhost:4318/v1/metrics`, the published port of otel-lgtm; `http://otel-lgtm:4318/v1/metrics` inside the compose
-network) every `KRAKEN_OTLP_METRICS_STEP` (default `60s`). Off by default: the examples closure runs no collector, and an
-export without one would log a failure every step. Each series carries `job` = the service name and `instance` = the
-instance id the hub shows on its topology (`kraken.messaging.instance-id`).
+Everything in the sandbox exports its metrics over OTLP to otel-lgtm every 5 s (ADR 0026; `kraken/infra/compose.local.yaml`):
+both hubs (`KRAKEN_HUB_OTLP_ENDPOINT=http://otel-lgtm:4317`, `OTEL_METRIC_EXPORT_INTERVAL=5000`), service-a and service-b (the
+library's metrics, listed in the [README](../README.md#metrics), and Boot's own, over OTLP/HTTP:
+`KRAKEN_OTLP_METRICS_ENABLED=true`, `KRAKEN_OTLP_METRICS_ENDPOINT=http://otel-lgtm:4318/v1/metrics`,
+`KRAKEN_OTLP_METRICS_STEP=5s`) and service-c (the Rust library's, over OTLP/gRPC: `KRAKEN_OTLP_ENDPOINT=http://otel-lgtm:4317`,
+`OTEL_METRIC_EXPORT_INTERVAL=5000`). Outside the sandbox the examples export nothing unless switched on (`KRAKEN_OTLP_METRICS_ENABLED`
+defaults to `false`, `KRAKEN_OTLP_METRICS_STEP` to `60s`; service-c installs no meter provider without `KRAKEN_OTLP_ENDPOINT`).
+Each series carries `job` = the service name (`kraken-hub` for the hubs) and `instance` = the instance id the hub shows on its
+topology (a hub's own id for the hubs).
+
+Grafana (<http://localhost:3000/>, anonymous admin; `KRAKEN_GRAFANA_PORT` when 3000 is taken) has the three kraken dashboards in
+the folder Kraken: [Overview](http://localhost:3000/d/kraken-overview), [Hub](http://localhost:3000/d/kraken-hub) and
+[Messaging](http://localhost:3000/d/kraken-messaging) (`kraken/infra/grafana/`). After a smoke run every panel has data except
+those the sandbox mode does not drive. Prometheus is reached through Grafana's proxy:
+
+```bash
+P=localhost:3000/api/datasources/proxy/uid/prometheus/api/v1
+curl -sG $P/query --data-urlencode 'query=max by (service) (kraken_hub_connected_instances)'      # instances per service
+curl -sG $P/query --data-urlencode 'query=sum by (job, processor, outcome) (kraken_events_consumed_total)'   # Kotlin and Rust alike
+curl -sG $P/query --data-urlencode 'query=max by (group) (kraken_hub_consumer_group_lag)'          # every group, idle ones too
+```
+
+Smoke steps 29 to 29e check it, last, in every sandbox mode: 29 expects Grafana's API (`/api/search?tag=kraken`) to list
+`kraken-overview`, `kraken-hub` and `kraken-messaging` in the folder Kraken; 29b expects the hub series of P9
+(`kraken_hub_requests_total`, `kraken_hub_request_duration_seconds_bucket`, `kraken_hub_connected_instances`, the processor gauges
+`kraken_hub_processor_lag`, `_state`, `_dead_letters`, `_processed`, and `kraken_hub_consumer_group_lag`) under `job="kraken-hub"`
+from both hubs (`instance` = the `hubId` of each hub's topology) and `kraken_hub_connected_instances` for service-a, -b and -c;
+29c sends `examples.CountGreetings` three times through service-c (`GET $C/greetings/Ada/count`, the sandbox's one call from Rust
+through the hub) and expects service-b (Kotlin) and service-c (Rust) to export the library series under the same names with the
+same label names (the hub-client histogram: service-a, the Kotlin sender, and service-c; the series:
+`kraken_events_consumed_total{outcome,processor,type}`, `kraken_event_handler_duration_seconds_bucket{le,processor,type}`, the
+outbox gauges and counter, `kraken_processor_lag{partition,processor}`, `kraken_processor_state{processor,state}`,
+`kraken_dead_letters{processor}`, `kraken_hub_client_request_duration_seconds_bucket{kind,le,outcome,type}`,
+`kraken_hub_client_handlers_in_flight`, `kraken_hub_client_connected_hubs`), with `instance` = the instance ids the hub lists for
+each; 29d expects no series with a `hub_id` label and `instance_id` only on `kraken_hub_streams_open` and
+`kraken_hub_subscriptions_open` (the handler instance); 29e reads the three dashboards from Grafana's API and runs every panel
+query against Prometheus, the variables at All (`.*`) and `$__rate_interval` at `5m`, and expects each to return data, except
+the panels the smoke lists in `OBS_MAY_BE_EMPTY` with the reason this sandbox may not drive them (auth violations, JWT, JWKS,
+credential refreshes, client certificates and TLS failures outside their mode; capacity rejections, session buffers, TLS
+shedding, reload errors, unknown control replies, saga command failures and overdue deadlines, which the sandbox never causes;
+payload views in
+the plain sandbox; token fetches and certificate rotations outside JWT and mTLS). Exports arrive every 5 s, so the steps poll
+(up to 60 s). `GRAFANA` (default `http://localhost:${KRAKEN_GRAFANA_PORT:-3000}`) and `PROM` (Grafana's proxy) override the
+addresses. They need `jq` or `python3`; `SKIP_OBS=1` skips them, `ONLY_OBS=1` runs only them (on a sandbox that already
+carried traffic, such as after a full run: the request and consumer series exist only after it).
 
 ## Experiments
 
