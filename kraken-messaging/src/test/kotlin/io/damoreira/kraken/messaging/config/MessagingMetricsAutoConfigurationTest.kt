@@ -2,6 +2,7 @@ package io.damoreira.kraken.messaging.config
 
 import io.damoreira.kraken.messaging.hub.HubBus
 import io.damoreira.kraken.messaging.hub.HubChannelFactory
+import io.damoreira.kraken.messaging.hub.HubConnections
 import io.damoreira.kraken.messaging.kafka.LocalEventDispatcher
 import io.damoreira.kraken.messaging.kafka.OutboxPublisher
 import io.damoreira.kraken.messaging.metrics.MessagingMetrics
@@ -76,6 +77,18 @@ class MessagingMetricsAutoConfigurationTest {
             assertTrue(context.getBeansOfType(EventProcessorMetrics::class.java).isEmpty())
             assertSame(NoopMessagingMetrics, field(context.getBean(LocalEventDispatcher::class.java), "metrics"))
             assertSame(NoopMessagingMetrics, field(context.getBean(HubBus::class.java), "metrics"))
+        }
+    }
+
+    @Test fun `the hub sees the configured instance id, the one the metrics resource carries`() {
+        runner.withPropertyValues("kraken.messaging.instance-id=pod-7").run { context ->
+            assertEquals(null, context.startupFailure)
+            assertEquals("pod-7", context.getBean(HubConnections::class.java).instanceId)
+        }
+        runner.run { context ->
+            val id = context.getBean(KrakenMessagingProperties::class.java).instanceId
+            java.util.UUID.fromString(id) // a fresh one when unset
+            assertEquals(id, context.getBean(HubConnections::class.java).instanceId)
         }
     }
 

@@ -122,6 +122,12 @@
       "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties"
     },
     {
+      "name": "kraken.messaging.instance-id",
+      "type": "java.lang.String",
+      "description": "This instance's id: its hub registration's instance id and the service.instance.id of its metrics. A fresh UUID per start unless set (a pod name, for example); unique among the instances of the service.",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties"
+    },
+    {
       "name": "kraken.messaging.hub.enabled",
       "type": "java.lang.Boolean",
       "description": "Connect to the hub and expose the hub-backed CommandBus and QueryBus.",
