@@ -1554,8 +1554,10 @@ management:
         step: 60s
 ```
 
-The starter makes three defaults, below every setting of the application: `management.otlp.metrics.export.base-time-unit`
-`seconds` (Boot's default, milliseconds, would turn the timers into `..._milliseconds` series), and the resource attributes
+The starter makes these defaults, below every setting of the application: `management.otlp.metrics.export.base-time-unit`
+`seconds` (Boot's default, milliseconds, would turn the timers into `..._milliseconds` series),
+`management.otlp.metrics.export.publish-max-gauge-for-histograms` `false` (no `..._max_seconds` series, which the Rust library
+does not have), and the resource attributes
 `service.name` = `kraken.messaging.service-name` and `service.instance.id` = `kraken.messaging.instance-id`, the names the
 hub shows. Prometheus turns them into the `job` and `instance` labels of every series, which the dashboards select and
 aggregate on. Keep `spring.application.group` unset: Boot would add it as `service.namespace`, and `job` would become

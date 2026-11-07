@@ -24,6 +24,12 @@ class MetricsDefaultsTest {
         assertEquals("seconds", env.getProperty(key))
     }
 
+    @Test fun `histograms get no max gauge, a series the Rust library does not have`() {
+        val env = StandardEnvironment()
+        MetricsDefaults().postProcessEnvironment(env, SpringApplication())
+        assertEquals("false", env.getProperty("management.otlp.metrics.export.publish-max-gauge-for-histograms"))
+    }
+
     @Test fun `an application's own setting wins`() {
         val env = StandardEnvironment()
         env.propertySources.addFirst(MapPropertySource("app", mapOf(key to "milliseconds")))

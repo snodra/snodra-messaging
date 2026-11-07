@@ -50,6 +50,7 @@ class OtlpMetricsExportTest {
             val config = context.getBean(OtlpConfig::class.java)
             assertEquals("http://otel-lgtm:4318/v1/metrics", config.url())
             assertEquals(TimeUnit.SECONDS, config.baseTimeUnit())
+            assertEquals(false, config.publishMaxGaugeForHistograms())
             assertEquals("service-a", config.resourceAttributes()["service.name"])
             assertEquals("a-1", config.resourceAttributes()["service.instance.id"])
             assertTrue("service.namespace" !in config.resourceAttributes())

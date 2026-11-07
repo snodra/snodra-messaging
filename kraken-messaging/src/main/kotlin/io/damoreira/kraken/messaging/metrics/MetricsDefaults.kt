@@ -12,6 +12,8 @@ import java.util.UUID
  *
  * - `management.otlp.metrics.export.base-time-unit=seconds` (Boot's default is milliseconds): the library's timers
  *   ([MicrometerMessagingMetrics]) reach Prometheus as `..._seconds` series, as the Rust library's;
+ * - `management.otlp.metrics.export.publish-max-gauge-for-histograms=false`: no `..._max_seconds` gauge next to each
+ *   histogram, a series the Rust library does not export;
  * - the resource identity every series carries (Prometheus `job` and `instance`): `service.name` is
  *   `kraken.messaging.service-name` (the name the hub sees; Boot's own default is `spring.application.name`) and
  *   `service.instance.id` is `kraken.messaging.instance-id`, which gets a fresh UUID here per start, so the hub
@@ -26,6 +28,7 @@ class MetricsDefaults : EnvironmentPostProcessor {
                 NAME,
                 mapOf(
                     BASE_TIME_UNIT to "seconds",
+                    "management.otlp.metrics.export.publish-max-gauge-for-histograms" to "false",
                     INSTANCE_ID to UUID.randomUUID().toString(),
                     "$RESOURCE.service.instance.id" to "\${$INSTANCE_ID}",
                     "$RESOURCE.service.name" to "\${kraken.messaging.service-name:\${spring.application.name:unknown_service}}",
