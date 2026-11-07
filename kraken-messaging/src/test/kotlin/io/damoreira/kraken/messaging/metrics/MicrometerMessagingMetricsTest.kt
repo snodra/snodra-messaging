@@ -111,7 +111,7 @@ class MicrometerMessagingMetricsTest {
             MessageTimeoutException("t") to "timeout",
             HandlerDisconnectedException("t") to "handler_disconnected",
             RemoteHandlerException("t", "boom", ByteArray(0)) to "handler_error",
-            RemoteHandlerException("t", "odd", ByteArray(0), "SOMETHING_NEW") to "error",
+            RemoteHandlerException("t", "odd", ByteArray(0), "SOMETHING_NEW") to "handler_error",
             InvalidMessageException("bad") to "invalid_request",
             HandlerBusyException("t") to "resource_exhausted",
             StreamCancelledException("too long") to "cancelled",
