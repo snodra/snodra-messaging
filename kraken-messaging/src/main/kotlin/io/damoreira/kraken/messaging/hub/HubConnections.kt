@@ -695,10 +695,10 @@ enum class HubAuthKind { NONE, TOKEN, JWT, CERTIFICATE }
 /**
  * [HubConnections.authStatus]: [kind]; for a JWT the [tokenExpiresAt] of the current access token (null before the first fetch), the
  * [lastTokenError] (null when the last fetch worked), [tokenFetches] by result (`ok`, `http_error`, `oauth_error`, `io_error`,
- * `bad_response`: the `result` label of `kraken_messaging_hub_token_fetches_total`) and [credentialsRefreshesSent]
- * (`kraken_messaging_hub_credentials_refreshes_sent_total`). For a client certificate (P5c): the [certificateService] it names, the [certificateFingerprint] (first 8 hex characters of
+ * `bad_response`: the `result` label of `kraken_hub_client_token_fetches_total`) and [credentialsRefreshesSent]
+ * (`kraken_hub_client_credentials_refreshes_sent_total`). For a client certificate (P5c): the [certificateService] it names, the [certificateFingerprint] (first 8 hex characters of
  * the leaf's SHA-256, what the hub shows too), its end ([certificateExpiresAt], `notAfter`) and the pairs adopted since start
- * ([certificateRotations], `kraken_messaging_hub_certificate_rotations_total`). Holds no token and no key.
+ * ([certificateRotations], `kraken_hub_client_certificate_rotations_total`). Holds no token and no key.
  */
 data class HubAuthStatus(
     val kind: HubAuthKind,

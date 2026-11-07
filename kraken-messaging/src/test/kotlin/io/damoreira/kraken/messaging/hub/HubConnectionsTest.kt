@@ -160,6 +160,33 @@ class HubConnectionsTest {
         Unit
     }
 
+    @Test fun `the hub client gauges read the live hubs and the handlers in flight`() = runBlocking {
+        val a = hub()
+        val b = hub()
+        val release = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val busy = client(listOf(a.name, b.name), "b") { req -> release.await(); payloadReply(req.id, "{}") }
+        val registry = io.micrometer.core.instrument.simple.SimpleMeterRegistry()
+        HubClientMetrics(busy).bindTo(registry)
+        val hubs = registry.get("kraken.hub.client.connected.hubs").gauge()
+        val inFlight = registry.get("kraken.hub.client.handlers.in.flight").gauge()
+        assertEquals(0.0, hubs.value())
+        busy.register(setOf("test.Ping"), emptySet())
+        busy.start()
+        assertTrue(busy.awaitRegistered(wait))
+        eventually(2_000) { hubs.value() == 2.0 }
+        val sender = client(listOf(a.name), "a")
+        sender.start()
+        assertTrue(sender.awaitRegistered(wait))
+
+        val calls = (1..3).map { async { sender.send(request(timeoutMs = 5_000)) } }
+        eventually(2_000) { inFlight.value() == 3.0 }
+        release.complete(Unit)
+        calls.awaitAll()
+        eventually(2_000) { inFlight.value() == 0.0 }
+        a.close()
+        eventually(5_000) { hubs.value() == 1.0 }
+    }
+
     // --- permits ---
 
     @Test fun `each hub gets ceil(max over hubs) initial permits, one hub gets them all`() = runBlocking {

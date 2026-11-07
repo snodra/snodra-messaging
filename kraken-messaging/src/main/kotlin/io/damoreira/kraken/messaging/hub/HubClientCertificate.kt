@@ -99,7 +99,7 @@ class HubClientCertificate(
     /** Counts the pairs adopted since start: a connection that began before the latest bump presents an older pair. */
     val generation: Long get() = generationCount
 
-    /** Pairs adopted since start (the `kraken_messaging_hub_certificate_rotations_total` counter): the sessions are moved over by [HubConnections]. */
+    /** Pairs adopted since start (the `kraken_hub_client_certificate_rotations_total` counter): the sessions are moved over by [HubConnections]. */
     val rotations: Long get() = rotationCount
 
     /** The clock of the validity checks (the remaining validity of a presented pair is counted with it too). */

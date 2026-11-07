@@ -31,6 +31,9 @@ import io.damoreira.kraken.messaging.codec.ResponseTypes
 import io.damoreira.kraken.messaging.handler.HandlerInvoker
 import io.damoreira.kraken.messaging.handler.HandlerRegistry
 import io.damoreira.kraken.messaging.handler.InvocationResult
+import io.damoreira.kraken.messaging.metrics.HubOutcome
+import io.damoreira.kraken.messaging.metrics.MessagingMetrics
+import io.damoreira.kraken.messaging.metrics.NoopMessagingMetrics
 import io.damoreira.kraken.messaging.saga.LocalRawCommandSender
 import io.damoreira.kraken.messaging.saga.RawCommandSender
 import io.damoreira.kraken.messaging.saga.RawFailures
@@ -107,6 +110,10 @@ import kotlin.reflect.KClass
  * `ReplyEnd` completes the flow, an `ReplyEnd` with an error (or a broken hub stream) fails it with the unary mapping, and a
  * part the hub dropped fails it as `InvalidMessageException("subscription <type> lost N part(s)")`. The caller's bearer token
  * and trace context are read when [subscribe] is called.
+ *
+ * Each unary command or query call that goes through the hub ([send], [sendRaw]) is timed into [metrics] (P9) once, from the
+ * call to its result with every retry and back-off, labelled with its final [HubOutcome]; a call cancelled by its caller is
+ * not. Local invocations, scatter-gather, streaming and subscription queries are not observed.
  */
 class HubBus(
     private val connection: HubTransport,
@@ -122,6 +129,7 @@ class HubBus(
     private val priorities: Map<String, Int> = emptyMap(),
     /** Default retry policy (`kraken.messaging.hub.retry.*` when enabled); null = no retry. */
     private val retry: RetryPolicy? = null,
+    private val metrics: MessagingMetrics = NoopMessagingMetrics,
 ) : CommandBus, QueryBus, RawCommandSender {
 
     override suspend fun <R> send(command: Command<R>, routingKey: String?): R = send(command, SendOptions(routingKey = routingKey))
@@ -141,8 +149,10 @@ class HubBus(
         if (registry.commandHandler(type) != null) return localRaw.sendRaw(type, payload, options)
         return try {
             val template = rawTemplate(type, payload, options)
-            withRetry(type, MessageKind.COMMAND, options.timeout, options.retry, retryIf = { true }) { timeout ->
-                attemptReply(template, timeout)
+            timed(MessageKind.COMMAND, type) {
+                withRetry(type, MessageKind.COMMAND, options.timeout, options.retry, retryIf = { true }) { timeout ->
+                    attemptReply(template, timeout)
+                }
             }
             RawOutcome.Success
         } catch (e: MessagingException) {
@@ -412,8 +422,23 @@ class HubBus(
         }
         val template = template(message, kind, options.routingKey, options.priority, extra = options.headers)
         val messageKind = if (kind == RequestKind.COMMAND) MessageKind.COMMAND else MessageKind.QUERY
-        return withRetry(type, messageKind, options.timeout, options.retry, retryIf = { true }) { timeout ->
-            attempt(template, message::class, timeout)
+        return timed(messageKind, type) {
+            withRetry(type, messageKind, options.timeout, options.retry, retryIf = { true }) { timeout ->
+                attempt(template, message::class, timeout)
+            }
+        }
+    }
+
+    /** Runs [call] (a unary call through the hub, all its attempts) and reports its time and outcome to [metrics]. */
+    private inline fun <T> timed(kind: MessageKind, type: String, call: () -> T): T {
+        val started = System.nanoTime()
+        try {
+            return call().also { metrics.hubRequest(kind, type, HubOutcome.OK, System.nanoTime() - started) }
+        } catch (e: CancellationException) {
+            throw e // the caller gave up: not an outcome of the call
+        } catch (e: Exception) {
+            metrics.hubRequest(kind, type, HubOutcome.of(e), System.nanoTime() - started)
+            throw e
         }
     }
 

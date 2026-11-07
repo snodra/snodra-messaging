@@ -355,14 +355,14 @@ class HubCertificateRotationTest {
         val handler = handler(listOf(a), certificate())
         assertTrue(handler.awaitRegistered(wait))
         val registry = SimpleMeterRegistry()
-        HubAuthMetrics(handler).bindTo(registry)
-        assertEquals(0.0, registry.get("kraken.messaging.hub.certificate.rotations").functionCounter().count())
+        HubClientMetrics(handler).bindTo(registry)
+        assertEquals(0.0, registry.get("kraken.hub.client.certificate.rotations").functionCounter().count())
         renew()
-        await atMost wait until { registry.get("kraken.messaging.hub.certificate.rotations").functionCounter().count() == 1.0 }
+        await atMost wait until { registry.get("kraken.hub.client.certificate.rotations").functionCounter().count() == 1.0 }
 
         val plain = SimpleMeterRegistry()
-        HubAuthMetrics(sender(listOf(a))).bindTo(plain)
-        assertTrue(plain.find("kraken.messaging.hub.certificate.rotations").functionCounter() == null)
+        HubClientMetrics(sender(listOf(a))).bindTo(plain)
+        assertTrue(plain.find("kraken.hub.client.certificate.rotations").functionCounter() == null)
     }
 
     @Test fun `a roll does not wait for the subscription this instance itself consumes`() = runBlocking {

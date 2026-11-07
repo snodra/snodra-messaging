@@ -74,7 +74,7 @@ class HubOAuth2(
     }
 }
 
-/** What one token fetch came to; [label] is the value of the `result` label of `kraken_messaging_hub_token_fetches_total`. */
+/** What one token fetch came to; [label] is the value of the `result` label of `kraken_hub_client_token_fetches_total`. */
 enum class TokenFetchResult(val label: String) {
     OK("ok"),
     /** The endpoint answered with an error status and no OAuth2 error body (or could not be asked: see [IO_ERROR]). */
