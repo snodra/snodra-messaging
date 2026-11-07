@@ -4,3 +4,4 @@ io.damoreira.kraken.messaging.config.KafkaEventsAutoConfiguration
 io.damoreira.kraken.messaging.config.SagaAutoConfiguration
 io.damoreira.kraken.messaging.config.ExternalAutoConfiguration
 io.damoreira.kraken.messaging.config.SagaMetricsAutoConfiguration
+io.damoreira.kraken.messaging.config.MessagingMetricsAutoConfiguration

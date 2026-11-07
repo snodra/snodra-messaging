@@ -1,0 +1,88 @@
+package io.damoreira.kraken.messaging.metrics
+
+import io.damoreira.kraken.hub.v1.ProcessorState
+import io.damoreira.kraken.messaging.kafka.EventConsumer
+import io.damoreira.kraken.messaging.kafka.ProcessorStatusSource
+import io.micrometer.core.instrument.MeterRegistry
+import io.micrometer.core.instrument.MultiGauge
+import io.micrometer.core.instrument.Tags
+import org.slf4j.LoggerFactory
+import org.springframework.context.SmartLifecycle
+import java.time.Duration
+import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.TimeUnit
+
+/**
+ * The event processors' gauges (P9, ADR 0026), from the status this instance reports to the hub ([source]), sampled every
+ * [interval] on a daemon thread (and on [sampleOnce]); the export only reads the sampled values. The status is built from
+ * memory and asks its own background thread to refresh the committed offsets, high watermarks and dead-letter counts, so
+ * sampling it also keeps those fresh when no hub is connected. One set per started processor, as Prometheus shows them:
+ *
+ * - `kraken_processor_state{processor,state}`: `starting | running | paused | failing | stopped`, 1 for the current one;
+ * - `kraken_dead_letters{processor}`: the sampled letter count (mode `collection`, else 0, as the status);
+ * - `kraken_processor_lag{processor,partition}`: per partition assigned here whose lag is known; a revoked partition's
+ *   series goes away, so summing over the instances never counts a partition twice.
+ */
+class EventProcessorMetrics(
+    registry: MeterRegistry,
+    private val source: ProcessorStatusSource,
+    private val interval: Duration = Duration.ofSeconds(5),
+) : SmartLifecycle {
+    private val log = LoggerFactory.getLogger(EventProcessorMetrics::class.java)
+    private val lag = MultiGauge.builder("kraken.processor.lag").description("Records behind the high watermark per assigned partition").register(registry)
+    private val state = MultiGauge.builder("kraken.processor.state").description("1 for the processor's current state").register(registry)
+    private val deadLetters = MultiGauge.builder("kraken.dead.letters").description("Dead letters of the processor (mode collection)").register(registry)
+    private var executor: ScheduledExecutorService? = null
+
+    init {
+        require(!interval.isZero && !interval.isNegative) { "interval must be positive, was $interval" }
+    }
+
+    /** One sample of every gauge. */
+    fun sampleOnce() {
+        try {
+            val statuses = source.processorStatuses()
+            lag.register(
+                statuses.flatMap { s ->
+                    s.partitionsList.filter { it.lag >= 0 }.map { MultiGauge.Row.of(Tags.of("processor", s.name, "partition", it.partition.toString()), it.lag) }
+                },
+                true,
+            )
+            state.register(
+                statuses.flatMap { s -> STATES.map { (value, label) -> MultiGauge.Row.of(Tags.of("processor", s.name, "state", label), if (s.state == value) 1 else 0) } },
+                true,
+            )
+            deadLetters.register(statuses.map { MultiGauge.Row.of(Tags.of("processor", it.name), it.deadLetters) }, true)
+        } catch (e: Exception) {
+            log.warn("Sampling the processor gauges failed, keeping the last values: {}", e.toString())
+        }
+    }
+
+    @Synchronized
+    override fun start() {
+        if (executor != null) return
+        executor = Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "kraken-processor-metrics").apply { isDaemon = true } }
+            .also { it.scheduleWithFixedDelay(::sampleOnce, 0, interval.toMillis(), TimeUnit.MILLISECONDS) }
+    }
+
+    @Synchronized
+    override fun stop() {
+        executor?.shutdownNow()
+        executor = null
+    }
+
+    @Synchronized
+    override fun isRunning(): Boolean = executor != null
+
+    /** With the event processors. */
+    override fun getPhase(): Int = EventConsumer.PHASE
+
+    private companion object {
+        /** The states of the `state` label, as the hub's `kraken_hub_processor_state` names them. */
+        val STATES = listOf(
+            ProcessorState.PROCESSOR_STARTING, ProcessorState.PROCESSOR_RUNNING, ProcessorState.PROCESSOR_PAUSED,
+            ProcessorState.PROCESSOR_FAILING, ProcessorState.PROCESSOR_STOPPED,
+        ).map { it to it.name.removePrefix("PROCESSOR_").lowercase() }
+    }
+}
