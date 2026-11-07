@@ -1,5 +1,8 @@
 package io.damoreira.kraken.messaging.kafka
 
+import io.damoreira.kraken.messaging.metrics.MessagingMetrics
+import io.damoreira.kraken.messaging.metrics.NoopMessagingMetrics
+import io.damoreira.kraken.messaging.metrics.RecordingMessagingMetrics
 import com.mongodb.client.MongoClients
 import io.damoreira.kraken.messaging.MessageContext
 import io.damoreira.kraken.messaging.codec.JsonCodec
@@ -123,7 +126,7 @@ class EventConsumerTest {
         consumer = null
     }
 
-    private fun startConsumer(maxAttempts: Int = 5, backOffMs: Long = 100) {
+    private fun startConsumer(maxAttempts: Int = 5, backOffMs: Long = 100, metrics: MessagingMetrics = NoopMessagingMetrics) {
         val factory = DefaultKafkaConsumerFactory(
             mapOf<String, Any>(
                 ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG to kafkaContainer.bootstrapServers,
@@ -133,9 +136,10 @@ class EventConsumerTest {
             StringDeserializer(),
             ByteArrayDeserializer(),
         )
+        val invoker = HandlerInvoker(registry, codec)
         consumer = EventConsumer(
-            factory, topic, "group-" + UUID.randomUUID(), registry, HandlerInvoker(registry, codec), tx, mongo,
-            maxAttempts, backOffMs = backOffMs,
+            factory, topic, "group-" + UUID.randomUUID(), registry, invoker, tx, mongo,
+            maxAttempts, backOffMs = backOffMs, dispatcher = LocalEventDispatcher(registry, invoker, tx, mongo, metrics = metrics), metrics = metrics,
         ).also { it.start() }
     }
 
@@ -182,13 +186,22 @@ class EventConsumerTest {
 
     @Test
     fun `duplicate event id is processed once`() {
-        startConsumer()
+        val metrics = RecordingMessagingMetrics()
+        startConsumer(metrics = metrics)
         send("d-1", "test.Happened")
         send("d-1", "test.Happened")
         send("d-2", "test.Happened")
         awaitSeen("d-2")
         assertEquals(listOf("d-1", "d-2"), handlers.seen.toList())
         assertEquals(2, mongo.count(Query(), "processed_events"))
+        await().atMost(Duration.ofSeconds(5)).until { metrics.consumed.size == 3 }
+        val happened = "test.Happened"
+        assertEquals(
+            listOf(happened to MessagingMetrics.Consumed.HANDLED, happened to MessagingMetrics.Consumed.DUPLICATE, happened to MessagingMetrics.Consumed.HANDLED),
+            metrics.outcomes("default"),
+        )
+        assertEquals(3, metrics.handled.size)
+        assertTrue(metrics.handled.all { it.processor == "default" && it.type == happened && it.nanos > 0 })
     }
 
     @Test

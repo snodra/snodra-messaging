@@ -1,5 +1,7 @@
 package io.damoreira.kraken.messaging.kafka
 
+import io.damoreira.kraken.messaging.metrics.MessagingMetrics
+import io.damoreira.kraken.messaging.metrics.NoopMessagingMetrics
 import org.apache.kafka.clients.producer.ProducerRecord
 import org.apache.kafka.common.errors.AuthorizationException
 import org.apache.kafka.common.errors.InvalidTopicException
@@ -28,6 +30,10 @@ import kotlin.concurrent.withLock
  * marks the document failed (`failedAt`), logs it once at error (never the payload) and moves on to the next
  * document: one poison document does not block the outbox. Failed documents stay in the collection for inspection;
  * clearing `failedAt` (and `attempts`) re-queues one.
+ *
+ * Reports to [metrics] (P9): every send attempt, and the oldest pending document of every poll. When the metrics want it
+ * ([MessagingMetrics.countsOutbox]) the relay thread also counts the pending documents ([samplePending]) at most every
+ * [pendingSampleInterval], so the gauge never makes the export thread touch the database.
  */
 class OutboxPublisher(
     private val mongo: MongoTemplate,
@@ -37,6 +43,8 @@ class OutboxPublisher(
     private val pollInterval: Duration,
     private val batchSize: Int,
     private val maxAttempts: Int = 10,
+    private val metrics: MessagingMetrics = NoopMessagingMetrics,
+    private val pendingSampleInterval: Duration = Duration.ofSeconds(5),
 ) : SmartLifecycle {
     private val log = LoggerFactory.getLogger(OutboxPublisher::class.java)
     private val lock = ReentrantLock()
@@ -56,10 +64,10 @@ class OutboxPublisher(
      */
     fun publishPendingNow(): Int {
         val pending = mongo.find(
-            Query(Criteria.where("sentAt").isNull.and("failedAt").isNull)
-                .with(Sort.by(Sort.Direction.ASC, "createdAt", "seq")).limit(batchSize),
+            Query(unsent()).with(Sort.by(Sort.Direction.ASC, "createdAt", "seq")).limit(batchSize),
             OutboxDocument::class.java,
         )
+        metrics.outboxOldest(pending.firstOrNull()?.createdAt)
         var sent = 0
         for (doc in pending) {
             if (stopRequested) return sent
@@ -67,6 +75,7 @@ class OutboxPublisher(
                 // Bounded by the producer's max.block.ms + delivery.timeout.ms (10 s + 30 s in the auto-configuration).
                 kafka.send(toRecord(doc)).get(SEND_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             } catch (e: Exception) {
+                metrics.outboxPublished(ok = false)
                 if (e is InterruptedException) Thread.currentThread().interrupt()
                 val attempt = doc.attempts + 1
                 val nonRetriable = nonRetriableCause(e)
@@ -86,11 +95,19 @@ class OutboxPublisher(
                 mongo.updateFirst(byId(doc.id), Update().inc("attempts", 1), OutboxDocument::class.java)
                 return sent
             }
+            metrics.outboxPublished(ok = true)
             mongo.updateFirst(byId(doc.id), Update().set("sentAt", Instant.now()), OutboxDocument::class.java)
             sent++
         }
         return sent
     }
+
+    /** Counts the documents not sent and not given up on, for [MessagingMetrics.outboxPending]. */
+    fun samplePending() {
+        metrics.outboxPending(mongo.count(Query(unsent()), OutboxDocument::class.java))
+    }
+
+    private fun unsent() = Criteria.where("sentAt").isNull.and("failedAt").isNull
 
     private fun causes(e: Throwable) = generateSequence(e) { it.cause.takeIf { c -> c !== it } }.take(16)
 
@@ -123,11 +140,20 @@ class OutboxPublisher(
     }
 
     private fun loop() {
+        var nextSample = System.nanoTime()
         while (running) {
             try {
                 publishPendingNow()
             } catch (e: Exception) {
                 log.warn("Outbox poll failed", e)
+            }
+            if (metrics.countsOutbox && System.nanoTime() - nextSample >= 0) {
+                nextSample = System.nanoTime() + pendingSampleInterval.toNanos()
+                try {
+                    samplePending()
+                } catch (e: Exception) {
+                    log.debug("Counting the pending outbox documents failed, keeping the last value: {}", e.toString())
+                }
             }
             lock.withLock {
                 if (running) wake.awaitNanos(pollInterval.toNanos())

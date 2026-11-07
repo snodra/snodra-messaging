@@ -4,6 +4,8 @@ import io.damoreira.kraken.messaging.MessageContext
 import io.damoreira.kraken.messaging.handler.HandlerInvoker
 import io.damoreira.kraken.messaging.handler.HandlerRegistry
 import io.damoreira.kraken.messaging.handler.Processors
+import io.damoreira.kraken.messaging.metrics.MessagingMetrics
+import io.damoreira.kraken.messaging.metrics.NoopMessagingMetrics
 import io.damoreira.kraken.messaging.saga.SagaStage
 import io.damoreira.kraken.messaging.tracing.CorrelationContext
 import kotlinx.coroutines.runBlocking
@@ -27,6 +29,9 @@ import java.time.Instant
  * stage 1 failed** (review amendment, ADR 0021 ruling 26): the failure is held, stage 2 runs, and then the failure is
  * thrown, so the caller redelivers, parks or skips the record by its own rules; a redelivery applies nothing twice because
  * the markers decide. Both stages finish before the caller acknowledges the record.
+ *
+ * Each stage-1 run of [dispatchIn] (a consumed Kafka record) is timed into [metrics] (P9), whether its handlers ran, failed
+ * or found the marker; the saga stage and the other entry points are not.
  */
 class LocalEventDispatcher(
     private val registry: HandlerRegistry,
@@ -34,6 +39,7 @@ class LocalEventDispatcher(
     private val tx: TransactionTemplate,
     private val mongo: MongoTemplate,
     private val sagaStage: SagaStage = SagaStage.NONE,
+    private val metrics: MessagingMetrics = NoopMessagingMetrics,
 ) {
     private val log = LoggerFactory.getLogger(LocalEventDispatcher::class.java)
 
@@ -88,7 +94,7 @@ class LocalEventDispatcher(
      */
     fun dispatch(dedupeId: String, type: String, payload: ByteArray, ctx: MessageContext): Outcome {
         val processors = processors().filter { hasStage1(it, type) }
-        return run(processors, sagaStage.interested(type), dedupeId, type, payload, ctx, wrapStage2 = false)
+        return run(processors, sagaStage.interested(type), dedupeId, type, payload, ctx, wrapStage2 = false, timed = false)
     }
 
     /**
@@ -103,7 +109,7 @@ class LocalEventDispatcher(
     ): Outcome {
         val stage1 = if (hasStage1(processor, type)) listOf(processor) else emptyList()
         val saga = !replay && processor == Processors.DEFAULT && sagaStage.interested(type)
-        return run(stage1, saga, dedupeId, type, payload, ctx, wrapStage2 = true, position, replay)
+        return run(stage1, saga, dedupeId, type, payload, ctx, wrapStage2 = true, timed = true, position, replay)
     }
 
     /** Runs only stage 2 (the sagas) for the event, as for a record parked SEQUENCED in `default`; false when no saga is interested. */
@@ -129,18 +135,21 @@ class LocalEventDispatcher(
 
     private fun run(
         stage1: List<String>, saga: Boolean, dedupeId: String, type: String, payload: ByteArray, ctx: MessageContext, wrapStage2: Boolean,
-        position: RecordPosition? = null, replay: Boolean = false,
+        timed: Boolean, position: RecordPosition? = null, replay: Boolean = false,
     ): Outcome {
         if (stage1.isEmpty() && !saga) return Outcome.NO_INTEREST
         var handled = false
         var failure: Exception? = null
         for (processor in stage1) {
+            val started = System.nanoTime()
             try {
                 if (stage1(processor, dedupeId, type, payload, ctx, position, replay) {}) handled = true
             } catch (e: Exception) {
                 // Held until the other processors and stage 2 ran: one failing handler group hides the event from none of them.
                 val first = failure
                 if (first == null) failure = e else first.addSuppressed(e)
+            } finally {
+                if (timed) metrics.eventHandled(processor, type, System.nanoTime() - started)
             }
         }
         var applied = false

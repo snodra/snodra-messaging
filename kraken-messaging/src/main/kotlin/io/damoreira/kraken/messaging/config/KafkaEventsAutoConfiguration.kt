@@ -18,6 +18,8 @@ import io.damoreira.kraken.messaging.kafka.LocalEventDispatcher
 import io.damoreira.kraken.messaging.kafka.MessagingIndexes
 import io.damoreira.kraken.messaging.kafka.OutboxEventBus
 import io.damoreira.kraken.messaging.kafka.OutboxPublisher
+import io.damoreira.kraken.messaging.metrics.MessagingMetrics
+import io.damoreira.kraken.messaging.metrics.NoopMessagingMetrics
 import io.damoreira.kraken.messaging.saga.SagaStage
 import io.damoreira.kraken.messaging.tracing.TraceHeaders
 import org.apache.kafka.clients.consumer.ConsumerConfig
@@ -56,6 +58,9 @@ import org.springframework.transaction.support.TransactionTemplate
  * methods, so business writes and outbox inserts commit together. The Kafka factories and template are private to
  * the starter (`defaultCandidate = false`, injected by name): they neither satisfy nor suppress the application's
  * own Kafka beans.
+ *
+ * The relay, the dispatcher and the consumers report to the application's [MessagingMetrics] bean (the Micrometer one of
+ * [MessagingMetricsAutoConfiguration] when a registry exists), else to [NoopMessagingMetrics].
  */
 @AutoConfiguration(
     after = [KrakenMessagingAutoConfiguration::class],
@@ -128,6 +133,7 @@ class KafkaEventsAutoConfiguration {
         mongo: MongoTemplate,
         @Qualifier(KAFKA_TEMPLATE) kafka: KafkaTemplate<String, ByteArray>,
         properties: KrakenMessagingProperties,
+        metrics: ObjectProvider<MessagingMetrics>,
     ) = OutboxPublisher(
         mongo, kafka,
         topic = properties.kafka.topic,
@@ -135,6 +141,7 @@ class KafkaEventsAutoConfiguration {
         pollInterval = properties.outbox.pollInterval,
         batchSize = properties.outbox.batchSize,
         maxAttempts = properties.outbox.maxAttempts,
+        metrics = metrics.getIfAvailable { NoopMessagingMetrics },
     )
 
     /** Runs an event's ordinary handlers, then the saga stage when the saga runtime provides one (none: [SagaStage.NONE]). */
@@ -146,7 +153,8 @@ class KafkaEventsAutoConfiguration {
         tx: TransactionTemplate,
         mongo: MongoTemplate,
         sagaStage: ObjectProvider<SagaStage>,
-    ) = LocalEventDispatcher(registry, invoker, tx, mongo, sagaStage.getIfAvailable { SagaStage.NONE })
+        metrics: ObjectProvider<MessagingMetrics>,
+    ) = LocalEventDispatcher(registry, invoker, tx, mongo, sagaStage.getIfAvailable { SagaStage.NONE }, metrics.getIfAvailable { NoopMessagingMetrics })
 
     /** The `dead_letters` collection (mode `collection`, the default). */
     @Bean
@@ -201,6 +209,7 @@ class KafkaEventsAutoConfiguration {
         properties: KrakenMessagingProperties,
         store: ObjectProvider<DeadLetterStore>,
         control: ObjectProvider<ProcessorControl>,
+        metrics: ObjectProvider<MessagingMetrics>,
     ): EventProcessors {
         val sink = when (properties.kafka.deadLetter.mode) {
             DeadLetterMode.COLLECTION -> DeadLetterSink.Collection(store.getObject())
@@ -208,6 +217,7 @@ class KafkaEventsAutoConfiguration {
             DeadLetterMode.LOG -> DeadLetterSink.Log
         }
         val serviceGroup = properties.kafka.serviceGroupId(properties.serviceName)
+        val messagingMetrics = metrics.getIfAvailable { NoopMessagingMetrics }
         return EventProcessors(
             dispatcher,
             consumerFor = { processor ->
@@ -224,6 +234,7 @@ class KafkaEventsAutoConfiguration {
                     dispatcher = dispatcher,
                     processor = processor,
                     deadLetters = sink,
+                    metrics = messagingMetrics,
                 )
             },
             adminConfig = consumerFactory.configurationProperties,

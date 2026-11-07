@@ -14,6 +14,9 @@ import io.damoreira.kraken.messaging.deadletter.DeadLetterStore
 import io.damoreira.kraken.messaging.handler.HandlerInvoker
 import io.damoreira.kraken.messaging.handler.HandlerRegistry
 import io.damoreira.kraken.messaging.handler.Processors
+import io.damoreira.kraken.messaging.metrics.MessagingMetrics
+import io.damoreira.kraken.messaging.metrics.MessagingMetrics.Consumed
+import io.damoreira.kraken.messaging.metrics.NoopMessagingMetrics
 import org.apache.kafka.clients.admin.Admin
 import org.apache.kafka.clients.admin.OffsetSpec
 import org.apache.kafka.clients.consumer.Consumer
@@ -78,6 +81,10 @@ import java.util.concurrent.atomic.AtomicLong
  * without leaving the group (kept across [stop] and [start]); the stage-1 marker of every record carries its position; a
  * record inside an open [replay] range runs stage 1 without its `@DisallowReplay` handlers and never stage 2. The status says
  * PAUSED, the [operationId] holding the processor's lock, `replaying` and each partition's `replay_until`.
+ *
+ * **Metrics** (P9): each record's final outcome in this processor goes to [metrics] once ([Consumed]; a parked record when
+ * the sink took it, so a redelivery after a sink failure counts once), labelled with its type when the processor handles it,
+ * else [MessagingMetrics.OTHER]. A stop in the middle of the attempts records nothing: the record comes back.
  */
 class EventConsumer(
     consumerFactory: ConsumerFactory<String, ByteArray>,
@@ -96,6 +103,7 @@ class EventConsumer(
     val processor: String = Processors.DEFAULT,
     private val deadLetters: DeadLetterSink = DeadLetterSink.Log,
     private val clock: Clock = Clock.systemUTC(),
+    private val metrics: MessagingMetrics = NoopMessagingMetrics,
 ) : SmartLifecycle {
     private val log = LoggerFactory.getLogger(EventConsumer::class.java)
     private val factory = consumerFactory
@@ -232,7 +240,7 @@ class EventConsumer(
     override fun getPhase(): Int = PHASE
 
     private fun handle(record: ConsumerRecord<String, ByteArray>, ack: Acknowledgment) {
-        pending[coords(record)]?.let { toSink(record, ack, it); return }
+        pending[coords(record)]?.let { deliver(record, ack, it); return }
         val headers = HashMap<String, String>()
         record.headers().forEach { headers[it.key()] = String(it.value() ?: ByteArray(0), Charsets.UTF_8) }
         val type = headers[EventHeaders.TYPE]
@@ -240,6 +248,7 @@ class EventConsumer(
             invalid(record, ack, null, "record without type header"); return
         }
         if (!dispatcher.interested(processor, type)) {
+            consumed(MessagingMetrics.OTHER, Consumed.SKIPPED)
             advance(record, ack); return
         }
         val id = headers[EventHeaders.ID]?.takeIf { it.isNotBlank() } ?: "${record.topic()}-${record.partition()}-${record.offset()}".also {
@@ -287,6 +296,7 @@ class EventConsumer(
         val own = DeadLetterStore.id(processor, record.topic(), partition, record.offset())
         if (head == own || store.exists(own)) {
             log.info("Record {}-{}@{} is already parked in processor {}, acknowledging it", record.topic(), partition, record.offset(), processor)
+            consumed(type, Consumed.DUPLICATE)
             advance(record, ack)
             return true
         }
@@ -294,7 +304,7 @@ class EventConsumer(
         if (processor == Processors.DEFAULT && !replay) stage2(record, type, payload, ctx)
         val letter = store.sequenced(processor, record, head, replay)
         log.info("Record {}-{}@{} of type {} parked SEQUENCED in processor {} behind {}", record.topic(), partition, record.offset(), type, processor, head)
-        toSink(record, ack) { if (store.park(letter)) parkedSinceSample.set(true) }
+        toSink(record, ack, type) { if (store.park(letter)) parkedSinceSample.set(true) }
         return true
     }
 
@@ -333,8 +343,9 @@ class EventConsumer(
         while (true) {
             attempts++
             try {
-                dispatcher.dispatchIn(processor, id, type, payload, ctx, position, replay)
+                val outcome = dispatcher.dispatchIn(processor, id, type, payload, ctx, position, replay)
                 processedTotal.incrementAndGet()
+                consumed(type, if (outcome == LocalEventDispatcher.Outcome.DUPLICATE) Consumed.DUPLICATE else Consumed.HANDLED)
                 advance(record, ack)
                 return
             } catch (e: InvalidMessageException) {
@@ -362,6 +373,7 @@ class EventConsumer(
                 "Giving up on the saga stage of event type={} id={} at {}-{}@{} after {} attempts: {}: {}",
                 type, id, record.topic(), record.partition(), record.offset(), attempts, cause::class.java.name, cause.message,
             )
+            consumed(type, Consumed.FAILED)
             advance(record, ack); return
         }
         when (val sink = deadLetters) {
@@ -372,7 +384,7 @@ class EventConsumer(
                     type, id, record.topic(), record.partition(), record.offset(), attempts, processor, letter["_id"], cause::class.java.name, cause.message,
                 )
                 val key = record.key()
-                toSink(record, ack) {
+                toSink(record, ack, type) {
                     if (sink.store.park(letter)) parkedSinceSample.set(true)
                     if (key != null) parkedKeys.getOrPut(record.partition()) { HashSet() } += key
                 }
@@ -382,13 +394,14 @@ class EventConsumer(
                     "Event type={} id={} at {}-{}@{} failed {} attempts in processor {}, sending it to {}.dlt: {}: {}",
                     type, id, record.topic(), record.partition(), record.offset(), attempts, processor, record.topic(), cause::class.java.name, cause.message,
                 )
-                toSink(record, ack) { produce(sink, record, DeadLetterReason.HANDLER_FAILED, error) }
+                toSink(record, ack, type) { produce(sink, record, DeadLetterReason.HANDLER_FAILED, error) }
             }
             DeadLetterSink.Log -> {
                 log.error(
                     "Giving up on event type={} id={} at {}-{}@{} after {} attempts: {}: {}",
                     type, id, record.topic(), record.partition(), record.offset(), attempts, cause::class.java.name, cause.message,
                 )
+                consumed(type, Consumed.FAILED)
                 advance(record, ack)
             }
         }
@@ -396,25 +409,33 @@ class EventConsumer(
 
     private fun invalid(record: ConsumerRecord<String, ByteArray>, ack: Acknowledgment, id: String?, why: String, type: String? = null) {
         val error = DeadLetterError.invalid(why)
+        val label = type ?: MessagingMetrics.OTHER
         when (val sink = deadLetters) {
             is DeadLetterSink.Collection -> {
                 val letter = sink.store.letter(processor, record, DeadLetterReason.INVALID, error, attempts = 0, replay = inReplay(record))
                 log.warn("Record {} of type {} at {}-{}@{} is invalid ({}), parked as dead letter {}", id, type, record.topic(), record.partition(), record.offset(), why, letter["_id"])
-                toSink(record, ack) { if (sink.store.park(letter)) parkedSinceSample.set(true) }
+                toSink(record, ack, label) { if (sink.store.park(letter)) parkedSinceSample.set(true) }
             }
             is DeadLetterSink.Topic -> {
                 log.warn("Record {} of type {} at {}-{}@{} is invalid ({}), sending it to {}.dlt", id, type, record.topic(), record.partition(), record.offset(), why, record.topic())
-                toSink(record, ack) { produce(sink, record, DeadLetterReason.INVALID, error) }
+                toSink(record, ack, label) { produce(sink, record, DeadLetterReason.INVALID, error) }
             }
             DeadLetterSink.Log -> {
                 log.warn("Skipping record {} of type {} at {}-{}@{}: {}", id, type, record.topic(), record.partition(), record.offset(), why)
+                consumed(label, Consumed.FAILED)
                 advance(record, ack)
             }
         }
     }
 
-    /** Runs [work] (park, produce) and acknowledges; when it throws the record stays unacknowledged and [work] is kept for the redelivery. */
-    private fun toSink(record: ConsumerRecord<String, ByteArray>, ack: Acknowledgment, work: () -> Unit) {
+    /**
+     * Runs [work] (park, produce), counts the record parked as [type] and acknowledges; when [work] throws the record stays
+     * unacknowledged and is kept, with its count, for the redelivery ([deliver]).
+     */
+    private fun toSink(record: ConsumerRecord<String, ByteArray>, ack: Acknowledgment, type: String, work: () -> Unit) =
+        deliver(record, ack) { work(); consumed(type, Consumed.PARKED) }
+
+    private fun deliver(record: ConsumerRecord<String, ByteArray>, ack: Acknowledgment, work: () -> Unit) {
         val coords = coords(record)
         pending[coords] = work
         try {
@@ -439,6 +460,8 @@ class EventConsumer(
         add(DLT_ORIGINAL_OFFSET, record.offset().toString())
         sink.kafka.send(out).get(sink.sendTimeout.toMillis(), TimeUnit.MILLISECONDS)
     }
+
+    private fun consumed(type: String, outcome: Consumed) = metrics.eventConsumed(processor, type, outcome)
 
     private fun advance(record: ConsumerRecord<String, ByteArray>, ack: Acknowledgment) {
         ack.acknowledge()

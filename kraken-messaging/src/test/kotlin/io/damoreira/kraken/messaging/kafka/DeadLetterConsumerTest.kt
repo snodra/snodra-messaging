@@ -1,5 +1,7 @@
 package io.damoreira.kraken.messaging.kafka
 
+import io.damoreira.kraken.messaging.metrics.MessagingMetrics
+import io.damoreira.kraken.messaging.metrics.RecordingMessagingMetrics
 import io.damoreira.kraken.messaging.MessageContext
 import io.damoreira.kraken.messaging.codec.MessageTypeResolver
 import io.damoreira.kraken.messaging.deadletter.DeadLetterMode
@@ -52,6 +54,7 @@ class DeadLetterConsumerTest {
     private lateinit var registry: HandlerRegistry
     private var consumer: EventConsumer? = null
     private val store = FlakyStore(support)
+    private lateinit var metrics: RecordingMessagingMetrics
 
     @AfterAll fun stop() = support.close()
 
@@ -63,6 +66,7 @@ class DeadLetterConsumerTest {
         group = "group-" + UUID.randomUUID()
         handlers = RecordingHandlers()
         registry = HandlerRegistry(MessageTypeResolver("test")).also { it.register(handlers) }
+        metrics = RecordingMessagingMetrics()
     }
 
     @AfterEach fun tearDown() {
@@ -79,7 +83,8 @@ class DeadLetterConsumerTest {
         }
         return EventConsumer(
             support.consumerFactory(), topic, group, registry, invoker, support.tx, mongo, maxAttempts, backOffMs = 50,
-            codec = support.codec, dispatcher = LocalEventDispatcher(registry, invoker, support.tx, mongo, stage), deadLetters = sink,
+            codec = support.codec, dispatcher = LocalEventDispatcher(registry, invoker, support.tx, mongo, stage, metrics), deadLetters = sink,
+            metrics = metrics,
         ).also { consumer = it; it.start() }
     }
 
@@ -102,6 +107,8 @@ class DeadLetterConsumerTest {
         assertEquals(3, letter["attempts"])
         assertEquals(Document(mapOf("type" to "IllegalStateException", "message" to "poison")), letter["error"])
         assertEquals(3, handlers.seen.count { it == "poison-1" })
+        assertEquals(listOf(HAPPENED to PARKED, HAPPENED to HANDLED), metrics.outcomes("default"))
+        assertEquals(4, metrics.handled.count { it.processor == "default" && it.type == HAPPENED }, "every stage-1 attempt is timed")
     }
 
     @Test fun `a failing key parks its later records SEQUENCED while other keys flow, and stage 2 still runs for them`() {
@@ -122,6 +129,8 @@ class DeadLetterConsumerTest {
         assertEquals(0, l[1]["attempts"])
         assertEquals(listOf("p-1", "p-1", "o-1"), handlers.seen.toList(), "stage 1 never ran for the sequenced records")
         assertTrue(stage.seen.containsAll(listOf("p-1", "p-2", "o-1", "p-3")), "stage 2 saw every record: ${stage.seen}")
+        assertEquals(listOf(HAPPENED to PARKED, HAPPENED to PARKED, HAPPENED to HANDLED, HAPPENED to PARKED), metrics.outcomes("default"))
+        assertEquals(3, metrics.handled.size, "p-1's two attempts and o-1: a sequenced record runs no stage 1")
     }
 
     @Test fun `a sequenced record's stage 2 is retried and then logged and skipped like any record's, and the record is parked`() {
@@ -146,6 +155,7 @@ class DeadLetterConsumerTest {
         val status = c.status()
         assertEquals(2L, status.failedTotal, "p-1's stage 1 and p-2's stage 2 exhausted their attempts")
         assertTrue(status.lastError.contains("saga store down"), status.lastError)
+        assertEquals(listOf(HAPPENED to PARKED, HAPPENED to PARKED, HAPPENED to HANDLED), metrics.outcomes("default"))
     }
 
     @Test fun `a key whose letter was removed elsewhere is handled normally (the confirmation misses)`() {
@@ -174,6 +184,12 @@ class DeadLetterConsumerTest {
         assertEquals(Document(mapOf("type" to "InvalidMessage", "message" to "payload is not a JSON object")), l[1]["error"])
         assertEquals(0, l[0]["attempts"])
         assertNull(l[0]["eventType"])
+        assertEquals(
+            listOf(OTHER to PARKED, HAPPENED to PARKED, HAPPENED to HANDLED, OTHER to SKIPPED),
+            metrics.outcomes("default"),
+            "a missing or foreign type is labelled other",
+        )
+        assertEquals(1, metrics.handled.size, "an INVALID or skipped record runs no stage 1")
     }
 
     @Test fun `a record parked before a crash is acknowledged on redelivery without running its handler again`() {
@@ -188,6 +204,7 @@ class DeadLetterConsumerTest {
         awaitCommitted(2)
         assertEquals(listOf("r-2"), handlers.seen.toList())
         assertEquals("first", (letters().single()["error"] as Document)["message"])
+        assertEquals(listOf(HAPPENED to DUPLICATE, HAPPENED to HANDLED), metrics.outcomes("default"))
     }
 
     @Test fun `MongoDB down while parking - the record is not acknowledged and is parked once it is back`() {
@@ -203,6 +220,7 @@ class DeadLetterConsumerTest {
         store.down.set(false)
         awaitCommitted(1)
         assertEquals(listOf("HANDLER_FAILED"), letters().map { it["reason"] })
+        assertEquals(listOf(HAPPENED to PARKED), metrics.outcomes("default"), "parked once, when the sink took it")
     }
 
     @Test fun `a stage-2 failure after stage 1 succeeded is logged and skipped, no letter`() {
@@ -215,6 +233,8 @@ class DeadLetterConsumerTest {
         awaitCommitted(1)
         assertEquals(emptyList(), letters())
         assertEquals(listOf("s-1"), handlers.seen.toList(), "stage 1 ran once: its marker skipped it on the second attempt")
+        assertEquals(listOf(HAPPENED to FAILED), metrics.outcomes("default"))
+        assertEquals(2, metrics.handled.size, "both stage-1 runs are timed (the second found its marker), the saga stage is not")
     }
 
     @Test fun `mode topic produces the failed and the INVALID record to the DLT with kraken-dlt headers`() {
@@ -243,6 +263,7 @@ class DeadLetterConsumerTest {
         assertEquals(listOf("2"), h(dlt[1], "kraken-dlt-original-offset"))
         assertEquals(emptyList(), letters(), "mode topic writes no letter")
         assertEquals(listOf("t-1", "t-1", "t-2"), handlers.seen.toList(), "not sequenced")
+        assertEquals(listOf(HAPPENED to PARKED, HAPPENED to HANDLED, OTHER to PARKED), metrics.outcomes("default"))
     }
 
     @Test fun `mode log logs and skips, nothing is parked`() {
@@ -254,5 +275,16 @@ class DeadLetterConsumerTest {
         awaitSeen("g-2")
         awaitCommitted(3)
         assertEquals(emptyList(), letters())
+        assertEquals(listOf(HAPPENED to FAILED, HAPPENED to HANDLED, OTHER to FAILED), metrics.outcomes("default"))
+    }
+
+    private companion object {
+        const val HAPPENED = "test.Happened"
+        const val OTHER = MessagingMetrics.OTHER
+        val HANDLED = MessagingMetrics.Consumed.HANDLED
+        val DUPLICATE = MessagingMetrics.Consumed.DUPLICATE
+        val SKIPPED = MessagingMetrics.Consumed.SKIPPED
+        val FAILED = MessagingMetrics.Consumed.FAILED
+        val PARKED = MessagingMetrics.Consumed.PARKED
     }
 }
