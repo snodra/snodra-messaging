@@ -1612,7 +1612,7 @@ OBS_MAY_BE_EMPTY=(
   "kraken-hub|JWT validations|JWT=1 only"
   "kraken-hub|JWKS fetches|JWT=1 only"
   "kraken-hub|JWKS keys|JWT=1 only"
-  "kraken-hub|Credential refreshes|JWT=1 and MTLS=1 only (a client's credentials message)"
+  "kraken-hub|Credential refreshes|JWT=1 only (a token refresh; the certificate sessions of MTLS=1 send none)"
   "kraken-hub|Client certificates|MTLS=1 only"
   "kraken-hub|TLS handshake failures|only the secure modes speak TLS, and only a bad client fails a handshake"
   "kraken-hub|TLS handshakes shed|no handshake flood in the sandbox"
