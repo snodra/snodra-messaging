@@ -4,6 +4,8 @@ import io.damoreira.kraken.messaging.MessageKind
 import io.damoreira.kraken.messaging.NoHandlerException
 import io.damoreira.kraken.messaging.RemoteHandlerException
 import io.damoreira.kraken.messaging.SendOptions
+import io.damoreira.kraken.messaging.api.Command
+import io.damoreira.kraken.messaging.api.MessageType
 import io.damoreira.kraken.messaging.codec.JsonCodec
 import io.damoreira.kraken.messaging.codec.MessageTypeResolver
 import io.damoreira.kraken.messaging.fixtures.Count
@@ -87,6 +89,20 @@ class HubBusMetricsTest {
         assertFailsWith<NoHandlerException> { bus.send(GetCount("abc")) }
 
         assertEquals(listOf(HubOutcome.HANDLER_ERROR, HubOutcome.NO_HANDLER), metrics.hubCalls.map { it.outcome })
+    }
+
+    /** A command whose payload cannot be encoded (its getter throws). */
+    @MessageType("test.Unencodable")
+    class Unencodable : Command<Unit> {
+        @Suppress("unused") val text: String get() = error("cannot encode")
+    }
+
+    @Test fun `a call whose request cannot be encoded is observed as error, as the Rust library`() = runBlocking {
+        val bus = caller(ContextCapturingHandlers())
+
+        assertFailsWith<Exception> { bus.send(Unencodable()) }
+
+        assertEquals(listOf(Triple(MessageKind.COMMAND, "test.Unencodable", HubOutcome.ERROR)), metrics.hubCalls.map { Triple(it.kind, it.type, it.outcome) })
     }
 
     @Test fun `a local handler is not observed, and a saga's raw command is`() = runBlocking {

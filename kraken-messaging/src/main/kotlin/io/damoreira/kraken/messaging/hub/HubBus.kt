@@ -112,8 +112,8 @@ import kotlin.reflect.KClass
  * and trace context are read when [subscribe] is called.
  *
  * Each unary command or query call that goes through the hub ([send], [sendRaw]) is timed into [metrics] (P9) once, from the
- * call to its result with every retry and back-off, labelled with its final [HubOutcome]; a call cancelled by its caller is
- * not. Local invocations, scatter-gather, streaming and subscription queries are not observed.
+ * call to its result with every retry and back-off, labelled with its final [HubOutcome] (a request that cannot be encoded
+ * is `error`); a call cancelled by its caller is not. Local invocations, scatter-gather, streaming and subscription queries are not observed.
  */
 class HubBus(
     private val connection: HubTransport,
@@ -148,8 +148,8 @@ class HubBus(
     override suspend fun sendRaw(type: String, payload: ByteArray, options: SendOptions): RawOutcome {
         if (registry.commandHandler(type) != null) return localRaw.sendRaw(type, payload, options)
         return try {
-            val template = rawTemplate(type, payload, options)
             timed(MessageKind.COMMAND, type) {
+                val template = rawTemplate(type, payload, options)
                 withRetry(type, MessageKind.COMMAND, options.timeout, options.retry, retryIf = { true }) { timeout ->
                     attemptReply(template, timeout)
                 }
@@ -420,9 +420,10 @@ class HubBus(
             val token = CallerContext.currentBearerToken()
             return invokeLocally(type, kind, message::class, codec.encode(message), correlationId, token, options.headers)
         }
-        val template = template(message, kind, options.routingKey, options.priority, extra = options.headers)
         val messageKind = if (kind == RequestKind.COMMAND) MessageKind.COMMAND else MessageKind.QUERY
         return timed(messageKind, type) {
+            // Built inside the timing: a request that cannot be encoded is a call that failed (`error`), as in Rust.
+            val template = template(message, kind, options.routingKey, options.priority, extra = options.headers)
             withRetry(type, messageKind, options.timeout, options.retry, retryIf = { true }) { timeout ->
                 attempt(template, message::class, timeout)
             }
