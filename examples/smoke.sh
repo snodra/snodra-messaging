@@ -1598,8 +1598,8 @@ browser_steps() {
 # examples.CountGreetings through the hub for it), and their instance label is the instance id the hubs list. 29d: no series has a label hub_id, and only the hub's streams and
 # subscriptions open have instance_id (the handler instance, ADR 0026 hub ruling 3). 29e: every panel query of the three
 # dashboards, as Grafana serves them, returns data with the template variables at All (.*) and $__rate_interval at 5m,
-# except the panels in OBS_MAY_BE_EMPTY, which the sandbox may not drive in this mode (each with its reason). Needs jq or
-# python3; SKIP_OBS=1 skips these steps, ONLY_OBS=1 runs only them (on a sandbox that already carried traffic: a full run).
+# except the panels in OBS_MAY_BE_EMPTY, which the sandbox may not drive in this mode (each with its reason), and those
+# whose series only steps skipped by a SKIP_* flag create (obs_skipped). Needs jq or python3; SKIP_OBS=1 skips these steps, ONLY_OBS=1 runs only them (on a sandbox that already carried traffic: a full run).
 GRAFANA=${GRAFANA:-http://localhost:${KRAKEN_GRAFANA_PORT:-3000}}
 PROM=${PROM:-$GRAFANA/api/datasources/proxy/uid/prometheus}
 OBS_SINCE=$(( $(date +%s) - 120 ))
@@ -1623,7 +1623,34 @@ OBS_MAY_BE_EMPTY=(
   "kraken-messaging|Certificate rotations|MTLS=1 only, after step 23b rotated the certificates"
   "kraken-messaging|Saga command failures|no saga command fails unhandled in the sandbox"
   "kraken-messaging|Deadlines due|no deadline is overdue (the schedulers fire them on time; the gauge has only names with overdue ones)"
+  "kraken-hub|Streams open|the gauge holds only handler instances with a stream open: the steps' streams closed, and 5 minutes after its last 0 the series is gone"
+  "kraken-hub|Subscriptions open|as Streams open, for the subscription steps' targets"
 )
+
+# Adds "<dashboard uid>|<panel title>" lines to OBS_MAY_BE_EMPTY when <flag> (SKIP_*) is 1: the steps it skips are what
+# creates the panels' series.
+obs_skipped() { # <flag> <dashboard uid>|<panel title> ...
+  local flag=$1 panel
+  shift
+  [ "${!flag:-0}" = "1" ] || return 0
+  for panel in "$@"; do OBS_MAY_BE_EMPTY+=("$panel|$flag=1 skipped the steps that create its series"); done
+}
+obs_skipped SKIP_FLOW "kraken-hub|Queue depth" "kraken-hub|Queue wait p95"
+obs_skipped SKIP_SCATTER "kraken-hub|Scatter-gather targets"
+obs_skipped SKIP_STREAM "kraken-hub|Stream parts relayed"
+obs_skipped SKIP_SUBSCRIBE "kraken-hub|Subscription updates relayed"
+obs_skipped SKIP_CONTROL "kraken-hub|Processor control calls"
+obs_skipped SKIP_BROWSER "kraken-hub|Event browser requests" "kraken-hub|Records scanned per search" "kraken-hub|Event tails"
+# Each of these pairs drives the series on its own (the pause a handler_disconnected, step 19c a handler_error; either
+# saga's steps polls, timeouts and printer calls): only both skipped leave them empty.
+if [ "${SKIP_PAUSE:-0}" = "1" ] && [ "${SKIP_STREAM:-0}" = "1" ]; then
+  OBS_MAY_BE_EMPTY+=("kraken-overview|Errors by outcome|SKIP_PAUSE=1 and SKIP_STREAM=1 skipped the steps whose requests fail")
+fi
+if [ "${SKIP_POSTCARD:-0}" = "1" ] && [ "${SKIP_BANNER:-0}" = "1" ]; then
+  for title in "Sagas started and ended" "Saga events by outcome" "External calls" "Deadlines fired"; do
+    OBS_MAY_BE_EMPTY+=("kraken-messaging|$title|SKIP_POSTCARD=1 and SKIP_BANNER=1 skipped both sagas' steps")
+  done
+fi
 
 prom_query() { curl -fsS -G "$PROM/api/v1/query" --data-urlencode "query=$1" 2>/dev/null || true; }
 prom_series() { curl -fsS -G "$PROM/api/v1/series" --data-urlencode "match[]=$1" --data-urlencode "start=$OBS_SINCE" 2>/dev/null || true; }
