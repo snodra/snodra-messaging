@@ -1554,14 +1554,28 @@ management:
         step: 60s
 ```
 
-The starter makes these defaults, below every setting of the application: `management.otlp.metrics.export.base-time-unit`
-`seconds` (Boot's default, milliseconds, would turn the timers into `..._milliseconds` series),
-`management.otlp.metrics.export.publish-max-gauge-for-histograms` `false` (no `..._max_seconds` series, which the Rust library
-does not have), and the resource attributes
-`service.name` = `kraken.messaging.service-name` and `service.instance.id` = `kraken.messaging.instance-id`, the names the
-hub shows. Prometheus turns them into the `job` and `instance` labels of every series, which the dashboards select and
-aggregate on. Keep `spring.application.group` unset: Boot would add it as `service.namespace`, and `job` would become
-`<group>/<service>`. service-a and service-b of the [examples](#examples) export this way when switched on.
+The starter makes these defaults, below every setting of the application, and they apply to the whole application, its
+own meters and traces included: `management.otlp.metrics.export.base-time-unit` `seconds` (Boot's default, milliseconds,
+would turn the timers into `..._milliseconds` series; the application's own timers, `http.server.requests` for one, are
+exported in seconds too), `management.otlp.metrics.export.publish-max-gauge-for-histograms` `false` (no `..._max_seconds`
+series, which the Rust library does not have, for the application's timers either), and the resource identity, which
+Prometheus turns into the `job` and `instance` labels of every series (the dashboards select and aggregate on them) and
+which the application's traces carry too:
+
+- `service.instance.id` = `kraken.messaging.instance-id`, the instance id the hub shows, unless `OTEL_RESOURCE_ATTRIBUTES`
+  names one. The id is resolved once at startup and written as a value, so a `${random.uuid}` is the same in the hub
+  registration and the metrics; without `kraken.messaging.instance-id` it is the `service.instance.id` of
+  `OTEL_RESOURCE_ATTRIBUTES`, else a fresh UUID.
+- `service.name` = `kraken.messaging.service-name`, the service the hub shows, unless `OTEL_SERVICE_NAME` or
+  `OTEL_RESOURCE_ATTRIBUTES` names the service or `spring.application.name` is set: then Boot's own choice stands (the
+  variable, else the application name), so the application's traces keep their name. **Keep `spring.application.name`
+  equal to `kraken.messaging.service-name`, or unset**: otherwise the metrics' `job` is not the `service` of the hub's
+  series, and the dashboards cannot join them.
+
+These defaults are needed because Boot lets `management.opentelemetry.resource-attributes.*` win over the `OTEL_*`
+variables; the starter sets none where a variable or the application already names the attribute. Keep
+`spring.application.group` unset: Boot would add it as `service.namespace`, and `job` would become `<group>/<service>`.
+service-a and service-b of the [examples](#examples) export this way when switched on.
 
 ## Test helpers (`kraken-messaging-test`)
 
