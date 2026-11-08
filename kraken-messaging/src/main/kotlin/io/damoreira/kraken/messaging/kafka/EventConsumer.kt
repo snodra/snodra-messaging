@@ -83,7 +83,8 @@ import java.util.concurrent.atomic.AtomicLong
  * PAUSED, the [operationId] holding the processor's lock, `replaying` and each partition's `replay_until`.
  *
  * **Metrics** (P9): each record's final outcome in this processor goes to [metrics] once ([Consumed]; a parked record when
- * the sink took it, so a redelivery after a sink failure counts once), labelled with its type when the processor handles it,
+ * the sink took it, so a redelivery after a sink failure counts once, and as a duplicate when its letter was there already),
+ * labelled with its type when the processor handles it,
  * else [MessagingMetrics.OTHER]. A stop in the middle of the attempts records nothing: the record comes back.
  */
 class EventConsumer(
@@ -304,7 +305,7 @@ class EventConsumer(
         if (processor == Processors.DEFAULT && !replay) stage2(record, type, payload, ctx)
         val letter = store.sequenced(processor, record, head, replay)
         log.info("Record {}-{}@{} of type {} parked SEQUENCED in processor {} behind {}", record.topic(), partition, record.offset(), type, processor, head)
-        toSink(record, ack, type) { if (store.park(letter)) parkedSinceSample.set(true) }
+        toSink(record, ack, type) { parked(store.park(letter)) }
         return true
     }
 
@@ -385,8 +386,9 @@ class EventConsumer(
                 )
                 val key = record.key()
                 toSink(record, ack, type) {
-                    if (sink.store.park(letter)) parkedSinceSample.set(true)
+                    val new = sink.store.park(letter)
                     if (key != null) parkedKeys.getOrPut(record.partition()) { HashSet() } += key
+                    parked(new)
                 }
             }
             is DeadLetterSink.Topic -> {
@@ -394,7 +396,7 @@ class EventConsumer(
                     "Event type={} id={} at {}-{}@{} failed {} attempts in processor {}, sending it to {}.dlt: {}: {}",
                     type, id, record.topic(), record.partition(), record.offset(), attempts, processor, record.topic(), cause::class.java.name, cause.message,
                 )
-                toSink(record, ack, type) { produce(sink, record, DeadLetterReason.HANDLER_FAILED, error) }
+                toSink(record, ack, type) { produce(sink, record, DeadLetterReason.HANDLER_FAILED, error); Consumed.PARKED }
             }
             DeadLetterSink.Log -> {
                 log.error(
@@ -414,11 +416,11 @@ class EventConsumer(
             is DeadLetterSink.Collection -> {
                 val letter = sink.store.letter(processor, record, DeadLetterReason.INVALID, error, attempts = 0, replay = inReplay(record))
                 log.warn("Record {} of type {} at {}-{}@{} is invalid ({}), parked as dead letter {}", id, type, record.topic(), record.partition(), record.offset(), why, letter["_id"])
-                toSink(record, ack, label) { if (sink.store.park(letter)) parkedSinceSample.set(true) }
+                toSink(record, ack, label) { parked(sink.store.park(letter)) }
             }
             is DeadLetterSink.Topic -> {
                 log.warn("Record {} of type {} at {}-{}@{} is invalid ({}), sending it to {}.dlt", id, type, record.topic(), record.partition(), record.offset(), why, record.topic())
-                toSink(record, ack, label) { produce(sink, record, DeadLetterReason.INVALID, error) }
+                toSink(record, ack, label) { produce(sink, record, DeadLetterReason.INVALID, error); Consumed.PARKED }
             }
             DeadLetterSink.Log -> {
                 log.warn("Skipping record {} of type {} at {}-{}@{}: {}", id, type, record.topic(), record.partition(), record.offset(), why)
@@ -429,11 +431,21 @@ class EventConsumer(
     }
 
     /**
-     * Runs [work] (park, produce), counts the record parked as [type] and acknowledges; when [work] throws the record stays
-     * unacknowledged and is kept, with its count, for the redelivery ([deliver]).
+     * Runs [work] (park, produce), counts the record as [type] with the outcome [work] returns and acknowledges; when [work]
+     * throws the record stays unacknowledged and is kept, with its count, for the redelivery ([deliver]).
      */
-    private fun toSink(record: ConsumerRecord<String, ByteArray>, ack: Acknowledgment, type: String, work: () -> Unit) =
-        deliver(record, ack) { work(); consumed(type, Consumed.PARKED) }
+    private fun toSink(record: ConsumerRecord<String, ByteArray>, ack: Acknowledgment, type: String, work: () -> Consumed) =
+        deliver(record, ack) { consumed(type, work()) }
+
+    /**
+     * The outcome of a letter [DeadLetterStore.park] took ([new]) or found there already: the record's own letter exists
+     * (parked, then the instance died before the commit), so this delivery is a duplicate, as the Rust library counts it.
+     */
+    private fun parked(new: Boolean): Consumed {
+        if (!new) return Consumed.DUPLICATE
+        parkedSinceSample.set(true)
+        return Consumed.PARKED
+    }
 
     private fun deliver(record: ConsumerRecord<String, ByteArray>, ack: Acknowledgment, work: () -> Unit) {
         val coords = coords(record)

@@ -207,6 +207,20 @@ class DeadLetterConsumerTest {
         assertEquals(listOf(HAPPENED to DUPLICATE, HAPPENED to HANDLED), metrics.outcomes("default"))
     }
 
+    @Test fun `an invalid record whose letter exists already is counted duplicate, as the Rust library`() {
+        // Its INVALID letter exists (parked, then the instance died before the commit); INVALID letters block no key, so
+        // the redelivery parks again and the store reports the letter there.
+        val r0 = ConsumerRecord<String, ByteArray>(topic, 0, 0L, null, ByteArray(0))
+        store.park(store.letter("default", r0, DeadLetterReason.INVALID, io.damoreira.kraken.messaging.deadletter.DeadLetterError("Invalid", "first"), 0))
+        start()
+        support.send(topic, null, type = null, key = null)
+        support.send(topic, "i-2", key = "k2")
+        awaitSeen("i-2")
+        awaitCommitted(2)
+        assertEquals("first", (letters().single()["error"] as Document)["message"])
+        assertEquals(listOf(OTHER to DUPLICATE, HAPPENED to HANDLED), metrics.outcomes("default"))
+    }
+
     @Test fun `MongoDB down while parking - the record is not acknowledged and is parked once it is back`() {
         handlers.failAlways.set("d-1")
         store.down.set(true)
