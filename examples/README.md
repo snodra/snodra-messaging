@@ -435,12 +435,18 @@ outbox gauges and counter, `kraken_processor_lag{partition,processor}`, `kraken_
 `kraken_hub_client_handlers_in_flight`, `kraken_hub_client_connected_hubs`), with `instance` = the instance ids the hub lists for
 each; 29d expects no series with a `hub_id` label and `instance_id` only on `kraken_hub_streams_open` and
 `kraken_hub_subscriptions_open` (the handler instance); 29e reads the three dashboards from Grafana's API and runs every panel
-query against Prometheus, the variables at All (`.*`) and `$__rate_interval` at `5m`, and expects each to return data, except
+query against Prometheus, the variables at All (`.*`), `$__rate_interval` at `5m` and `$hub_seen` (Hubs seen within) at
+`3m`, and expects each to return data, except
 the panels the smoke lists in `OBS_MAY_BE_EMPTY` with the reason this sandbox may not drive them (auth violations, JWT, JWKS,
 credential refreshes, client certificates and TLS failures outside their mode; capacity rejections, session buffers, TLS
 shedding, reload errors, unknown control replies, saga command failures and overdue deadlines, which the sandbox never causes;
 payload views in
-the plain sandbox; token fetches and certificate rotations outside JWT and mTLS). Exports arrive every 5 s, so the steps poll
+the plain sandbox; token fetches and certificate rotations outside JWT and mTLS; the open streams and subscriptions, whose
+gauges hold only handler instances with one open), and the panels whose series only the steps a `SKIP_*` flag skipped create
+(queue depth and wait for `SKIP_FLOW`, scatter-gather for `SKIP_SCATTER`, stream parts for `SKIP_STREAM`, subscription
+updates for `SKIP_SUBSCRIBE`, processor control for `SKIP_CONTROL`, the event browser's for `SKIP_BROWSER`; errors by
+outcome with both `SKIP_PAUSE` and `SKIP_STREAM`; the saga counters and fired deadlines with both `SKIP_POSTCARD` and
+`SKIP_BANNER`). Exports arrive every 5 s, so the steps poll
 (up to 60 s). `GRAFANA` (default `http://localhost:${KRAKEN_GRAFANA_PORT:-3000}`) and `PROM` (Grafana's proxy) override the
 addresses. They need `jq` or `python3`; `SKIP_OBS=1` skips them, `ONLY_OBS=1` runs only them (on a sandbox that already
 carried traffic, such as after a full run: the request and consumer series exist only after it).
