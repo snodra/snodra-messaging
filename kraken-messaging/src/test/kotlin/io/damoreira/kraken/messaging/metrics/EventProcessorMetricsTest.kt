@@ -51,17 +51,29 @@ class EventProcessorMetricsTest {
         assertEquals(10, registry.find("kraken.processor.state").gauges().size, "five states per processor, nothing else")
     }
 
-    @Test fun `a revoked partition's lag goes away and a new state replaces the old one`() {
-        statuses = listOf(status("default", ProcessorState.PROCESSOR_RUNNING, 0, 0 to 3L, 1 to 5L))
+    @Test fun `a revoked partition's lag reads 0 until an export read it, then goes away, and a new state replaces the old one`() {
+        statuses = listOf(status("default", ProcessorState.PROCESSOR_RUNNING, 0, 0 to 3L, 1 to 5L, 2 to 4L))
         metrics.sampleOnce()
-        statuses = listOf(status("default", ProcessorState.PROCESSOR_PAUSED, 2, 1 to 6L))
+        statuses = listOf(status("default", ProcessorState.PROCESSOR_PAUSED, 2, 1 to 6L, 2 to -1L))
         metrics.sampleOnce()
+        metrics.sampleOnce() // nobody read the 0 yet: it stays
 
-        assertNull(gauge("kraken.processor.lag", "processor", "default", "partition", "0"), "revoked: no double counting with its new owner")
+        // Prometheus keeps a series that stops at its last value (no staleness over OTLP): 0, not 3, next to the new owner's.
+        assertEquals(0.0, gauge("kraken.processor.lag", "processor", "default", "partition", "0"), "revoked: 0 until read")
         assertEquals(6.0, gauge("kraken.processor.lag", "processor", "default", "partition", "1"))
+        assertNull(gauge("kraken.processor.lag", "processor", "default", "partition", "2"), "assigned, lag unknown: absent, not 0")
         assertEquals(1.0, gauge("kraken.processor.state", "processor", "default", "state", "paused"))
         assertEquals(0.0, gauge("kraken.processor.state", "processor", "default", "state", "running"))
         assertEquals(2.0, gauge("kraken.dead.letters", "processor", "default"))
+
+        metrics.sampleOnce()
+        assertNull(gauge("kraken.processor.lag", "processor", "default", "partition", "0"), "read once: gone")
+        statuses = emptyList()
+        metrics.sampleOnce()
+        assertEquals(0.0, gauge("kraken.processor.lag", "processor", "default", "partition", "1"), "a processor gone: its partitions read 0")
+        assertEquals(0.0, gauge("kraken.processor.lag", "processor", "default", "partition", "2"))
+        metrics.sampleOnce()
+        assertTrue(registry.find("kraken.processor.lag").gauges().isEmpty())
     }
 
     @Test fun `the meters are sampled on their own thread while running, never by the export`() {

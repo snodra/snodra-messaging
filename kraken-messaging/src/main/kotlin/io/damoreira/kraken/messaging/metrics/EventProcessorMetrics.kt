@@ -21,8 +21,10 @@ import java.util.concurrent.TimeUnit
  *
  * - `kraken_processor_state{processor,state}`: `starting | running | paused | failing | stopped`, 1 for the current one;
  * - `kraken_dead_letters{processor}`: the sampled letter count (mode `collection`, else 0, as the status);
- * - `kraken_processor_lag{processor,partition}`: per partition assigned here whose lag is known; a revoked partition's
- *   series goes away, so summing over the instances never counts a partition twice.
+ * - `kraken_processor_lag{processor,partition}`: per partition assigned here whose lag is known (an unknown lag has no
+ *   series: 0 means caught up). A partition that leaves the assignment (revoked, or its processor gone) reads 0 until an
+ *   export has read it, then its series goes away: Prometheus keeps a series that stops at its last value for minutes (no
+ *   staleness over OTLP), which next to the new owner's would read as a lag nobody has.
  */
 class EventProcessorMetrics(
     registry: MeterRegistry,
@@ -34,19 +36,35 @@ class EventProcessorMetrics(
     private val state = MultiGauge.builder("kraken.processor.state").description("1 for the processor's current state").register(registry)
     private val deadLetters = MultiGauge.builder("kraken.dead.letters").description("Dead letters of the processor (mode collection)").register(registry)
     private var executor: ScheduledExecutorService? = null
+    private val sampling = Any()
+
+    /** The partitions assigned at the last sample, by tags; guarded by [sampling]. */
+    private var assigned = emptySet<Tags>()
+
+    /** Partitions that left the assignment, read as 0 until an export read them; guarded by [sampling]. */
+    private val departed = HashMap<Tags, Departed>()
+
+    private class Departed {
+        @Volatile var read = false
+    }
 
     init {
         require(!interval.isZero && !interval.isNegative) { "interval must be positive, was $interval" }
     }
 
     /** One sample of every gauge. */
-    fun sampleOnce() {
+    fun sampleOnce() = synchronized(sampling) {
         try {
             val statuses = source.processorStatuses()
+            fun tags(processor: String, partition: Int) = Tags.of("processor", processor, "partition", partition.toString())
+            val now = statuses.flatMap { s -> s.partitionsList.map { tags(s.name, it.partition) } }.toSet()
+            departed.values.removeIf { it.read }
+            departed.keys.removeAll(now)
+            (assigned - now).forEach { departed.getOrPut(it) { Departed() } }
+            assigned = now
             lag.register(
-                statuses.flatMap { s ->
-                    s.partitionsList.filter { it.lag >= 0 }.map { MultiGauge.Row.of(Tags.of("processor", s.name, "partition", it.partition.toString()), it.lag) }
-                },
+                statuses.flatMap { s -> s.partitionsList.filter { it.lag >= 0 }.map { MultiGauge.Row.of(tags(s.name, it.partition), it.lag) } } +
+                    departed.map { (tags, d) -> MultiGauge.Row.of(tags, d) { it.read = true; 0.0 } },
                 true,
             )
             state.register(
