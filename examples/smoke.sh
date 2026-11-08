@@ -1597,7 +1597,8 @@ browser_steps() {
 # hub-client histogram from the sandbox's senders, service-a and service-c, whose GET /greetings/{name}/count sends
 # examples.CountGreetings through the hub for it), and their instance label is the instance id the hubs list. 29d: no series has a label hub_id, and only the hub's streams and
 # subscriptions open have instance_id (the handler instance, ADR 0026 hub ruling 3). 29e: every panel query of the three
-# dashboards, as Grafana serves them, returns data with the template variables at All (.*) and $__rate_interval at 5m,
+# dashboards, as Grafana serves them, returns data with the template variables at All (.*), $__rate_interval at 5m and
+# $hub_seen (Hubs seen within) at its default 3m,
 # except the panels in OBS_MAY_BE_EMPTY, which the sandbox may not drive in this mode (each with its reason), and those
 # whose series only steps skipped by a SKIP_* flag create (obs_skipped). Needs jq or python3; SKIP_OBS=1 skips these steps, ONLY_OBS=1 runs only them (on a sandbox that already carried traffic: a full run).
 GRAFANA=${GRAFANA:-http://localhost:${KRAKEN_GRAFANA_PORT:-3000}}
@@ -1758,7 +1759,8 @@ obs_steps() {
       for line in "${OBS_MAY_BE_EMPTY[@]}"; do
         [ "${line%%|*}" = "$uid" ] && [ "$(printf '%s' "$line" | cut -d'|' -f2)" = "$title" ] && reason=${line##*|}
       done
-      q=$(printf '%s' "$expr" | sed -e 's/\$__rate_interval/5m/g' -e 's/\$[A-Za-z_][A-Za-z0-9_]*/.*/g')
+      # $hub_seen is a range, not a label match: its default, 3m (ADR 0026 Dashboards ruling 9).
+      q=$(printf '%s' "$expr" | sed -e 's/\$__rate_interval/5m/g' -e 's/\$hub_seen/3m/g' -e 's/\$[A-Za-z_][A-Za-z0-9_]*/.*/g')
       found=$(prom_query "$q" | prom_rows __name__ | grep -c . || true)
       if [ "$found" -gt 0 ]; then continue; fi
       if [ -n "$reason" ]; then
