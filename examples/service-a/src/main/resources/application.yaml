@@ -16,6 +16,16 @@ spring:
     name: ${KRAKEN_SERVICE_NAME:service-a}
   mongodb:
     uri: ${KRAKEN_MONGODB_URI:mongodb://localhost:27017/service-a?replicaSet=rs0&directConnection=true}
+management:
+  otlp:
+    metrics:
+      export:
+        # Metrics over OTLP/HTTP (the sandbox's otel-lgtm) only when switched on: without a collector the export would log a
+        # failure every step. The library makes the export's time unit seconds and its resource the service and the
+        # instance id the hub sees (ADR 0026).
+        enabled: ${KRAKEN_OTLP_METRICS_ENABLED:false}
+        url: ${KRAKEN_OTLP_METRICS_ENDPOINT:http://localhost:4318/v1/metrics}
+        step: ${KRAKEN_OTLP_METRICS_STEP:60s}
 server:
   port: ${SERVER_PORT:8091}
 logging:

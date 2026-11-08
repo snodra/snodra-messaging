@@ -6,7 +6,7 @@ import io.damoreira.kraken.messaging.codec.JsonCodec
 import io.damoreira.kraken.messaging.codec.MessageTypeResolver
 import io.damoreira.kraken.messaging.handler.HandlerInvoker
 import io.damoreira.kraken.messaging.handler.HandlerRegistry
-import io.damoreira.kraken.messaging.hub.HubAuthMetrics
+import io.damoreira.kraken.messaging.hub.HubClientMetrics
 import io.damoreira.kraken.messaging.hub.HubBus
 import io.damoreira.kraken.messaging.hub.DefaultHubChannelFactory
 import io.damoreira.kraken.messaging.hub.HubChannelFactory
@@ -22,6 +22,8 @@ import io.damoreira.kraken.messaging.hub.HubTargets
 import io.damoreira.kraken.messaging.hub.InboundRequestDispatcher
 import io.damoreira.kraken.messaging.hub.SubscriptionRegistry
 import io.damoreira.kraken.messaging.kafka.ProcessorStatusSource
+import io.damoreira.kraken.messaging.metrics.MessagingMetrics
+import io.damoreira.kraken.messaging.metrics.NoopMessagingMetrics
 import io.damoreira.kraken.messaging.control.ProcessorControl
 import io.damoreira.kraken.messaging.hub.NO_PROCESSOR_CONTROL
 import io.damoreira.kraken.messaging.security.ForwardedIdentityResolver
@@ -46,7 +48,6 @@ import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.core.env.Environment
 import java.time.Duration
-import java.util.UUID
 import java.util.concurrent.Executors
 import java.net.URI
 import java.nio.file.Path
@@ -133,7 +134,7 @@ class HubAutoConfiguration {
             targets = HubTargets.parse(hub.address),
             channelFactory = channelFactory,
             serviceName = properties.serviceName,
-            instanceId = UUID.randomUUID().toString(),
+            instanceId = properties.instanceId,
             settings = settings,
             inbound = dispatcher::dispatch,
             scope = scope,
@@ -166,6 +167,7 @@ class HubAutoConfiguration {
         typeResolver: MessageTypeResolver,
         traceHeaders: TraceHeaders,
         properties: KrakenMessagingProperties,
+        metrics: ObjectProvider<MessagingMetrics>,
     ) = HubBus(
         connections, registry, invoker, codec, typeResolver,
         forwardJwt = properties.security.forwardJwt,
@@ -173,6 +175,7 @@ class HubAutoConfiguration {
         requestTimeout = properties.hub.requestTimeout,
         priorities = properties.hub.priorities,
         retry = properties.hub.retry.policy(),
+        metrics = metrics.getIfAvailable { NoopMessagingMetrics },
     )
 
     // Facades delegate instead of returning hubBus itself: an object implementing both interfaces would make each
@@ -185,13 +188,13 @@ class HubAutoConfiguration {
     @ConditionalOnMissingBean(QueryBus::class)
     fun queryBus(@Qualifier("hubBus") hubBus: HubBus): QueryBus = object : QueryBus by hubBus {}
 
-    /** Counters of the hub credential, when Micrometer's `MeterBinder` is on the classpath (Boot binds the bean to its registry). */
+    /** The hub connection meters, when Micrometer's `MeterBinder` is on the classpath (Boot binds the bean to its registry). */
     @Configuration(proxyBeanMethods = false)
     @ConditionalOnClass(name = ["io.micrometer.core.instrument.binder.MeterBinder"])
-    class HubAuthMetricsConfiguration {
+    class HubClientMetricsConfiguration {
         @Bean
         @ConditionalOnMissingBean
-        fun krakenHubAuthMetrics(connections: HubConnections): HubAuthMetrics = HubAuthMetrics(connections)
+        fun krakenHubClientMetrics(connections: HubConnections): HubClientMetrics = HubClientMetrics(connections)
     }
 
     private val log = LoggerFactory.getLogger(HubAutoConfiguration::class.java)

@@ -9,6 +9,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties
 import java.net.URI
 import java.nio.file.Path
 import java.time.Duration
+import java.util.UUID
 
 /**
  * `kraken.messaging.*` settings (see `02-messaging.md`, "Configuration keys"). Durations accept Boot's simple form
@@ -20,6 +21,11 @@ data class KrakenMessagingProperties(
     val serviceName: String,
     /** Prefix of the wire type name of message classes without `@MessageType`. Required. */
     val typePrefix: String,
+    /**
+     * This instance's id: its hub `Register.instance_id` and the `service.instance.id` of its metrics (ADR 0026). A fresh UUID
+     * per start unless set (a pod name, for example); unique among the instances of the service.
+     */
+    val instanceId: String = UUID.randomUUID().toString(),
     val hub: Hub = Hub(),
     val kafka: Kafka = Kafka(),
     val outbox: Outbox = Outbox(),

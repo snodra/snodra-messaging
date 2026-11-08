@@ -1174,7 +1174,7 @@ class HubConnection(
 
     private val refreshes = AtomicLong()
 
-    /** `ClientMessage.credentials` written to this hub over all of its streams (`kraken_messaging_hub_credentials_refreshes_sent_total`). */
+    /** `ClientMessage.credentials` written to this hub over all of its streams (`kraken_hub_client_credentials_refreshes_sent_total`). */
     val credentialsRefreshesSent: Long get() = refreshes.get()
 
     /**

@@ -45,6 +45,7 @@ Repo conventions: `../kraken/docs/04-repositories.md`.
 - [Dead letters](#dead-letters)
 - [Processor control](#processor-control)
 - [Sagas](#sagas)
+- [Metrics](#metrics)
 - [Test helpers (`kraken-messaging-test`)](#test-helpers-kraken-messaging-test)
 - [Examples](#examples)
 - [Known limitations](#known-limitations)
@@ -151,6 +152,7 @@ All keys (`kraken.messaging.*`; durations accept `200ms`, `5s`, `7d`; relaxed bi
 |---|---|---|
 | `service-name` | required | Kafka consumer group, event `source`, hub `Register.service_name`. |
 | `type-prefix` | required | Prefix of the wire type name for message classes without `@MessageType`. |
+| `instance-id` | a fresh UUID per start | This instance's id: its hub `Register.instance_id` and the `service.instance.id` of its metrics ([Metrics](#metrics)). Set it to something stable per instance (a pod name) if you like; unique among the service's instances. |
 | `hub.enabled` | `true` | Connect to the hub and expose the hub-backed `CommandBus`/`QueryBus` (addition beyond the spec table). |
 | `hub.address` | `static://kraken-hub:7000` | The hub or hubs: one gRPC target (`host:port`, optional `static://` prefix), a comma-separated list of them (`hub-1:7000,hub-2:7000`, one connection per hub), or one `dns:///name:port` whose addresses are re-resolved every 30 s. See [Multiple hubs](#multiple-hubs). A malformed value fails the startup. |
 | `hub.status-interval` | `5s` | Period of the `InstanceStatus` report (connected hub ids, handlers in flight) sent to every live hub; also sent whenever the set of live hubs changes. Must be positive. |
@@ -410,8 +412,8 @@ without a token URI: a stray client id or secret would otherwise leave the servi
 
 **What you can read.** `HubConnections.authStatus()` returns `kind` (`NONE`, `TOKEN`, `JWT`), the current token's `tokenExpiresAt`, the
 `lastTokenError` (null once a fetch worked), `tokenFetches` by result and `credentialsRefreshesSent` (one process-wide counter: it never drops when a hub connection goes away): wire it into your own
-health indicator. With Micrometer on the classpath the starter binds `kraken_messaging_hub_token_fetches_total{result}`
-(`ok`, `http_error`, `oauth_error`, `io_error`, `bad_response`) and `kraken_messaging_hub_credentials_refreshes_sent_total`.
+health indicator. With Micrometer on the classpath the starter binds `kraken_hub_client_token_fetches_total{result}`
+(`ok`, `http_error`, `oauth_error`, `io_error`, `bad_response`) and `kraken_hub_client_credentials_refreshes_sent_total` ([Metrics](#metrics)).
 
 **Divergences from the Rust library** (same design, ecosystem differences): the Kotlin starter reports through
 `HubConnections.authStatus()` and Micrometer counters where Rust has an accessor. A token URI host with an underscore in
@@ -501,7 +503,7 @@ at ...": one `ERROR`, then retried at the back-off cap), and a renewed file is p
 **What you can read.** `HubConnections.authStatus()` has `kind = CERTIFICATE`, `certificateService`, `certificateFingerprint` (the first 8 hex characters of
 the leaf's SHA-256, the only form of the certificate that is logged or shown; the hub's topology shows the same value), `certificateExpiresAt`
 (`notAfter`) and `certificateRotations` (pairs adopted since start). With Micrometer the starter binds
-`kraken_messaging_hub_certificate_rotations_total`. Logs name a certificate only by that fingerprint and the service; no key material
+`kraken_hub_client_certificate_rotations_total`. Logs name a certificate only by that fingerprint and the service; no key material
 is ever logged, and `toString()` of the certificate objects shows neither key nor certificate.
 
 **Divergences from the Rust library** (same design, ecosystem differences): the Kotlin starter reports through `authStatus()` and a
@@ -1325,7 +1327,7 @@ message)`, delivered locally (never published to `kraken.events`). `reason` is `
 saga instance that sent the command **by its id**: the saga needs no association, only a handler
 (`@SagaEventHandler(associationProperty = "sagaId")`, the name of the event's property; a saga that also associated itself with
 `sagaId` keeps working). When the saga type has no handler for it, or the saga has ended, and no ordinary `@EventHandler` took
-it either, it is logged at error and counted in `kraken.saga.command.failures`. A permanently failed step does not hold back
+it either, it is logged at error and counted in `kraken_saga_command_failures_total`. A permanently failed step does not hold back
 the saga's later steps.
 
 ### Hearing from the partner: a topic of its own
@@ -1461,13 +1463,11 @@ adapter against a fake of the partner, the controller with a mock request and a 
 ### Operating sagas
 
 - **A parked event.** An event whose saga handler failed all its attempts is written to `saga_failures` (with its marker, so the
-  consumer moves on), counted in `kraken.saga.events{outcome="parked"}` and logged at error. Inject `SagaFailures` and call
+  consumer moves on), counted in `kraken_saga_events_total{outcome="parked"}` and logged at error. Inject `SagaFailures` and call
   `list(type?)`, `retry(id)`, `retryAll(type)` or `discard(id)` once the cause is fixed. Nothing retries a parked event by itself.
-- **Metrics** (Micrometer, with a `MeterRegistry` bean in a service that uses sagas or idempotent handlers): `kraken.sagas.started`,
-  `kraken.sagas.ended`, `kraken.sagas.active`, `kraken.saga.events{type,outcome}` (`handled`, `no_match`, `conflict`, `parked`),
-  `kraken.saga.dispatch.pending`, `kraken.saga.command.failures`, `kraken.deadlines.fired`, `kraken.deadlines.due`,
-  `kraken.external.calls{handler,outcome}`. A `no_match` count that grows means an association that does not line up. Logs carry
-  `sagaType`, `sagaId` and `correlationId` in the MDC while a saga handles a message.
+- **Metrics** (with a `MeterRegistry` bean, in a service that uses sagas or idempotent handlers): the saga rows of
+  [Metrics](#metrics). A `kraken_saga_events_total{outcome="no_match"}` that grows means an association that does not line up.
+  Logs carry `sagaType`, `sagaId` and `correlationId` in the MDC while a saga handles a message.
 - **Deadlines** fire at least once, after their due time, from any instance of the service (a lease makes each fire on one), also
   after a restart, and never for a cancelled deadline or an ended saga.
 - Configuration: the `sagas.*`, `deadlines.*` and `external.*` rows of the [configuration table](#configuration).
@@ -1502,6 +1502,80 @@ adapter against a fake of the partner, the controller with a mock request and a 
 - **At most 999 messages** can be sent or published by one handling.
 - **A saga is for one service.** To talk to another service send it a command or publish an event; a saga never reads another
   service's database.
+
+## Metrics
+
+With Micrometer and a `MeterRegistry` bean (Boot's actuator brings both) the starter registers the meters below; without a
+registry nothing is recorded. The names are the series as Prometheus shows them (dots become `_`, a unit adds its suffix,
+counters end in `_total`), **identical to the Rust library's** (ADR 0026), so one dashboard serves both. Every label value
+comes from a bounded set: a processor, a registered type, a saga type, a deadline name, a kind, an outcome; never an id.
+Histograms are `_bucket{le}`, `_sum` and `_count`, with the hub's bucket boundaries (1 ms to 60 s).
+
+| Series | Type | Labels | Meaning |
+|---|---|---|---|
+| `kraken_outbox_pending` | gauge | | Outbox documents not sent and not given up on, counted by the relay thread every 5 s. Every instance reports the same database: aggregate with `max by (job)`. |
+| `kraken_outbox_oldest_age_seconds` | gauge | | Age of the oldest of them as the relay's latest poll saw it (it grows while the relay is stuck), 0 when none. |
+| `kraken_outbox_published_total` | counter | `outcome` (`ok`, `failed`) | Send attempts; a retried document counts each attempt. |
+| `kraken_events_consumed_total` | counter | `processor`, `type`, `outcome` | Each record's final outcome in each processor: `handled`, `duplicate` (its marker existed, or its own dead letter did), `skipped` (a type the processor does not handle), `parked` (handed to the dead letters, mode `collection` or `topic`), `failed` (given up without a letter: mode `log`, or only the saga stage failed). `type` is `other` for a type the processor does not handle or a record without one. |
+| `kraken_event_handler_duration_seconds` | histogram | `processor`, `type` | One stage-1 run (the marker transaction with the processor's handlers) of a consumed record, every attempt; not the saga stage. |
+| `kraken_processor_lag` | gauge | `processor`, `partition` | The lag the processor status reports, per partition assigned to this instance; a partition whose lag is not known yet has no series. A partition that leaves the assignment (or whose processor goes) reads 0 until an export read it, then has no series. Prometheus keeps a series that stops at its last value for 5 minutes, so aggregate with the max per partition first: `sum by (job, processor) (max by (job, processor, partition) (kraken_processor_lag))`. |
+| `kraken_processor_state` | gauge | `processor`, `state` | 1 for the current state (`starting`, `running`, `paused`, `failing`, `stopped`), 0 for the other four. |
+| `kraken_dead_letters` | gauge | `processor` | The processor's dead letters as the status last counted them (mode `collection`; 0 otherwise). |
+| `kraken_hub_client_request_duration_seconds` | histogram | `kind` (`command`, `query`), `type`, `outcome` | One unary command or query call through the hub, from the call to its result, retries included (saga commands too). `outcome`: `ok`, the hub's `no_handler`, `timeout`, `handler_disconnected`, `handler_error`, `invalid_request`, `resource_exhausted`, `cancelled`, `denied`, or `unavailable` (no live hub, or the stream broke), `error` (also a request that cannot be encoded). Local handlers, scatter-gather, streaming and subscription queries are not observed. |
+| `kraken_hub_client_handlers_in_flight` | gauge | | Incoming hub requests being handled or waiting for a handler permit, over all hubs. |
+| `kraken_hub_client_connected_hubs` | gauge | | Hubs with an acknowledged stream. |
+| `kraken_hub_client_token_fetches_total` | counter | `result` | Access token fetches (JWT only, [JWT](#authenticating-with-a-jwt-keycloak-client-credentials)). |
+| `kraken_hub_client_certificate_rotations_total` | counter | | Client certificate pairs adopted (mTLS only). |
+| `kraken_hub_client_credentials_refreshes_sent_total` | counter | | `ClientMessage.credentials` written to the hubs. |
+| `kraken_sagas_started_total`, `kraken_sagas_ended_total` | counter | `type` | Saga instances started and ended. |
+| `kraken_sagas_active` | gauge | `type` | Live saga instances, counted every 15 s. |
+| `kraken_saga_events_total` | counter | `type`, `outcome` (`handled`, `no_match`, `conflict`, `parked`) | One (event, saga type) handling. |
+| `kraken_saga_dispatch_pending` | gauge | | Commands and events saga handlers recorded that the relay has not dispatched yet, counted every 15 s. |
+| `kraken_saga_command_failures_total` | counter | `type`, `reason` | A `SagaCommandFailed` nobody handled (`reason` as the wire enum, e.g. `NO_HANDLER`). |
+| `kraken_deadlines_fired_total` | counter | `name` | Deadlines that ran their handler. |
+| `kraken_deadlines_due` | gauge | `name` | Scheduled deadlines past their due time. |
+| `kraken_external_calls_total` | counter | `handler`, `outcome` (`succeeded`, `replayed`, `failed`, `retryable`, `unknown`) | Calls of an `@IdempotentHandler`. |
+
+Nothing on the hot paths waits for a metric: the hooks count in memory, and the gauges read values a background thread
+already sampled (the outbox count on the relay's thread, the processor gauges every 5 s from the status the instance
+reports to the hub, which refreshes offsets and dead-letter counts on its own thread). An application's own
+`MessagingMetrics` bean replaces the Micrometer one.
+
+**Exporting.** Use Boot's OTLP metrics export: add `io.micrometer:micrometer-registry-otlp` and
+`org.springframework.boot:spring-boot-opentelemetry` (or `spring-boot-starter-opentelemetry`, which adds tracing) and
+point it at the collector:
+
+```yaml
+management:
+  otlp:
+    metrics:
+      export:
+        url: http://otel-lgtm:4318/v1/metrics   # OTLP/HTTP
+        step: 60s
+```
+
+The starter makes these defaults, below every setting of the application, and they apply to the whole application, its
+own meters and traces included: `management.otlp.metrics.export.base-time-unit` `seconds` (Boot's default, milliseconds,
+would turn the timers into `..._milliseconds` series; the application's own timers, `http.server.requests` for one, are
+exported in seconds too), `management.otlp.metrics.export.publish-max-gauge-for-histograms` `false` (no `..._max_seconds`
+series, which the Rust library does not have, for the application's timers either), and the resource identity, which
+Prometheus turns into the `job` and `instance` labels of every series (the dashboards select and aggregate on them) and
+which the application's traces carry too:
+
+- `service.instance.id` = `kraken.messaging.instance-id`, the instance id the hub shows, unless `OTEL_RESOURCE_ATTRIBUTES`
+  names one. The id is resolved once at startup and written as a value, so a `${random.uuid}` is the same in the hub
+  registration and the metrics; without `kraken.messaging.instance-id` it is the `service.instance.id` of
+  `OTEL_RESOURCE_ATTRIBUTES`, else a fresh UUID.
+- `service.name` = `kraken.messaging.service-name`, the service the hub shows, unless `OTEL_SERVICE_NAME` or
+  `OTEL_RESOURCE_ATTRIBUTES` names the service or `spring.application.name` is set: then Boot's own choice stands (the
+  variable, else the application name), so the application's traces keep their name. **Keep `spring.application.name`
+  equal to `kraken.messaging.service-name`, or unset**: otherwise the metrics' `job` is not the `service` of the hub's
+  series, and the dashboards cannot join them.
+
+These defaults are needed because Boot lets `management.opentelemetry.resource-attributes.*` win over the `OTEL_*`
+variables; the starter sets none where a variable or the application already names the attribute. Keep
+`spring.application.group` unset: Boot would add it as `service.namespace`, and `job` would become `<group>/<service>`.
+service-a and service-b of the [examples](#examples) export this way when switched on.
 
 ## Test helpers (`kraken-messaging-test`)
 

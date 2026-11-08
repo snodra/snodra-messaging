@@ -1,6 +1,10 @@
 package io.damoreira.kraken.messaging.e2e
 
+import io.damoreira.kraken.messaging.CommandBus
+import io.damoreira.kraken.messaging.EventBus
+import io.damoreira.kraken.messaging.NoHandlerException
 import io.damoreira.kraken.messaging.codec.JsonCodec
+import io.damoreira.kraken.messaging.fixtures.Ping
 import io.damoreira.kraken.messaging.deadletter.DeadLetters
 import io.damoreira.kraken.messaging.deadletter.RetryResult
 import io.damoreira.kraken.messaging.e2e.processors.Audit
@@ -9,6 +13,7 @@ import io.damoreira.kraken.messaging.e2e.processors.OrdersProjection
 import io.damoreira.kraken.messaging.e2e.processors.ProcessorsService
 import io.damoreira.kraken.messaging.hub.HubConnections
 import io.damoreira.kraken.messaging.test.KrakenContainers
+import io.micrometer.core.instrument.MeterRegistry
 import kotlinx.coroutines.runBlocking
 import org.apache.kafka.clients.admin.AdminClient
 import org.apache.kafka.clients.admin.NewTopic
@@ -38,6 +43,8 @@ import java.net.http.HttpResponse
 import java.time.Duration
 import java.util.UUID
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 /**
@@ -79,7 +86,7 @@ class ProcessorsEndToEndTest {
 
     private fun startHub(container: GenericContainer<*>) = container.withEnv("KRAKEN_HUB_OTLP_ENDPOINT", "").also { it.start(); hubs += it }
 
-    private fun service(hub: GenericContainer<*>, name: String): ConfigurableApplicationContext {
+    private fun service(hub: GenericContainer<*>, name: String, vararg extra: String): ConfigurableApplicationContext {
         newTopic()
         val mongoUri = "mongodb://${mongo.host}:${mongo.firstMappedPort}/$name?directConnection=true"
         return SpringApplicationBuilder(ProcessorsService::class.java)
@@ -95,6 +102,7 @@ class ProcessorsEndToEndTest {
                 "kraken.messaging.outbox.enabled=false",
                 "spring.mongodb.uri=$mongoUri",
                 "spring.main.banner-mode=off",
+                *extra,
             )
             .run().also { contexts += it }
             .also { ctx -> check(runBlocking { ctx.getBean(HubConnections::class.java).awaitRegistered(Duration.ofSeconds(20)) }) }
@@ -168,5 +176,42 @@ class ProcessorsEndToEndTest {
         assertTrue(deadLetters.discard(head.id))
         assertEquals(RetryResult.Retried, deadLetters.retry(follower.id))
         assertEquals(listOf("o-1", "o-2", "o-2", "o-2", "o-3"), ctx.getBean(OrdersProjection::class.java).seen.sorted())
+    }
+
+    @Test fun `a running service has every messaging meter of P9 in Boot's registry`() {
+        val hub = startHub(KrakenContainers.hub())
+        val ctx = service(hub, "svc-p9", "kraken.messaging.outbox.enabled=true")
+        val registry = ctx.getBean(MeterRegistry::class.java)
+        assertEquals("seconds", ctx.environment.getProperty("management.otlp.metrics.export.base-time-unit"))
+
+        publish(OrderPlaced("m-1"), "k1")
+        publish(OrderPlaced("m-2", poison = true), "k2")
+        ctx.getBean(EventBus::class.java).publishBlocking(OrderPlaced("m-3"), key = "k3") // through the outbox relay
+        await().atMost(Duration.ofSeconds(30)).until { ctx.getBean(Audit::class.java).seen.size == 3 }
+        assertFailsWith<NoHandlerException> { runBlocking { ctx.getBean(CommandBus::class.java).send(Ping("nobody")) } }
+
+        val type = "p6a.OrderPlaced"
+        await().atMost(Duration.ofSeconds(30)).untilAsserted {
+            fun consumed(processor: String, outcome: String) =
+                registry.find("kraken.events.consumed").tags("processor", processor, "type", type, "outcome", outcome).counter()?.count()
+            assertEquals(3.0, consumed("default", "handled"))
+            assertEquals(2.0, consumed("orders", "handled"))
+            assertEquals(1.0, consumed("orders", "parked"))
+            assertTrue(registry.get("kraken.event.handler.duration").tags("processor", "orders", "type", type).timer().count() >= 4) // m-2: max-attempts 2
+            assertTrue(registry.get("kraken.outbox.published").tag("outcome", "ok").counter().count() >= 1.0)
+            assertEquals(0.0, registry.get("kraken.outbox.published").tag("outcome", "failed").counter().count())
+            assertEquals(0.0, registry.get("kraken.outbox.pending").gauge().value())
+            assertEquals(0.0, registry.get("kraken.outbox.oldest.age").gauge().value())
+            assertEquals(1.0, registry.get("kraken.processor.state").tags("processor", "orders", "state", "failing").gauge().value())
+            assertEquals(1.0, registry.get("kraken.processor.state").tags("processor", "default", "state", "running").gauge().value())
+            assertEquals(1.0, registry.get("kraken.dead.letters").tag("processor", "orders").gauge().value())
+            // Partitions with a known lag (a partition that never had a record of this test has none yet).
+            val lags = registry.find("kraken.processor.lag").tag("processor", "default").gauges()
+            assertTrue(lags.isNotEmpty() && lags.all { it.id.getTag("partition") in setOf("0", "1") && it.value() == 0.0 }, lags.toString())
+            assertEquals(1.0, registry.get("kraken.hub.client.connected.hubs").gauge().value())
+            assertEquals(0.0, registry.get("kraken.hub.client.handlers.in.flight").gauge().value())
+            assertEquals(1, registry.get("kraken.hub.client.request.duration").tags("kind", "command", "type", "test.Ping", "outcome", "no_handler").timer().count())
+            assertNotNull(registry.find("kraken.hub.client.credentials.refreshes.sent").functionCounter())
+        }
     }
 }

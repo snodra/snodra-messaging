@@ -315,11 +315,13 @@ class HubOAuth2ConfigTest {
             await atMost Duration.ofSeconds(10) until { hub.acksSentTo(connections.instanceId) >= 1 }
             val registry = SimpleMeterRegistry()
             context.getBean(MeterBinder::class.java).bindTo(registry) // Boot's registry post-processor does this in an application
-            assertEquals(1.0, registry.get("kraken.messaging.hub.token.fetches").tag("result", "ok").functionCounter().count())
+            assertEquals(1.0, registry.get("kraken.hub.client.token.fetches").tag("result", "ok").functionCounter().count())
             for (result in listOf("http_error", "oauth_error", "io_error", "bad_response")) {
-                assertEquals(0.0, registry.get("kraken.messaging.hub.token.fetches").tag("result", result).functionCounter().count(), result)
+                assertEquals(0.0, registry.get("kraken.hub.client.token.fetches").tag("result", result).functionCounter().count(), result)
             }
-            assertEquals(0.0, registry.get("kraken.messaging.hub.credentials.refreshes.sent").functionCounter().count())
+            assertEquals(0.0, registry.get("kraken.hub.client.credentials.refreshes.sent").functionCounter().count())
+            assertEquals(1.0, registry.get("kraken.hub.client.connected.hubs").gauge().value())
+            assertEquals(0.0, registry.get("kraken.hub.client.handlers.in.flight").gauge().value())
         }
     }
 

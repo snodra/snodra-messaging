@@ -47,7 +47,7 @@ class HubTokenProvider(
 
     private val counts = AtomicLongArray(TokenFetchResult.entries.size)
 
-    /** Fetches so far with [result], for `kraken_messaging_hub_token_fetches_total{result}`. */
+    /** Fetches so far with [result], for `kraken_hub_client_token_fetches_total{result}`. */
     fun fetches(result: TokenFetchResult): Long = counts.get(result.ordinal)
 
     private val lock = Any()

@@ -19,6 +19,9 @@ dependencies {
     implementation(project(":examples:examples-api"))
     implementation(libs.spring.boot.starter.webmvc)
     implementation(libs.spring.boot.starter.actuator)
+    // Metrics over OTLP/HTTP when KRAKEN_OTLP_METRICS_ENABLED is set (application.yaml); OpenTelemetry's resource attributes.
+    implementation("io.micrometer:micrometer-registry-otlp")
+    implementation("org.springframework.boot:spring-boot-opentelemetry")
     implementation(libs.jackson.module.kotlin)
     implementation(libs.kotlin.reflect)
     // Spring MVC runs `suspend fun` controller methods through Reactor; the bridge brings reactor-core and reactive-streams.

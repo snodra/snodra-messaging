@@ -21,6 +21,10 @@
 #        SKIP_BROWSER=1 skips the event browser steps 28-28f (search, record, payload rules, tail and consumer groups of
 #        kraken.events through both hubs' HTTP API, and the broker's own group list with the Kafka CLI in KAFKA_CONTAINER,
 #        default kraken-kafka; needs the docker CLI), ONLY_BROWSER=1 runs only them;
+#        SKIP_OBS=1 skips the metric and dashboard steps 29-29e (otel-lgtm's Prometheus and Grafana: the hub and library
+#        series, labels, and every panel query of the three kraken dashboards; they run last), ONLY_OBS=1 runs only them
+#        (after a full run), GRAFANA=http://localhost:3000 (or KRAKEN_GRAFANA_PORT) is Grafana's address, PROM its proxy of
+#        Prometheus;
 #        SECURE=1 runs against the secure sandbox (kraken/infra/compose.secure.yaml, secrets from
 #        kraken/infra/scripts/dev-hub-pki.sh): the hub calls are https with the dev CA and carry the dashboard token, every
 #        other step runs unchanged, and the security steps 21 and 21b are added; SKIP_SECURE=1 skips those two, ONLY_SECURE=1
@@ -308,6 +312,27 @@ if command -v jq >/dev/null; then
   }
   # GET /api/v1/consumer-groups -> one line per group, in the order given: "<groupId> <state> <members> <lag>".
   group_rows() { jq -r '.groups[] | "\(.groupId) \(.state) \(.members) \(.lag)"' 2>/dev/null || true; }
+  # Prometheus /api/v1/query -> one line per result: the values of the labels <label ...>, space-separated ("-" for a label the
+  # result lacks; one "-" per result without labels).
+  prom_rows() {
+    jq -r --arg ls "$*" '.data.result[] | .metric as $m | [($ls | split(" ") | .[]) as $l | ($m[$l] // "-")] | join(" ")' \
+      2>/dev/null || true
+  }
+  # Prometheus /api/v1/series -> one line per series: its name.
+  series_names() { jq -r '.data[].__name__' 2>/dev/null || true; }
+  # Prometheus /api/v1/series -> the label names of the series apart from the name and the identity (job, instance and the
+  # promoted service_name / service_instance_id), sorted, comma-separated.
+  series_labels() {
+    jq -r '[.data[] | keys[]] | unique | map(select(test("^(__name__|job|instance|service_name|service_instance_id)$") | not))
+      | join(",")' 2>/dev/null || true
+  }
+  # Grafana /api/search -> one line per dashboard: "<uid> <folder title>".
+  dashboard_list() { jq -r '.[] | "\(.uid) \(.folderTitle // "-")"' 2>/dev/null || true; }
+  # Grafana /api/dashboards/uid/<uid> -> one line per panel query: "<panel title><TAB><expr>".
+  panel_queries() {
+    jq -r '.dashboard.panels[] | ., (.panels // [])[] | select(.targets) | .title as $t | .targets[] | "\($t)\t\(.expr)"' \
+      2>/dev/null || true
+  }
 elif command -v python3 >/dev/null; then
   hub_id_of() { python3 -I -c 'import json,sys
 try: print(json.load(sys.stdin).get("hubId") or "")
@@ -413,6 +438,30 @@ try:
     for g in json.load(sys.stdin).get("groups", []):
         print(g["groupId"], g["state"], g["members"], g["lag"])
 except Exception: pass' || true; }
+  prom_rows() { python3 -I -c 'import json,sys
+try:
+    for r in json.load(sys.stdin)["data"]["result"]:
+        print(" ".join(r["metric"].get(l, "-") for l in (sys.argv[1:] or [""])))
+except Exception: pass' "$@" || true; }
+  series_names() { python3 -I -c 'import json,sys
+try:
+    for s in json.load(sys.stdin)["data"]: print(s["__name__"])
+except Exception: pass' || true; }
+  series_labels() { python3 -I -c 'import json,sys
+try:
+    ids = {"__name__", "job", "instance", "service_name", "service_instance_id"}
+    print(",".join(sorted({k for s in json.load(sys.stdin)["data"] for k in s} - ids)))
+except Exception: pass' || true; }
+  dashboard_list() { python3 -I -c 'import json,sys
+try:
+    for d in json.load(sys.stdin): print(d["uid"], d.get("folderTitle") or "-")
+except Exception: pass' || true; }
+  panel_queries() { python3 -I -c 'import json,sys
+try:
+    for p in json.load(sys.stdin)["dashboard"]["panels"]:
+        for q in [p] + p.get("panels", []):
+            for t in q.get("targets") or []: print(q["title"] + "\t" + t["expr"])
+except Exception: pass' || true; }
 else
   hub_id_of() { fail "jq or python3 needed for the two-hub steps (or set SKIP_HA=1)"; }
   example_instances() { hub_id_of; }
@@ -432,6 +481,11 @@ else
   event_rows() { fail "jq or python3 needed for the event browser steps (or set SKIP_BROWSER=1)"; }
   event_detail() { event_rows; }
   group_rows() { event_rows; }
+  prom_rows() { fail "jq or python3 needed for the metric steps (or set SKIP_OBS=1)"; }
+  series_names() { prom_rows; }
+  series_labels() { prom_rows; }
+  dashboard_list() { prom_rows; }
+  panel_queries() { prom_rows; }
 fi
 
 # Succeeds (prints nothing) when both hubs list the same instances of service-a, service-b and service-c, each of
@@ -1533,6 +1587,206 @@ browser_steps() {
   echo "   $kafka (kafka-consumer-groups.sh --list): $(printf '%s\n' "$listed" | grep -c .) groups, none kraken-hub*"
 }
 
+# P9 (ADR 0026): metrics and dashboards. Both hubs and the examples export their metrics over OTLP to the sandbox's
+# otel-lgtm every 5 s (kraken/infra/compose.local.yaml); its Grafana (GRAFANA, default http://localhost:3000, or the port in
+# KRAKEN_GRAFANA_PORT) provisions the kraken dashboards from kraken/infra/grafana/, and Prometheus is read through Grafana's
+# proxy of the bundled data source (PROM; otel-lgtm does not publish Prometheus' port). These steps run last, once the
+# others made traffic. 29: Grafana lists the three dashboards, Overview, Hub and Messaging, in the folder Kraken. 29b: the
+# hub series of P9 come from both hubs (job kraken-hub, instance = the hub id each hub's topology gives). 29c: service-b
+# (Kotlin) and service-c (Rust) export the library series under the same names with the same label names (the
+# hub-client histogram from the sandbox's senders, service-a and service-c, whose GET /greetings/{name}/count sends
+# examples.CountGreetings through the hub for it), and their instance label is the instance id the hubs list. 29d: no series has a label hub_id, and only the hub's streams and
+# subscriptions open have instance_id (the handler instance, ADR 0026 hub ruling 3). 29e: every panel query of the three
+# dashboards, as Grafana serves them, returns data with the template variables at All (.*), $__rate_interval at 5m and
+# $hub_seen (Hubs seen within) at its default 3m,
+# except the panels in OBS_MAY_BE_EMPTY, which the sandbox may not drive in this mode (each with its reason), and those
+# whose series only steps skipped by a SKIP_* flag create (obs_skipped). Needs jq or python3; SKIP_OBS=1 skips these steps, ONLY_OBS=1 runs only them (on a sandbox that already carried traffic: a full run).
+GRAFANA=${GRAFANA:-http://localhost:${KRAKEN_GRAFANA_PORT:-3000}}
+PROM=${PROM:-$GRAFANA/api/datasources/proxy/uid/prometheus}
+OBS_SINCE=$(( $(date +%s) - 120 ))
+
+# Panels whose series only exist after an event this sandbox does not cause in every mode: "<dashboard uid>|<panel title>|<why>".
+OBS_MAY_BE_EMPTY=(
+  "kraken-hub|Rejected for capacity|no queue or session buffer overflows in the sandbox (the flow steps queue, within the bounds)"
+  "kraken-hub|Session buffer full|as above"
+  "kraken-hub|Auth violations|only the secure modes refuse anyone (steps 21, 22, 23)"
+  "kraken-hub|JWT validations|JWT=1 only"
+  "kraken-hub|JWKS fetches|JWT=1 only"
+  "kraken-hub|JWKS keys|JWT=1 only"
+  "kraken-hub|Credential refreshes|JWT=1 only (a token refresh; the certificate sessions of MTLS=1 send none)"
+  "kraken-hub|Client certificates|MTLS=1 only"
+  "kraken-hub|TLS handshake failures|only the secure modes speak TLS, and only a bad client fails a handshake"
+  "kraken-hub|TLS handshakes shed|no handshake flood in the sandbox"
+  "kraken-hub|ACL and client CA reload errors|no broken ACL or CA file in the sandbox"
+  "kraken-hub|Control replies nobody waited for|every control reply in the sandbox arrives in time"
+  "kraken-hub|Payloads viewed|payloads are hidden in the plain sandbox (compose.secure.yaml shows them)"
+  "kraken-messaging|Token fetches|JWT=1 only (service-b and service-c)"
+  "kraken-messaging|Certificate rotations|MTLS=1 only, after step 23b rotated the certificates"
+  "kraken-messaging|Saga command failures|no saga command fails unhandled in the sandbox"
+  "kraken-messaging|Deadlines due|no deadline is overdue (the schedulers fire them on time; the gauge has only names with overdue ones)"
+  "kraken-hub|Streams open|the gauge holds only handler instances with a stream open: the steps' streams closed, and 5 minutes after its last 0 the series is gone"
+  "kraken-hub|Subscriptions open|as Streams open, for the subscription steps' targets"
+)
+
+# Adds "<dashboard uid>|<panel title>" lines to OBS_MAY_BE_EMPTY when <flag> (SKIP_*) is 1: the steps it skips are what
+# creates the panels' series.
+obs_skipped() { # <flag> <dashboard uid>|<panel title> ...
+  local flag=$1 panel
+  shift
+  [ "${!flag:-0}" = "1" ] || return 0
+  for panel in "$@"; do OBS_MAY_BE_EMPTY+=("$panel|$flag=1 skipped the steps that create its series"); done
+}
+obs_skipped SKIP_FLOW "kraken-hub|Queue depth" "kraken-hub|Queue wait p95"
+obs_skipped SKIP_SCATTER "kraken-hub|Scatter-gather targets"
+obs_skipped SKIP_STREAM "kraken-hub|Stream parts relayed"
+obs_skipped SKIP_SUBSCRIBE "kraken-hub|Subscription updates relayed"
+obs_skipped SKIP_CONTROL "kraken-hub|Processor control calls"
+obs_skipped SKIP_BROWSER "kraken-hub|Event browser requests" "kraken-hub|Records scanned per search" "kraken-hub|Event tails"
+# Each of these pairs drives the series on its own (the pause a handler_disconnected, step 19c a handler_error; either
+# saga's steps polls, timeouts and printer calls): only both skipped leave them empty.
+if [ "${SKIP_PAUSE:-0}" = "1" ] && [ "${SKIP_STREAM:-0}" = "1" ]; then
+  OBS_MAY_BE_EMPTY+=("kraken-overview|Errors by outcome|SKIP_PAUSE=1 and SKIP_STREAM=1 skipped the steps whose requests fail")
+fi
+if [ "${SKIP_POSTCARD:-0}" = "1" ] && [ "${SKIP_BANNER:-0}" = "1" ]; then
+  for title in "Sagas started and ended" "Saga events by outcome" "External calls" "Deadlines fired"; do
+    OBS_MAY_BE_EMPTY+=("kraken-messaging|$title|SKIP_POSTCARD=1 and SKIP_BANNER=1 skipped both sagas' steps")
+  done
+fi
+
+prom_query() { curl -fsS -G "$PROM/api/v1/query" --data-urlencode "query=$1" 2>/dev/null || true; }
+prom_series() { curl -fsS -G "$PROM/api/v1/series" --data-urlencode "match[]=$1" --data-urlencode "start=$OBS_SINCE" 2>/dev/null || true; }
+
+# Waits until <query> returns at least one result for every word of <want> in its label <label>; prints the values found.
+await_label_values() { # <query> <label> <want, space-separated> <seconds>
+  local i got w missing
+  for i in $(seq 1 "$4"); do
+    got=" $(prom_query "$1" | prom_rows "$2" | sort -u | tr '\n' ' ')"
+    missing=""
+    for w in $3; do case "$got" in *" $w "*) ;; *) missing="$missing $w" ;; esac; done
+    [ -z "$missing" ] && { echo "${got# }"; return 0; }
+    sleep 1
+  done
+  fail "$1: no result for$missing in $4 s (got:${got:- none}; is otel-lgtm up and the export on? kraken/infra/compose.local.yaml)"
+}
+
+obs_steps() {
+  local hubs h ids list uid m svc sb sc lb lc kt line want n bad total dash queries title expr q reason found i reply
+  local empty_ok empty_seen pending round left
+  hubs=("$HUB")
+  [ "${SKIP_HA:-0}" = "1" ] || hubs+=("$HUB2")
+
+  echo "29. Grafana ($GRAFANA) lists the dashboards kraken-overview, kraken-hub and kraken-messaging in the folder Kraken ..."
+  for i in $(seq 1 60); do
+    list=$(curl -fsS "$GRAFANA/api/search?tag=kraken&type=dash-db" 2>/dev/null | dashboard_list || true)
+    bad=""
+    for uid in kraken-overview kraken-hub kraken-messaging; do
+      printf '%s\n' "$list" | grep -qx "$uid Kraken" || bad="$bad $uid"
+    done
+    [ -z "$bad" ] && break
+    [ "$i" -eq 60 ] && fail "$GRAFANA/api/search: not in the folder Kraken after 60 s:$bad (kraken/infra/grafana, mounted by compose.yaml's otel-lgtm); got: $list"
+    sleep 1
+  done
+  echo "   $(printf '%s\n' "$list" | awk '$2 == "Kraken" { print $1 }' | sort | tr '\n' ' ')in the folder Kraken"
+
+  echo "29b. the hub series come from both hubs (job kraken-hub, instance = hub id) ..."
+  ids=""
+  for h in "${hubs[@]}"; do ids="$ids $(curl -fsS "$h/api/v1/topology" | hub_id_of)"; done
+  for m in kraken_hub_requests_total kraken_hub_request_duration_seconds_bucket kraken_hub_connected_instances \
+           kraken_hub_processor_lag kraken_hub_processor_state kraken_hub_processor_dead_letters \
+           kraken_hub_processor_processed kraken_hub_consumer_group_lag; do
+    await_label_values "count by (instance) ($m{job=\"kraken-hub\"})" instance "$ids" 60 >/dev/null
+  done
+  line=$(prom_query 'max by (service) (kraken_hub_connected_instances{service=~"service-[abc]"})' | prom_rows service)
+  for svc in service-a service-b service-c; do
+    printf '%s\n' "$line" | grep -qx "$svc" || fail "kraken_hub_connected_instances has no series for $svc"
+  done
+  echo "   requests, duration buckets, connected_instances, processor lag/state/dead letters/processed, consumer_group_lag:" \
+       "each from$ids"
+
+  echo "29c. service-b (Kotlin) and service-c (Rust) export the library series under the same names and label names ..."
+  # Only service-a (Kotlin) and service-c (Rust) send through the hub: service-c's GET /greetings/{name}/count sends
+  # examples.CountGreetings to service-b, so the hub-client histogram is compared between service-a and service-c.
+  for i in 1 2 3; do
+    reply=$(curl -fsS "$C/greetings/Ada/count") || fail "GET $C/greetings/Ada/count (CountGreetings from service-c through the hub) failed"
+    printf '%s' "$reply" | grep -q '"count":[0-9]' || fail "GET $C/greetings/Ada/count: expected a count, got: $reply"
+  done
+  for svc in service-b service-c; do
+    want=$(curl -fsS "$HUB/api/v1/topology" | example_instances | awk -v s="$svc" '$1 == s { print $2 }' | tr '\n' ' ')
+    [ -n "$want" ] || fail "$HUB/api/v1/topology lists no instance of $svc"
+    await_label_values "kraken_hub_client_connected_hubs{job=\"$svc\"}" instance "$want" 60 >/dev/null
+    printf '   %s: instance %s(as the hub lists it)\n' "$svc" "$want"
+  done
+  line=""
+  for m in kraken_events_consumed_total kraken_event_handler_duration_seconds_bucket kraken_outbox_pending \
+           kraken_outbox_oldest_age_seconds kraken_outbox_published_total kraken_processor_lag kraken_processor_state \
+           kraken_dead_letters kraken_hub_client_request_duration_seconds_bucket kraken_hub_client_handlers_in_flight \
+           kraken_hub_client_connected_hubs; do
+    kt=service-b
+    [ "$m" = kraken_hub_client_request_duration_seconds_bucket ] && kt=service-a
+    for i in $(seq 1 60); do
+      sb=$(prom_series "$m{job=\"$kt\"}"); sc=$(prom_series "$m{job=\"service-c\"}")
+      bad=""
+      [ -n "$(printf '%s' "$sb" | series_names)" ] || bad="$bad $kt"
+      [ -n "$(printf '%s' "$sc" | series_names)" ] || bad="$bad service-c"
+      [ -z "$bad" ] && break
+      [ "$i" -eq 60 ] && fail "$m: no series from$bad in 60 s"
+      sleep 1
+    done
+    lb=$(printf '%s' "$sb" | series_labels); lc=$(printf '%s' "$sc" | series_labels)
+    [ "$lb" = "$lc" ] || fail "$m: $kt has the labels {$lb}, service-c {$lc}"
+    line="$line ${m#kraken_}{$lb}"
+  done
+  echo "   the same names and labels:$line"
+
+  echo "29d. no series has a label hub_id; instance_id only on kraken_hub_streams_open and kraken_hub_subscriptions_open ..."
+  total=$(prom_series '{__name__=~"kraken_.+"}' | series_names | grep -c . || true)
+  [ "$total" -gt 0 ] || fail "no kraken_* series in Prometheus since $(date -r "$OBS_SINCE" +%T 2>/dev/null || echo "$OBS_SINCE")"
+  bad=$(prom_series '{hub_id!=""}' | series_names | sort -u | tr '\n' ' ')
+  [ -z "$bad" ] || fail "series with a hub_id label: $bad"
+  bad=$(prom_series '{instance_id!="", __name__!~"kraken_hub_(streams|subscriptions)_open"}' | series_names | sort -u | tr '\n' ' ')
+  [ -z "$bad" ] || fail "series with an instance_id label besides the hub's streams/subscriptions open: $bad"
+  n=$(prom_series '{instance_id!=""}' | series_names | grep -c . || true)
+  echo "   $total kraken series since the run started: none with hub_id, instance_id on $n (streams/subscriptions open)"
+
+  echo "29e. every panel query of the three dashboards returns data (variables at All, \$__rate_interval 5m) ..."
+  for uid in kraken-overview kraken-hub kraken-messaging; do
+    dash=$(curl -fsS "$GRAFANA/api/dashboards/uid/$uid") || fail "GET $GRAFANA/api/dashboards/uid/$uid failed"
+    queries=$(printf '%s' "$dash" | panel_queries)
+    [ -n "$queries" ] || fail "$uid: no panel queries in $GRAFANA/api/dashboards/uid/$uid"
+    empty_ok=""; empty_seen=""; pending=""
+    while IFS=$'\t' read -r title expr; do
+      reason=""
+      for line in "${OBS_MAY_BE_EMPTY[@]}"; do
+        [ "${line%%|*}" = "$uid" ] && [ "$(printf '%s' "$line" | cut -d'|' -f2)" = "$title" ] && reason=${line##*|}
+      done
+      # $hub_seen is a range, not a label match: its default, 3m (ADR 0026 Dashboards ruling 9).
+      q=$(printf '%s' "$expr" | sed -e 's/\$__rate_interval/5m/g' -e 's/\$hub_seen/3m/g' -e 's/\$[A-Za-z_][A-Za-z0-9_]*/.*/g')
+      found=$(prom_query "$q" | prom_rows __name__ | grep -c . || true)
+      if [ "$found" -gt 0 ]; then continue; fi
+      if [ -n "$reason" ]; then
+        case ", $empty_seen, " in *", $title, "*) ;; *) empty_seen="${empty_seen:+$empty_seen, }$title" ;; esac
+      else
+        pending="$pending$title"$'\t'"$q"$'\n'
+      fi
+    done <<< "$queries"
+    # A series exported a moment ago may still be on its way: the empty ones get 30 s more.
+    for round in $(seq 1 30); do
+      [ -z "$pending" ] && break
+      left=""
+      while IFS=$'\t' read -r title q; do
+        [ -n "$title" ] || continue
+        found=$(prom_query "$q" | prom_rows __name__ | grep -c . || true)
+        [ "$found" -gt 0 ] || left="$left$title"$'\t'"$q"$'\n'
+      done <<< "$pending"
+      pending=$left
+      [ -z "$pending" ] || sleep 1
+    done
+    [ -z "$pending" ] || fail "$uid: panel queries without data: $(printf '%s' "$pending" | tr '\t\n' ' |')"
+    echo "   $uid: $(printf '%s\n' "$queries" | cut -f1 | sort -u | grep -c .) panels, $(printf '%s\n' "$queries" | grep -c .) queries:" \
+         "all with data${empty_seen:+ except, as allowed in this mode, $empty_seen}"
+  done
+}
+
 # P5a (ADR 0018), only with SECURE=1 against the secure sandbox (kraken/infra/compose.secure.yaml). Step 21: a service
 # with a token the ACL does not know, and one with a valid token that grants only another service name, are refused by
 # both hubs and logged by the client as a registration rejection (ERROR once per hub), and never listed on /api/v1/topology; a
@@ -1938,6 +2192,12 @@ if [ "${ONLY_BROWSER:-0}" = "1" ]; then
   exit 0
 fi
 
+if [ "${ONLY_OBS:-0}" = "1" ]; then
+  obs_steps
+  echo "SMOKE OK (metric and dashboard steps only)"
+  exit 0
+fi
+
 if [ "${ONLY_SECURE:-0}" = "1" ]; then
   [ "$SECURE" = "1" ] || fail "ONLY_SECURE=1 needs SECURE=1"
   secure_steps
@@ -2051,5 +2311,6 @@ echo "   delivered: $TEXTS"
 if [ "$SECURE" = "1" ] && [ "${SKIP_SECURE:-0}" != "1" ]; then secure_steps; fi
 if [ "$JWT" = "1" ] && [ "${SKIP_JWT:-0}" != "1" ]; then jwt_steps; fi
 if [ "$MTLS" = "1" ] && [ "${SKIP_MTLS:-0}" != "1" ]; then mtls_steps; fi
+[ "${SKIP_OBS:-0}" = "1" ] || obs_steps
 
 echo "SMOKE OK"
