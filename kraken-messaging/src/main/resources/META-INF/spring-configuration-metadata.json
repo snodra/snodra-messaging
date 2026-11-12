@@ -490,6 +490,13 @@
       "defaultValue": "5m"
     },
     {
+      "name": "kraken.messaging.sagas.relay.send-timeout",
+      "type": "java.time.Duration",
+      "description": "How long a command send may take. One with no answer by then (a local adapter that hangs) is abandoned, its thread interrupted, and retried later with the same idempotency key as a transient failure. Must be positive.",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$SagaRelay",
+      "defaultValue": "1m"
+    },
+    {
       "name": "kraken.messaging.deadlines.poll-interval",
       "type": "java.time.Duration",
       "description": "How often the deadline scheduler looks for due deadlines. Must be positive.",

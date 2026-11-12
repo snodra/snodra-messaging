@@ -205,6 +205,7 @@ All keys (`kraken.messaging.*`; durations accept `200ms`, `5s`, `7d`; relaxed bi
 | `sagas.relay.max-attempts` | `10` | Attempts per command for transient failures (first try included, at least 1) before it becomes `SagaCommandFailed(EXHAUSTED)`. |
 | `sagas.relay.initial-backoff` | `1s` | Wait before the second attempt of a command; doubles per attempt up to `max-backoff`. |
 | `sagas.relay.max-backoff` | `5m` | Upper bound of one wait between attempts of a command. |
+| `sagas.relay.send-timeout` | `1m` | How long a command send may take. One with no answer by then (a local adapter that hangs: a local call has no timeout of its own) is abandoned, its thread interrupted, and retried later with the same idempotency key as a transient failure. Adapters should still set their own I/O timeouts well below it. Must be positive. |
 | `deadlines.poll-interval` | `1s` | How often the deadline scheduler looks for due deadlines. Must be positive. |
 | `deadlines.lease` | `30s` | How long a claimed deadline stays reserved for the instance that claimed it; an expired claim lets it fire again (at least once). Must be positive. |
 | `deadlines.retention` | `7d` | Fired and cancelled deadlines are deleted this long after (TTL index on `deadlines.finishedAt`). Must be positive. |

@@ -214,6 +214,7 @@ class SagaAutoConfigurationTest {
             "kraken.messaging.sagas.relay.poll-interval=0s" to "sagas.relay",
             "kraken.messaging.sagas.relay.lease=-5s" to "sagas.relay",
             "kraken.messaging.sagas.relay.max-attempts=0" to "sagas.relay",
+            "kraken.messaging.sagas.relay.send-timeout=0s" to "sagas.relay",
             "kraken.messaging.sagas.max-attempts=0" to "sagas.max-attempts",
             "kraken.messaging.sagas.ended-retention=0s" to "sagas.ended-retention",
             "kraken.messaging.sagas.dispatch-retention=-1d" to "sagas.dispatch-retention",
@@ -247,6 +248,7 @@ class SagaAutoConfigurationTest {
         assertEquals(10, p.sagas.relay.maxAttempts)
         assertEquals(Duration.ofSeconds(1), p.sagas.relay.initialBackoff)
         assertEquals(Duration.ofMinutes(5), p.sagas.relay.maxBackoff)
+        assertEquals(Duration.ofMinutes(1), p.sagas.relay.sendTimeout)
         assertEquals(Duration.ofSeconds(1), p.deadlines.pollInterval)
         assertEquals(Duration.ofSeconds(30), p.deadlines.lease)
         assertEquals(Duration.ofDays(7), p.deadlines.retention)
@@ -304,7 +306,7 @@ class SagaAutoConfigurationTest {
         val described = json["properties"].associate { it["name"].asString() to it["description"]?.asString() }
         val keys = listOf(
             "sagas.enabled", "sagas.max-attempts", "sagas.ended-retention", "sagas.dispatch-retention", "sagas.failed-retention",
-            "sagas.relay.poll-interval", "sagas.relay.lease", "sagas.relay.max-attempts", "sagas.relay.initial-backoff", "sagas.relay.max-backoff",
+            "sagas.relay.poll-interval", "sagas.relay.lease", "sagas.relay.max-attempts", "sagas.relay.initial-backoff", "sagas.relay.max-backoff", "sagas.relay.send-timeout",
             "deadlines.poll-interval", "deadlines.lease", "deadlines.retention",
             "external.calls.enabled", "external.calls.lease", "external.calls.retention",
             "external.kafka.sources",

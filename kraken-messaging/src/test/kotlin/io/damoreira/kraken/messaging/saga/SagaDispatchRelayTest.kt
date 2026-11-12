@@ -400,6 +400,33 @@ class SagaDispatchRelayTest {
     }
 
     @Test
+    fun `a send that outlives the send timeout is abandoned, its thread interrupted, and the entry retried later with its key`() {
+        record("stuck", 1000)
+        val interrupted = CountDownLatch(1)
+        sender.script = {
+            try {
+                Thread.sleep(30_000) // a local adapter that never returns
+            } catch (e: InterruptedException) {
+                interrupted.countDown()
+                throw e
+            }
+            RawOutcome.Success
+        }
+        val started = System.nanoTime()
+
+        relay(settings = settings.copy(sendTimeout = Duration.ofMillis(300))).pollOnce()
+
+        assertTrue(Duration.ofNanos(System.nanoTime() - started) < Duration.ofSeconds(10), "the pass did not wait for the hung call")
+        val stuck = entry("stuck:1000")
+        assertNull(stuck.dispatchedAt)
+        assertNull(stuck.failedAt, "a timeout is transient: whether the adapter acted is unknown, its idempotency key decides on the retry")
+        assertEquals(1, stuck.attempts)
+        assertTrue(stuck.nextAttemptAt!! > clock.now)
+        assertTrue(interrupted.await(5, TimeUnit.SECONDS), "the abandoned call's thread was interrupted")
+        assertEquals(null, mongo.findById("stuck", SagaDispatchLeaseDocument::class.java), "the saga's lease was released")
+    }
+
+    @Test
     fun `the lease of a saga is renewed while its send is alive, so another relay does not take it over`() {
         record("slow", 1000)
         val short = settings.copy(lease = Duration.ofMillis(600))
