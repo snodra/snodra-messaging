@@ -435,8 +435,8 @@ outbox gauges and counter, `kraken_processor_lag{partition,processor}`, `kraken_
 `kraken_hub_client_handlers_in_flight`, `kraken_hub_client_connected_hubs`), with `instance` = the instance ids the hub lists for
 each; 29d expects no series with a `hub_id` label and `instance_id` only on `kraken_hub_streams_open` and
 `kraken_hub_subscriptions_open` (the handler instance); 29e reads the three dashboards from Grafana's API and runs every panel
-query against Prometheus, the variables at All (`.*`), `$__rate_interval` at `5m` and `$hub_seen` (Hubs seen within) at
-`3m`, and expects each to return data, except
+query against Prometheus, the variables at All (`.*`), `$__rate_interval` at `5m`, `$hub_seen` (Hubs seen within) and
+`$instance_seen` (Instances seen within) at `3m`, and expects each to return data, except
 the panels the smoke lists in `OBS_MAY_BE_EMPTY` with the reason this sandbox may not drive them (auth violations, JWT, JWKS,
 credential refreshes, client certificates and TLS failures outside their mode; capacity rejections, session buffers, TLS
 shedding, reload errors, unknown control replies, saga command failures and overdue deadlines, which the sandbox never causes;
