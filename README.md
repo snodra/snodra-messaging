@@ -1193,7 +1193,9 @@ The `processor_control` document (the same from the Rust library; every field is
 
 Every control request is logged at INFO with its control id, processor, action and result. Requests run off the hub stream, one
 at a time per processor (a renewal of the lease this instance holds is answered at once, and the instance executing a reset
-extends its own lease while it runs). Dead letters through the hub map to `DeadLetters` one to one (`list` without payloads or
+extends its own lease while it runs). Dead letters never wait behind a running reset execute of their processor: a list is read
+beside it, a retry, retry-all or discard is refused `LOCKED` "processor '<name>' is executing reset operation <id>; try again
+when it finished" (the hub gives a request 10 s). Dead letters through the hub map to `DeadLetters` one to one (`list` without payloads or
 headers, `retry`, `retryAll`, `discard`); an instance answers only for the processors it runs and only in mode `collection`.
 
 ## Sagas

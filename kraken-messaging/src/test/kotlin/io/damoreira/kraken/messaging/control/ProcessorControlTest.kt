@@ -515,6 +515,40 @@ class ProcessorControlTest {
         assertTrue(a.ask(finish("op-1")).hasOk())
     }
 
+    @Test fun `dead letters are listed beside a running execute and a change to them is refused LOCKED at once`() {
+        topic = support.newTopic("kraken.events.ctl", partitions = 1)
+        val a = instance(projection, resets)
+        support.send(topic, "w-1")
+        await().atMost(Duration.ofSeconds(30)).until { support.committed(defaultGroup)[0] == 1L }
+        assertTrue(a.ask(prepare("op-1")).hasOk())
+        resets.gate = CountDownLatch(1)
+        val executed = CompletableFuture<ControlReply>()
+        a.control!!.handle(execute("op-1", earliest)) { executed.complete(it) }
+        Thread.sleep(500)
+
+        val began = System.nanoTime()
+        val page = a.ask(request("default") { deadLetterList = DeadLetterList.newBuilder().setLimit(10).build() }, Duration.ofSeconds(2))
+        assertTrue(page.hasDeadLetters(), "the list is read beside the execute: $page")
+        assertEquals(0L, page.deadLetters.total)
+        val letter = "default:$topic:0:0"
+        for (change in listOf(
+            request("default") { deadLetterRetry = DeadLetterRetry.newBuilder().setLetterId(letter).build() },
+            request("default") { deadLetterRetryAll = DeadLetterRetryAll.getDefaultInstance() },
+            request("default") { deadLetterDiscard = DeadLetterDiscard.newBuilder().setLetterId(letter).build() },
+        )) {
+            val reply = a.ask(change, Duration.ofSeconds(2))
+            assertEquals(ControlRefusal.CONTROL_REFUSAL_LOCKED, reply.refusal(), "$reply")
+            assertEquals("processor 'default' is executing reset operation op-1; try again when it finished", reply.refused.message)
+        }
+        assertTrue(Duration.ofNanos(System.nanoTime() - began) < Duration.ofSeconds(2), "answered at once, not behind the execute")
+        assertFalse(executed.isDone, "the execute is still running")
+
+        resets.gate!!.countDown()
+        assertTrue(executed.get(30, TimeUnit.SECONDS).hasReset())
+        assertTrue(a.ask(finish("op-1")).hasOk())
+        assertTrue(a.ask(request("default") { deadLetterRetryAll = DeadLetterRetryAll.getDefaultInstance() }).hasRetryAll(), "after the execute as before")
+    }
+
     @Test fun `a prepare or renewal with a lease under a second is invalid`() {
         topic = support.newTopic("kraken.events.ctl", partitions = 1)
         val a = instance(projection)
