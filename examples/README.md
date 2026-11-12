@@ -583,8 +583,8 @@ curl -s -X POST localhost:8092/audit/dead-letters/retry-all                # {"r
 
 The dashboard's Processors page (`localhost:7001`, hub ADR 0022) shows both services' `audit` and `default` processors with their
 state, lag and dead letters. Smoke steps 26 to 26h drive all of it, for service-b and for service-c: 26 waits until both `audit`
-processors are RUNNING with partitions (group `<service>.audit`) next to `default` on the hub's `GET /api/v1/processors` and clears
-any letter left over; 26b and 26c turn the failure on and publish two poison notes under one key and a fine note under another
+processors are RUNNING with partitions (group `<service>.audit`) next to `default` on the hub's `GET /api/v1/processors`, clears
+any letter left over and expects the hub to list each one's `lag` as 0; 26b and 26c turn the failure on and publish two poison notes under one key and a fine note under another
 (the first is `HANDLER_FAILED`, the second `SEQUENCED` behind it, the other key is handled, the parked key is not); 26d reads
 both processors on the hub, FAILING with two dead letters each; 26e retries while the failure is on (the head answers `Failed`
 and its attempts grow, the sequenced letter `Blocked` behind the head); 26f turns it off and retries (service-b: the head, then
@@ -640,8 +640,8 @@ curl -s -X DELETE -H "$W" "$HUB/dead-letters/<id>"       # discard instead: {"di
 
 Smoke steps 27 to 27e drive this for service-b and for service-c, in every sandbox mode: 27 expects a write without a credential
 (or with a wrong one) to be 401 on both hubs and, with `SECURE=1`, the dashboard token's to be 403 read-only, clears leftover letters
-and resumes the processor; 27b pauses it (PAUSED on `GET /api/v1/processors`), publishes two notes that stay unhandled for 8 s and
-resumes it (they are handled); 27c publishes two notes under a key of the run (handled and notified once), pauses the processor and
+and resumes the processor; 27b pauses it (PAUSED on `GET /api/v1/processors`), publishes two notes that stay unhandled for 8 s (the processor's `lag`
+there is at least 2) and resumes it (they are handled, the lag back to 0); 27c publishes two notes under a key of the run (handled and notified once), pauses the processor and
 resets it to `earliest`: the reply is ok with a replay, one reset handler and markers deleted, `/audit/resets` gained that operation
 once, and the hub shows the processor PAUSED, replaying, with no operation left (the finish kept the pause); 27d resumes it and
 expects the run's notes handled again, the notifier not run again and the replay to end (RUNNING, not replaying); 27e parks a
