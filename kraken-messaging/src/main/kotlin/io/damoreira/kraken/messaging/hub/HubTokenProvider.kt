@@ -18,10 +18,13 @@ import kotlin.random.Random
 /**
  * The access token of this service (P5b, ADR 0019), one per process and shared by every hub connection: N hubs, one token.
  *
- * - [token] returns the cached token while it is [AccessToken.refreshAt] away or more, else fetches; callers that arrive while
- *   a fetch runs wait for that one (single flight, and its failure is theirs too).
- * - After the first fetch the provider renews the token **in the background** when it reaches [AccessToken.refreshAt] and
- *   publishes it in [current], which every live stream follows (see [HubConnection]). A renewal that fails keeps the current
+ * - [token] returns the cached token while it is fresh, else fetches; callers that arrive while a fetch runs wait for that one
+ *   (single flight, and its failure is theirs too). Fresh means before [AccessToken.refreshAt] by the wall clock **and** by the
+ *   monotonic clock ([nanoTime], counted from the fetch): a machine that slept stops the monotonic clock, a wall clock set back
+ *   stops the other, and either alone would keep a token past its refresh point (H1, as the Rust library).
+ * - After the first fetch the provider renews the token **in the background** when it stops being fresh and publishes it in
+ *   [current], which every live stream follows (see [HubConnection]). A token a hub refused ([invalidate]) is renewed at the
+ *   renewer's next look (within 5 s) and is not [usable] meanwhile. A renewal that fails keeps the current
  *   token and is retried with a back-off from [retryMin] to [retryMax] (1 s to 30 s) until it works: one WARN per distinct
  *   error, then DEBUG. The hub closes the session at `exp` plus its grace if it never does.
  * - [lastError] is the latest failure's message (null after a success), [fetches] counts the fetches by [TokenFetchResult].
@@ -34,6 +37,7 @@ class HubTokenProvider(
     private val clock: Clock = Clock.systemUTC(),
     private val retryMin: Duration = Duration.ofSeconds(1),
     private val retryMax: Duration = Duration.ofSeconds(30),
+    private val nanoTime: () -> Long = System::nanoTime,
 ) {
     private val log = LoggerFactory.getLogger(HubTokenProvider::class.java)
 
@@ -60,8 +64,23 @@ class HubTokenProvider(
      * @throws HubTokenException when the endpoint cannot give one
      */
     suspend fun token(): AccessToken {
-        currentState.value?.takeIf { it.value != refused && clock.instant() < it.refreshAt }?.let { return it }
+        currentState.value?.takeIf { untilRefresh(it).isPositive }?.let { return it }
         return fetchShared().await()
+    }
+
+    /** The current token unless a hub refused it (see [invalidate]): what `authStatus` reports. */
+    fun usable(): AccessToken? = currentState.value?.takeIf { it.value != refused }
+
+    /** [System.nanoTime] when the current token was stored: its age by the monotonic clock. */
+    @Volatile private var fetchedNanos = 0L
+
+    /** How long until [token] stops being fresh, the earlier of the wall clock's and the monotonic clock's view; zero once it is not. */
+    private fun untilRefresh(token: AccessToken): Duration {
+        if (token.value == refused) return Duration.ZERO
+        val wall = Duration.between(clock.instant(), token.refreshAt)
+        val monotonic = token.lifetime.minus(token.refreshMargin).minusNanos(nanoTime() - fetchedNanos)
+        val left = if (wall < monotonic) wall else monotonic
+        return if (left.isNegative) Duration.ZERO else left
     }
 
     /** The value of the latest token a hub refused with `UNAUTHENTICATED` (see [invalidate]); never handed out again. */
@@ -94,6 +113,7 @@ class HubTokenProvider(
         try {
             val token = endpoint.fetch()
             counts.incrementAndGet(TokenFetchResult.OK.ordinal)
+            fetchedNanos = nanoTime()
             currentState.value = token
             errorState.value = null
             log.debug("Hub access token fetched, valid until {}", token.expiresAt)
@@ -110,16 +130,17 @@ class HubTokenProvider(
         if (renewer == null) renewer = scope.launch { renew() }
     }
 
-    /** The background renewal: sleeps until the current token is due, then fetches; a failure waits and retries. */
+    /** The background renewal: sleeps until the current token is due (or set aside), then fetches; a failure waits and retries. */
     private suspend fun renew() {
         var backoff = retryMin
         var lastLogged: String? = null
         while (true) {
             val token = currentState.value ?: return
-            val wait = Duration.between(clock.instant(), token.refreshAt)
+            val wait = untilRefresh(token)
             if (wait.isPositive) {
                 // One slice at a time: `delay` counts monotonic time, which stops while the machine sleeps, so after a suspend the wall
-                // clock (which decides freshness) is ahead of it. Looking at the wall clock every slice bounds the overrun to one slice.
+                // clock (which also decides freshness) is ahead of it. Looking again every slice bounds the overrun to one slice, and
+                // a token set aside by [invalidate] meanwhile is renewed at the next look.
                 delay((if (wait > MAX_SLICE) MAX_SLICE else wait).toMillis().coerceAtLeast(1))
                 continue // somebody may have renewed meanwhile, or the clock jumped: look again
             }

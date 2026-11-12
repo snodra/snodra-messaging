@@ -184,7 +184,7 @@ class HubConnections(
         }
         return HubAuthStatus(
             kind = kind,
-            tokenExpiresAt = provider?.current?.value?.expiresAt,
+            tokenExpiresAt = provider?.usable()?.expiresAt,
             lastTokenError = provider?.lastError?.value,
             tokenFetches = provider?.let { p -> TokenFetchResult.entries.associate { it.label to p.fetches(it) } }.orEmpty(),
             credentialsRefreshesSent = refreshesSent.get(),
@@ -693,7 +693,8 @@ class HubConnections(
 enum class HubAuthKind { NONE, TOKEN, JWT, CERTIFICATE }
 
 /**
- * [HubConnections.authStatus]: [kind]; for a JWT the [tokenExpiresAt] of the current access token (null before the first fetch), the
+ * [HubConnections.authStatus]: [kind]; for a JWT the [tokenExpiresAt] of the current access token (null before the first fetch
+ * and while a hub refused it until it is renewed), the
  * [lastTokenError] (null when the last fetch worked), [tokenFetches] by result (`ok`, `http_error`, `oauth_error`, `io_error`,
  * `bad_response`: the `result` label of `kraken_hub_client_token_fetches_total`) and [credentialsRefreshesSent]
  * (`kraken_hub_client_credentials_refreshes_sent_total`). For a client certificate (P5c): the [certificateService] it names, the [certificateFingerprint] (first 8 hex characters of

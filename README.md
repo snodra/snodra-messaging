@@ -392,14 +392,17 @@ without a token URI: a stray client id or secret would otherwise leave the servi
   together wait for the same request. Each new stream (connect, reconnect) gets a token before it sends `Register`.
 - A cached token is used while more than its refresh margin is left; the provider **renews it in the background** at that
   point: margin = 20 % of the lifetime, at least 5 s, and at most half of it (a 6 s token is renewed after 3 s; the Rust library
-  uses the same rule). A lifetime over 10 years (a huge `expires_in`) is cut to 10 years. The renewer looks at the wall clock at
-  least every 5 s, so a clock that jumped ahead while the machine slept does not postpone the renewal. The renewal goes to every live
+  uses the same rule). A lifetime over 10 years (a huge `expires_in`) is cut to 10 years. A token is fresh while both the wall
+  clock and the monotonic clock (counted from its fetch) say more than its margin is left, as in the Rust library: a machine that
+  slept stops the monotonic clock, a wall clock set back stops the other. The renewer looks again at least every 5 s, so a clock
+  that jumped ahead while the machine slept does not postpone the renewal. The renewal goes to every live
   stream (one that has its ack) as `ClientMessage.credentials`. The hub closes a JWT session at `exp` plus
   `KRAKEN_HUB_JWT_EXPIRY_GRACE` (30 s) without one.
 - A renewal that fails keeps the current token and retries with a back-off from 1 s to 30 s (one `WARN` per distinct error).
 - A stream the hub closes (or a `Register` it refuses) with `UNAUTHENTICATED` ("token expired", "unknown signing key",
-  "credentials expired", a refused refresh) drops the cached token: the reconnect fetches a new one instead of presenting the
-  same one until its margin runs out. `PERMISSION_DENIED` (wrong `azp`, no `[[service]]` entry) keeps it: a new token would not help
+  "credentials expired", a refused refresh) sets the cached token aside: the reconnect fetches a new one instead of presenting
+  the same one until its margin runs out, the renewer fetches one at its next look (within 5 s) whoever asks first, and
+  `authStatus().tokenExpiresAt` is null meanwhile. `PERMISSION_DENIED` (wrong `azp`, no `[[service]]` entry) keeps it: a new token would not help
   and the identity provider is not asked again for every retry.
 - **No token, no stream.** When the endpoint cannot give a token (401 `invalid_client`, down, TLS, an unusable answer) the stream is
   not opened: the attempt fails locally, `HubConnection.lastRejection` holds `UNAUTHENTICATED` and `awaitRegistered` throws
