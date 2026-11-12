@@ -178,6 +178,20 @@ class HubTokenProviderTest {
         assertEquals(2, server.requests.size)
     }
 
+    @Test fun `an endpoint that answers the refused token again is not asked again at once`() {
+        server.expiresIn = 3600
+        val provider = provider()
+        val first = runBlocking { provider.token() }
+        server.responder = { TokenResponse(200, """{"access_token":"${first.value}","token_type":"Bearer","expires_in":3600}""") }
+
+        provider.invalidate(first.value)
+        await atMost Duration.ofSeconds(8) until { server.requests.size >= 2 }
+        Thread.sleep(1000)
+
+        assertEquals(2, server.requests.size, "the same token, fetched again, is the current one until a hub refuses it again")
+        assertEquals(first.value, provider.usable()?.value)
+    }
+
     @Test fun `a failing renewal keeps the current token, retries with a back-off and recovers`() {
         server.expiresIn = 2
         val provider = provider()

@@ -83,7 +83,7 @@ class HubTokenProvider(
         return if (left.isNegative) Duration.ZERO else left
     }
 
-    /** The value of the latest token a hub refused with `UNAUTHENTICATED` (see [invalidate]); never handed out again. */
+    /** The value of the current token once a hub refused it with `UNAUTHENTICATED` (see [invalidate]); cleared by the next fetch. */
     @Volatile private var refused: String? = null
 
     /**
@@ -114,6 +114,9 @@ class HubTokenProvider(
             val token = endpoint.fetch()
             counts.incrementAndGet(TokenFetchResult.OK.ordinal)
             fetchedNanos = nanoTime()
+            // A fetched token is usable until a hub refuses it, even when the endpoint answered the refused value again (as Rust,
+            // which drops a refused token and remembers no value): otherwise the renewer would fetch again without a pause.
+            refused = null
             currentState.value = token
             errorState.value = null
             log.debug("Hub access token fetched, valid until {}", token.expiresAt)
