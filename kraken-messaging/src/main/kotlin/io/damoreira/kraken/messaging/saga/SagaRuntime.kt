@@ -21,7 +21,7 @@ import kotlin.reflect.KClass
  * Per (event, saga type) (S1 plan R1) one transaction runs: the marker `processed_events` id `saga:<sagaType>:<eventId>`
  * is inserted first (an existing one skips the event); the live instances associated with the event are resolved per
  * handler (`keyName = value`); when none matches, a `@StartSaga` handler creates one with `startKey =
- * "<type>|<key>=<value>"` (a `forceNew` handler always creates one, without a start key; the key is kept only while the
+ * "<type>|<key>=<value>"` ([startKey]: the parts escaped) (a `forceNew` handler always creates one, without a start key; the key is kept only while the
  * instance keeps that association, from its start handler on); each instance's handlers run
  * in the scanner's order, a handler running only on instances associated with its own key and value. Handlers see
  * recording objects ([SagaLifecycle], [SagaCommands], [DeadlineManager]); once every handler returned, the state is
@@ -72,8 +72,9 @@ class SagaRuntime(
     override fun process(type: String, payload: ByteArray, ctx: MessageContext): Boolean {
         var applied = false
         for (sagaType in byEvent[type].orEmpty()) {
+            // Parked (null) counts too: the event reached a saga, whose park is logged and kept for a person.
             val kind = deliverKind(sagaType, type, payload, ctx, null)
-            if (kind == Kind.HANDLED || kind == Kind.DUPLICATE) applied = true
+            if (kind != Kind.NO_MATCH && kind != Kind.GONE) applied = true
         }
         return applied
     }
@@ -102,14 +103,18 @@ class SagaRuntime(
      * design): in one transaction the failure is deleted and the event applied, with the retries of R4. Returns true
      * when it was applied (or no longer matches anything), false when it failed again (the failure stays with `attempts`
      * increased and the new error) or was no longer parked (a concurrent retry or discard: it is then not brought back).
+     *
+     * @throws IllegalStateException when the failure's saga type does not run in this service; the parked event is left as
+     *   it was (its error, attempts and `lastFailedAt`), see [checkRuns]
      */
     fun reapply(failure: SagaFailureDocument): Boolean {
-        val sagaType = byName[failure.sagaType]
-        if (sagaType == null) {
-            parkAgain(failure, "Saga type '${failure.sagaType}' does not exist in this service", 0)
-            return false
-        }
-        return deliver(sagaType, failure.eventType, failure.payload.toByteArray(Charsets.UTF_8), contextOf(failure), failure)
+        checkRuns(failure.sagaType) { "parked event ${failure.id} is left as it was" }
+        return deliver(byName.getValue(failure.sagaType), failure.eventType, failure.payload.toByteArray(Charsets.UTF_8), contextOf(failure), failure)
+    }
+
+    /** Refuses, without writing anything, a retry of parked events whose saga type [sagaType] does not run in this service; [left] says which. */
+    fun checkRuns(sagaType: String, left: () -> String) {
+        check(sagaType in byName) { "Saga type '$sagaType' does not run in this service: ${left()}" }
     }
 
     // ---- events ------------------------------------------------------------------------------------------------
@@ -231,7 +236,7 @@ class SagaRuntime(
             val start = values.entries.firstOrNull { (h, v) -> h.start && !h.forceNew && v != null }
             if (start != null) {
                 val value = start.value!!
-                planned += startInstance(sagaType, start.key, value, handlers, event, values, ctx, now, startKey = "${sagaType.name}|${start.key.keyName}=$value")
+                planned += startInstance(sagaType, start.key, value, handlers, event, values, ctx, now, startKey = startKey(sagaType.name, start.key.keyName, value))
             }
         }
         if (planned.isEmpty()) {
@@ -330,7 +335,7 @@ class SagaRuntime(
             val state = String(codec.encode(saga), Charsets.UTF_8)
             // The start key lives and dies with its association: remove that one and the key is free for a new instance (as in Axon).
             // That holds from the first handler on: a start handler that removes its own start association reserves no key.
-            val keptStartKey = (if (doc == null) startKey else doc.startKey)?.takeIf { key -> lifecycle.associations.any { "${sagaType.name}|${it.k}=${it.v}" == key } }
+            val keptStartKey = (if (doc == null) startKey else doc.startKey)?.takeIf { key -> lifecycle.associations.any { startKey(sagaType.name, it.k, it.v) == key } }
             val next = doc?.copy(
                 state = state, associations = lifecycle.associations.toList(), startKey = keptStartKey, ended = ended,
                 endedAt = if (ended) now else null, version = version, updatedAt = now,
@@ -456,8 +461,16 @@ class SagaRuntime(
     /** The stored version of an instance (or the state of a deadline) is not the one this attempt read. */
     private class VersionConflict(message: String) : RuntimeException(message)
 
-    private companion object {
-        const val MAX_ERROR_LENGTH = 2000
-        const val WRITE_CONFLICT = 112
+    companion object {
+        private const val MAX_ERROR_LENGTH = 2000
+        private const val WRITE_CONFLICT = 112
+
+        /**
+         * The start key of the association [key] = [value] of saga type [type]: `<type>|<key>=<value>` with `%`, `|` and `=`
+         * percent-escaped in each part (`%25`, `%7C`, `%3D`), so two different pairs never build the same key.
+         */
+        fun startKey(type: String, key: String, value: String): String = "${escape(type)}|${escape(key)}=${escape(value)}"
+
+        private fun escape(part: String): String = part.replace("%", "%25").replace("|", "%7C").replace("=", "%3D")
     }
 }

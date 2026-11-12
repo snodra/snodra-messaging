@@ -171,7 +171,7 @@ class IdempotentHandlerTest {
         mongo = MarkFailingTemplate(factory)
         txManager = MongoTransactionManager(factory)
         tx = TransactionTemplate(txManager)
-        SagaIndexes(mongo, Duration.ofDays(30), Duration.ofDays(7), Duration.ofDays(7)).afterPropertiesSet()
+        SagaIndexes(mongo, Duration.ofDays(30), Duration.ofDays(7), Duration.ofDays(7), Duration.ofDays(30)).afterPropertiesSet()
         ExternalCallIndexes(mongo, Duration.ofDays(30)).afterPropertiesSet()
         listOf("processed_events", "saga_failures", "outbox", "external_calls").forEach { if (!mongo.collectionExists(it)) mongo.createCollection(it) }
     }
@@ -217,6 +217,7 @@ class IdempotentHandlerTest {
         assertEquals(ExternalCallStatus.SUCCEEDED, stored.status)
         assertEquals(1, stored.attempts)
         assertNull(stored.leaseUntil)
+        assertNull(stored.owner, "a settled record has no owner")
         assertEquals(listOf("ExPrinterAdapter.handle" to SagaMetrics.ExternalOutcome.SUCCEEDED, "ExPrinterAdapter.handle" to SagaMetrics.ExternalOutcome.REPLAYED), metrics.calls)
         print(key = "job-2")
         assertEquals(2, adapter.bodies.get(), "another key runs the body")
@@ -328,12 +329,12 @@ class IdempotentHandlerTest {
         assertEquals(listOf("ExPrinterAdapter.handle" to SagaMetrics.ExternalOutcome.REPLAYED), metrics.calls)
     }
 
-    /** Inside call A's body: A's lease runs out and call B takes the record over (attempt 2, a fresh lease), as begin does. */
+    /** Inside call A's body: A's lease runs out and call B takes the record over (attempt 2, its own owner token, a fresh lease), as begin does. */
     private fun takenOverMeanwhile() {
         clock.now = start.plus(lease).plusSeconds(1)
         mongo.updateFirst(
             Query(Criteria.where("_id").`is`("job-1")),
-            Update().inc("attempts", 1).set("leaseUntil", clock.now.plus(lease)).set("updatedAt", clock.now),
+            Update().inc("attempts", 1).set("owner", "call-B").set("leaseUntil", clock.now.plus(lease)).set("updatedAt", clock.now),
             ExternalCallDocument::class.java,
         )
     }
@@ -390,6 +391,26 @@ class IdempotentHandlerTest {
 
         assertTrue(ExternalFailureMarkers.isUnknownOutcome(a.details), a.message)
         assertStillB()
+    }
+
+    @Test
+    fun `a call whose record was reset and inserted afresh meanwhile does not settle the new call's record (ABA)`() {
+        adapter.behaviour = {
+            // Inside call A's body: A's lease runs out, B takes the record over and deletes it on a retryable failure, and C
+            // inserts it afresh: attempts is 1 again, as it was when A began.
+            clock.now = start.plus(lease).plusSeconds(1)
+            mongo.remove(Query(Criteria.where("_id").`is`("job-1")), ExternalCallDocument::class.java)
+            mongo.insert(ExternalCallDocument("job-1", ExternalCallStatus.IN_PROGRESS, attempts = 1, updatedAt = clock.now, leaseUntil = clock.now.plus(lease), owner = "call-C"))
+            ExReceipt(it.jobId, 1)
+        }
+
+        val a = failure(print())
+
+        assertTrue(ExternalFailureMarkers.isUnknownOutcome(a.details), "A no longer owns the record: ${a.message}")
+        val stored = assertNotNull(record("job-1"))
+        assertEquals(ExternalCallStatus.IN_PROGRESS, stored.status, "call C's record is left alone")
+        assertEquals("call-C", stored.owner)
+        assertTrue(metrics.calls.none { it.second == SagaMetrics.ExternalOutcome.SUCCEEDED }, metrics.calls.toString())
     }
 
     @Test

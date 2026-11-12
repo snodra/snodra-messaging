@@ -199,11 +199,13 @@ All keys (`kraken.messaging.*`; durations accept `200ms`, `5s`, `7d`; relaxed bi
 | `sagas.max-attempts` | `5` | Attempts per saga event (first try included) for **conflicts** (a version check, a start-key duplicate, a Mongo write conflict or transient transaction error) before the event is parked in `saga_failures`; also the bound for firing a deadline. Backoff 200 ms doubling to 5 s (not configurable). A **handler exception** is not cured by waiting: it gets two attempts in all, at most 50 ms apart, and the event is then parked. |
 | `sagas.ended-retention` | `30d` | Ended sagas are deleted this long after they ended (TTL index on `sagas.endedAt`). Must be positive. |
 | `sagas.dispatch-retention` | `7d` | Dispatched `saga_dispatch` entries are deleted this long after they were sent (TTL index on `dispatchedAt`). Must be positive. |
+| `sagas.failed-retention` | `30d` | What failed for good is deleted this long after it failed: `saga_dispatch` entries given up on (TTL index on `failedAt`) and parked events in `saga_failures` (TTL index on `lastFailedAt`, which a retry that fails again moves on). Must be positive. |
 | `sagas.relay.poll-interval` | `500ms` | How often the dispatch relay looks for entries that saga handlers recorded. Must be positive. |
 | `sagas.relay.lease` | `30s` | How long a relay instance holds one saga's dispatch order before another instance may take over (a crashed instance's lease expires); renewed before each entry and, every third of the lease, while a send runs. Needs synchronised clocks (NTP) across instances. Must be positive. |
 | `sagas.relay.max-attempts` | `10` | Attempts per command for transient failures (first try included, at least 1) before it becomes `SagaCommandFailed(EXHAUSTED)`. |
 | `sagas.relay.initial-backoff` | `1s` | Wait before the second attempt of a command; doubles per attempt up to `max-backoff`. |
 | `sagas.relay.max-backoff` | `5m` | Upper bound of one wait between attempts of a command. |
+| `sagas.relay.send-timeout` | `1m` | How long a command send may take. One with no answer by then (a local adapter that hangs: a local call has no timeout of its own) is abandoned, its thread interrupted, and retried later with the same idempotency key as a transient failure. A send through the hub waits at least the hub's deadline for the command (its per-type override, else `hub.request-timeout` or the hub's clamp, the longest over the live hubs) plus 10 s, so it is never sent again while the hub may still be running it. Adapters should still set their own I/O timeouts well below it. Must be positive. |
 | `deadlines.poll-interval` | `1s` | How often the deadline scheduler looks for due deadlines. Must be positive. |
 | `deadlines.lease` | `30s` | How long a claimed deadline stays reserved for the instance that claimed it; an expired claim lets it fire again (at least once). Must be positive. |
 | `deadlines.retention` | `7d` | Fired and cancelled deadlines are deleted this long after (TTL index on `deadlines.finishedAt`). Must be positive. |
@@ -390,14 +392,17 @@ without a token URI: a stray client id or secret would otherwise leave the servi
   together wait for the same request. Each new stream (connect, reconnect) gets a token before it sends `Register`.
 - A cached token is used while more than its refresh margin is left; the provider **renews it in the background** at that
   point: margin = 20 % of the lifetime, at least 5 s, and at most half of it (a 6 s token is renewed after 3 s; the Rust library
-  uses the same rule). A lifetime over 10 years (a huge `expires_in`) is cut to 10 years. The renewer looks at the wall clock at
-  least every 5 s, so a clock that jumped ahead while the machine slept does not postpone the renewal. The renewal goes to every live
+  uses the same rule). A lifetime over 10 years (a huge `expires_in`) is cut to 10 years. A token is fresh while both the wall
+  clock and the monotonic clock (counted from its fetch) say more than its margin is left, as in the Rust library: a machine that
+  slept stops the monotonic clock, a wall clock set back stops the other. The renewer looks again at least every 5 s, so a clock
+  that jumped ahead while the machine slept does not postpone the renewal. The renewal goes to every live
   stream (one that has its ack) as `ClientMessage.credentials`. The hub closes a JWT session at `exp` plus
   `KRAKEN_HUB_JWT_EXPIRY_GRACE` (30 s) without one.
 - A renewal that fails keeps the current token and retries with a back-off from 1 s to 30 s (one `WARN` per distinct error).
 - A stream the hub closes (or a `Register` it refuses) with `UNAUTHENTICATED` ("token expired", "unknown signing key",
-  "credentials expired", a refused refresh) drops the cached token: the reconnect fetches a new one instead of presenting the
-  same one until its margin runs out. `PERMISSION_DENIED` (wrong `azp`, no `[[service]]` entry) keeps it: a new token would not help
+  "credentials expired", a refused refresh) sets the cached token aside: the reconnect fetches a new one instead of presenting
+  the same one until its margin runs out, the renewer fetches one at its next look (within 5 s) whoever asks first, and
+  `authStatus().tokenExpiresAt` is null meanwhile. `PERMISSION_DENIED` (wrong `azp`, no `[[service]]` entry) keeps it: a new token would not help
   and the identity provider is not asked again for every retry.
 - **No token, no stream.** When the endpoint cannot give a token (401 `invalid_client`, down, TLS, an unusable answer) the stream is
   not opened: the attempt fails locally, `HubConnection.lastRejection` holds `UNAUTHENTICATED` and `awaitRegistered` throws
@@ -1131,7 +1136,8 @@ path. The bean `ProcessorControl` does all of it; its `pause(processor)` and `re
   and resumes by itself; an instance that starts while the lock is held stays out of the group until it clears. A second reset
   while one holds the lock is refused (`LOCKED`). A renewal that arrives after the finish never takes the lock again: an
   operation that ended on an instance (finished, aborted, its lease passed, its lock lost) is remembered for at least
-  max(2 x lease, 60 s), and a prepare of it, or a renewal whose lock is gone, is refused `NOT_PREPARED`.
+  max(2 x lease, 60 s), and a prepare of it, or a renewal whose lock is gone, is refused `NOT_PREPARED`. A prepare or renewal
+  asking for a lease under 1000 ms is refused `INVALID` (the hub asks for 30 s).
 - **The execute** resolves the target per partition (Kafka `Admin.listOffsets`; a timestamp past the last record means the end),
   reads the group's committed offsets ("before"), refuses while the group has any active member (`GROUP_NOT_EMPTY`, nothing
   changed), runs the processor's `@ResetHandler`s, deletes the processor's markers in the replay ranges, writes the ranges to the
@@ -1187,7 +1193,9 @@ The `processor_control` document (the same from the Rust library; every field is
 
 Every control request is logged at INFO with its control id, processor, action and result. Requests run off the hub stream, one
 at a time per processor (a renewal of the lease this instance holds is answered at once, and the instance executing a reset
-extends its own lease while it runs). Dead letters through the hub map to `DeadLetters` one to one (`list` without payloads or
+extends its own lease while it runs). Dead letters never wait behind a running reset execute of their processor: a list is read
+beside it, a retry, retry-all or discard is refused `LOCKED` "processor '<name>' is executing reset operation <id>; try again
+when it finished" (the hub gives a request 10 s). Dead letters through the hub map to `DeadLetters` one to one (`list` without payloads or
 headers, `retry`, `retryAll`, `discard`); an instance answers only for the processors it runs and only in mode `collection`.
 
 ## Sagas
@@ -1295,8 +1303,8 @@ class PaymentAdapter(private val gateway: PaymentGateway) {
   `ExternalCallUnknownOutcomeException` yourself when you see a connection break after the request went out: the record stays
   `UNKNOWN` and a redelivery reports it again. A call that ran but whose `SUCCEEDED` could not be written (the store went away)
   is an unknown outcome too, never a failed call (retryable with `externalIdempotent = true`). A call that outlives its lease
-  no longer owns the record (its writes match on the `attempts` it set): it never overwrites or deletes the record of the call
-  that took over or gave it up, and a body that returned then reports an unknown outcome (retryable with `externalIdempotent = true`).
+  no longer owns the record (its writes match on the random `owner` token it wrote, which a settled record no longer has): it
+  never overwrites or deletes the record of the call that took over, gave it up or inserted it afresh after a reset, and a body that returned then reports an unknown outcome (retryable with `externalIdempotent = true`).
 - `@IdempotentHandler(key = "'poll:' + message.jobId + ':' + message.attempt")` takes a SpEL key over `message` and `headers`.
 - The handler must not be `suspend`. Use `eventBus.publishBlocking(...)` to publish a result.
 - The interceptor and its collection exist when a class in the application's packages has an `@IdempotentHandler` method; set
@@ -1464,7 +1472,10 @@ adapter against a fake of the partner, the controller with a mock request and a 
 
 - **A parked event.** An event whose saga handler failed all its attempts is written to `saga_failures` (with its marker, so the
   consumer moves on), counted in `kraken_saga_events_total{outcome="parked"}` and logged at error. Inject `SagaFailures` and call
-  `list(type?)`, `retry(id)`, `retryAll(type)` or `discard(id)` once the cause is fixed. Nothing retries a parked event by itself.
+  `list(type?)`, `retry(id)`, `retryAll(type)` or `discard(id)` once the cause is fixed (a retry of a saga type this service does
+  not run throws `IllegalStateException` and leaves the event as it was). Nothing retries a parked event by itself;
+  one nobody retries or discards is deleted `sagas.failed-retention` (30 days) after its last failure, as is a `saga_dispatch`
+  entry given up on.
 - **Metrics** (with a `MeterRegistry` bean, in a service that uses sagas or idempotent handlers): the saga rows of
   [Metrics](#metrics). A `kraken_saga_events_total{outcome="no_match"}` that grows means an association that does not line up.
   Logs carry `sagaType`, `sagaId` and `correlationId` in the MDC while a saga handles a message.
@@ -1697,9 +1708,7 @@ Docker Compose from local builds together with the real `kraken-hub` image, Kafk
   only reach handlers without `@RequiresAuthentication` (a `kraken-system` client-credentials token is future work).
 - Sagas: Kotlin only (the Rust crate follows, S2); a new saga type does not see events from before its deployment (no replay);
   parked saga events are retried by a person through `SagaFailures`; a saga belongs to one service.
-- Sagas, reviewed and left as they are: `saga_dispatch` entries that failed for good and `saga_failures` documents have no TTL; a
-  `startKey` is `"<type>|<key>=<value>"`, so an association key that contains `=` can make two pairs share one live instance
-  (avoid `=` in keys); the smoke test does not check that a restart replays nothing twice (the tests do).
+- Sagas, reviewed and left as they are: the smoke test does not check that a restart replays nothing twice (the tests do).
 
 
 ## CI/CD pipeline

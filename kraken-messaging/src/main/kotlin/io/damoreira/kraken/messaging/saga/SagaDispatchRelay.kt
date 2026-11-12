@@ -26,11 +26,13 @@ import java.util.Date
 import java.util.UUID
 import java.util.concurrent.Callable
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ExecutionException
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Future
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
@@ -38,7 +40,9 @@ import kotlin.concurrent.withLock
  * Settings of the [SagaDispatchRelay] (`kraken.messaging.sagas.relay.*`, S1 plan R8): how often it polls, how long a saga's
  * dispatch lease holds, and the transient retry of a command (up to [maxAttempts] attempts in all, then `EXHAUSTED`, with
  * [initialBackoff] growing by [multiplier] up to [maxBackoff]). [parallelism] sagas are dispatched at a time, at most
- * [batchSize] of them per poll.
+ * [batchSize] of them per poll. A command send gets [sendTimeout] for its answer (H1): one that takes longer is abandoned
+ * and counts as a transient failure. Through the hub the bound is never shorter than the hub's own deadline for the call plus
+ * a guard ([RawCommandSender.sendTimeoutFor]).
  */
 data class RelaySettings(
     val pollInterval: Duration = Duration.ofMillis(500),
@@ -49,11 +53,13 @@ data class RelaySettings(
     val maxBackoff: Duration = Duration.ofMinutes(5),
     val parallelism: Int = 4,
     val batchSize: Int = 100,
+    val sendTimeout: Duration = Duration.ofMinutes(1),
 ) {
     init {
         require(!pollInterval.isZero && !pollInterval.isNegative) { "pollInterval must be positive, was $pollInterval" }
         require(!lease.isZero && !lease.isNegative) { "lease must be positive, was $lease" }
         require(parallelism >= 1 && batchSize >= 1) { "parallelism and batchSize must be >= 1" }
+        require(!sendTimeout.isZero && !sendTimeout.isNegative) { "sendTimeout must be positive, was $sendTimeout" }
     }
 
     /** The backoff between the attempts of one command (validates [maxAttempts], [multiplier] and the backoffs). */
@@ -73,6 +79,9 @@ data class RelaySettings(
  *   `<sagaId>:<seq>` (the entry's id) and `saga-id`, the entry's routing key and the correlation id of the message that
  *   caused it, outside any caller identity. It is marked dispatched after the reply, so a crash in between re-sends it
  *   with the same key (an `@IdempotentHandler` adapter then runs its body once).
+ * - A send that has no answer within [RelaySettings.sendTimeout] (a local adapter that hangs: a local call has no timeout of
+ *   its own) is abandoned: its thread is interrupted (a blocking call that honours interrupts ends; one that does not keeps
+ *   that thread until it returns) and it is a transient failure, retried later with the same key.
  * - A transient failure counts an attempt and delays the entry (`nextAttemptAt`), holding back that saga's later entries
  *   only; after [RelaySettings.maxAttempts] it becomes `EXHAUSTED`. A permanent failure is a known outcome: it is
  *   **persisted first** (`failedAt`, `failureReason`, `failureMessage` and `noticePending`), so the command is never sent
@@ -109,6 +118,7 @@ class SagaDispatchRelay(
     private var thread: Thread? = null
     private var pool: ExecutorService? = null
     private var renewer: ScheduledExecutorService? = null
+    private var sends: ExecutorService? = null
     private val inFlight: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
     /**
@@ -197,11 +207,23 @@ class SagaDispatchRelay(
         val headers = entry.headers.filterKeys { it != DISPATCH_CORRELATION_HEADER } + mapOf("idempotency-key" to entry.id, "saga-id" to entry.sagaId)
         val period = maxOf(settings.lease.toMillis() / 3, MIN_RENEW_PERIOD_MS)
         val beat = leaseRenewer().scheduleAtFixedRate({ keepLease(entry.sagaId) }, period, period, TimeUnit.MILLISECONDS)
-        val outcome = try {
+        // On a thread of its own, so a call that never returns can be abandoned after the send timeout.
+        val send = sendExecutor().submit(Callable {
             runBlocking(CorrelationContext(correlationId)) {
                 commands.sendRaw(entry.type, entry.payload.toByteArray(Charsets.UTF_8), SendOptions(routingKey = entry.routingKey, retry = RetryPolicy.NONE, headers = headers))
             }
+        })
+        // A local adapter has no other bound; through the hub the bound waits for the hub to give up first (ADR 0021 ruling 74).
+        val timeout = commands.sendTimeoutFor(entry.type, settings.sendTimeout)
+        val outcome = try {
+            send.get(timeout.toMillis(), TimeUnit.MILLISECONDS)
+        } catch (_: TimeoutException) {
+            send.cancel(true)
+            RawOutcome.Transient("no answer within ${timeout.toMillis()} ms: the call was abandoned and its thread interrupted")
+        } catch (e: ExecutionException) {
+            RawFailures.classify(e.cause ?: e)
         } catch (e: Exception) {
+            send.cancel(true)
             if (e is InterruptedException) Thread.currentThread().interrupt()
             RawFailures.classify(e)
         } finally {
@@ -247,7 +269,7 @@ class SagaDispatchRelay(
             SagaDispatchDocument::class.java,
         )
         log.warn("Saga {} command {} ({}) failed with {}: {}", entry.sagaId, entry.id, entry.type, reason, message)
-        deliverNotice(entry.copy(attempts = attempts, failedAt = now, failureReason = reason, failureMessage = message, noticePending = true, noticeAttempts = 0))
+        deliverNoticeQuietly(entry.copy(attempts = attempts, failedAt = now, failureReason = reason, failureMessage = message, noticePending = true, noticeAttempts = 0))
     }
 
     /** Claims the pending failure notices that are due (up to a batch, not those in flight here), each reserved for this instance by moving `noticeNextAt` a lease ahead. */
@@ -269,11 +291,16 @@ class SagaDispatchRelay(
         return claimed
     }
 
+    /**
+     * [deliverNotice], whose own failures (the delivery's are handled inside it) are the store's: the notice's pending mark
+     * could not be cleared or its next attempt not recorded. It stays pending and is delivered again when its claim
+     * expires (the dedupe id makes that harmless); the entry itself is settled, so the saga's later entries go on.
+     */
     private fun deliverNoticeQuietly(entry: SagaDispatchDocument): Int {
         try {
             deliverNotice(entry)
         } catch (e: Exception) {
-            log.warn("Delivering the failure notice of {} failed, trying again when its claim expires: {}", entry.id, e.toString())
+            log.warn("The failure notice of {} could not be settled in the store; it is delivered again when its claim expires: {}", entry.id, e.toString())
         }
         return 1
     }
@@ -300,9 +327,22 @@ class SagaDispatchRelay(
         } catch (e: Exception) {
             return noticeFailed(entry, e)
         }
-        if (outcome == LocalEventDispatcher.Outcome.NO_INTEREST || outcome == LocalEventDispatcher.Outcome.UNCLAIMED) {
-            metrics.commandFailureUnhandled(entry.type, reason)
-            log.error("Saga {} command {} ({}) failed with {} and no live saga with a SagaCommandFailed handler and no ordinary handler took it: {}", entry.sagaId, entry.id, entry.type, reason, entry.failureMessage)
+        when (outcome) {
+            LocalEventDispatcher.Outcome.NO_INTEREST -> {
+                metrics.commandFailureUnhandled(entry.type, reason)
+                log.error(
+                    "Saga {} command {} ({}) failed with {} and nothing in this service handles SagaCommandFailed (no saga type with a handler for it, no ordinary handler): {}",
+                    entry.sagaId, entry.id, entry.type, reason, entry.failureMessage,
+                )
+            }
+            LocalEventDispatcher.Outcome.UNCLAIMED -> {
+                metrics.commandFailureUnhandled(entry.type, reason)
+                log.error(
+                    "Saga {} command {} ({}) failed with {} and no live instance of a saga took it (the saga ended or no longer associates with {}), and no ordinary handler handles it: {}",
+                    entry.sagaId, entry.id, entry.type, reason, entry.sagaId, entry.failureMessage,
+                )
+            }
+            else -> Unit
         }
         clearNotice(entry)
     }
@@ -316,7 +356,7 @@ class SagaDispatchRelay(
         if (attempts >= settings.maxAttempts) {
             metrics.commandFailureUnhandled(entry.type, entry.failureReason!!)
             log.error(
-                "Gave up delivering SagaCommandFailed for saga {} command {} ({}, {}) after {} attempts; the saga never heard of it: {}",
+                "Gave up delivering SagaCommandFailed for saga {} command {} ({}, {}) after {} attempts; the saga may have applied it (its stage runs even when an ordinary handler fails), but the delivery kept failing: {}",
                 entry.sagaId, entry.id, entry.type, entry.failureReason, attempts, error.toString(),
             )
             clearNotice(entry)
@@ -387,6 +427,13 @@ class SagaDispatchRelay(
         }.also { pool = it }
     }
 
+    /** The threads the command sends run on: as many as sends are alive, an abandoned hung call keeping its own. */
+    private fun sendExecutor(): ExecutorService = synchronized(this) {
+        sends?.takeUnless { it.isShutdown } ?: Executors.newCachedThreadPool { r ->
+            Thread(r, "kraken-saga-send").apply { isDaemon = true }
+        }.also { sends = it }
+    }
+
     private fun leaseRenewer(): ScheduledExecutorService = synchronized(this) {
         renewer?.takeUnless { it.isShutdown } ?: Executors.newSingleThreadScheduledExecutor { r ->
             Thread(r, "kraken-saga-lease-renewer").apply { isDaemon = true }
@@ -430,6 +477,8 @@ class SagaDispatchRelay(
                 pool?.shutdownNow()
             }
             pool = null
+            sends?.shutdownNow()
+            sends = null
             renewer?.shutdownNow()
             renewer = null
         }

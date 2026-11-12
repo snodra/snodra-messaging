@@ -4,6 +4,7 @@ import java.time.Duration
 import java.time.Instant
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -25,6 +26,7 @@ private class Fixture(val pollDelay: Duration = Duration.ofSeconds(5)) {
         },
         later = { _, task -> scheduled += task },
         crash = { crashes++ },
+        replyHosts = setOf("service-c"),
         pollDelay = pollDelay,
     )
 
@@ -68,6 +70,26 @@ class FakePrinterTest {
         assertEquals(listOf<String?>(webhook), f.webhookUrls)
         assertEquals(listOf(Notification("printed-banner-topic-1", "banner-topic-1", "topic-1")), f.topic)
         assertEquals(listOf<String?>("printer.banner.events"), f.topics)
+    }
+
+    @Test fun `a reply webhook on a host the printer does not serve is refused and nothing is sent anywhere`() {
+        val f = Fixture()
+        val refused = listOf(
+            "http://169.254.169.254/latest/meta-data/", // not a customer
+            "http://service-c.attacker.example/printer/webhook", // a longer name is another host
+            "http://service-c@attacker.example/printer/webhook", // user info is not the host
+            "file:///etc/passwd", // not HTTP
+            "printer/webhook", // not absolute
+        )
+        refused.forEachIndexed { i, url ->
+            val e = assertFailsWith<IllegalArgumentException>(url) { f.printer.submit("k$i", JobRequest("g$i", "webhook-$i", replyWebhook = url)) }
+            assertTrue("reply webhook" in e.message!!, e.message)
+        }
+        f.runScheduled()
+
+        assertTrue(f.webhooks.isEmpty() && f.topic.isEmpty())
+        assertNull(f.printer.status("g0"), "a refused job is not accepted")
+        assertEquals(false, f.printer.submit("k0", JobRequest("g0", "webhook-0")).duplicate, "nor is its key used up")
     }
 
     @Test fun `a name with no known prefix is a webhook job`() {

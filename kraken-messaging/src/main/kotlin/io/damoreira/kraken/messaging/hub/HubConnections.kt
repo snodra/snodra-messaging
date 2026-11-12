@@ -184,7 +184,7 @@ class HubConnections(
         }
         return HubAuthStatus(
             kind = kind,
-            tokenExpiresAt = provider?.current?.value?.expiresAt,
+            tokenExpiresAt = provider?.usable()?.expiresAt,
             lastTokenError = provider?.lastError?.value,
             tokenFetches = provider?.let { p -> TokenFetchResult.entries.associate { it.label to p.fetches(it) } }.orEmpty(),
             credentialsRefreshesSent = refreshesSent.get(),
@@ -372,6 +372,11 @@ class HubConnections(
     /** The deadline rules of the first live hub (the hubs of a deployment are configured alike). */
     override fun hubTimeoutFor(type: String): Duration =
         live.value.firstOrNull()?.hubTimeoutFor(type) ?: HubProtocol.DEFAULT_REQUEST_TIMEOUT
+
+    /** The longest deadline any live hub may give a request (a request goes to one of them); see [HubConnection.hubDeadlineBound]. */
+    override fun hubDeadlineBound(type: String, timeoutMs: Int): Duration =
+        live.value.maxOfOrNull { it.hubDeadlineBound(type, timeoutMs) }
+            ?: Duration.ofMillis(HubProtocol.hubDeadlineBoundMs(timeoutMs, type, io.damoreira.kraken.hub.v1.RegisterAck.getDefaultInstance()))
 
     /** Closes every stream, stops reconnecting and resolving, and fails every request in flight. */
     suspend fun stop() {
@@ -693,7 +698,8 @@ class HubConnections(
 enum class HubAuthKind { NONE, TOKEN, JWT, CERTIFICATE }
 
 /**
- * [HubConnections.authStatus]: [kind]; for a JWT the [tokenExpiresAt] of the current access token (null before the first fetch), the
+ * [HubConnections.authStatus]: [kind]; for a JWT the [tokenExpiresAt] of the current access token (null before the first fetch
+ * and while a hub refused it until it is renewed), the
  * [lastTokenError] (null when the last fetch worked), [tokenFetches] by result (`ok`, `http_error`, `oauth_error`, `io_error`,
  * `bad_response`: the `result` label of `kraken_hub_client_token_fetches_total`) and [credentialsRefreshesSent]
  * (`kraken_hub_client_credentials_refreshes_sent_total`). For a client certificate (P5c): the [certificateService] it names, the [certificateFingerprint] (first 8 hex characters of

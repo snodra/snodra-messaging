@@ -85,7 +85,7 @@ class WebhookIngressTest {
         val factory = SimpleMongoClientDatabaseFactory(MongoClients.create(mongoContainer.connectionString + "/?directConnection=true"), "webhook_ingress_test")
         mongo = MongoTemplate(factory)
         tx = TransactionTemplate(MongoTransactionManager(factory))
-        SagaIndexes(mongo, Duration.ofDays(30), Duration.ofDays(7), Duration.ofDays(7)).afterPropertiesSet()
+        SagaIndexes(mongo, Duration.ofDays(30), Duration.ofDays(7), Duration.ofDays(7), Duration.ofDays(30)).afterPropertiesSet()
         listOf("processed_events", "saga_failures").forEach { if (!mongo.collectionExists(it)) mongo.createCollection(it) }
     }
 

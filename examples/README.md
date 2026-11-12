@@ -240,7 +240,7 @@ SKIP_SUBSCRIBE=1 bash examples/smoke.sh # without the subscription-query steps
 ONLY_SUBSCRIBE=1 bash examples/smoke.sh # only the subscription-query steps (needs jq or python3)
 SKIP_AUDIT=1 bash examples/smoke.sh   # without the named-processor and dead-letter steps (26 to 26h)
 ONLY_AUDIT=1 bash examples/smoke.sh   # only those steps (needs jq or python3)
-SKIP_CONTROL=1 bash examples/smoke.sh # without the processor-control steps (27 to 27e)
+SKIP_CONTROL=1 bash examples/smoke.sh # without the processor-control steps (27 to 27f)
 ONLY_CONTROL=1 bash examples/smoke.sh # only those steps (needs jq or python3 and the write token, see "Event processors and dead letters")
 SKIP_BROWSER=1 bash examples/smoke.sh # without the event browser steps (28 to 28f)
 ONLY_BROWSER=1 bash examples/smoke.sh # only those steps (needs jq or python3, see "Event browser")
@@ -435,8 +435,8 @@ outbox gauges and counter, `kraken_processor_lag{partition,processor}`, `kraken_
 `kraken_hub_client_handlers_in_flight`, `kraken_hub_client_connected_hubs`), with `instance` = the instance ids the hub lists for
 each; 29d expects no series with a `hub_id` label and `instance_id` only on `kraken_hub_streams_open` and
 `kraken_hub_subscriptions_open` (the handler instance); 29e reads the three dashboards from Grafana's API and runs every panel
-query against Prometheus, the variables at All (`.*`), `$__rate_interval` at `5m` and `$hub_seen` (Hubs seen within) at
-`3m`, and expects each to return data, except
+query against Prometheus, the variables at All (`.*`), `$__rate_interval` at `5m`, `$hub_seen` (Hubs seen within) and
+`$instance_seen` (Instances seen within) at `3m`, and expects each to return data, except
 the panels the smoke lists in `OBS_MAY_BE_EMPTY` with the reason this sandbox may not drive them (auth violations, JWT, JWKS,
 credential refreshes, client certificates and TLS failures outside their mode; capacity rejections, session buffers, TLS
 shedding, reload errors, unknown control replies, saga command failures and overdue deadlines, which the sandbox never causes;
@@ -515,7 +515,10 @@ examples up --no-deps printer-topic-init`. Smoke steps 24 to 24e drive all five 
 `ONLY_POSTCARD=1` runs only them); step 24 also replays the webhook (200, applied once) and sends a wrong secret (401).
 
 A job may name its own reply target (`replyWebhook`, `replyTopic` in the `POST /jobs` body): the printer posts and produces
-there instead of to service-b's webhook and `printer.events`, signing with the same dev-only secret. Postcards send none.
+there instead of to service-b's webhook and `printer.events`, signing with the same dev-only secret. Postcards send none. A
+`replyWebhook` must be an `http(s)` URL on a host the printer serves, the host of `PRINTER_WEBHOOK_URL` or one listed in
+`PRINTER_REPLY_HOSTS` (comma-separated; the sandbox lists `service-c`): any other is refused with 400, so a caller cannot make
+the printer post its signed notifications to an address of its choosing.
 
 ## The banner saga
 
@@ -580,8 +583,8 @@ curl -s -X POST localhost:8092/audit/dead-letters/retry-all                # {"r
 
 The dashboard's Processors page (`localhost:7001`, hub ADR 0022) shows both services' `audit` and `default` processors with their
 state, lag and dead letters. Smoke steps 26 to 26h drive all of it, for service-b and for service-c: 26 waits until both `audit`
-processors are RUNNING with partitions (group `<service>.audit`) next to `default` on the hub's `GET /api/v1/processors` and clears
-any letter left over; 26b and 26c turn the failure on and publish two poison notes under one key and a fine note under another
+processors are RUNNING with partitions (group `<service>.audit`) next to `default` on the hub's `GET /api/v1/processors`, clears
+any letter left over and expects the hub to list each one's `lag` as 0; 26b and 26c turn the failure on and publish two poison notes under one key and a fine note under another
 (the first is `HANDLER_FAILED`, the second `SEQUENCED` behind it, the other key is handled, the parked key is not); 26d reads
 both processors on the hub, FAILING with two dead letters each; 26e retries while the failure is on (the head answers `Failed`
 and its attempts grow, the sequenced letter `Blocked` behind the head); 26f turns it off and retries (service-b: the head, then
@@ -635,16 +638,21 @@ curl -s -X POST -H "$W" "$HUB/dead-letters/<id>/retry"   # {"result":"Retried",.
 curl -s -X DELETE -H "$W" "$HUB/dead-letters/<id>"       # discard instead: {"discarded":true}; again: 404
 ```
 
-Smoke steps 27 to 27e drive this for service-b and for service-c, in every sandbox mode: 27 expects a write without a credential
+Smoke steps 27 to 27f drive this for service-b and for service-c, in every sandbox mode: 27 expects a write without a credential
 (or with a wrong one) to be 401 on both hubs and, with `SECURE=1`, the dashboard token's to be 403 read-only, clears leftover letters
-and resumes the processor; 27b pauses it (PAUSED on `GET /api/v1/processors`), publishes two notes that stay unhandled for 8 s and
-resumes it (they are handled); 27c publishes two notes under a key of the run (handled and notified once), pauses the processor and
+and resumes the processor; 27b pauses it (PAUSED on `GET /api/v1/processors`), publishes two notes that stay unhandled for 8 s (the processor's `lag`
+there is at least 2) and resumes it (they are handled, the lag back to 0); 27c publishes two notes under a key of the run (handled and notified once), pauses the processor and
 resets it to `earliest`: the reply is ok with a replay, one reset handler and markers deleted, `/audit/resets` gained that operation
 once, and the hub shows the processor PAUSED, replaying, with no operation left (the finish kept the pause); 27d resumes it and
 expects the run's notes handled again, the notifier not run again and the replay to end (RUNNING, not replaying); 27e parks a
 poison note, lists it through the hub (`HANDLER_FAILED`, no payload), retries it through the hub while failing (`Failed`) and with
 the failure off (`Retried`, the note handled, the list empty), and discards another one through the hub (a second discard is a
-404). The topic holds every note since the sandbox started, so a reset to `earliest` replays them all; the steps check only the
+404); 27f has a postcard (service-b) and a banner (service-c) printed once, then pauses each service's `default` processor,
+resets it to the timestamp of the saga's start record (`examples.GreetingDelivered` / `examples.TextShouted` under the run's key,
+read from the hub's event browser, not the host clock) and resumes it: the replay runs and ends, and the fake printer has still
+delivered the job once (its log). That proves the end-to-end outcome only, which is double-protected: a replay skips the sagas,
+and the saga stage's markers (`saga:<type>:<eventId>`, which carry no position, so a reset keeps them) would make a saga skip the
+replayed event anyway; the libraries' tests check the skip itself. The topic holds every note since the sandbox started, so a reset to `earliest` replays them all; the steps check only the
 keys of the run. They need `jq` or `python3`; `SKIP_CONTROL=1` skips them, `ONLY_CONTROL=1` runs only them.
 
 ## Event browser

@@ -8,7 +8,8 @@ import java.time.Instant
  * One saga instance in the `sagas` collection. [state] is the saga object as JSON **text** (Jackson, the library's codec: its
  * exact output, so a `BigDecimal` keeps its scale and a map key may hold a dot or start with `$`),
  * [version] the optimistic version every write checks. While [ended] is false the instance is live: its [associations]
- * route events to it and its [startKey] (`"<type>|<key>=<value>"`, absent for `forceNew` instances) is unique. Ended
+ * route events to it and its [startKey] (`"<type>|<key>=<value>"`, `%`, `|` and `=` escaped in each part, see
+ * [SagaRuntime.startKey]; absent for `forceNew` instances) is unique. Ended
  * instances expire through the TTL index on [endedAt].
  */
 @Document("sagas")

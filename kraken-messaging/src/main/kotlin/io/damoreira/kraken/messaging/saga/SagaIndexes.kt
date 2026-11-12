@@ -12,14 +12,16 @@ import java.time.Duration
  * Ensures the indexes of `sagas`, `saga_dispatch`, `saga_dispatch_leases`, `deadlines` and `saga_failures` exist
  * (the spec's storage table). Idempotent. The association and start-key indexes are partial on `ended: false`, so ended
  * instances neither route events nor hold a start key; the TTL indexes expire ended sagas ([endedRetention]), dispatched
- * entries ([dispatchRetention]) and fired or cancelled deadlines ([deadlineRetention]); a document whose date is still
- * null is never expired.
+ * entries ([dispatchRetention]), fired or cancelled deadlines ([deadlineRetention]) and what failed for good
+ * ([failedRetention]: entries given up on, by `failedAt`, and parked events, by `lastFailedAt`); a document whose date
+ * is still null is never expired.
  */
 class SagaIndexes(
     private val mongo: MongoTemplate,
     private val endedRetention: Duration,
     private val dispatchRetention: Duration,
     private val deadlineRetention: Duration,
+    private val failedRetention: Duration,
 ) : InitializingBean {
     override fun afterPropertiesSet() {
         val live = PartialIndexFilter.of(Criteria.where("ended").`is`(false))
@@ -42,6 +44,7 @@ class SagaIndexes(
                 .named("dispatchedAt_1_failedAt_1_sagaId_1_seq_1"),
         )
         mongo.indexOps("saga_dispatch").createIndex(Index().on("dispatchedAt", Sort.Direction.ASC).expire(dispatchRetention).named("dispatchedAt_ttl"))
+        mongo.indexOps("saga_dispatch").createIndex(Index().on("failedAt", Sort.Direction.ASC).expire(failedRetention).named("failedAt_ttl"))
         mongo.indexOps("saga_dispatch").createIndex(
             Index().on("noticeNextAt", Sort.Direction.ASC)
                 .partial(PartialIndexFilter.of(Criteria.where("noticePending").`is`(true))).named("noticePending_noticeNextAt"),
@@ -59,5 +62,6 @@ class SagaIndexes(
         mongo.indexOps("saga_failures").createIndex(
             Index().on("sagaType", Sort.Direction.ASC).on("lastFailedAt", Sort.Direction.ASC).named("sagaType_1_lastFailedAt_1"),
         )
+        mongo.indexOps("saga_failures").createIndex(Index().on("lastFailedAt", Sort.Direction.ASC).expire(failedRetention).named("lastFailedAt_ttl"))
     }
 }

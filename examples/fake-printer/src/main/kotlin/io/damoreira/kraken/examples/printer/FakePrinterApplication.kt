@@ -44,6 +44,7 @@ class PrinterWiring {
         @Value("\${printer.kafka-bootstrap}") bootstrap: String,
         @Value("\${printer.print-delay}") printDelay: Duration,
         @Value("\${printer.poll-delay}") pollDelay: Duration,
+        @Value("\${printer.reply-hosts:}") replyHosts: List<String>,
     ): FakePrinter {
         val pool = ScheduledThreadPoolExecutor(2)
         val http = HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1).connectTimeout(Duration.ofSeconds(3)).build()
@@ -76,6 +77,8 @@ class PrinterWiring {
             notifier = notifier,
             later = { delay, task -> pool.schedule(task, delay.toMillis(), TimeUnit.MILLISECONDS) },
             crash = { Runtime.getRuntime().halt(1) },
+            // A job's reply webhook may only name a host the printer serves: the configured customer's, or those listed.
+            replyHosts = (replyHosts.map { it.trim() }.filter { it.isNotEmpty() } + listOfNotNull(URI.create(webhookUrl).host)).toSet(),
             pollDelay = pollDelay,
             printDelay = printDelay,
         )

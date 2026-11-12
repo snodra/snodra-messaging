@@ -162,6 +162,25 @@ class RlQuietSaga {
     }
 }
 
+@MessageType("rl.GrumpyStart")
+data class RlGrumpyStart(val orderId: String) : Event
+
+/** Handles `SagaCommandFailed` by `sagaId` with a handler that always fails: the notice is parked for this saga type. */
+@Saga(name = "rl.Grumpy")
+class RlGrumpySaga {
+    var orderId: String? = null
+
+    @StartSaga
+    @SagaEventHandler(associationProperty = "orderId")
+    fun on(e: RlGrumpyStart, saga: SagaLifecycle) {
+        orderId = e.orderId
+        saga.associateWith("sagaId", saga.sagaId)
+    }
+
+    @SagaEventHandler(associationProperty = "sagaId")
+    fun on(e: SagaCommandFailed): Unit = throw IllegalStateException("cannot cope with ${e.reason}")
+}
+
 /** A saga type with no handler for `SagaCommandFailed`. */
 @Saga(name = "rl.Deaf")
 class RlDeafSaga {
@@ -180,6 +199,10 @@ private class ScriptedSender : RawCommandSender {
 
     val calls = CopyOnWriteArrayList<Call>()
     @Volatile var script: (Call) -> RawOutcome = { RawOutcome.Success }
+    /** What [sendTimeoutFor] answers for a type; null keeps the relay's send timeout (a local handler). */
+    @Volatile var timeoutFor: ((String) -> Duration)? = null
+
+    override fun sendTimeoutFor(type: String, sendTimeout: Duration): Duration = timeoutFor?.invoke(type) ?: sendTimeout
 
     override suspend fun sendRaw(type: String, payload: ByteArray, options: SendOptions): RawOutcome {
         val call = Call(type, String(payload, Charsets.UTF_8), options.headers, currentCoroutineContext()[CorrelationContext]?.correlationId, options.retry)
@@ -202,6 +225,9 @@ internal class MarkFailingTemplate(factory: SimpleMongoClientDatabaseFactory) : 
     /** The next write of an `external_calls` record as SUCCEEDED fails: the store goes away right after the external call returned. */
     val failNextSucceededWrite = AtomicBoolean()
 
+    /** The next update that clears a pending failure notice fails: the store goes away right after the notice was delivered. */
+    val failNextNoticeClear = AtomicBoolean()
+
     /** Runs once right after the next read of an `external_calls` record by id: another call writes between that read and what follows. */
     val afterNextExternalCallRead = java.util.concurrent.atomic.AtomicReference<(() -> Unit)?>()
 
@@ -214,6 +240,9 @@ internal class MarkFailingTemplate(factory: SimpleMongoClientDatabaseFactory) : 
     override fun updateFirst(query: Query, update: UpdateDefinition, entityClass: Class<*>): UpdateResult {
         if (entityClass == io.damoreira.kraken.messaging.external.ExternalCallDocument::class.java && "SUCCEEDED" in update.updateObject.toString() && failNextSucceededWrite.getAndSet(false)) {
             throw org.springframework.dao.DataAccessResourceFailureException("the store went away after the external call returned")
+        }
+        if (entityClass == SagaDispatchDocument::class.java && "\$unset" in update.updateObject.toString() && "noticePending" in update.updateObject.toString() && failNextNoticeClear.getAndSet(false)) {
+            throw org.springframework.dao.DataAccessResourceFailureException("the store went away after the notice was delivered")
         }
         if (entityClass == SagaDispatchDocument::class.java && "dispatchedAt" in update.updateObject.toString() && failNextMark.getAndSet(false)) {
             throw IllegalStateException("crashed before marking the entry dispatched")
@@ -251,7 +280,7 @@ class SagaDispatchRelayTest {
         val factory = SimpleMongoClientDatabaseFactory(client, "saga_relay_test")
         mongo = MarkFailingTemplate(factory)
         tx = TransactionTemplate(MongoTransactionManager(factory))
-        SagaIndexes(mongo, Duration.ofDays(30), Duration.ofDays(7), Duration.ofDays(7)).afterPropertiesSet()
+        SagaIndexes(mongo, Duration.ofDays(30), Duration.ofDays(7), Duration.ofDays(7), Duration.ofDays(30)).afterPropertiesSet()
         listOf("processed_events", "saga_failures", "outbox").forEach { if (!mongo.collectionExists(it)) mongo.createCollection(it) }
     }
 
@@ -269,7 +298,7 @@ class SagaDispatchRelayTest {
         watcher = RlFailureWatcher()
         registry = HandlerRegistry(resolver).also { it.register(adapter) }
         runtime = SagaRuntime(
-            types = SagaModelScanner(resolver, codec).scan(listOf(RlSaga::class, RlQuietSaga::class, RlDeafSaga::class)), mongo = mongo, tx = tx, codec = codec, typeResolver = resolver,
+            types = SagaModelScanner(resolver, codec).scan(listOf(RlSaga::class, RlQuietSaga::class, RlDeafSaga::class, RlGrumpySaga::class)), mongo = mongo, tx = tx, codec = codec, typeResolver = resolver,
             beans = { error("no beans") }, clock = clock, retry = SagaRetry(RetryPolicy(maxAttempts = 2, initialBackoff = Duration.ofMillis(1), multiplier = 1.0, maxBackoff = Duration.ofMillis(1))),
         )
         sender = ScriptedSender()
@@ -397,6 +426,47 @@ class SagaDispatchRelayTest {
             release.countDown()
         }
         awaitTrue("the released send to be marked") { entry("hung:1000").dispatchedAt != null }
+    }
+
+    @Test
+    fun `a send that outlives the send timeout is abandoned, its thread interrupted, and the entry retried later with its key`() {
+        record("stuck", 1000)
+        val interrupted = CountDownLatch(1)
+        sender.script = {
+            try {
+                Thread.sleep(30_000) // a local adapter that never returns
+            } catch (e: InterruptedException) {
+                interrupted.countDown()
+                throw e
+            }
+            RawOutcome.Success
+        }
+        val started = System.nanoTime()
+
+        relay(settings = settings.copy(sendTimeout = Duration.ofMillis(300))).pollOnce()
+
+        assertTrue(Duration.ofNanos(System.nanoTime() - started) < Duration.ofSeconds(10), "the pass did not wait for the hung call")
+        val stuck = entry("stuck:1000")
+        assertNull(stuck.dispatchedAt)
+        assertNull(stuck.failedAt, "a timeout is transient: whether the adapter acted is unknown, its idempotency key decides on the retry")
+        assertEquals(1, stuck.attempts)
+        assertTrue(stuck.nextAttemptAt!! > clock.now)
+        assertTrue(interrupted.await(5, TimeUnit.SECONDS), "the abandoned call's thread was interrupted")
+        assertEquals(null, mongo.findById("stuck", SagaDispatchLeaseDocument::class.java), "the saga's lease was released")
+    }
+
+    @Test
+    fun `a send through the hub is not abandoned before the hub gave up on it, whatever the send timeout`() {
+        record("remote", 1000)
+        sender.timeoutFor = { Duration.ofSeconds(10) } // the hub's deadline for the type plus the guard
+        sender.script = { Thread.sleep(800); RawOutcome.Success } // longer than the send timeout, within the hub's deadline
+
+        relay(settings = settings.copy(sendTimeout = Duration.ofMillis(300))).pollOnce()
+
+        val remote = entry("remote:1000")
+        assertNotNull(remote.dispatchedAt, "the hub's answer was awaited: no second send while the hub may still run the first")
+        assertEquals(0, remote.attempts)
+        assertEquals(listOf("remote:1000"), sender.keys())
     }
 
     @Test
@@ -624,7 +694,9 @@ class SagaDispatchRelayTest {
         assertEquals(settings.maxAttempts, watcher.calls.get(), "bounded: 3 attempts in all")
         assertEquals(1, sender.calls.size)
         assertEquals(listOf("rl.Charge" to Reason.FAILED), metrics.unhandled)
-        assertTrue(appender.list.any { it.level == Level.ERROR && saga.id in it.formattedMessage }, "the give-up is logged at error")
+        val giveUp = appender.list.single { it.level == Level.ERROR && saga.id in it.formattedMessage }.formattedMessage
+        assertTrue("the saga may have applied it" in giveUp && "never heard" !in giveUp, "the saga stage runs even when an ordinary handler fails: $giveUp")
+        assertEquals(listOf("rl.Charge:FAILED"), failuresOf("o1"), "and so the saga did hear of it")
         assertEquals(0, mongo.count(Query(Criteria.where("noticePending").`is`(true)), "saga_dispatch"))
     }
 
@@ -644,7 +716,51 @@ class SagaDispatchRelayTest {
         assertEquals(listOf("rl.Nobody" to Reason.NO_HANDLER), metrics.unhandled)
         val error = appender.list.single { it.level == Level.ERROR }
         assertTrue("lost:1000" in error.formattedMessage && "NO_HANDLER" in error.formattedMessage, error.formattedMessage)
+        assertTrue("nothing in this service handles SagaCommandFailed" in error.formattedMessage, error.formattedMessage)
         assertNotNull(entry("lost:1000").failedAt)
+    }
+
+    @Test
+    fun `a SagaCommandFailed whose saga handler fails is parked for that saga, not logged and counted as unhandled`() {
+        deliver(RlGrumpyStart("g1"), "e-g1")
+        val saga = sagaOf("g1")
+        record(saga.id, 9001, type = "rl.Nobody", payload = """{"ref":"n"}""")
+        val log = LoggerFactory.getLogger(SagaDispatchRelay::class.java) as Logger
+        val appender = ListAppender<ILoggingEvent>().also { it.start(); log.addAppender(it) }
+
+        try {
+            relay(commands = LocalRawCommandSender(HandlerInvoker(registry, codec))).pollOnce()
+        } finally {
+            log.detachAppender(appender)
+        }
+
+        val parked = mongo.findAll(SagaFailureDocument::class.java).single()
+        assertEquals("rl.Grumpy", parked.sagaType)
+        assertEquals(emptyList(), metrics.unhandled, "it reached the saga: the park is what a person looks at")
+        assertEquals(emptyList(), appender.list.filter { it.level == Level.ERROR }.map { it.formattedMessage })
+        assertEquals(0, mongo.count(Query(Criteria.where("noticePending").`is`(true)), "saga_dispatch"))
+    }
+
+    @Test
+    fun `a store failure after a failure notice was delivered is logged as such and the saga's later entries go on`() {
+        record("n", 1000, type = "rl.Nobody")
+        record("n", 2000)
+        mongo.failNextNoticeClear.set(true)
+        val log = LoggerFactory.getLogger(SagaDispatchRelay::class.java) as Logger
+        val appender = ListAppender<ILoggingEvent>().also { it.start(); log.addAppender(it) }
+
+        try {
+            relay(commands = LocalRawCommandSender(HandlerInvoker(registry, codec))).pollOnce()
+        } finally {
+            log.detachAppender(appender)
+        }
+
+        assertNotNull(entry("n:1000").failedAt)
+        assertNotNull(entry("n:2000").dispatchedAt, "the failed entry is settled: the saga's next entry went out in the same pass")
+        val warnings = appender.list.filter { it.level == Level.WARN }.map { it.formattedMessage }
+        assertTrue(warnings.any { "n:1000" in it && "could not be settled" in it }, warnings.toString())
+        assertTrue(warnings.none { "Dispatching saga" in it }, "nothing about the dispatch failed: $warnings")
+        assertEquals(true, entry("n:1000").noticePending, "the notice is delivered again when its claim expires")
     }
 
     @Test
@@ -683,6 +799,7 @@ class SagaDispatchRelayTest {
         val errors = appender.list.filter { it.level == Level.ERROR }.map { it.formattedMessage }
         assertEquals(2, errors.size, errors.toString())
         assertTrue(errors.any { "${ended.id}:9001" in it } && errors.any { "${deaf.id}:9001" in it }, errors.toString())
+        assertTrue(errors.all { "no live instance of a saga took it" in it }, errors.toString())
         assertNotNull(entry("${ended.id}:9001").failedAt)
     }
 

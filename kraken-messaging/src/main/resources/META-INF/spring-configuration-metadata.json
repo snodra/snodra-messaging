@@ -448,6 +448,13 @@
       "defaultValue": "7d"
     },
     {
+      "name": "kraken.messaging.sagas.failed-retention",
+      "type": "java.time.Duration",
+      "description": "What failed for good is deleted this long after it failed: saga_dispatch entries given up on (TTL index on failedAt) and parked events in saga_failures (TTL index on lastFailedAt). Must be positive.",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Sagas",
+      "defaultValue": "30d"
+    },
+    {
       "name": "kraken.messaging.sagas.relay.poll-interval",
       "type": "java.time.Duration",
       "description": "How often the dispatch relay looks for entries that saga handlers recorded. Must be positive.",
@@ -481,6 +488,13 @@
       "description": "Upper bound of one wait between attempts of a command.",
       "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$SagaRelay",
       "defaultValue": "5m"
+    },
+    {
+      "name": "kraken.messaging.sagas.relay.send-timeout",
+      "type": "java.time.Duration",
+      "description": "How long a command send may take. One with no answer by then (a local adapter that hangs) is abandoned, its thread interrupted, and retried later with the same idempotency key as a transient failure. A send through the hub waits at least the hub's deadline for the command (its per-type override, else the request timeout or the hub's clamp) plus 10 s, so it is never sent again while the hub may still run it. Must be positive.",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$SagaRelay",
+      "defaultValue": "1m"
     },
     {
       "name": "kraken.messaging.deadlines.poll-interval",

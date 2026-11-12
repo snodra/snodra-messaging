@@ -192,6 +192,19 @@ class HubSecurityEndToEndTest {
         assertEquals(Count(7), bus(anonymous).send(GetCount("k")))
     }
 
+    @Test fun `off ignores the token a client sends, so one no ACL knows registers under any name and type and sends`() = runBlocking {
+        val hub = hub(mode = "off")
+        val owner = startOwner(hub, null)
+        val stranger = connection(hub, "someone-else", "unknown-" + UUID.randomUUID(), null).also {
+            it.register(setOf("other.Thing"), emptySet()) // a type no ACL grants it
+            it.start()
+        }
+        assertTrue(owner.awaitRegistered(wait) && stranger.awaitRegistered(wait), "both registered")
+        assertEquals(null, stranger.lastRejection.value)
+        assertEquals(Count(7), bus(stranger).send(GetCount("k")))
+        assertTrue(stranger.connected.value)
+    }
+
     @Test fun `plain text against the TLS hub fails cleanly with a log line that says what to do, not a hang`() = runBlocking {
         val tls = TestCertificates.generate(dir.resolve("tls"))
         val hub = hub(tls)

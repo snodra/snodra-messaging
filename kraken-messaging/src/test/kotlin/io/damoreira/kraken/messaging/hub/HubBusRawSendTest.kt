@@ -10,6 +10,7 @@ import io.damoreira.kraken.messaging.handler.HandlerInvoker
 import io.damoreira.kraken.messaging.handler.HandlerRegistry
 import io.damoreira.kraken.messaging.handler.RequiresAuthentication
 import io.damoreira.kraken.messaging.saga.LocalRawCommandSender
+import io.damoreira.kraken.messaging.saga.RawCommandSender
 import io.damoreira.kraken.messaging.saga.RawOutcome
 import io.damoreira.kraken.messaging.saga.SagaCommandFailed.Reason
 import io.damoreira.kraken.messaging.security.ForwardedIdentityResolver
@@ -126,6 +127,25 @@ class HubBusRawSendTest {
         val denied = bus(connection("b", lonely) { error("unexpected") }, secured).sendRaw("test.Ping", payload, SendOptions(headers = headers))
 
         assertEquals(Reason.DENIED, assertIs<RawOutcome.Permanent>(denied).reason)
+    }
+
+    @Test fun `the relay waits for a call through the hub until the hub gave up on it, a local call only its send timeout`() = runBlocking {
+        hub.maxTimeout = Duration.ofSeconds(20)
+        hub.typeTimeouts = mapOf("test.Slow" to Duration.ofSeconds(90))
+        val local = HandlerRegistry(resolver).also { it.register(ContextCapturingHandlers()) }
+        val caller = connection("caller") { error("unexpected") }
+        caller.start()
+        assertTrue(caller.awaitRegistered(wait))
+        val unset = HubBus(caller, local, HandlerInvoker(local, codec), codec, resolver, true, TraceHeaders(null, null), null)
+        val chosen = HubBus(caller, local, HandlerInvoker(local, codec), codec, resolver, true, TraceHeaders(null, null), Duration.ofSeconds(2))
+        val sendTimeout = Duration.ofMillis(300)
+        val guard = RawCommandSender.HUB_CALL_GUARD
+
+        assertEquals(sendTimeout, unset.sendTimeoutFor("test.Ping", sendTimeout), "a local handler: the send timeout alone")
+        assertEquals(Duration.ofSeconds(20).plus(guard), unset.sendTimeoutFor("test.Remote", sendTimeout), "the hub's clamp for timeout_ms 0, plus the guard")
+        assertEquals(Duration.ofSeconds(90).plus(guard), unset.sendTimeoutFor("test.Slow", sendTimeout), "the type's override")
+        assertEquals(Duration.ofSeconds(2).plus(guard), chosen.sendTimeoutFor("test.Slow", sendTimeout), "the request timeout sent as timeout_ms")
+        assertEquals(Duration.ofMinutes(5), unset.sendTimeoutFor("test.Slow", Duration.ofMinutes(5)), "never shorter than the send timeout")
     }
 
     @Test fun `a type no service handles is transient through the hub (a rolling redeploy of the target)`() = runBlocking {

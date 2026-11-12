@@ -63,7 +63,7 @@ class SagaRuntimeTest {
         val factory = SimpleMongoClientDatabaseFactory(MongoClients.create(mongoContainer.connectionString + "/?directConnection=true"), "saga_runtime_test")
         mongo = MongoTemplate(factory)
         tx = TransactionTemplate(MongoTransactionManager(factory))
-        SagaIndexes(mongo, Duration.ofDays(30), Duration.ofDays(7), Duration.ofDays(7)).afterPropertiesSet()
+        SagaIndexes(mongo, Duration.ofDays(30), Duration.ofDays(7), Duration.ofDays(7), Duration.ofDays(30)).afterPropertiesSet()
         listOf("processed_events", "saga_failures").forEach { if (!mongo.collectionExists(it)) mongo.createCollection(it) }
     }
 
@@ -407,6 +407,19 @@ class SagaRuntimeTest {
         assertEquals(doc.id, doc.stateDoc.getString("mdcSagaId"))
         assertEquals("corr-e-16", doc.stateDoc.getString("mdcCorrelationId"))
         assertNull(org.slf4j.MDC.get("sagaType"), "and not after")
+    }
+
+    @Test
+    fun `start keys whose parts contain the separators stay apart`() {
+        val escaping = runtime(RtEscapeSaga::class)
+        deliver(RtNote("x=1"), on = escaping) // k = "x=1"
+        deliver(RtBump("o", "1"), on = escaping) // "k=x" = 1: the same text once joined by "="
+
+        val docs = sagas("rt.Escape").sortedBy { it.startKey }
+        assertEquals(listOf("rt.Escape|k%3Dx=1", "rt.Escape|k=x%3D1"), docs.map { it.startKey }, "two instances, each with its own key")
+        assertEquals(listOf(1, 1), docs.map { it.stateDoc.getInteger("starts") })
+        assertEquals("rt.Escape%7Ca%25b|k=v", SagaRuntime.startKey("rt.Escape|a%b", "k", "v"), "the type name and a percent sign are escaped too")
+        assertEquals(0, mongo.count(Query(), "saga_failures"), "nothing was parked on a shared key")
     }
 
     @Test

@@ -26,6 +26,7 @@ import java.time.Instant
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -90,7 +91,7 @@ class SagaFailuresTest {
         mongo = MongoTemplate(factory)
         plain = MongoTemplate(SimpleMongoClientDatabaseFactory(MongoClients.create(mongoContainer.connectionString + "/?directConnection=true"), "saga_failures_test"))
         tx = TransactionTemplate(MongoTransactionManager(factory))
-        SagaIndexes(mongo, Duration.ofDays(30), Duration.ofDays(7), Duration.ofDays(7)).afterPropertiesSet()
+        SagaIndexes(mongo, Duration.ofDays(30), Duration.ofDays(7), Duration.ofDays(7), Duration.ofDays(30)).afterPropertiesSet()
         listOf("processed_events", "saga_failures").forEach { if (!mongo.collectionExists(it)) mongo.createCollection(it) }
     }
 
@@ -211,10 +212,27 @@ class SagaFailuresTest {
     }
 
     @Test
+    fun `a retry of a saga type this service does not run is refused and leaves the parked event as it was`() {
+        deliver(RtOrderPlaced("f7"), "e-f7")
+        val parked = failures.list("rt.Flaky").single()
+        mongo.save(parked.copy(id = "rt.Other:e-f7", sagaType = "rt.Other")) // parked by another service, or before the type was removed
+        val before = mongo.findById("rt.Other:e-f7", SagaFailureDocument::class.java)!!
+        clock.now = start.plusSeconds(60)
+
+        val one = assertFailsWith<IllegalStateException> { failures.retry("rt.Other:e-f7") }
+        val all = assertFailsWith<IllegalStateException> { failures.retryAll("rt.Other") }
+
+        assertEquals("Saga type 'rt.Other' does not run in this service: parked event rt.Other:e-f7 is left as it was", one.message)
+        assertEquals("Saga type 'rt.Other' does not run in this service: its parked events (1) are left as they were", all.message)
+        assertEquals(before, mongo.findById("rt.Other:e-f7", SagaFailureDocument::class.java), "its error, attempts and lastFailedAt are untouched")
+    }
+
+    @Test
     fun `retry of an unknown id is false`() {
         assertFalse(failures.retry("rt.Flaky:nope"))
         assertFalse(failures.retry("rt.Gone:e-1"))
         assertEquals(0, failures.retryAll("rt.Flaky"))
+        assertEquals(0, failures.retryAll("rt.Gone"), "nothing parked: nothing to refuse, as in Rust")
         assertNull(failures.list().firstOrNull())
     }
 }

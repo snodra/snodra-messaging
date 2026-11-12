@@ -21,6 +21,7 @@ import io.damoreira.kraken.messaging.saga.SagaCommandFailed.Reason
 import io.damoreira.kraken.messaging.tracing.CorrelationContext
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.withContext
+import java.time.Duration
 import java.util.UUID
 
 /**
@@ -31,6 +32,22 @@ import java.util.UUID
  */
 interface RawCommandSender {
     suspend fun sendRaw(type: String, payload: ByteArray, options: SendOptions = SendOptions()): RawOutcome
+
+    /**
+     * How long the relay waits for [sendRaw] of [type] before it abandons the call and sends it again later with the same
+     * idempotency key, given its `sagas.relay.send-timeout` [sendTimeout] (ADR 0021 ruling 74). A local handler has no other
+     * bound: [sendTimeout]. Through the hub never less than the hub's deadline for the call plus [HUB_CALL_GUARD], so the relay
+     * never sends a command again while the hub may still be running the first call.
+     */
+    fun sendTimeoutFor(type: String, sendTimeout: Duration): Duration = sendTimeout
+
+    companion object {
+        /**
+         * Added to the hub's deadline of a call: covers the client's own guard (1 s past that deadline) and the wait for a live
+         * hub stream (`kraken.messaging.hub.request-timeout`, 5 s by default), with room.
+         */
+        val HUB_CALL_GUARD: Duration = Duration.ofSeconds(10)
+    }
 }
 
 /** What [RawCommandSender.sendRaw] reports, classified for the relay (the spec's retry taxonomy). */

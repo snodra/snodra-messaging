@@ -67,7 +67,7 @@ class SagaMetricsTest {
         mongo = MongoTemplate(factory)
         txManager = MongoTransactionManager(factory)
         tx = TransactionTemplate(txManager)
-        SagaIndexes(mongo, Duration.ofDays(30), Duration.ofDays(7), Duration.ofDays(7)).afterPropertiesSet()
+        SagaIndexes(mongo, Duration.ofDays(30), Duration.ofDays(7), Duration.ofDays(7), Duration.ofDays(30)).afterPropertiesSet()
         ExternalCallIndexes(mongo, Duration.ofDays(30)).afterPropertiesSet()
         listOf("processed_events", "saga_failures", "outbox", "external_calls").forEach { if (!mongo.collectionExists(it)) mongo.createCollection(it) }
     }

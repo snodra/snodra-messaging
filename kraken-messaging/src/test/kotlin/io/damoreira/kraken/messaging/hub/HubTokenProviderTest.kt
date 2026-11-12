@@ -147,6 +147,51 @@ class HubTokenProviderTest {
         assertEquals(2, server.requests.size)
     }
 
+    @Test fun `freshness follows the monotonic clock too, so a wall clock set back does not keep a token past its refresh point`() {
+        server.expiresIn = 100 // refreshed 80 s after it was fetched
+        val clock = JumpingClock()
+        var nanos = 0L
+        val provider = HubTokenProvider(
+            TokenEndpoint(HubOAuth2(server.tokenUri, "billing-service", { "secret" }), clock), scope, clock,
+            retryMin = Duration.ofMillis(50), retryMax = Duration.ofMillis(200), nanoTime = { nanos },
+        )
+        val first = runBlocking { provider.token() }
+        clock.offset = Duration.ofHours(-1) // an NTP step back: by the wall clock the token is younger than ever
+        nanos = Duration.ofSeconds(90).toNanos() // but 90 s went by
+
+        val next = runBlocking { provider.token() }
+
+        assertNotEquals(first.value, next.value, "a token past its refresh point by the monotonic clock is not served")
+        assertTrue(server.requests.size >= 2)
+    }
+
+    @Test fun `a token the hub refused is renewed in the background at its next look and no longer reported`() {
+        server.expiresIn = 3600 // its own refresh point is 48 minutes away
+        val provider = provider()
+        val first = runBlocking { provider.token() }
+
+        provider.invalidate(first.value)
+
+        assertNotEquals(first.value, provider.usable()?.value, "a refused token is not reported as the current one")
+        await atMost Duration.ofSeconds(8) until { provider.current.value?.value != first.value }
+        assertEquals(provider.current.value, provider.usable())
+        assertEquals(2, server.requests.size)
+    }
+
+    @Test fun `an endpoint that answers the refused token again is not asked again at once`() {
+        server.expiresIn = 3600
+        val provider = provider()
+        val first = runBlocking { provider.token() }
+        server.responder = { TokenResponse(200, """{"access_token":"${first.value}","token_type":"Bearer","expires_in":3600}""") }
+
+        provider.invalidate(first.value)
+        await atMost Duration.ofSeconds(8) until { server.requests.size >= 2 }
+        Thread.sleep(1000)
+
+        assertEquals(2, server.requests.size, "the same token, fetched again, is the current one until a hub refuses it again")
+        assertEquals(first.value, provider.usable()?.value)
+    }
+
     @Test fun `a failing renewal keeps the current token, retries with a back-off and recovers`() {
         server.expiresIn = 2
         val provider = provider()

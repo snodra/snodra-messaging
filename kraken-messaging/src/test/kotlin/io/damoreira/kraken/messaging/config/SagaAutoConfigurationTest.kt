@@ -214,9 +214,11 @@ class SagaAutoConfigurationTest {
             "kraken.messaging.sagas.relay.poll-interval=0s" to "sagas.relay",
             "kraken.messaging.sagas.relay.lease=-5s" to "sagas.relay",
             "kraken.messaging.sagas.relay.max-attempts=0" to "sagas.relay",
+            "kraken.messaging.sagas.relay.send-timeout=0s" to "sagas.relay",
             "kraken.messaging.sagas.max-attempts=0" to "sagas.max-attempts",
             "kraken.messaging.sagas.ended-retention=0s" to "sagas.ended-retention",
             "kraken.messaging.sagas.dispatch-retention=-1d" to "sagas.dispatch-retention",
+            "kraken.messaging.sagas.failed-retention=0s" to "sagas.failed-retention",
             "kraken.messaging.deadlines.poll-interval=0s" to "deadlines.poll-interval",
             "kraken.messaging.deadlines.lease=0s" to "deadlines.lease",
             "kraken.messaging.deadlines.retention=-1d" to "deadlines.retention",
@@ -240,11 +242,13 @@ class SagaAutoConfigurationTest {
         assertEquals(5, p.sagas.maxAttempts)
         assertEquals(Duration.ofDays(30), p.sagas.endedRetention)
         assertEquals(Duration.ofDays(7), p.sagas.dispatchRetention)
+        assertEquals(Duration.ofDays(30), p.sagas.failedRetention)
         assertEquals(Duration.ofMillis(500), p.sagas.relay.pollInterval)
         assertEquals(Duration.ofSeconds(30), p.sagas.relay.lease)
         assertEquals(10, p.sagas.relay.maxAttempts)
         assertEquals(Duration.ofSeconds(1), p.sagas.relay.initialBackoff)
         assertEquals(Duration.ofMinutes(5), p.sagas.relay.maxBackoff)
+        assertEquals(Duration.ofMinutes(1), p.sagas.relay.sendTimeout)
         assertEquals(Duration.ofSeconds(1), p.deadlines.pollInterval)
         assertEquals(Duration.ofSeconds(30), p.deadlines.lease)
         assertEquals(Duration.ofDays(7), p.deadlines.retention)
@@ -301,8 +305,8 @@ class SagaAutoConfigurationTest {
         val json = checkNotNull(javaClass.getResourceAsStream("/META-INF/spring-configuration-metadata.json")).use { io.damoreira.kraken.messaging.codec.JsonCodec().decodeTree(it.readAllBytes()) }
         val described = json["properties"].associate { it["name"].asString() to it["description"]?.asString() }
         val keys = listOf(
-            "sagas.enabled", "sagas.max-attempts", "sagas.ended-retention", "sagas.dispatch-retention",
-            "sagas.relay.poll-interval", "sagas.relay.lease", "sagas.relay.max-attempts", "sagas.relay.initial-backoff", "sagas.relay.max-backoff",
+            "sagas.enabled", "sagas.max-attempts", "sagas.ended-retention", "sagas.dispatch-retention", "sagas.failed-retention",
+            "sagas.relay.poll-interval", "sagas.relay.lease", "sagas.relay.max-attempts", "sagas.relay.initial-backoff", "sagas.relay.max-backoff", "sagas.relay.send-timeout",
             "deadlines.poll-interval", "deadlines.lease", "deadlines.retention",
             "external.calls.enabled", "external.calls.lease", "external.calls.retention",
             "external.kafka.sources",

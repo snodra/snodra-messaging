@@ -6,6 +6,8 @@ spring:
     name: fake-printer
 printer:
   webhook-url: ${PRINTER_WEBHOOK_URL:http://localhost:8092/printer/webhook}
+  # Hosts a job's replyWebhook may name besides webhook-url's (comma-separated): any other is refused with 400.
+  reply-hosts: ${PRINTER_REPLY_HOSTS:}
   # Dev-only value shared with service-b (compose.local.yaml sets both); not a secret.
   webhook-secret: ${PRINTER_WEBHOOK_SECRET:dev-only-printer-webhook-secret}
   topic: ${PRINTER_TOPIC:printer.events}

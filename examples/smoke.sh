@@ -14,8 +14,9 @@
 #        C=http://localhost:8094 is service-c's HTTP address;
 #        SKIP_AUDIT=1 skips the named-processor and dead-letter steps 26-26h (the `audit` processor of service-b and
 #        service-c), ONLY_AUDIT=1 runs only them;
-#        SKIP_CONTROL=1 skips the processor-control steps 27-27e (pause, resume, reset and dead letters of both `audit`
-#        processors through the hub's HTTP API with the write token), ONLY_CONTROL=1 runs only them; WRITE_TOKEN_FILE names
+#        SKIP_CONTROL=1 skips the processor-control steps 27-27f (pause, resume, reset and dead letters of both `audit`
+#        processors, and a reset of both `default` processors past a saga's start, through the hub's HTTP API with the write
+#        token), ONLY_CONTROL=1 runs only them; WRITE_TOKEN_FILE names
 #        the write token, default <secrets directory>/hub-control/dashboard-write.token (kraken/infra/scripts/dev-hub-pki.sh,
 #        in every mode);
 #        SKIP_BROWSER=1 skips the event browser steps 28-28f (search, record, payload rules, tail and consumer groups of
@@ -289,6 +290,11 @@ if command -v jq >/dev/null; then
     jq -r --arg s "$1" --arg p "$2" '.services[] | select(.serviceName == $s) | .processors[] | select(.name == $p)
       | "\(.state) \(.groupId) \(.deadLetters) \(.assignedPartitions) \(.instancesReporting)"' 2>/dev/null || true
   }
+  # /api/v1/processors -> the lag of the processor named $2 of the service named $1 ("-" while none is known).
+  processor_lag() {
+    jq -r --arg s "$1" --arg p "$2" '.services[] | select(.serviceName == $s) | .processors[] | select(.name == $p)
+      | (.lag // "-") | tostring' 2>/dev/null || true
+  }
   # /api/v1/processors -> "<state> <replaying> <operationId or ->" of the processor named $2 of the service named $1.
   control_state() {
     jq -r --arg s "$1" --arg p "$2" '.services[] | select(.serviceName == $s) | .processors[] | select(.name == $p)
@@ -398,6 +404,14 @@ try:
                 if p.get("name") == sys.argv[2]:
                     print(p["state"], p["groupId"], p["deadLetters"], p["assignedPartitions"], p["instancesReporting"])
 except Exception: pass' "$1" "$2" || true; }
+  processor_lag() { python3 -I -c 'import json,sys
+try:
+    for s in json.load(sys.stdin).get("services", []):
+        if s.get("serviceName") == sys.argv[1]:
+            for p in s.get("processors", []):
+                if p.get("name") == sys.argv[2]:
+                    print("-" if p.get("lag") is None else p["lag"])
+except Exception: pass' "$1" "$2" || true; }
   control_state() { python3 -I -c 'import json,sys
 try:
     for s in json.load(sys.stdin).get("services", []):
@@ -475,6 +489,7 @@ else
   open_summary() { type_owners; }
   in_flight() { rows_summary; }
   processor_summary() { fail "jq or python3 needed for the processor steps (or set SKIP_AUDIT=1)"; }
+  processor_lag() { processor_summary; }
   control_state() { fail "jq or python3 needed for the processor-control steps (or set SKIP_CONTROL=1)"; }
   reply_field() { control_state; }
   hub_letters() { control_state; }
@@ -977,11 +992,12 @@ banner_steps() {
 # on demand: while `POST <service>/audit/failing?on=true` is on, a note whose text starts with `poison` fails. The example
 # admin endpoints over the library's DeadLetters (`GET /audit/dead-letters`, `POST /audit/dead-letters/{id}/retry`,
 # `POST /audit/dead-letters/retry-all`, `DELETE /audit/dead-letters/{id}`) are the same in both. Step 26: both audit
-# processors run (RUNNING, with partitions) on the hub's `GET /api/v1/processors`, next to `default`, and no letters are
-# left over. 26b / 26c: with the failure on, service-b / service-c get two poison notes under one key and a fine note under
-# another: the first is parked HANDLER_FAILED, the second SEQUENCED behind it, the other key is handled. 26d: the hub shows
-# both processors FAILING with their two dead letters (sampled by the service, so within a minute). 26e: retrying the head
-# while the failure is on answers Failed, retrying the sequenced letter answers Blocked behind the head. 26f: with the
+# processors run (RUNNING, with partitions) on the hub's `GET /api/v1/processors`, next to `default`, no letters are
+# left over and the hub lists each one's lag as 0 (caught up). 26b / 26c: with the failure on, service-b / service-c get
+# two poison notes under one key and a fine note under another: the first is parked HANDLER_FAILED, the second SEQUENCED
+# behind it, the other key is handled. 26d: the hub shows both processors FAILING with their two dead letters (sampled
+# by the service, so within a minute). 26e: retrying the head while the failure is on answers Failed, retrying the
+# sequenced letter answers Blocked behind the head. 26f: with the
 # failure off, retrying drains the key in order (service-b: the head, then retryAll; service-c: the head, then the second)
 # and no letter is left. 26g: a poison note is parked and discarded (a second discard is a 404), and its key flows again.
 # 26h: the hub's dead-letter count is back to 0. SKIP_AUDIT=1 skips these steps, ONLY_AUDIT=1 runs only them.
@@ -1057,6 +1073,19 @@ await_processor() { # <service> <processor> <group> <state pattern> <dead letter
   fail "$HUB/api/v1/processors: expected $1's processor $2 (group $3) in state $4 with $5 dead letters within ${6}s, got '${sum:-not listed}'"
 }
 
+# Waits until the hub lists <service>'s <processor> with a lag of at least <min> (exactly 0 when <min> is 0) and prints it.
+await_processor_lag() { # <service> <processor> <min> <seconds>
+  local start=$SECONDS lag=""
+  while [ $((SECONDS - start)) -lt "$4" ]; do
+    lag=$(curl -fsS "$HUB/api/v1/processors" 2>/dev/null | processor_lag "$1" "$2" || true)
+    if printf '%s' "$lag" | grep -Eq '^[0-9]+$'; then
+      if [ "$3" = "0" ]; then [ "$lag" = "0" ] && { printf '%s' "$lag"; return 0; }; elif [ "$lag" -ge "$3" ]; then printf '%s' "$lag"; return 0; fi
+    fi
+    sleep 1
+  done
+  fail "$HUB/api/v1/processors: expected $1's processor $2 with a lag of $([ "$3" = "0" ] && echo 0 || echo "at least $3") within ${4}s, got '${lag:-not listed}'"
+}
+
 # Leaves nothing behind when a step fails: the failure off on both services.
 audit_off() {
   trap - EXIT
@@ -1085,11 +1114,11 @@ audit_park() { # <label> <base> <run>
 }
 
 audit_steps() {
-  local run letters id id2 n sum reply base label
+  local run letters id id2 n sum reply base label lag
   run=$(date +%s)
   trap audit_off EXIT
 
-  echo "26. both audit processors run (group <service>.audit) next to default on the hub's /api/v1/processors; no letters left over ..."
+  echo "26. both audit processors run (group <service>.audit) next to default on the hub's /api/v1/processors, caught up (lag 0); no letters left over ..."
   for label in "service-b $B" "service-c $C"; do
     read -r label base <<< "$label"
     sum=$(await_processor "$label" audit "$label\.audit" RUNNING '[0-9]+' 150)
@@ -1103,6 +1132,8 @@ audit_steps() {
       curl -fsS -X DELETE "$base/audit/dead-letters/$id" >/dev/null || fail "discarding the leftover letter $id of $label failed"
     done
     [ "$(audit_count "$base")" = "0" ] || fail "$label still has audit letters after the clean-up"
+    lag=$(await_processor_lag "$label" audit 0 60)
+    echo "   $label audit: lag $lag"
   done
 
   echo "26b. service-b (Kotlin): failure on; two poison notes under one key, a fine note under another: HANDLER_FAILED, SEQUENCED, handled ..."
@@ -1185,20 +1216,28 @@ audit_steps() {
 # (KRAKEN_HUB_DASHBOARD_WRITE_TOKEN_FILE). For the `audit` processor of service-b (Kotlin) and of service-c (Rust):
 # 27: a write without a credential (or with a wrong one) is 401 on both hubs, with the dashboard token 403 (SECURE=1 only: the
 # plain hubs have no dashboard token); leftover letters are cleared and the processor resumed. 27b: pause: the hub shows PAUSED and notes published
-# meanwhile are not handled; resume: they are, and RUNNING again. 27c: notes under a key of this run are handled (and notified
-# once), the processor is paused, then reset to earliest: the reset handler ran once (`/audit/resets`), the hub shows it
-# PAUSED and replaying with no operation left (a finish keeps the pause, so nothing is replayed yet). 27d: resume: the notes
+# meanwhile are not handled (the hub lists the processor's lag as at least 2); resume: they are, RUNNING again, lag 0.
+# 27c: notes under a key of this run are handled (and notified once), the processor is paused, then reset to earliest:
+# the reset handler ran once (`/audit/resets`), the hub shows it PAUSED and replaying with no operation left (a finish
+# keeps the pause, so nothing is replayed yet). 27d: resume: the notes
 # of this run are handled again, the notifier (`@DisallowReplay` / `disallow_replay`) did not run again, and the replay ends
 # (RUNNING, not replaying). The topic holds every note since the sandbox started, so only this run's keys are checked.
 # 27e: dead letters through the hub: a poison note parked (the failure on), listed by the hub without a payload, retried
 # (Failed while failing, Retried with the failure off, its key handled), the list empty; another one discarded (a second
-# discard is a 404). SKIP_CONTROL=1 skips these steps, ONLY_CONTROL=1 runs only them.
+# discard is a 404). 27f: a postcard (service-b) and a banner (service-c) of this run are printed once (the printer's log:
+# PRINTER_CONTAINER, default kraken-example-printer), then each service's `default` processor is paused, reset to the
+# timestamp of the saga's start record (examples.GreetingDelivered / examples.TextShouted under the run's key, read from the
+# hub's event browser, so the host clock plays no part) and resumed: the replay runs (ok, replay) and ends, and 10 s later
+# the printer has still delivered the job once. That is the end-to-end outcome only: it is double-protected, since the replay
+# skips the sagas (ADR 0023) and the saga stage's markers (`saga:<type>:<eventId>`, which carry no position and which a reset
+# does not delete) would make a saga skip the replayed event anyway; the library tests check the skip itself.
+# SKIP_CONTROL=1 skips these steps, ONLY_CONTROL=1 runs only them.
 
 # A call to <hub>'s control API for <service>'s audit processor, with the credential <cred>: `write` (the write token), `read`
 # (the dashboard token, SECURE=1), `wrong` or `none`. Prints the body and then the HTTP code on a line of its own. A token goes
 # through a curl config on a pipe, as the curl wrapper does, so it never shows in a process list.
 control_call() { # <hub> <cred> <method> <service> <path> [json body]
-  local url="$1/api/v1/services/$4/processors/audit/$5" token="" args=(-sS --max-time 200 -X "$3" -w '\n%{http_code}')
+  local url="$1/api/v1/services/$4/processors/${PROCESSOR:-audit}/$5" token="" args=(-sS --max-time 200 -X "$3" -w '\n%{http_code}')
   [ "$SECURE" = "1" ] && args+=(--cacert "$SECRETS/ca.pem")
   case $2 in write) token=$WRITE_TOKEN ;; read) token=$DASHBOARD_TOKEN ;; wrong) token=wrong-write-token-0123456789 ;; esac
   [ -n "${6:-}" ] && args+=(-H 'content-type: application/json' -d "$6")
@@ -1213,21 +1252,27 @@ control_call() { # <hub> <cred> <method> <service> <path> [json body]
 control_expect() { # <code> <hub> <cred> <method> <service> <path> [json body]
   local want=$1 reply code
   shift
-  reply=$(control_call "$@") || fail "$3 $1 .../$4/processors/audit/$5 failed"
+  reply=$(control_call "$@") || fail "$3 $1 .../$4/processors/${PROCESSOR:-audit}/$5 failed"
   code=${reply##*$'\n'}
-  [ "$code" = "$want" ] || fail "$3 $1/api/v1/services/$4/processors/audit/$5 ($2 credential): expected $want, got $code: ${reply%$'\n'*}"
+  [ "$code" = "$want" ] || fail "$3 $1/api/v1/services/$4/processors/${PROCESSOR:-audit}/$5 ($2 credential): expected $want, got $code: ${reply%$'\n'*}"
   printf '%s' "${reply%$'\n'*}"
 }
 
-# Waits until the hub shows <service>'s audit processor as "<state> <replaying> <operationId or ->" matching <pattern>.
+# Waits until the hub shows <service>'s audit processor (PROCESSOR=<name> for another) as "<state> <replaying> <operationId or ->"
+# matching <pattern>. control_call and control_expect take PROCESSOR the same way.
 await_control_state() { # <service> <pattern> <seconds>
   local start=$SECONDS st=""
   while [ $((SECONDS - start)) -lt "$3" ]; do
-    st=$(curl -fsS "$HUB/api/v1/processors" 2>/dev/null | control_state "$1" audit || true)
+    st=$(curl -fsS "$HUB/api/v1/processors" 2>/dev/null | control_state "$1" "${PROCESSOR:-audit}" || true)
     if printf '%s' "$st" | grep -Eq "^($2)$"; then printf '%s' "$st"; return 0; fi
     sleep 1
   done
-  fail "$HUB/api/v1/processors: expected $1's audit processor as '$2' (state replaying operation) within ${3}s, got '${st:-not listed}'"
+  fail "$HUB/api/v1/processors: expected $1's ${PROCESSOR:-audit} processor as '$2' (state replaying operation) within ${3}s, got '${st:-not listed}'"
+}
+
+# How often the fake printer delivered the webhook of job <id> (its log: "Printer: webhook of <id> delivered (attempt n)").
+printer_deliveries() { # <id>
+  { docker logs "${PRINTER_CONTAINER:-kraken-example-printer}" 2>&1 | grep -c -- "webhook of $1 delivered"; } || true
 }
 
 # The texts the audit processor's notifier at <base> handled for <key>, comma-separated (as audit_handled).
@@ -1258,17 +1303,19 @@ await_hub_letter() { # <service> <key> <seconds>
   fail "$HUB: expected one dead letter of $1's audit processor under key $2 within ${3}s, got '$got'"
 }
 
-# Leaves nothing behind when a step fails: both audit processors resumed, the failure off.
+# Leaves nothing behind when a step fails: both audit and both default processors resumed, the failure off.
 control_off() {
   trap - EXIT
   control_call "$HUB" write POST service-b resume >/dev/null 2>&1 || true
   control_call "$HUB" write POST service-c resume >/dev/null 2>&1 || true
+  PROCESSOR=default control_call "$HUB" write POST service-b resume >/dev/null 2>&1 || true
+  PROCESSOR=default control_call "$HUB" write POST service-c resume >/dev/null 2>&1 || true
   command curl -fsS -X POST "$B/audit/failing?on=false" >/dev/null 2>&1 || true
   command curl -fsS -X POST "$C/audit/failing?on=false" >/dev/null 2>&1 || true
 }
 
 control_steps() {
-  local run file secrets label base reply code h st op n resets id key reason attempts
+  local run file secrets label base reply code h st op n resets id key reason attempts lag since start
   run=$(date +%s)
   secrets=${SECRETS:-${SECRETS_DIR:-${KRAKEN_SECRETS_DIR:-$INFRA/.secrets}}}
   file=${WRITE_TOKEN_FILE:-$secrets/hub-control/dashboard-write.token}
@@ -1314,10 +1361,12 @@ control_steps() {
     audit_note "$base" "p$run" held-2
     sleep 8
     [ -z "$(audit_handled "$base" "p$run")" ] || fail "$label: a note published while audit is paused was handled: $(audit_handled "$base" "p$run")"
+    lag=$(await_processor_lag "$label" audit 2 30)
     control_expect 200 "$HUB" write POST "$label" resume >/dev/null
     await_handled "$base" "p$run" "held-1,held-2" 30
     st=$(await_control_state "$label" '(RUNNING|FAILING) false -' 30)
-    echo "   $label: paused (acknowledged $(printf '%s' "$reply" | reply_field acknowledged)), held-1 and held-2 held for 8 s, handled after the resume; audit: $st"
+    n=$(await_processor_lag "$label" audit 0 30)
+    echo "   $label: paused (acknowledged $(printf '%s' "$reply" | reply_field acknowledged)), held-1 and held-2 held for 8 s (lag $lag), handled after the resume (lag $n); audit: $st"
   done
 
   echo "27c. reset to earliest while paused: the reset handler runs once, the hub shows PAUSED and replaying, no operation left ..."
@@ -1382,6 +1431,34 @@ control_steps() {
     control_expect 404 "$HUB" write DELETE "$label" "dead-letters/$id" >/dev/null
     [ -z "$(hub_letters_of "$label" "x$run")" ] || fail "$label: the discarded letter $id is still listed"
     echo "   $label: $id discarded through the hub, a second discard 404"
+  done
+
+  echo "27f. a reset of default to a saga's start record replays it and the job is still printed once (service-b's postcard, service-c's banner; the end-to-end outcome, double-protected by the saga markers) ..."
+  for label in "service-b $B" "service-c $C"; do
+    read -r label base <<< "$label"
+    if [ "$label" = "service-b" ]; then
+      id=$(greet "webhook-z$run"); [ -n "$id" ] || fail "no id in the greeting reply"
+      await_postcard "$id" PRINTED - 90 >/dev/null
+      start=examples.GreetingDelivered
+    else
+      shout "webhook-z$run"; id="banner-webhook-z$run"
+      await_banner "$id" PRINTED - 90 >/dev/null
+      start=examples.TextShouted
+    fi
+    [ "$(printer_deliveries "$id")" = "1" ] || fail "$label: the printer should have delivered job $id once before the reset, got $(printer_deliveries "$id")"
+    # The start record's own timestamp (Kafka's, read through the hub's event browser): the reset replays from that record.
+    read -r _ _ since _ <<< "$(await_events "$HUB" "key=webhook-z$run&type=$start&limit=1" 1 60)"
+    [ "$since" -gt 0 ] 2>/dev/null || fail "$label: the start record $start of webhook-z$run has no timestamp: '$since'"
+    PROCESSOR=default control_expect 200 "$HUB" write POST "$label" pause >/dev/null
+    PROCESSOR=default await_control_state "$label" 'PAUSED false -' 30 >/dev/null
+    reply=$(PROCESSOR=default control_expect 200 "$HUB" write POST "$label" reset "{\"to\":{\"timestampMs\":$since}}")
+    [ "$(printf '%s' "$reply" | reply_field outcome)" = "ok" ] && [ "$(printf '%s' "$reply" | reply_field replay)" = "true" ] \
+      || fail "$label: the reset of default to $since should be ok with a replay, got: $reply"
+    PROCESSOR=default control_expect 200 "$HUB" write POST "$label" resume >/dev/null
+    st=$(PROCESSOR=default await_control_state "$label" '(RUNNING|FAILING) false -' 120)
+    sleep 10 # the saga relay polls every 500 ms: a saga run again by the replay would have sent its print by now
+    [ "$(printer_deliveries "$id")" = "1" ] || fail "$label: the replay of default ran the saga again: the printer delivered job $id $(printer_deliveries "$id") times"
+    echo "   $label: job $id printed once, default reset to $since (operation $(printf '%s' "$reply" | reply_field operationId), $(printf '%s' "$reply" | reply_field markersDeleted) markers deleted) and replayed, printed still once; default: $st"
   done
   control_off
 }
@@ -1598,7 +1675,7 @@ browser_steps() {
 # examples.CountGreetings through the hub for it), and their instance label is the instance id the hubs list. 29d: no series has a label hub_id, and only the hub's streams and
 # subscriptions open have instance_id (the handler instance, ADR 0026 hub ruling 3). 29e: every panel query of the three
 # dashboards, as Grafana serves them, returns data with the template variables at All (.*), $__rate_interval at 5m and
-# $hub_seen (Hubs seen within) at its default 3m,
+# $hub_seen (Hubs seen within) and $instance_seen (Instances seen within) at their default 3m,
 # except the panels in OBS_MAY_BE_EMPTY, which the sandbox may not drive in this mode (each with its reason), and those
 # whose series only steps skipped by a SKIP_* flag create (obs_skipped). Needs jq or python3; SKIP_OBS=1 skips these steps, ONLY_OBS=1 runs only them (on a sandbox that already carried traffic: a full run).
 GRAFANA=${GRAFANA:-http://localhost:${KRAKEN_GRAFANA_PORT:-3000}}
@@ -1759,8 +1836,8 @@ obs_steps() {
       for line in "${OBS_MAY_BE_EMPTY[@]}"; do
         [ "${line%%|*}" = "$uid" ] && [ "$(printf '%s' "$line" | cut -d'|' -f2)" = "$title" ] && reason=${line##*|}
       done
-      # $hub_seen is a range, not a label match: its default, 3m (ADR 0026 Dashboards ruling 9).
-      q=$(printf '%s' "$expr" | sed -e 's/\$__rate_interval/5m/g' -e 's/\$hub_seen/3m/g' -e 's/\$[A-Za-z_][A-Za-z0-9_]*/.*/g')
+      # $hub_seen and $instance_seen are ranges, not label matches: their default, 3m (ADR 0026 Dashboards rulings 9 and 10).
+      q=$(printf '%s' "$expr" | sed -e 's/\$__rate_interval/5m/g' -e 's/\$hub_seen/3m/g' -e 's/\$instance_seen/3m/g' -e 's/\$[A-Za-z_][A-Za-z0-9_]*/.*/g')
       found=$(prom_query "$q" | prom_rows __name__ | grep -c . || true)
       if [ "$found" -gt 0 ]; then continue; fi
       if [ -n "$reason" ]; then

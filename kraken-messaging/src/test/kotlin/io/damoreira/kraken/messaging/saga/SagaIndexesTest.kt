@@ -39,7 +39,7 @@ class SagaIndexesTest {
     @BeforeEach
     fun setUp() {
         mongo.db.drop()
-        indexes = SagaIndexes(mongo, Duration.ofDays(30), Duration.ofDays(7), Duration.ofDays(7))
+        indexes = SagaIndexes(mongo, Duration.ofDays(30), Duration.ofDays(7), Duration.ofDays(7), failedRetention = Duration.ofDays(30))
         indexes.afterPropertiesSet()
         ExternalCallIndexes(mongo, Duration.ofDays(30)).afterPropertiesSet()
     }
@@ -71,6 +71,7 @@ class SagaIndexesTest {
         val notice = index("saga_dispatch", listOf("noticeNextAt")).partialFilterExpression!!
         assertTrue("noticePending" in notice && "true" in notice, notice)
         assertEquals(Duration.ofDays(7), index("saga_dispatch", listOf("dispatchedAt")).expireAfter.orElse(null))
+        assertEquals(Duration.ofDays(30), index("saga_dispatch", listOf("failedAt")).expireAfter.orElse(null), "an entry that failed for good expires too")
         assertEquals(Duration.ZERO, index("saga_dispatch_leases", listOf("until")).expireAfter.orElse(null))
 
         index("deadlines", listOf("status", "dueAt"))
@@ -78,6 +79,7 @@ class SagaIndexesTest {
         assertEquals(Duration.ofDays(7), index("deadlines", listOf("finishedAt")).expireAfter.orElse(null))
 
         index("saga_failures", listOf("sagaType", "lastFailedAt"))
+        assertEquals(Duration.ofDays(30), index("saga_failures", listOf("lastFailedAt")).expireAfter.orElse(null), "a parked event expires after its last failure")
 
         assertEquals(Duration.ofDays(30), index("external_calls", listOf("updatedAt")).expireAfter.orElse(null))
         assertEquals(Sort.Direction.ASC, index("deadlines", listOf("status", "dueAt")).indexFields.first().direction)

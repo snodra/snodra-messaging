@@ -51,7 +51,9 @@ import java.util.concurrent.TimeUnit
  * (the instance clears the operation it held and resumes), and the replay ranges this instance consumed past (removed).
  *
  * Requests run off the hub stream, one at a time per processor (a single thread each), except the renewal of the operation
- * this instance holds, which is answered at once. A reset executes here only for an operation this instance holds:
+ * this instance holds, which is answered at once, and the dead-letter requests while a reset of the processor executes here:
+ * the list is read beside it, a retry, retry-all or discard is refused LOCKED at once (H1, as the Rust library). A prepare or
+ * renewal with a lease under [MIN_RESET_LEASE_MS] is INVALID. A reset executes here only for an operation this instance holds:
  * 1. the target becomes per-partition offsets (`Admin.listOffsets`: earliest, latest, for a timestamp; explicit offsets are
  *    checked against the partitions and watermarks), 2. the group's committed offsets are read, a range `[target, before)`
  *    per partition where the target is lower, 3. the group must be empty (`describeConsumerGroups`), 4. the processor's
@@ -88,7 +90,8 @@ class ProcessorControl(
     private class Slot(val consumer: EventConsumer) {
         val queue: ExecutorService = Executors.newSingleThreadExecutor { r -> Thread(r, "kraken-control-${consumer.processor}").apply { isDaemon = true } }
         @Volatile var held: Held? = null
-        @Volatile var executing = false
+        /** The operation whose execute runs on [queue] now; null when none. */
+        @Volatile var executing: String? = null
         /** The operations that ended here, with the [System.nanoTime] until which they are remembered. */
         val finished = ConcurrentHashMap<String, Long>()
     }
@@ -161,6 +164,10 @@ class ProcessorControl(
             log.info("Control {} {} on processor {}: {}", request.controlId, actionOf(request), request.processor, describe(result))
             reply(result)
         }
+        if (request.hasResetPrepare() && request.resetPrepare.leaseMs < MIN_RESET_LEASE_MS) {
+            answer(refused(request, ControlRefusal.CONTROL_REFUSAL_INVALID, BAD_PREPARE))
+            return
+        }
         if (slot == null) {
             answer(refused(request, ControlRefusal.CONTROL_REFUSAL_UNKNOWN_PROCESSOR, "processor ${request.processor} does not run on this instance"))
             return
@@ -173,9 +180,21 @@ class ProcessorControl(
             }
         }
         val prepare = request.resetPrepare
-        if (request.hasResetPrepare() && prepare.leaseMs > 0 && slot.held?.id == prepare.operationId) {
+        val executing = slot.executing
+        if (request.hasResetPrepare() && slot.held?.id == prepare.operationId) {
             // A renewal of the operation held here: answered at once, never behind an execute of it (ADR 0023).
             Thread.ofVirtual().name("kraken-control-renew").start { answer(guarded(request) { renew(slot, request) }) }
+        } else if (executing != null && request.actionCase == ControlRequest.ActionCase.DEAD_LETTER_LIST) {
+            // Dead letters never wait behind an execute (the hub gives a request 10 s): the list only reads (H1, ADR 0023).
+            Thread.ofVirtual().name("kraken-control-letters").start { answer(guarded(request) { letters(request) { list(request) } }) }
+        } else if (executing != null && request.actionCase in LETTER_CHANGES) {
+            // A change beside the execute would race its reset handlers and marker deletion: refused at once.
+            answer(
+                refused(
+                    request, ControlRefusal.CONTROL_REFUSAL_LOCKED,
+                    "processor '${request.processor}' is executing reset operation $executing; try again when it finished",
+                ),
+            )
         } else {
             queued()
         }
@@ -221,7 +240,7 @@ class ProcessorControl(
     private fun prepare(slot: Slot, request: ControlRequest): ControlReply {
         val op = request.resetPrepare.operationId
         val leaseMs = request.resetPrepare.leaseMs
-        if (op.isBlank() || leaseMs <= 0) return refused(request, ControlRefusal.CONTROL_REFUSAL_INVALID, "a prepare needs an operation id and a positive lease")
+        if (op.isBlank() || leaseMs < MIN_RESET_LEASE_MS) return refused(request, ControlRefusal.CONTROL_REFUSAL_INVALID, BAD_PREPARE)
         if (hasEnded(slot, op)) return refused(request, ControlRefusal.CONTROL_REFUSAL_NOT_PREPARED, "operation $op already finished on this instance")
         val lease = Duration.ofMillis(leaseMs)
         val processor = slot.consumer.processor
@@ -245,8 +264,8 @@ class ProcessorControl(
         val op = request.resetExecute.operationId
         val held = slot.held
         if (held == null || held.id != op) return notPrepared(slot, request, op)
-        slot.executing = true
-        val period = minOf(LEASE_EXTENSION, held.lease.dividedBy(3)).toMillis().coerceAtLeast(50)
+        slot.executing = op
+        val period = minOf(LEASE_EXTENSION, held.lease.dividedBy(3)).toMillis()
         val until = System.nanoTime() + executeLeaseLimit.toNanos()
         val extension = leases?.scheduleAtFixedRate(
             {
@@ -262,7 +281,7 @@ class ProcessorControl(
         } finally {
             extension?.cancel(false)
             if (System.nanoTime() < until) runCatching { store.renew(slot.consumer.processor, op, held.lease) } // a whole lease for the finish
-            slot.executing = false
+            slot.executing = null
         }
     }
 
@@ -486,7 +505,7 @@ class ProcessorControl(
             if (operation == null || operation.id != held.id) {
                 slot.held = null // released (another instance's finish) or taken over after it expired
                 ended(slot, held.id, held.lease)
-            } else if (operation.expired(now) && !slot.executing) {
+            } else if (operation.expired(now) && slot.executing == null) {
                 if (!store.release(processor, held.id, expiredOnly = true)) return@synchronized // renewed meanwhile: next poll
                 log.warn("The lease of reset operation {} on processor {} passed without a renewal: released it, consuming again", held.id, processor)
                 slot.held = null
@@ -646,6 +665,17 @@ class ProcessorControl(
 
         /** `pausedBy` of a pause made through [pause] / [resume] on this instance. */
         const val LOCAL = "local"
+
+        /** The shortest lease a `ResetPrepare` may ask for (the hub asks for 30 s): a shorter one would lapse before anything happened. */
+        const val MIN_RESET_LEASE_MS = 1000L
+
+        /** The refusal of a prepare without an operation id or with a lease under [MIN_RESET_LEASE_MS] (the Rust library's text). */
+        private const val BAD_PREPARE = "a prepare needs an operation id and a lease of at least 1000 ms"
+
+        /** The dead-letter requests that change letters: refused while a reset of the processor executes here. */
+        private val LETTER_CHANGES = setOf(
+            ControlRequest.ActionCase.DEAD_LETTER_RETRY, ControlRequest.ActionCase.DEAD_LETTER_RETRY_ALL, ControlRequest.ActionCase.DEAD_LETTER_DISCARD,
+        )
 
         /** The most letters a `DeadLetterList` may ask for. */
         const val MAX_LIST = 100
