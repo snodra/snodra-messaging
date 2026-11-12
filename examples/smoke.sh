@@ -1225,10 +1225,13 @@ audit_steps() {
 # 27e: dead letters through the hub: a poison note parked (the failure on), listed by the hub without a payload, retried
 # (Failed while failing, Retried with the failure off, its key handled), the list empty; another one discarded (a second
 # discard is a 404). 27f: a postcard (service-b) and a banner (service-c) of this run are printed once (the printer's log:
-# PRINTER_CONTAINER, default kraken-example-printer), then each service's `default` processor is paused, reset to a moment
-# before the saga's start event and resumed: the replay runs (ok, replay) and ends, and 10 s later the printer has still
-# delivered the job once: a replay never runs a saga again (ADR 0023). SKIP_CONTROL=1 skips these steps, ONLY_CONTROL=1 runs
-# only them.
+# PRINTER_CONTAINER, default kraken-example-printer), then each service's `default` processor is paused, reset to the
+# timestamp of the saga's start record (examples.GreetingDelivered / examples.TextShouted under the run's key, read from the
+# hub's event browser, so the host clock plays no part) and resumed: the replay runs (ok, replay) and ends, and 10 s later
+# the printer has still delivered the job once. That is the end-to-end outcome only: it is double-protected, since the replay
+# skips the sagas (ADR 0023) and the saga stage's markers (`saga:<type>:<eventId>`, which carry no position and which a reset
+# does not delete) would make a saga skip the replayed event anyway; the library tests check the skip itself.
+# SKIP_CONTROL=1 skips these steps, ONLY_CONTROL=1 runs only them.
 
 # A call to <hub>'s control API for <service>'s audit processor, with the credential <cred>: `write` (the write token), `read`
 # (the dashboard token, SECURE=1), `wrong` or `none`. Prints the body and then the HTTP code on a line of its own. A token goes
@@ -1312,7 +1315,7 @@ control_off() {
 }
 
 control_steps() {
-  local run file secrets label base reply code h st op n resets id key reason attempts lag since
+  local run file secrets label base reply code h st op n resets id key reason attempts lag since start
   run=$(date +%s)
   secrets=${SECRETS:-${SECRETS_DIR:-${KRAKEN_SECRETS_DIR:-$INFRA/.secrets}}}
   file=${WRITE_TOKEN_FILE:-$secrets/hub-control/dashboard-write.token}
@@ -1430,18 +1433,22 @@ control_steps() {
     echo "   $label: $id discarded through the hub, a second discard 404"
   done
 
-  echo "27f. a reset of default replays a saga's start event and the saga does not run again (service-b's postcard, service-c's banner) ..."
+  echo "27f. a reset of default to a saga's start record replays it and the job is still printed once (service-b's postcard, service-c's banner; the end-to-end outcome, double-protected by the saga markers) ..."
   for label in "service-b $B" "service-c $C"; do
     read -r label base <<< "$label"
-    since=$(( ($(date +%s) - 2) * 1000 ))
     if [ "$label" = "service-b" ]; then
       id=$(greet "webhook-z$run"); [ -n "$id" ] || fail "no id in the greeting reply"
       await_postcard "$id" PRINTED - 90 >/dev/null
+      start=examples.GreetingDelivered
     else
       shout "webhook-z$run"; id="banner-webhook-z$run"
       await_banner "$id" PRINTED - 90 >/dev/null
+      start=examples.TextShouted
     fi
     [ "$(printer_deliveries "$id")" = "1" ] || fail "$label: the printer should have delivered job $id once before the reset, got $(printer_deliveries "$id")"
+    # The start record's own timestamp (Kafka's, read through the hub's event browser): the reset replays from that record.
+    read -r _ _ since _ <<< "$(await_events "$HUB" "key=webhook-z$run&type=$start&limit=1" 1 60)"
+    [ "$since" -gt 0 ] 2>/dev/null || fail "$label: the start record $start of webhook-z$run has no timestamp: '$since'"
     PROCESSOR=default control_expect 200 "$HUB" write POST "$label" pause >/dev/null
     PROCESSOR=default await_control_state "$label" 'PAUSED false -' 30 >/dev/null
     reply=$(PROCESSOR=default control_expect 200 "$HUB" write POST "$label" reset "{\"to\":{\"timestampMs\":$since}}")

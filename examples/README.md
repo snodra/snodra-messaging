@@ -648,8 +648,11 @@ expects the run's notes handled again, the notifier not run again and the replay
 poison note, lists it through the hub (`HANDLER_FAILED`, no payload), retries it through the hub while failing (`Failed`) and with
 the failure off (`Retried`, the note handled, the list empty), and discards another one through the hub (a second discard is a
 404); 27f has a postcard (service-b) and a banner (service-c) printed once, then pauses each service's `default` processor,
-resets it to a moment before the saga's start event and resumes it: the replay runs and ends, and the fake printer has still
-delivered the job once (its log), because a replay never runs a saga again. The topic holds every note since the sandbox started, so a reset to `earliest` replays them all; the steps check only the
+resets it to the timestamp of the saga's start record (`examples.GreetingDelivered` / `examples.TextShouted` under the run's key,
+read from the hub's event browser, not the host clock) and resumes it: the replay runs and ends, and the fake printer has still
+delivered the job once (its log). That proves the end-to-end outcome only, which is double-protected: a replay skips the sagas,
+and the saga stage's markers (`saga:<type>:<eventId>`, which carry no position, so a reset keeps them) would make a saga skip the
+replayed event anyway; the libraries' tests check the skip itself. The topic holds every note since the sandbox started, so a reset to `earliest` replays them all; the steps check only the
 keys of the run. They need `jq` or `python3`; `SKIP_CONTROL=1` skips them, `ONLY_CONTROL=1` runs only them.
 
 ## Event browser
