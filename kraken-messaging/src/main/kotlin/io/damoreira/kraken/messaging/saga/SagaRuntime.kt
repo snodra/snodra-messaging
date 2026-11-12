@@ -103,14 +103,18 @@ class SagaRuntime(
      * design): in one transaction the failure is deleted and the event applied, with the retries of R4. Returns true
      * when it was applied (or no longer matches anything), false when it failed again (the failure stays with `attempts`
      * increased and the new error) or was no longer parked (a concurrent retry or discard: it is then not brought back).
+     *
+     * @throws IllegalStateException when the failure's saga type does not run in this service; the parked event is left as
+     *   it was (its error, attempts and `lastFailedAt`), see [checkRuns]
      */
     fun reapply(failure: SagaFailureDocument): Boolean {
-        val sagaType = byName[failure.sagaType]
-        if (sagaType == null) {
-            parkAgain(failure, "Saga type '${failure.sagaType}' does not exist in this service", 0)
-            return false
-        }
-        return deliver(sagaType, failure.eventType, failure.payload.toByteArray(Charsets.UTF_8), contextOf(failure), failure)
+        checkRuns(failure.sagaType) { "parked event ${failure.id} is left as it was" }
+        return deliver(byName.getValue(failure.sagaType), failure.eventType, failure.payload.toByteArray(Charsets.UTF_8), contextOf(failure), failure)
+    }
+
+    /** Refuses, without writing anything, a retry of parked events whose saga type [sagaType] does not run in this service; [left] says which. */
+    fun checkRuns(sagaType: String, left: () -> String) {
+        check(sagaType in byName) { "Saga type '$sagaType' does not run in this service: ${left()}" }
     }
 
     // ---- events ------------------------------------------------------------------------------------------------

@@ -26,6 +26,7 @@ import java.time.Instant
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -208,6 +209,22 @@ class SagaFailuresTest {
         assertEquals(0, sagas("rt.Flaky").size)
         assertTrue(marker("saga:rt.Flaky:e-f6"), "the event stays marked: a redelivery does not apply it either")
         assertFalse(failures.discard("rt.Flaky:e-f6"))
+    }
+
+    @Test
+    fun `a retry of a saga type this service does not run is refused and leaves the parked event as it was`() {
+        deliver(RtOrderPlaced("f7"), "e-f7")
+        val parked = failures.list("rt.Flaky").single()
+        mongo.save(parked.copy(id = "rt.Other:e-f7", sagaType = "rt.Other")) // parked by another service, or before the type was removed
+        val before = mongo.findById("rt.Other:e-f7", SagaFailureDocument::class.java)!!
+        clock.now = start.plusSeconds(60)
+
+        val one = assertFailsWith<IllegalStateException> { failures.retry("rt.Other:e-f7") }
+        val all = assertFailsWith<IllegalStateException> { failures.retryAll("rt.Other") }
+
+        assertEquals("Saga type 'rt.Other' does not run in this service: parked event rt.Other:e-f7 is left as it was", one.message)
+        assertEquals("Saga type 'rt.Other' does not run in this service: its parked events (1) are left as they were", all.message)
+        assertEquals(before, mongo.findById("rt.Other:e-f7", SagaFailureDocument::class.java), "its error, attempts and lastFailedAt are untouched")
     }
 
     @Test

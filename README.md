@@ -1466,7 +1466,8 @@ adapter against a fake of the partner, the controller with a mock request and a 
 
 - **A parked event.** An event whose saga handler failed all its attempts is written to `saga_failures` (with its marker, so the
   consumer moves on), counted in `kraken_saga_events_total{outcome="parked"}` and logged at error. Inject `SagaFailures` and call
-  `list(type?)`, `retry(id)`, `retryAll(type)` or `discard(id)` once the cause is fixed. Nothing retries a parked event by itself;
+  `list(type?)`, `retry(id)`, `retryAll(type)` or `discard(id)` once the cause is fixed (a retry of a saga type this service does
+  not run throws `IllegalStateException` and leaves the event as it was). Nothing retries a parked event by itself;
   one nobody retries or discards is deleted `sagas.failed-retention` (30 days) after its last failure, as is a `saga_dispatch`
   entry given up on.
 - **Metrics** (with a `MeterRegistry` bean, in a service that uses sagas or idempotent handlers): the saga rows of
