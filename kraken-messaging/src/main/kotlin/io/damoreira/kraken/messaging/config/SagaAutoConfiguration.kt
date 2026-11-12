@@ -74,7 +74,7 @@ class SagaAutoConfiguration {
     @Bean
     @ConditionalOnMissingBean
     fun sagaIndexes(mongo: MongoTemplate, properties: KrakenMessagingProperties) =
-        SagaIndexes(mongo, properties.sagas.endedRetention, properties.sagas.dispatchRetention, properties.deadlines.retention)
+        SagaIndexes(mongo, properties.sagas.endedRetention, properties.sagas.dispatchRetention, properties.deadlines.retention, properties.sagas.failedRetention)
 
     @Bean
     @ConditionalOnMissingBean

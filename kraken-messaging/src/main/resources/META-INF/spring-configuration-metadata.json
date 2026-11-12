@@ -448,6 +448,13 @@
       "defaultValue": "7d"
     },
     {
+      "name": "kraken.messaging.sagas.failed-retention",
+      "type": "java.time.Duration",
+      "description": "What failed for good is deleted this long after it failed: saga_dispatch entries given up on (TTL index on failedAt) and parked events in saga_failures (TTL index on lastFailedAt). Must be positive.",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Sagas",
+      "defaultValue": "30d"
+    },
+    {
       "name": "kraken.messaging.sagas.relay.poll-interval",
       "type": "java.time.Duration",
       "description": "How often the dispatch relay looks for entries that saga handlers recorded. Must be positive.",

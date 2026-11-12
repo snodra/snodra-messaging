@@ -199,6 +199,7 @@ All keys (`kraken.messaging.*`; durations accept `200ms`, `5s`, `7d`; relaxed bi
 | `sagas.max-attempts` | `5` | Attempts per saga event (first try included) for **conflicts** (a version check, a start-key duplicate, a Mongo write conflict or transient transaction error) before the event is parked in `saga_failures`; also the bound for firing a deadline. Backoff 200 ms doubling to 5 s (not configurable). A **handler exception** is not cured by waiting: it gets two attempts in all, at most 50 ms apart, and the event is then parked. |
 | `sagas.ended-retention` | `30d` | Ended sagas are deleted this long after they ended (TTL index on `sagas.endedAt`). Must be positive. |
 | `sagas.dispatch-retention` | `7d` | Dispatched `saga_dispatch` entries are deleted this long after they were sent (TTL index on `dispatchedAt`). Must be positive. |
+| `sagas.failed-retention` | `30d` | What failed for good is deleted this long after it failed: `saga_dispatch` entries given up on (TTL index on `failedAt`) and parked events in `saga_failures` (TTL index on `lastFailedAt`, which a retry that fails again moves on). Must be positive. |
 | `sagas.relay.poll-interval` | `500ms` | How often the dispatch relay looks for entries that saga handlers recorded. Must be positive. |
 | `sagas.relay.lease` | `30s` | How long a relay instance holds one saga's dispatch order before another instance may take over (a crashed instance's lease expires); renewed before each entry and, every third of the lease, while a send runs. Needs synchronised clocks (NTP) across instances. Must be positive. |
 | `sagas.relay.max-attempts` | `10` | Attempts per command for transient failures (first try included, at least 1) before it becomes `SagaCommandFailed(EXHAUSTED)`. |
@@ -1464,7 +1465,9 @@ adapter against a fake of the partner, the controller with a mock request and a 
 
 - **A parked event.** An event whose saga handler failed all its attempts is written to `saga_failures` (with its marker, so the
   consumer moves on), counted in `kraken_saga_events_total{outcome="parked"}` and logged at error. Inject `SagaFailures` and call
-  `list(type?)`, `retry(id)`, `retryAll(type)` or `discard(id)` once the cause is fixed. Nothing retries a parked event by itself.
+  `list(type?)`, `retry(id)`, `retryAll(type)` or `discard(id)` once the cause is fixed. Nothing retries a parked event by itself;
+  one nobody retries or discards is deleted `sagas.failed-retention` (30 days) after its last failure, as is a `saga_dispatch`
+  entry given up on.
 - **Metrics** (with a `MeterRegistry` bean, in a service that uses sagas or idempotent handlers): the saga rows of
   [Metrics](#metrics). A `kraken_saga_events_total{outcome="no_match"}` that grows means an association that does not line up.
   Logs carry `sagaType`, `sagaId` and `correlationId` in the MDC while a saga handles a message.
@@ -1697,7 +1700,7 @@ Docker Compose from local builds together with the real `kraken-hub` image, Kafk
   only reach handlers without `@RequiresAuthentication` (a `kraken-system` client-credentials token is future work).
 - Sagas: Kotlin only (the Rust crate follows, S2); a new saga type does not see events from before its deployment (no replay);
   parked saga events are retried by a person through `SagaFailures`; a saga belongs to one service.
-- Sagas, reviewed and left as they are: `saga_dispatch` entries that failed for good and `saga_failures` documents have no TTL; a
+- Sagas, reviewed and left as they are: a
   `startKey` is `"<type>|<key>=<value>"`, so an association key that contains `=` can make two pairs share one live instance
   (avoid `=` in keys); the smoke test does not check that a restart replays nothing twice (the tests do).
 
