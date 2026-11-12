@@ -1297,8 +1297,8 @@ class PaymentAdapter(private val gateway: PaymentGateway) {
   `ExternalCallUnknownOutcomeException` yourself when you see a connection break after the request went out: the record stays
   `UNKNOWN` and a redelivery reports it again. A call that ran but whose `SUCCEEDED` could not be written (the store went away)
   is an unknown outcome too, never a failed call (retryable with `externalIdempotent = true`). A call that outlives its lease
-  no longer owns the record (its writes match on the `attempts` it set): it never overwrites or deletes the record of the call
-  that took over or gave it up, and a body that returned then reports an unknown outcome (retryable with `externalIdempotent = true`).
+  no longer owns the record (its writes match on the random `owner` token it wrote, which a settled record no longer has): it
+  never overwrites or deletes the record of the call that took over, gave it up or inserted it afresh after a reset, and a body that returned then reports an unknown outcome (retryable with `externalIdempotent = true`).
 - `@IdempotentHandler(key = "'poll:' + message.jobId + ':' + message.attempt")` takes a SpEL key over `message` and `headers`.
 - The handler must not be `suspend`. Use `eventBus.publishBlocking(...)` to publish a result.
 - The interceptor and its collection exist when a class in the application's packages has an `@IdempotentHandler` method; set
