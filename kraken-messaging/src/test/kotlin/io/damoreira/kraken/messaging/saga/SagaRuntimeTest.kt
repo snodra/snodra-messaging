@@ -410,6 +410,19 @@ class SagaRuntimeTest {
     }
 
     @Test
+    fun `start keys whose parts contain the separators stay apart`() {
+        val escaping = runtime(RtEscapeSaga::class)
+        deliver(RtNote("x=1"), on = escaping) // k = "x=1"
+        deliver(RtBump("o", "1"), on = escaping) // "k=x" = 1: the same text once joined by "="
+
+        val docs = sagas("rt.Escape").sortedBy { it.startKey }
+        assertEquals(listOf("rt.Escape|k%3Dx=1", "rt.Escape|k=x%3D1"), docs.map { it.startKey }, "two instances, each with its own key")
+        assertEquals(listOf(1, 1), docs.map { it.stateDoc.getInteger("starts") })
+        assertEquals("rt.Escape%7Ca%25b|k=v", SagaRuntime.startKey("rt.Escape|a%b", "k", "v"), "the type name and a percent sign are escaped too")
+        assertEquals(0, mongo.count(Query(), "saga_failures"), "nothing was parked on a shared key")
+    }
+
+    @Test
     fun `associationHeader routes by the message header`() {
         deliver(RtNote("one"), headers = mapOf("x-order" to "h1"))
         deliver(RtNote("two"), headers = mapOf("x-order" to "h1"))

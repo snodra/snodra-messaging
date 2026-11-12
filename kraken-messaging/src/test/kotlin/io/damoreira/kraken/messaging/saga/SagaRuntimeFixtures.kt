@@ -186,6 +186,24 @@ class RtHeaderSaga {
     }
 }
 
+/** Two start handlers whose key and value pairs (`k` = `x=1`, `k=x` = `1`) read alike once joined by `=`. */
+@Saga(name = "rt.Escape")
+class RtEscapeSaga {
+    var starts = 0
+
+    @StartSaga
+    @SagaEventHandler(associationProperty = "text", keyName = "k")
+    fun on(e: RtNote) {
+        starts++
+    }
+
+    @StartSaga
+    @SagaEventHandler(associationProperty = "tag", keyName = "k=x")
+    fun on(e: RtBump) {
+        starts++
+    }
+}
+
 /** A clock the test moves: the relay's backoff and the scheduler's due times read it. */
 internal class SettableClock(@Volatile var now: Instant) : Clock() {
     override fun getZone(): ZoneId = ZoneId.of("UTC")

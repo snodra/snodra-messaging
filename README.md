@@ -1700,9 +1700,7 @@ Docker Compose from local builds together with the real `kraken-hub` image, Kafk
   only reach handlers without `@RequiresAuthentication` (a `kraken-system` client-credentials token is future work).
 - Sagas: Kotlin only (the Rust crate follows, S2); a new saga type does not see events from before its deployment (no replay);
   parked saga events are retried by a person through `SagaFailures`; a saga belongs to one service.
-- Sagas, reviewed and left as they are: a
-  `startKey` is `"<type>|<key>=<value>"`, so an association key that contains `=` can make two pairs share one live instance
-  (avoid `=` in keys); the smoke test does not check that a restart replays nothing twice (the tests do).
+- Sagas, reviewed and left as they are: the smoke test does not check that a restart replays nothing twice (the tests do).
 
 
 ## CI/CD pipeline
