@@ -35,6 +35,9 @@ interface HubTransport {
     /** See [HubConnection.hubTimeoutFor]. */
     fun hubTimeoutFor(type: String): java.time.Duration
 
+    /** See [HubConnection.hubDeadlineBound]. */
+    fun hubDeadlineBound(type: String, timeoutMs: Int): java.time.Duration
+
     /** See [HubConnection.gather]. */
     suspend fun gather(
         request: io.damoreira.kraken.hub.v1.Request,

@@ -199,6 +199,10 @@ private class ScriptedSender : RawCommandSender {
 
     val calls = CopyOnWriteArrayList<Call>()
     @Volatile var script: (Call) -> RawOutcome = { RawOutcome.Success }
+    /** What [sendTimeoutFor] answers for a type; null keeps the relay's send timeout (a local handler). */
+    @Volatile var timeoutFor: ((String) -> Duration)? = null
+
+    override fun sendTimeoutFor(type: String, sendTimeout: Duration): Duration = timeoutFor?.invoke(type) ?: sendTimeout
 
     override suspend fun sendRaw(type: String, payload: ByteArray, options: SendOptions): RawOutcome {
         val call = Call(type, String(payload, Charsets.UTF_8), options.headers, currentCoroutineContext()[CorrelationContext]?.correlationId, options.retry)
@@ -449,6 +453,20 @@ class SagaDispatchRelayTest {
         assertTrue(stuck.nextAttemptAt!! > clock.now)
         assertTrue(interrupted.await(5, TimeUnit.SECONDS), "the abandoned call's thread was interrupted")
         assertEquals(null, mongo.findById("stuck", SagaDispatchLeaseDocument::class.java), "the saga's lease was released")
+    }
+
+    @Test
+    fun `a send through the hub is not abandoned before the hub gave up on it, whatever the send timeout`() {
+        record("remote", 1000)
+        sender.timeoutFor = { Duration.ofSeconds(10) } // the hub's deadline for the type plus the guard
+        sender.script = { Thread.sleep(800); RawOutcome.Success } // longer than the send timeout, within the hub's deadline
+
+        relay(settings = settings.copy(sendTimeout = Duration.ofMillis(300))).pollOnce()
+
+        val remote = entry("remote:1000")
+        assertNotNull(remote.dispatchedAt, "the hub's answer was awaited: no second send while the hub may still run the first")
+        assertEquals(0, remote.attempts)
+        assertEquals(listOf("remote:1000"), sender.keys())
     }
 
     @Test

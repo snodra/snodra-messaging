@@ -164,6 +164,17 @@ class HubBus(
 
     private val localRaw = LocalRawCommandSender(invoker)
 
+    /**
+     * A local handler: [sendTimeout]. Through the hub at least the hub's deadline for the request [sendRaw] sends (its
+     * `timeout_ms` is [requestTimeout] or 0; every live hub's per-type override or clamp) plus
+     * [RawCommandSender.HUB_CALL_GUARD], so the relay never abandons a call the hub may still be running.
+     */
+    override fun sendTimeoutFor(type: String, sendTimeout: Duration): Duration {
+        if (registry.commandHandler(type) != null) return sendTimeout
+        val timeoutMs = chosenTimeout(null)?.toMillis()?.coerceIn(0, Int.MAX_VALUE.toLong())?.toInt() ?: 0
+        return maxOf(sendTimeout, connection.hubDeadlineBound(type, timeoutMs).plus(RawCommandSender.HUB_CALL_GUARD))
+    }
+
     /** The request of [sendRaw]: correlation id and trace context, [SendOptions.headers], never the caller's token. */
     private suspend fun rawTemplate(type: String, payload: ByteArray, options: SendOptions): Request {
         val headers = options.headers.toMutableMap()

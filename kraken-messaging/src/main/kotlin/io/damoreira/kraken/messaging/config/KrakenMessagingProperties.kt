@@ -328,7 +328,10 @@ data class KrakenMessagingProperties(
         val initialBackoff: Duration = Duration.ofSeconds(1),
         /** Upper bound of one wait between attempts. */
         val maxBackoff: Duration = Duration.ofMinutes(5),
-        /** How long a command send may take: one with no answer by then (a hung local adapter) is abandoned and retried as a transient failure. */
+        /**
+         * How long a command send may take: one with no answer by then (a hung local adapter) is abandoned and retried as a transient
+         * failure. Through the hub never less than the hub's deadline for the command plus 10 s.
+         */
         val sendTimeout: Duration = Duration.ofMinutes(1),
     ) {
         init {

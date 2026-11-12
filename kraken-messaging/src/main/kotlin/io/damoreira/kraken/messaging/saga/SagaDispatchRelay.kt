@@ -41,7 +41,8 @@ import kotlin.concurrent.withLock
  * dispatch lease holds, and the transient retry of a command (up to [maxAttempts] attempts in all, then `EXHAUSTED`, with
  * [initialBackoff] growing by [multiplier] up to [maxBackoff]). [parallelism] sagas are dispatched at a time, at most
  * [batchSize] of them per poll. A command send gets [sendTimeout] for its answer (H1): one that takes longer is abandoned
- * and counts as a transient failure.
+ * and counts as a transient failure. Through the hub the bound is never shorter than the hub's own deadline for the call plus
+ * a guard ([RawCommandSender.sendTimeoutFor]).
  */
 data class RelaySettings(
     val pollInterval: Duration = Duration.ofMillis(500),
@@ -212,11 +213,13 @@ class SagaDispatchRelay(
                 commands.sendRaw(entry.type, entry.payload.toByteArray(Charsets.UTF_8), SendOptions(routingKey = entry.routingKey, retry = RetryPolicy.NONE, headers = headers))
             }
         })
+        // A local adapter has no other bound; through the hub the bound waits for the hub to give up first (ADR 0021 ruling 74).
+        val timeout = commands.sendTimeoutFor(entry.type, settings.sendTimeout)
         val outcome = try {
-            send.get(settings.sendTimeout.toMillis(), TimeUnit.MILLISECONDS)
+            send.get(timeout.toMillis(), TimeUnit.MILLISECONDS)
         } catch (_: TimeoutException) {
             send.cancel(true)
-            RawOutcome.Transient("no answer within ${settings.sendTimeout.toMillis()} ms: the call was abandoned and its thread interrupted")
+            RawOutcome.Transient("no answer within ${timeout.toMillis()} ms: the call was abandoned and its thread interrupted")
         } catch (e: ExecutionException) {
             RawFailures.classify(e.cause ?: e)
         } catch (e: Exception) {

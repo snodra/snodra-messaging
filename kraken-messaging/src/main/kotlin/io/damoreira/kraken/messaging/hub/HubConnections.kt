@@ -373,6 +373,11 @@ class HubConnections(
     override fun hubTimeoutFor(type: String): Duration =
         live.value.firstOrNull()?.hubTimeoutFor(type) ?: HubProtocol.DEFAULT_REQUEST_TIMEOUT
 
+    /** The longest deadline any live hub may give a request (a request goes to one of them); see [HubConnection.hubDeadlineBound]. */
+    override fun hubDeadlineBound(type: String, timeoutMs: Int): Duration =
+        live.value.maxOfOrNull { it.hubDeadlineBound(type, timeoutMs) }
+            ?: Duration.ofMillis(HubProtocol.hubDeadlineBoundMs(timeoutMs, type, io.damoreira.kraken.hub.v1.RegisterAck.getDefaultInstance()))
+
     /** Closes every stream, stops reconnecting and resolving, and fails every request in flight. */
     suspend fun stop() {
         val members = synchronized(lock) {
