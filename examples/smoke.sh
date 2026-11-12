@@ -14,8 +14,9 @@
 #        C=http://localhost:8094 is service-c's HTTP address;
 #        SKIP_AUDIT=1 skips the named-processor and dead-letter steps 26-26h (the `audit` processor of service-b and
 #        service-c), ONLY_AUDIT=1 runs only them;
-#        SKIP_CONTROL=1 skips the processor-control steps 27-27e (pause, resume, reset and dead letters of both `audit`
-#        processors through the hub's HTTP API with the write token), ONLY_CONTROL=1 runs only them; WRITE_TOKEN_FILE names
+#        SKIP_CONTROL=1 skips the processor-control steps 27-27f (pause, resume, reset and dead letters of both `audit`
+#        processors, and a reset of both `default` processors past a saga's start, through the hub's HTTP API with the write
+#        token), ONLY_CONTROL=1 runs only them; WRITE_TOKEN_FILE names
 #        the write token, default <secrets directory>/hub-control/dashboard-write.token (kraken/infra/scripts/dev-hub-pki.sh,
 #        in every mode);
 #        SKIP_BROWSER=1 skips the event browser steps 28-28f (search, record, payload rules, tail and consumer groups of
@@ -1223,13 +1224,17 @@ audit_steps() {
 # (RUNNING, not replaying). The topic holds every note since the sandbox started, so only this run's keys are checked.
 # 27e: dead letters through the hub: a poison note parked (the failure on), listed by the hub without a payload, retried
 # (Failed while failing, Retried with the failure off, its key handled), the list empty; another one discarded (a second
-# discard is a 404). SKIP_CONTROL=1 skips these steps, ONLY_CONTROL=1 runs only them.
+# discard is a 404). 27f: a postcard (service-b) and a banner (service-c) of this run are printed once (the printer's log:
+# PRINTER_CONTAINER, default kraken-example-printer), then each service's `default` processor is paused, reset to a moment
+# before the saga's start event and resumed: the replay runs (ok, replay) and ends, and 10 s later the printer has still
+# delivered the job once: a replay never runs a saga again (ADR 0023). SKIP_CONTROL=1 skips these steps, ONLY_CONTROL=1 runs
+# only them.
 
 # A call to <hub>'s control API for <service>'s audit processor, with the credential <cred>: `write` (the write token), `read`
 # (the dashboard token, SECURE=1), `wrong` or `none`. Prints the body and then the HTTP code on a line of its own. A token goes
 # through a curl config on a pipe, as the curl wrapper does, so it never shows in a process list.
 control_call() { # <hub> <cred> <method> <service> <path> [json body]
-  local url="$1/api/v1/services/$4/processors/audit/$5" token="" args=(-sS --max-time 200 -X "$3" -w '\n%{http_code}')
+  local url="$1/api/v1/services/$4/processors/${PROCESSOR:-audit}/$5" token="" args=(-sS --max-time 200 -X "$3" -w '\n%{http_code}')
   [ "$SECURE" = "1" ] && args+=(--cacert "$SECRETS/ca.pem")
   case $2 in write) token=$WRITE_TOKEN ;; read) token=$DASHBOARD_TOKEN ;; wrong) token=wrong-write-token-0123456789 ;; esac
   [ -n "${6:-}" ] && args+=(-H 'content-type: application/json' -d "$6")
@@ -1244,21 +1249,27 @@ control_call() { # <hub> <cred> <method> <service> <path> [json body]
 control_expect() { # <code> <hub> <cred> <method> <service> <path> [json body]
   local want=$1 reply code
   shift
-  reply=$(control_call "$@") || fail "$3 $1 .../$4/processors/audit/$5 failed"
+  reply=$(control_call "$@") || fail "$3 $1 .../$4/processors/${PROCESSOR:-audit}/$5 failed"
   code=${reply##*$'\n'}
-  [ "$code" = "$want" ] || fail "$3 $1/api/v1/services/$4/processors/audit/$5 ($2 credential): expected $want, got $code: ${reply%$'\n'*}"
+  [ "$code" = "$want" ] || fail "$3 $1/api/v1/services/$4/processors/${PROCESSOR:-audit}/$5 ($2 credential): expected $want, got $code: ${reply%$'\n'*}"
   printf '%s' "${reply%$'\n'*}"
 }
 
-# Waits until the hub shows <service>'s audit processor as "<state> <replaying> <operationId or ->" matching <pattern>.
+# Waits until the hub shows <service>'s audit processor (PROCESSOR=<name> for another) as "<state> <replaying> <operationId or ->"
+# matching <pattern>. control_call and control_expect take PROCESSOR the same way.
 await_control_state() { # <service> <pattern> <seconds>
   local start=$SECONDS st=""
   while [ $((SECONDS - start)) -lt "$3" ]; do
-    st=$(curl -fsS "$HUB/api/v1/processors" 2>/dev/null | control_state "$1" audit || true)
+    st=$(curl -fsS "$HUB/api/v1/processors" 2>/dev/null | control_state "$1" "${PROCESSOR:-audit}" || true)
     if printf '%s' "$st" | grep -Eq "^($2)$"; then printf '%s' "$st"; return 0; fi
     sleep 1
   done
-  fail "$HUB/api/v1/processors: expected $1's audit processor as '$2' (state replaying operation) within ${3}s, got '${st:-not listed}'"
+  fail "$HUB/api/v1/processors: expected $1's ${PROCESSOR:-audit} processor as '$2' (state replaying operation) within ${3}s, got '${st:-not listed}'"
+}
+
+# How often the fake printer delivered the webhook of job <id> (its log: "Printer: webhook of <id> delivered (attempt n)").
+printer_deliveries() { # <id>
+  { docker logs "${PRINTER_CONTAINER:-kraken-example-printer}" 2>&1 | grep -c -- "webhook of $1 delivered"; } || true
 }
 
 # The texts the audit processor's notifier at <base> handled for <key>, comma-separated (as audit_handled).
@@ -1289,17 +1300,19 @@ await_hub_letter() { # <service> <key> <seconds>
   fail "$HUB: expected one dead letter of $1's audit processor under key $2 within ${3}s, got '$got'"
 }
 
-# Leaves nothing behind when a step fails: both audit processors resumed, the failure off.
+# Leaves nothing behind when a step fails: both audit and both default processors resumed, the failure off.
 control_off() {
   trap - EXIT
   control_call "$HUB" write POST service-b resume >/dev/null 2>&1 || true
   control_call "$HUB" write POST service-c resume >/dev/null 2>&1 || true
+  PROCESSOR=default control_call "$HUB" write POST service-b resume >/dev/null 2>&1 || true
+  PROCESSOR=default control_call "$HUB" write POST service-c resume >/dev/null 2>&1 || true
   command curl -fsS -X POST "$B/audit/failing?on=false" >/dev/null 2>&1 || true
   command curl -fsS -X POST "$C/audit/failing?on=false" >/dev/null 2>&1 || true
 }
 
 control_steps() {
-  local run file secrets label base reply code h st op n resets id key reason attempts lag
+  local run file secrets label base reply code h st op n resets id key reason attempts lag since
   run=$(date +%s)
   secrets=${SECRETS:-${SECRETS_DIR:-${KRAKEN_SECRETS_DIR:-$INFRA/.secrets}}}
   file=${WRITE_TOKEN_FILE:-$secrets/hub-control/dashboard-write.token}
@@ -1415,6 +1428,30 @@ control_steps() {
     control_expect 404 "$HUB" write DELETE "$label" "dead-letters/$id" >/dev/null
     [ -z "$(hub_letters_of "$label" "x$run")" ] || fail "$label: the discarded letter $id is still listed"
     echo "   $label: $id discarded through the hub, a second discard 404"
+  done
+
+  echo "27f. a reset of default replays a saga's start event and the saga does not run again (service-b's postcard, service-c's banner) ..."
+  for label in "service-b $B" "service-c $C"; do
+    read -r label base <<< "$label"
+    since=$(( ($(date +%s) - 2) * 1000 ))
+    if [ "$label" = "service-b" ]; then
+      id=$(greet "webhook-z$run"); [ -n "$id" ] || fail "no id in the greeting reply"
+      await_postcard "$id" PRINTED - 90 >/dev/null
+    else
+      shout "webhook-z$run"; id="banner-webhook-z$run"
+      await_banner "$id" PRINTED - 90 >/dev/null
+    fi
+    [ "$(printer_deliveries "$id")" = "1" ] || fail "$label: the printer should have delivered job $id once before the reset, got $(printer_deliveries "$id")"
+    PROCESSOR=default control_expect 200 "$HUB" write POST "$label" pause >/dev/null
+    PROCESSOR=default await_control_state "$label" 'PAUSED false -' 30 >/dev/null
+    reply=$(PROCESSOR=default control_expect 200 "$HUB" write POST "$label" reset "{\"to\":{\"timestampMs\":$since}}")
+    [ "$(printf '%s' "$reply" | reply_field outcome)" = "ok" ] && [ "$(printf '%s' "$reply" | reply_field replay)" = "true" ] \
+      || fail "$label: the reset of default to $since should be ok with a replay, got: $reply"
+    PROCESSOR=default control_expect 200 "$HUB" write POST "$label" resume >/dev/null
+    st=$(PROCESSOR=default await_control_state "$label" '(RUNNING|FAILING) false -' 120)
+    sleep 10 # the saga relay polls every 500 ms: a saga run again by the replay would have sent its print by now
+    [ "$(printer_deliveries "$id")" = "1" ] || fail "$label: the replay of default ran the saga again: the printer delivered job $id $(printer_deliveries "$id") times"
+    echo "   $label: job $id printed once, default reset to $since (operation $(printf '%s' "$reply" | reply_field operationId), $(printf '%s' "$reply" | reply_field markersDeleted) markers deleted) and replayed, printed still once; default: $st"
   done
   control_off
 }

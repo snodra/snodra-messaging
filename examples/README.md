@@ -240,7 +240,7 @@ SKIP_SUBSCRIBE=1 bash examples/smoke.sh # without the subscription-query steps
 ONLY_SUBSCRIBE=1 bash examples/smoke.sh # only the subscription-query steps (needs jq or python3)
 SKIP_AUDIT=1 bash examples/smoke.sh   # without the named-processor and dead-letter steps (26 to 26h)
 ONLY_AUDIT=1 bash examples/smoke.sh   # only those steps (needs jq or python3)
-SKIP_CONTROL=1 bash examples/smoke.sh # without the processor-control steps (27 to 27e)
+SKIP_CONTROL=1 bash examples/smoke.sh # without the processor-control steps (27 to 27f)
 ONLY_CONTROL=1 bash examples/smoke.sh # only those steps (needs jq or python3 and the write token, see "Event processors and dead letters")
 SKIP_BROWSER=1 bash examples/smoke.sh # without the event browser steps (28 to 28f)
 ONLY_BROWSER=1 bash examples/smoke.sh # only those steps (needs jq or python3, see "Event browser")
@@ -638,7 +638,7 @@ curl -s -X POST -H "$W" "$HUB/dead-letters/<id>/retry"   # {"result":"Retried",.
 curl -s -X DELETE -H "$W" "$HUB/dead-letters/<id>"       # discard instead: {"discarded":true}; again: 404
 ```
 
-Smoke steps 27 to 27e drive this for service-b and for service-c, in every sandbox mode: 27 expects a write without a credential
+Smoke steps 27 to 27f drive this for service-b and for service-c, in every sandbox mode: 27 expects a write without a credential
 (or with a wrong one) to be 401 on both hubs and, with `SECURE=1`, the dashboard token's to be 403 read-only, clears leftover letters
 and resumes the processor; 27b pauses it (PAUSED on `GET /api/v1/processors`), publishes two notes that stay unhandled for 8 s (the processor's `lag`
 there is at least 2) and resumes it (they are handled, the lag back to 0); 27c publishes two notes under a key of the run (handled and notified once), pauses the processor and
@@ -647,7 +647,9 @@ once, and the hub shows the processor PAUSED, replaying, with no operation left 
 expects the run's notes handled again, the notifier not run again and the replay to end (RUNNING, not replaying); 27e parks a
 poison note, lists it through the hub (`HANDLER_FAILED`, no payload), retries it through the hub while failing (`Failed`) and with
 the failure off (`Retried`, the note handled, the list empty), and discards another one through the hub (a second discard is a
-404). The topic holds every note since the sandbox started, so a reset to `earliest` replays them all; the steps check only the
+404); 27f has a postcard (service-b) and a banner (service-c) printed once, then pauses each service's `default` processor,
+resets it to a moment before the saga's start event and resumes it: the replay runs and ends, and the fake printer has still
+delivered the job once (its log), because a replay never runs a saga again. The topic holds every note since the sandbox started, so a reset to `earliest` replays them all; the steps check only the
 keys of the run. They need `jq` or `python3`; `SKIP_CONTROL=1` skips them, `ONLY_CONTROL=1` runs only them.
 
 ## Event browser
