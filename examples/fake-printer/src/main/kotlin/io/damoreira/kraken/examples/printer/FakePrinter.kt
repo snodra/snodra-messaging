@@ -1,6 +1,7 @@
 package io.damoreira.kraken.examples.printer
 
 import org.slf4j.LoggerFactory
+import java.net.URI
 import java.time.Duration
 import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
@@ -39,14 +40,17 @@ interface Notifier {
  * - `crash-*`: accepts, then takes the process down before replying (the customer's unknown-outcome path; compose restarts it).
  *
  * A job submitted twice under the same idempotency key is accepted twice and printed once, as a real partner that
- * de-duplicates by the key it is given. [later] runs a task after a delay (the printing time); the other collaborators
- * are seams for the tests.
+ * de-duplicates by the key it is given. A job's `replyWebhook` must be an absolute `http(s)` URL on one of [replyHosts]
+ * (the customers the printer serves): any other is refused before anything is accepted, so a caller cannot make the
+ * printer post its signed notifications to an address of its choosing. [later] runs a task after a delay (the printing
+ * time); the other collaborators are seams for the tests.
  */
 class FakePrinter(
     private val clock: () -> Instant,
     private val notifier: Notifier,
     private val later: (Duration, () -> Unit) -> Unit,
     private val crash: () -> Unit,
+    private val replyHosts: Set<String>,
     private val pollDelay: Duration = Duration.ofSeconds(5),
     private val printDelay: Duration = Duration.ofSeconds(1),
 ) {
@@ -56,7 +60,9 @@ class FakePrinter(
 
     private class Accepted(val name: String, val at: Instant)
 
+    /** @throws IllegalArgumentException when the job's reply webhook is not an `http(s)` URL on one of the [replyHosts] */
     fun submit(idempotencyKey: String, job: JobRequest): SubmitResult {
+        job.replyWebhook?.let(::checkReplyWebhook)
         if (!seen.add(idempotencyKey)) {
             log.info("Printer: job {} under key {} already accepted, not printing again", job.jobId, idempotencyKey)
             return SubmitResult(job.jobId, "ACCEPTED", duplicate = true)
@@ -74,6 +80,13 @@ class FakePrinter(
             else -> later(printDelay) { notifier.webhook(notification, job.replyWebhook) }
         }
         return SubmitResult(job.jobId, "ACCEPTED", duplicate = false)
+    }
+
+    private fun checkReplyWebhook(url: String) {
+        val uri = runCatching { URI(url) }.getOrNull()
+        require(uri != null && uri.isAbsolute && uri.scheme.lowercase() in setOf("http", "https") && uri.host in replyHosts) {
+            "the reply webhook must be an http(s) URL on one of the printer's customers ${replyHosts.sorted()}, was $url"
+        }
     }
 
     fun status(jobId: String): JobStatus? {

@@ -515,7 +515,10 @@ examples up --no-deps printer-topic-init`. Smoke steps 24 to 24e drive all five 
 `ONLY_POSTCARD=1` runs only them); step 24 also replays the webhook (200, applied once) and sends a wrong secret (401).
 
 A job may name its own reply target (`replyWebhook`, `replyTopic` in the `POST /jobs` body): the printer posts and produces
-there instead of to service-b's webhook and `printer.events`, signing with the same dev-only secret. Postcards send none.
+there instead of to service-b's webhook and `printer.events`, signing with the same dev-only secret. Postcards send none. A
+`replyWebhook` must be an `http(s)` URL on a host the printer serves, the host of `PRINTER_WEBHOOK_URL` or one listed in
+`PRINTER_REPLY_HOSTS` (comma-separated; the sandbox lists `service-c`): any other is refused with 400, so a caller cannot make
+the printer post its signed notifications to an address of its choosing.
 
 ## The banner saga
 

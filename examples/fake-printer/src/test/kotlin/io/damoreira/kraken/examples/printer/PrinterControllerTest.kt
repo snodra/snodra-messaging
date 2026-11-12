@@ -25,6 +25,7 @@ class PrinterControllerTest {
             },
             later = { _, _ -> },
             crash = {},
+            replyHosts = setOf("service-c"),
             pollDelay = Duration.ofSeconds(5),
         )
     }
@@ -42,6 +43,12 @@ class PrinterControllerTest {
         val body = """{"jobId":"g3","name":"poll-c","replyWebhook":"http://service-c:8080/printer/webhook","replyTopic":"printer.banner.events"}"""
         assertThat(mvc.post().uri("/jobs").contentType(MediaType.APPLICATION_JSON).header("Idempotency-Key", "k3").content(body))
             .hasStatus(HttpStatus.OK).bodyJson().isLenientlyEqualTo("""{"jobId":"g3","status":"ACCEPTED","duplicate":false}""")
+    }
+
+    @Test fun `POST jobs with a reply webhook on a host the printer does not serve is 400`() {
+        val body = """{"jobId":"g4","name":"webhook-c","replyWebhook":"http://169.254.169.254/latest/meta-data/"}"""
+        assertThat(mvc.post().uri("/jobs").contentType(MediaType.APPLICATION_JSON).header("Idempotency-Key", "k4").content(body))
+            .hasStatus(HttpStatus.BAD_REQUEST)
     }
 
     @Test fun `POST jobs without an idempotency key is 400`() {

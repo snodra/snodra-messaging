@@ -13,7 +13,11 @@ import org.springframework.web.server.ResponseStatusException
 @RestController
 class PrinterController(private val printer: FakePrinter) {
     @PostMapping("/jobs")
-    fun submit(@RequestHeader("Idempotency-Key") key: String, @RequestBody job: JobRequest): SubmitResult = printer.submit(key, job)
+    fun submit(@RequestHeader("Idempotency-Key") key: String, @RequestBody job: JobRequest): SubmitResult = try {
+        printer.submit(key, job)
+    } catch (e: IllegalArgumentException) {
+        throw ResponseStatusException(HttpStatus.BAD_REQUEST, e.message)
+    }
 
     @GetMapping("/jobs/{jobId}")
     fun status(@PathVariable jobId: String): JobStatus =
