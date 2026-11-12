@@ -1136,7 +1136,8 @@ path. The bean `ProcessorControl` does all of it; its `pause(processor)` and `re
   and resumes by itself; an instance that starts while the lock is held stays out of the group until it clears. A second reset
   while one holds the lock is refused (`LOCKED`). A renewal that arrives after the finish never takes the lock again: an
   operation that ended on an instance (finished, aborted, its lease passed, its lock lost) is remembered for at least
-  max(2 x lease, 60 s), and a prepare of it, or a renewal whose lock is gone, is refused `NOT_PREPARED`.
+  max(2 x lease, 60 s), and a prepare of it, or a renewal whose lock is gone, is refused `NOT_PREPARED`. A prepare or renewal
+  asking for a lease under 1000 ms is refused `INVALID` (the hub asks for 30 s).
 - **The execute** resolves the target per partition (Kafka `Admin.listOffsets`; a timestamp past the last record means the end),
   reads the group's committed offsets ("before"), refuses while the group has any active member (`GROUP_NOT_EMPTY`, nothing
   changed), runs the processor's `@ResetHandler`s, deletes the processor's markers in the replay ranges, writes the ranges to the

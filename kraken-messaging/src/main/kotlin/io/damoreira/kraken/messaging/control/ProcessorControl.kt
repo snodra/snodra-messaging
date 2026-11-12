@@ -51,7 +51,8 @@ import java.util.concurrent.TimeUnit
  * (the instance clears the operation it held and resumes), and the replay ranges this instance consumed past (removed).
  *
  * Requests run off the hub stream, one at a time per processor (a single thread each), except the renewal of the operation
- * this instance holds, which is answered at once. A reset executes here only for an operation this instance holds:
+ * this instance holds, which is answered at once. A prepare or renewal with a lease under [MIN_RESET_LEASE_MS] is INVALID. A
+ * reset executes here only for an operation this instance holds:
  * 1. the target becomes per-partition offsets (`Admin.listOffsets`: earliest, latest, for a timestamp; explicit offsets are
  *    checked against the partitions and watermarks), 2. the group's committed offsets are read, a range `[target, before)`
  *    per partition where the target is lower, 3. the group must be empty (`describeConsumerGroups`), 4. the processor's
@@ -161,6 +162,10 @@ class ProcessorControl(
             log.info("Control {} {} on processor {}: {}", request.controlId, actionOf(request), request.processor, describe(result))
             reply(result)
         }
+        if (request.hasResetPrepare() && request.resetPrepare.leaseMs < MIN_RESET_LEASE_MS) {
+            answer(refused(request, ControlRefusal.CONTROL_REFUSAL_INVALID, BAD_PREPARE))
+            return
+        }
         if (slot == null) {
             answer(refused(request, ControlRefusal.CONTROL_REFUSAL_UNKNOWN_PROCESSOR, "processor ${request.processor} does not run on this instance"))
             return
@@ -173,7 +178,7 @@ class ProcessorControl(
             }
         }
         val prepare = request.resetPrepare
-        if (request.hasResetPrepare() && prepare.leaseMs > 0 && slot.held?.id == prepare.operationId) {
+        if (request.hasResetPrepare() && slot.held?.id == prepare.operationId) {
             // A renewal of the operation held here: answered at once, never behind an execute of it (ADR 0023).
             Thread.ofVirtual().name("kraken-control-renew").start { answer(guarded(request) { renew(slot, request) }) }
         } else {
@@ -221,7 +226,7 @@ class ProcessorControl(
     private fun prepare(slot: Slot, request: ControlRequest): ControlReply {
         val op = request.resetPrepare.operationId
         val leaseMs = request.resetPrepare.leaseMs
-        if (op.isBlank() || leaseMs <= 0) return refused(request, ControlRefusal.CONTROL_REFUSAL_INVALID, "a prepare needs an operation id and a positive lease")
+        if (op.isBlank() || leaseMs < MIN_RESET_LEASE_MS) return refused(request, ControlRefusal.CONTROL_REFUSAL_INVALID, BAD_PREPARE)
         if (hasEnded(slot, op)) return refused(request, ControlRefusal.CONTROL_REFUSAL_NOT_PREPARED, "operation $op already finished on this instance")
         val lease = Duration.ofMillis(leaseMs)
         val processor = slot.consumer.processor
@@ -246,7 +251,7 @@ class ProcessorControl(
         val held = slot.held
         if (held == null || held.id != op) return notPrepared(slot, request, op)
         slot.executing = true
-        val period = minOf(LEASE_EXTENSION, held.lease.dividedBy(3)).toMillis().coerceAtLeast(50)
+        val period = minOf(LEASE_EXTENSION, held.lease.dividedBy(3)).toMillis()
         val until = System.nanoTime() + executeLeaseLimit.toNanos()
         val extension = leases?.scheduleAtFixedRate(
             {
@@ -646,6 +651,12 @@ class ProcessorControl(
 
         /** `pausedBy` of a pause made through [pause] / [resume] on this instance. */
         const val LOCAL = "local"
+
+        /** The shortest lease a `ResetPrepare` may ask for (the hub asks for 30 s): a shorter one would lapse before anything happened. */
+        const val MIN_RESET_LEASE_MS = 1000L
+
+        /** The refusal of a prepare without an operation id or with a lease under [MIN_RESET_LEASE_MS] (the Rust library's text). */
+        private const val BAD_PREPARE = "a prepare needs an operation id and a lease of at least 1000 ms"
 
         /** The most letters a `DeadLetterList` may ask for. */
         const val MAX_LIST = 100

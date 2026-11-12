@@ -515,6 +515,22 @@ class ProcessorControlTest {
         assertTrue(a.ask(finish("op-1")).hasOk())
     }
 
+    @Test fun `a prepare or renewal with a lease under a second is invalid`() {
+        topic = support.newTopic("kraken.events.ctl", partitions = 1)
+        val a = instance(projection)
+        for (leaseMs in listOf(-1L, 0L, 1L, 999L)) {
+            val reply = a.ask(prepare("op-1", leaseMs = leaseMs))
+            assertEquals(ControlRefusal.CONTROL_REFUSAL_INVALID, reply.refusal(), "lease $leaseMs ms")
+            assertEquals("a prepare needs an operation id and a lease of at least 1000 ms", reply.refused.message)
+            assertNull(control()?.operation, "no lock taken")
+        }
+        assertEquals(ControlRefusal.CONTROL_REFUSAL_INVALID, a.ask(prepare("op-1", processor = "elsewhere", leaseMs = 1)).refusal(), "checked before the processor")
+        assertTrue(a.ask(prepare("op-1", leaseMs = 1000)).hasOk(), "a second is a lease")
+        val renewal = a.ask(prepare("op-1", leaseMs = 999))
+        assertEquals(ControlRefusal.CONTROL_REFUSAL_INVALID, renewal.refusal(), "a renewal too")
+        assertTrue(a.ask(finish("op-1")).hasOk())
+    }
+
     @Test fun `dead letters are listed, retried, retried all and discarded through control`() {
         topic = support.newTopic("kraken.events.ctl", partitions = 1)
         audit.failing = "d-1"
