@@ -72,8 +72,9 @@ class SagaRuntime(
     override fun process(type: String, payload: ByteArray, ctx: MessageContext): Boolean {
         var applied = false
         for (sagaType in byEvent[type].orEmpty()) {
+            // Parked (null) counts too: the event reached a saga, whose park is logged and kept for a person.
             val kind = deliverKind(sagaType, type, payload, ctx, null)
-            if (kind == Kind.HANDLED || kind == Kind.DUPLICATE) applied = true
+            if (kind != Kind.NO_MATCH && kind != Kind.GONE) applied = true
         }
         return applied
     }

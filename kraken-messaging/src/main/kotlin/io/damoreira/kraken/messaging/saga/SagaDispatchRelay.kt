@@ -266,7 +266,7 @@ class SagaDispatchRelay(
             SagaDispatchDocument::class.java,
         )
         log.warn("Saga {} command {} ({}) failed with {}: {}", entry.sagaId, entry.id, entry.type, reason, message)
-        deliverNotice(entry.copy(attempts = attempts, failedAt = now, failureReason = reason, failureMessage = message, noticePending = true, noticeAttempts = 0))
+        deliverNoticeQuietly(entry.copy(attempts = attempts, failedAt = now, failureReason = reason, failureMessage = message, noticePending = true, noticeAttempts = 0))
     }
 
     /** Claims the pending failure notices that are due (up to a batch, not those in flight here), each reserved for this instance by moving `noticeNextAt` a lease ahead. */
@@ -288,11 +288,16 @@ class SagaDispatchRelay(
         return claimed
     }
 
+    /**
+     * [deliverNotice], whose own failures (the delivery's are handled inside it) are the store's: the notice's pending mark
+     * could not be cleared or its next attempt not recorded. It stays pending and is delivered again when its claim
+     * expires (the dedupe id makes that harmless); the entry itself is settled, so the saga's later entries go on.
+     */
     private fun deliverNoticeQuietly(entry: SagaDispatchDocument): Int {
         try {
             deliverNotice(entry)
         } catch (e: Exception) {
-            log.warn("Delivering the failure notice of {} failed, trying again when its claim expires: {}", entry.id, e.toString())
+            log.warn("The failure notice of {} could not be settled in the store; it is delivered again when its claim expires: {}", entry.id, e.toString())
         }
         return 1
     }
@@ -319,9 +324,22 @@ class SagaDispatchRelay(
         } catch (e: Exception) {
             return noticeFailed(entry, e)
         }
-        if (outcome == LocalEventDispatcher.Outcome.NO_INTEREST || outcome == LocalEventDispatcher.Outcome.UNCLAIMED) {
-            metrics.commandFailureUnhandled(entry.type, reason)
-            log.error("Saga {} command {} ({}) failed with {} and no live saga with a SagaCommandFailed handler and no ordinary handler took it: {}", entry.sagaId, entry.id, entry.type, reason, entry.failureMessage)
+        when (outcome) {
+            LocalEventDispatcher.Outcome.NO_INTEREST -> {
+                metrics.commandFailureUnhandled(entry.type, reason)
+                log.error(
+                    "Saga {} command {} ({}) failed with {} and nothing in this service handles SagaCommandFailed (no saga type with a handler for it, no ordinary handler): {}",
+                    entry.sagaId, entry.id, entry.type, reason, entry.failureMessage,
+                )
+            }
+            LocalEventDispatcher.Outcome.UNCLAIMED -> {
+                metrics.commandFailureUnhandled(entry.type, reason)
+                log.error(
+                    "Saga {} command {} ({}) failed with {} and no live instance of a saga took it (the saga ended or no longer associates with {}), and no ordinary handler handles it: {}",
+                    entry.sagaId, entry.id, entry.type, reason, entry.sagaId, entry.failureMessage,
+                )
+            }
+            else -> Unit
         }
         clearNotice(entry)
     }
@@ -335,7 +353,7 @@ class SagaDispatchRelay(
         if (attempts >= settings.maxAttempts) {
             metrics.commandFailureUnhandled(entry.type, entry.failureReason!!)
             log.error(
-                "Gave up delivering SagaCommandFailed for saga {} command {} ({}, {}) after {} attempts; the saga never heard of it: {}",
+                "Gave up delivering SagaCommandFailed for saga {} command {} ({}, {}) after {} attempts; the saga may have applied it (its stage runs even when an ordinary handler fails), but the delivery kept failing: {}",
                 entry.sagaId, entry.id, entry.type, entry.failureReason, attempts, error.toString(),
             )
             clearNotice(entry)
