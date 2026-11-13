@@ -1,13 +1,5 @@
 package io.damoreira.kraken.messaging.config
 
-import kotlin.test.assertFails
-import org.springframework.context.annotation.Import
-import org.springframework.boot.test.system.OutputCaptureExtension
-import org.springframework.boot.test.system.CapturedOutput
-import org.springframework.boot.autoconfigure.ImportAutoConfiguration
-import org.springframework.boot.WebApplicationType
-import org.springframework.boot.SpringApplication
-import org.junit.jupiter.api.extension.ExtendWith
 import io.damoreira.kraken.messaging.CommandBus
 import io.damoreira.kraken.messaging.EventBus
 import io.damoreira.kraken.messaging.config.sagascan.SagaScanConfig
@@ -25,14 +17,22 @@ import org.awaitility.kotlin.await
 import org.awaitility.kotlin.until
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.extension.ExtendWith
 import org.springframework.beans.factory.NoSuchBeanDefinitionException
+import org.springframework.boot.SpringApplication
+import org.springframework.boot.WebApplicationType
 import org.springframework.boot.autoconfigure.AutoConfigurations
+import org.springframework.boot.autoconfigure.ImportAutoConfiguration
 import org.springframework.boot.test.context.runner.ApplicationContextRunner
+import org.springframework.boot.test.system.CapturedOutput
+import org.springframework.boot.test.system.OutputCaptureExtension
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
+import org.springframework.context.annotation.Import
 import java.time.Duration
 import java.time.Instant
 import kotlin.test.assertEquals
+import kotlin.test.assertFails
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue

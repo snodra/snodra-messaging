@@ -28,6 +28,8 @@ import org.springframework.transaction.TransactionStatus
 import org.springframework.transaction.support.SimpleTransactionStatus
 import org.springframework.transaction.support.TransactionCallback
 import org.springframework.transaction.support.TransactionOperations
+import tools.jackson.databind.JsonNode
+import tools.jackson.databind.json.JsonMapper
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
@@ -262,6 +264,7 @@ private class InMemorySagaStore : TransactionOperations {
     val deadlines = LinkedHashMap<String, DeadlineDocument>()
     val failures = LinkedHashMap<String, SagaFailureDocument>()
     val markers = HashSet<String>()
+    private val json = JsonMapper.builder().build()
 
     override fun <T> execute(action: TransactionCallback<T>): T {
         val before = Snapshot(LinkedHashMap(sagas), ArrayList(dispatch), LinkedHashMap(deadlines), LinkedHashMap(failures), HashSet(markers))
@@ -285,6 +288,19 @@ private class InMemorySagaStore : TransactionOperations {
         deadlines.clear(); deadlines.putAll(s.deadlines)
         failures.clear(); failures.putAll(s.failures)
         markers.clear(); markers.addAll(s.markers)
+    }
+
+    /** Refuses what the outbox refuses (see `OutboxEntry`): anything but a JSON object whose integers fit in a signed 64-bit integer. */
+    private fun requireOutboxPayload(e: SagaDispatchDocument) {
+        val what = "saga event ${e.id} (${e.type})"
+        val tree = try {
+            json.readTree(e.payload)
+        } catch (x: RuntimeException) {
+            throw IllegalArgumentException("The payload of $what is not JSON: ${x.message}", x)
+        }
+        require(tree.isObject) { "The payload of $what is not a JSON object: ${e.payload}" }
+        fun fits(node: JsonNode): Boolean = if (node.isIntegralNumber) node.canConvertToLong() else node.values().all(::fits)
+        require(fits(tree)) { "The payload of $what has an integer outside the signed 64-bit range: ${e.payload}" }
     }
 
     fun ports() = SagaStores(
@@ -312,6 +328,7 @@ private class InMemorySagaStore : TransactionOperations {
         },
         dispatch = object : SagaDispatchStore {
             override fun record(entries: List<SagaDispatchDocument>) {
+                for (e in entries) if (e.kind == DispatchKind.EVENT) requireOutboxPayload(e)
                 dispatch += entries
             }
 

@@ -59,7 +59,7 @@ interface MessagingMetrics {
     /** The unpublished (not sent, not given up) outbox documents, as the relay last counted them. */
     fun outboxPending(count: Long) = Unit
 
-    /** Whether [outboxPending] is wanted: the relay counts the outbox in the database only then. */
+    /** Whether [outboxPending] and [outboxOldest] are wanted: the relay samples the outbox in the database only then. */
     val countsOutbox: Boolean get() = false
 
     /** One unary command or query call of [type] through the hub ended with [outcome] after [nanos], retries included. */

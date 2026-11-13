@@ -341,6 +341,26 @@ class SagaDispatchRelayTest {
     }
 
     @Test
+    fun `a pending notice of an event, left by a crash before the notice was cleared, is dropped without a SagaCommandFailed`() {
+        // The backstop marked the event failed, then the instance crashed before clearNotice: the notice is pending and due.
+        mongo.insert(
+            SagaDispatchDocument(
+                id = "s1:1000", sagaId = "s1", seq = 1000, kind = DispatchKind.EVENT, type = "rl.Announced", payload = "[1,2]",
+                createdAt = clock.now, failedAt = clock.now, failureReason = Reason.INVALID, failureMessage = "not a JSON object",
+                noticePending = true, noticeAttempts = 0, noticeNextAt = clock.now,
+            ),
+            SAGA_DISPATCH,
+        )
+        registry.register(watcher)
+
+        relay().pollOnce()
+
+        assertEquals(0, watcher.calls.get(), "SagaCommandFailed is about commands: never sent for an event")
+        assertEquals(emptyList(), metrics.unhandled, "nothing to count: the event was counted when it was given up")
+        assertNull(entry("s1:1000").noticePending, "the notice is cleared")
+    }
+
+    @Test
     fun `the oldest work is dispatched first when more sagas are due than one pass takes`() {
         val names = listOf("h", "g", "f", "e", "d", "c", "b", "a") // created in this order: the opposite of their ids
         names.forEachIndexed { i, name ->

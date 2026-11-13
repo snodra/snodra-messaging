@@ -293,9 +293,11 @@ class SagaDispatchRelay(
      * locally under the dedupe id `failed:<entry id>`, never published. Done: the pending mark is removed. A failure of the
      * delivery (an ordinary handler that throws, the store down) counts a notice attempt and sets `noticeNextAt` with the
      * relay's backoff; after [RelaySettings.maxAttempts] the notice is given up (logged at error and counted). The
-     * dispatcher's markers make every repeat harmless.
+     * dispatcher's markers make every repeat harmless. The pending notice of an EVENT entry (left by a crash between the
+     * backstop's `markFailed` and its `clearNotice`, see [invalidEvent]) is only cleared: `SagaCommandFailed` is about commands.
      */
     private fun deliverNotice(entry: SagaDispatchDocument) {
+        if (entry.kind == DispatchKind.EVENT) return clearNotice(entry)
         val reason = entry.failureReason ?: return clearNotice(entry)
         val failed = SagaCommandFailed(entry.sagaId, entry.type, entry.id, reason, entry.failureMessage.orEmpty())
         val type = typeResolver.typeNameOf(SagaCommandFailed::class)
