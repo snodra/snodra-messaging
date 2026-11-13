@@ -632,7 +632,9 @@ class ProcessorControlTest {
         ProcessorControlStore(mongo).release("default", "op-2")
         val lost = a.ask(prepare("op-2"))
         assertEquals(ControlRefusal.CONTROL_REFUSAL_NOT_PREPARED, lost.refusal(), lost.toString())
-        assertTrue("lock lost" in lost.refused.message, lost.refused.message)
+        // Whichever notices the lost lock first answers (ADR 0023 ruling 19): the renewal ("lock lost"), or the 300 ms poll,
+        // which forgets op-2 so this prepare is a late one ("already finished"). Either way the lock is not taken (below).
+        assertTrue("lock lost" in lost.refused.message || "op-2 already finished" in lost.refused.message, lost.refused.message)
         assertNull(control()!!.operation)
         assertEquals(ControlRefusal.CONTROL_REFUSAL_NOT_PREPARED, a.ask(prepare("op-2")).refusal(), "and so is every later one")
         awaitRunning(a)
