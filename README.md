@@ -5,7 +5,7 @@
 <h1 align="center">kraken-messaging</h1>
 
 <p align="center">
-  Axon-shaped messaging for Kotlin services: event, command and query buses over Kafka and the kraken hub, as a Spring Boot starter.
+  Messaging for Kotlin services: event, command and query buses over Kafka and the kraken hub, as a Spring Boot starter.
 </p>
 
 <p align="center">
@@ -22,7 +22,7 @@
 
 ---
 
-Kotlin library for service-to-service messaging in the kraken platform. It provides the Axon-shaped `EventBus`,
+Kotlin library for service-to-service messaging in the kraken platform. It provides the `EventBus`,
 `CommandBus` and `QueryBus` facades with `@EventHandler` / `@CommandHandler` / `@QueryHandler` annotations. Events travel
 over Kafka with a MongoDB transactional outbox and an idempotent consumer; commands and queries travel over a gRPC stream
 to the kraken hub. It ships as a Spring Boot 4.1 starter plus a test module.
@@ -1201,7 +1201,7 @@ headers, `retry`, `retryAll`, `discard`); an instance answers only for the proce
 ## Sagas
 
 A saga is a long-running process that reacts to events, keeps its own state, sends commands and events, waits for an answer and
-handles the answer that never comes. It is Axon's `@Saga` model (`@StartSaga`, `@SagaEventHandler` with association properties,
+handles the answer that never comes. It is the saga model (`@StartSaga`, `@SagaEventHandler` with association properties,
 `@EndSaga`, deadlines), built mainly to drive **integrations with external systems**. Sagas run inside your service, against its
 MongoDB and its Kafka consumer; the hub is not involved except to carry the commands a saga sends to another service.
 
