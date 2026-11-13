@@ -36,8 +36,7 @@ import java.util.UUID
 import kotlin.reflect.KClass
 
 /**
- * Drives one saga class with events and time, in memory: no Kafka, no MongoDB, no Spring context. In the style of Axon's
- * `SagaTestFixture`:
+ * Drives one saga class with events and time, in memory: no Kafka, no MongoDB, no Spring context. Usage:
  *
  * ```kotlin
  * SagaTestFixture(PaymentSaga::class)

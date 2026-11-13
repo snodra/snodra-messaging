@@ -2,12 +2,12 @@
 
 Status: agreed in conversation with the project owner on 2026-10-31; builder calls marked.
 **Approved by the owner on 2026-11-03** for implementation: roadmap phase S1 (Kotlin) after P5c,
-then S2 (Rust), in `kraken/docs/superpowers/specs/2026-10-31-hub-axon-parity-design.md`.
+then S2 (Rust), in `kraken/docs/roadmap.md`.
 
 ## Intent
 
-kraken replaced Axon Framework and Axon Server with its own library and hub, and left sagas and
-deadlines out of v1 (ADR 0002, 01-architecture). The owner wants Axon's saga feature set in full,
+kraken left sagas and
+deadlines out of v1 (ADR 0002, 01-architecture). The owner wants a full saga feature set,
 mainly to drive **integrations with external systems**: a long-running process that reacts to
 kraken events, asks an outside system to do something, waits for the answer and handles the
 answer that never comes. There is no concrete use case yet, so the feature must be general and
@@ -15,12 +15,12 @@ complete rather than shaped around one flow.
 
 ## Decisions taken with the owner
 
-1. **Full Axon parity**, not a minimal version: `@Saga`, `@StartSaga`, `@SagaEventHandler` with
+1. **Full feature set**, not a minimal version: `@Saga`, `@StartSaga`, `@SagaEventHandler` with
    association properties, `@EndSaga`, runtime association changes, ending from code, persistent
    saga state, one event at a time per instance, no double application of a redelivered event,
    deadlines that can be scheduled and cancelled.
-2. **Sagas live in the library (`kraken-messaging`), inside each service, not in the hub.** As in
-   Axon, where sagas run in the framework and Axon Server only routes and stores. The hub stays a
+2. **Sagas live in the library (`kraken-messaging`), inside each service, not in the hub.** The hub
+   keeps no saga state: it stays a
    stateless router (ADR 0004); it only carries commands a saga sends to another service.
 3. **Kotlin first.** The Rust crate gets the same model later; the MongoDB collection shapes in
    this document are the contract it will follow.
@@ -34,7 +34,7 @@ complete rather than shaped around one flow.
 
 ## Goals
 
-- Write a saga as a Kotlin class with annotated handlers, as in Axon.
+- Write a saga as a Kotlin class with annotated handlers.
 - Saga state survives restarts and crashes; each event is applied exactly once per saga instance;
   concurrent events for the same instance never interleave.
 - A saga's outbound commands never fire for a saga state that did not commit, and fire at least
@@ -166,7 +166,7 @@ change. A redelivered event finds its marker and is skipped.
 > saga runtime once the cause is fixed. Ordinary `@EventHandler`s keep today's behaviour.
 
 > **Builder call (deferred dispatch):** commands and events a saga emits are **deferred until commit** through a
-> `saga_dispatch` collection (a saga-side outbox), unlike Axon, which sends from the handler.
+> `saga_dispatch` collection (a saga-side outbox), not sent from the handler.
 > Integration adapters call external systems, so a command must never run for a saga state that
 > rolled back; the local short-circuit would otherwise run the adapter inside the saga's
 > transaction. A relay dispatches each entry once after commit (commands through the normal
@@ -285,7 +285,7 @@ These shapes are the contract the Rust crate will follow.
 
 ## Testing support (`kraken-messaging-test`)
 
-`SagaTestFixture(PaymentSaga::class)` in the style of Axon's:
+`SagaTestFixture(PaymentSaga::class)` offers:
 `givenEvents(...)`, `givenCurrentTime(...)`, `whenEvent(e)`, `whenTimeElapses(duration)`,
 `expectActiveSagas(n)`, `expectAssociation(key, value)`, `expectDispatchedCommands(...)`,
 `expectPublishedEvents(...)`, `expectScheduledDeadline(name, at)`, `expectNoScheduledDeadlines()`,

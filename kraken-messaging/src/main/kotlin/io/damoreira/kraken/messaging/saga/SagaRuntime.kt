@@ -333,7 +333,7 @@ class SagaRuntime(
         fun plan(saga: Any, doc: SagaDocument?, startKey: String?): Planned {
             val ended = lifecycle.endRequested
             val state = String(codec.encode(saga), Charsets.UTF_8)
-            // The start key lives and dies with its association: remove that one and the key is free for a new instance (as in Axon).
+            // The start key lives and dies with its association: remove that one and the key is free for a new instance.
             // That holds from the first handler on: a start handler that removes its own start association reserves no key.
             val keptStartKey = (if (doc == null) startKey else doc.startKey)?.takeIf { key -> lifecycle.associations.any { startKey(sagaType.name, it.k, it.v) == key } }
             val next = doc?.copy(
