@@ -1,5 +1,6 @@
 package io.damoreira.kraken.messaging.mongo
 
+import com.mongodb.MongoException
 import com.mongodb.client.MongoCollection
 import io.damoreira.kraken.messaging.store.DeadLetterStore
 import io.damoreira.kraken.messaging.store.ExternalCallStore
@@ -10,6 +11,8 @@ import io.damoreira.kraken.messaging.store.ProcessorControlStore
 import io.damoreira.kraken.messaging.store.SagaStores
 import org.bson.Document
 import org.springframework.data.mongodb.MongoTransactionManager
+import org.springframework.data.mongodb.TransientMongoDbException
+import org.springframework.data.mongodb.core.MongoExceptionTranslator
 import org.springframework.data.mongodb.core.MongoTemplate
 import org.springframework.transaction.PlatformTransactionManager
 import java.time.Clock
@@ -45,7 +48,7 @@ data class MongoStoreSettings(
 class MongoMessageStore(
     private val mongo: MongoTemplate,
     override val transactions: PlatformTransactionManager = MongoTransactionManager(mongo.mongoDatabaseFactory),
-    private val settings: MongoStoreSettings = MongoStoreSettings(),
+    internal val settings: MongoStoreSettings = MongoStoreSettings(),
     clock: Clock = Clock.systemUTC(),
 ) : MessageStore {
     override val name: String = "mongo"
@@ -71,3 +74,21 @@ internal fun MongoTemplate.joined(name: String): MongoCollection<Document> = get
 
 /** The collection a write that commits on its own goes to: the factory's plain database, never bound to a transaction. */
 internal fun MongoTemplate.independent(name: String): MongoCollection<Document> = mongoDatabaseFactory.mongoDatabase.getCollection(name)
+
+private val translator = MongoExceptionTranslator()
+
+/**
+ * Runs [block], translating a driver exception as the template does (a duplicate key: Spring's `DuplicateKeyException`),
+ * except that a write conflict of two transactions (`WriteConflict`, or any error labelled `TransientTransactionError`) is a
+ * [TransientMongoDbException], whatever kind of write it was: the transient failure a caller retries.
+ */
+internal fun <T> translated(block: () -> T): T = try {
+    block()
+} catch (e: MongoException) {
+    if (e.hasErrorLabel(MongoException.TRANSIENT_TRANSACTION_ERROR_LABEL) || e.code == WRITE_CONFLICT) throw TransientMongoDbException(e.message ?: "write conflict", e)
+    throw translator.translateExceptionIfPossible(e) ?: e
+} catch (e: RuntimeException) {
+    throw translator.translateExceptionIfPossible(e) ?: e
+}
+
+private const val WRITE_CONFLICT = 112

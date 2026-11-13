@@ -1,5 +1,6 @@
 package io.damoreira.kraken.messaging.kafka
 
+import io.damoreira.kraken.messaging.mongo.MongoMessageStore
 import com.mongodb.client.MongoClients
 import io.damoreira.kraken.messaging.MessageContext
 import io.damoreira.kraken.messaging.codec.JsonCodec
@@ -108,7 +109,7 @@ class ProcessorDispatchTest {
         registry = HandlerRegistry(MessageTypeResolver("test")).also { it.register(plain); it.register(orders) }
     }
 
-    private fun dispatcher(stage: SagaStage = SagaStage.NONE) = LocalEventDispatcher(registry, HandlerInvoker(registry, codec), tx, mongo, stage)
+    private fun dispatcher(stage: SagaStage = SagaStage.NONE) = LocalEventDispatcher(registry, HandlerInvoker(registry, codec), MongoMessageStore(mongo), stage)
     private fun payload(id: String) = codec.encode(Happened(id, Instant.now()))
     private fun ctx(id: String) = MessageContext(id, "test.Happened", id, null, emptySet(), null, mapOf("id" to id))
     private fun markerIds() = mongo.findAll(Document::class.java, "processed_events").map { it.getString("_id") }.toSet()

@@ -1,7 +1,8 @@
 package io.damoreira.kraken.messaging.kafka
 
+import io.damoreira.kraken.messaging.deadletter.DeadLetterFactory
 import io.damoreira.kraken.messaging.deadletter.DeadLetterMode
-import io.damoreira.kraken.messaging.deadletter.DeadLetterStore
+import io.damoreira.kraken.messaging.store.DeadLetterStore
 import org.springframework.kafka.core.KafkaTemplate
 import java.time.Duration
 
@@ -14,8 +15,8 @@ sealed interface DeadLetterSink {
         override val mode = DeadLetterMode.LOG
     }
 
-    /** Park it in `dead_letters` and sequence its key's later records behind it. */
-    class Collection(val store: DeadLetterStore) : DeadLetterSink {
+    /** Park it in the message store's dead letters, built by [letters], and sequence its key's later records behind it. */
+    class Collection(val store: DeadLetterStore, val letters: DeadLetterFactory) : DeadLetterSink {
         override val mode = DeadLetterMode.COLLECTION
     }
 

@@ -6,23 +6,14 @@ import io.damoreira.kraken.messaging.SendOptions
 import io.damoreira.kraken.messaging.codec.JsonCodec
 import io.damoreira.kraken.messaging.codec.MessageTypeResolver
 import io.damoreira.kraken.messaging.kafka.LocalEventDispatcher
+import io.damoreira.kraken.messaging.store.SagaDispatchStore
 import io.damoreira.kraken.messaging.tracing.CorrelationContext
 import kotlinx.coroutines.runBlocking
 import org.slf4j.LoggerFactory
 import org.springframework.context.SmartLifecycle
-import org.springframework.dao.DuplicateKeyException
-import org.springframework.data.domain.Sort
-import org.springframework.data.mongodb.core.FindAndModifyOptions
-import org.springframework.data.mongodb.core.MongoTemplate
-import org.springframework.data.mongodb.core.aggregation.Aggregation
-import org.springframework.data.mongodb.core.query.Criteria
-import org.springframework.data.mongodb.core.query.Query
-import org.springframework.data.mongodb.core.query.Update
 import org.springframework.transaction.support.TransactionOperations
 import java.time.Clock
 import java.time.Duration
-import java.time.Instant
-import java.util.Date
 import java.util.UUID
 import java.util.concurrent.Callable
 import java.util.concurrent.ConcurrentHashMap
@@ -67,10 +58,10 @@ data class RelaySettings(
 }
 
 /**
- * Sends what sagas recorded in `saga_dispatch` after their transactions committed, in order per saga.
+ * Sends what sagas recorded in `saga_dispatch` ([store]) after their transactions committed, in order per saga.
  *
  * A poll finds the sagas whose first pending entry (lowest `seq` not dispatched and not failed) is due, claims each one
- * with a lease (`saga_dispatch_leases`, so two service instances never dispatch one saga's entries at once) and works
+ * with a lease ([SagaDispatchStore.claimLease], so two service instances never dispatch one saga's entries at once) and works
  * through its entries in `seq` order; different sagas go in parallel. An ended saga's entries are dispatched like any.
  *
  * - An EVENT entry is inserted into the outbox and marked dispatched **in one transaction**: exactly once.
@@ -97,7 +88,7 @@ data class RelaySettings(
  * [RelaySettings.pollInterval] on a daemon thread. Runs after the outbox publisher starts and stops before the event consumer.
  */
 class SagaDispatchRelay(
-    private val mongo: MongoTemplate,
+    private val store: SagaDispatchStore,
     private val tx: TransactionOperations,
     private val commands: RawCommandSender,
     private val events: RawEventPublisher,
@@ -152,19 +143,9 @@ class SagaDispatchRelay(
         }
     }
 
-    /** The sagas whose first pending entry is due, oldest work first. */
-    private fun dueSagas(): List<String> {
-        val now = Date.from(clock.instant())
-        val aggregation = Aggregation.newAggregation(
-            Aggregation.match(Criteria.where("dispatchedAt").isNull.and("failedAt").isNull.and("sagaId").nin(inFlight.filter { it.startsWith("saga:") }.map { it.removePrefix("saga:") })),
-            Aggregation.sort(Sort.by("sagaId", "seq")),
-            Aggregation.group("sagaId").first("nextAttemptAt").`as`("next").first("createdAt").`as`("since"),
-            Aggregation.match(Criteria().orOperator(Criteria.where("next").isNull, Criteria.where("next").lte(now))),
-            Aggregation.sort(Sort.by("since", "_id")), // oldest work first: the first pending entry of each saga, by when it was recorded
-            Aggregation.limit(settings.batchSize.toLong()),
-        ).withOptions(Aggregation.newAggregationOptions().allowDiskUse(true).build())
-        return mongo.aggregate(aggregation, "saga_dispatch", org.bson.Document::class.java).mappedResults.map { it.getString("_id") }
-    }
+    /** The sagas whose first pending entry is due, oldest work first, without those in flight here. */
+    private fun dueSagas(): List<String> =
+        store.dueSagas(clock.instant(), inFlight.filter { it.startsWith("saga:") }.map { it.removePrefix("saga:") }, settings.batchSize)
 
     /** Works through one saga's entries while this relay holds its lease; the number of entries dealt with. */
     private fun dispatchSaga(sagaId: String): Int {
@@ -172,7 +153,7 @@ class SagaDispatchRelay(
         var dealt = 0
         try {
             while (!stopRequested) {
-                val entry = firstPending(sagaId) ?: break
+                val entry = store.nextPending(sagaId) ?: break
                 if (entry.nextAttemptAt != null && entry.nextAttemptAt.isAfter(clock.instant())) break
                 if (!renew(sagaId)) {
                     log.warn("Lost the dispatch lease of saga {} while dispatching", sagaId)
@@ -250,7 +231,7 @@ class SagaDispatchRelay(
             return true
         }
         val next = clock.instant().plus(settings.retryPolicy.jitteredBackoffBefore(attempts + 1))
-        mongo.updateFirst(byId(entry.id), Update().set("attempts", attempts).set("nextAttemptAt", next), SagaDispatchDocument::class.java)
+        store.scheduleRetry(entry.id, attempts, next)
         log.warn("Command {} ({}) failed attempt {} of {}, next at {}: {}", entry.id, entry.type, attempts, settings.maxAttempts, next, error)
         return false
     }
@@ -262,33 +243,16 @@ class SagaDispatchRelay(
      */
     private fun fail(entry: SagaDispatchDocument, reason: SagaCommandFailed.Reason, message: String, attempts: Int = entry.attempts) {
         val now = clock.instant()
-        mongo.updateFirst(
-            byId(entry.id),
-            Update().set("attempts", attempts).set("failedAt", now).set("failureReason", reason).set("failureMessage", message)
-                .set("noticePending", true).set("noticeAttempts", 0).set("noticeNextAt", now.plus(settings.lease)),
-            SagaDispatchDocument::class.java,
-        )
+        store.markFailed(entry.id, attempts, reason, message, now, noticeNextAt = now.plus(settings.lease))
         log.warn("Saga {} command {} ({}) failed with {}: {}", entry.sagaId, entry.id, entry.type, reason, message)
         deliverNoticeQuietly(entry.copy(attempts = attempts, failedAt = now, failureReason = reason, failureMessage = message, noticePending = true, noticeAttempts = 0))
     }
 
     /** Claims the pending failure notices that are due (up to a batch, not those in flight here), each reserved for this instance by moving `noticeNextAt` a lease ahead. */
     private fun claimDueNotices(): List<SagaDispatchDocument> {
-        val claimed = ArrayList<SagaDispatchDocument>()
-        while (claimed.size < settings.batchSize && !stopRequested) {
-            val now = clock.instant()
-            val entry = mongo.findAndModify(
-                Query(
-                    Criteria.where("noticePending").`is`(true)
-                        .orOperator(Criteria.where("noticeNextAt").isNull, Criteria.where("noticeNextAt").lte(now)),
-                ).with(Sort.by("noticeNextAt")),
-                Update().set("noticeNextAt", now.plus(settings.lease)),
-                FindAndModifyOptions.options().returnNew(true),
-                SagaDispatchDocument::class.java,
-            ) ?: break
-            claimed += entry
-        }
-        return claimed
+        if (stopRequested) return emptyList()
+        val now = clock.instant()
+        return store.claimDueNotices(now, reserveUntil = now.plus(settings.lease), limit = settings.batchSize)
     }
 
     /**
@@ -347,9 +311,7 @@ class SagaDispatchRelay(
         clearNotice(entry)
     }
 
-    private fun clearNotice(entry: SagaDispatchDocument) {
-        mongo.updateFirst(byId(entry.id), Update().unset("noticePending").unset("noticeAttempts").unset("noticeNextAt"), SagaDispatchDocument::class.java)
-    }
+    private fun clearNotice(entry: SagaDispatchDocument) = store.clearNotice(entry.id)
 
     private fun noticeFailed(entry: SagaDispatchDocument, error: Exception) {
         val attempts = (entry.noticeAttempts ?: 0) + 1
@@ -363,44 +325,21 @@ class SagaDispatchRelay(
             return
         }
         val next = clock.instant().plus(settings.retryPolicy.jitteredBackoffBefore(attempts + 1))
-        mongo.updateFirst(byId(entry.id), Update().set("noticeAttempts", attempts).set("noticeNextAt", next), SagaDispatchDocument::class.java)
+        store.scheduleNoticeRetry(entry.id, attempts, next)
         log.warn("Delivering SagaCommandFailed for command {} failed attempt {} of {}, next at {}: {}", entry.id, attempts, settings.maxAttempts, next, error.toString())
     }
 
-    private fun markDispatched(entry: SagaDispatchDocument) {
-        mongo.updateFirst(byId(entry.id), Update().set("dispatchedAt", clock.instant()), SagaDispatchDocument::class.java)
-    }
-
-    private fun firstPending(sagaId: String): SagaDispatchDocument? = mongo.findOne(
-        Query(Criteria.where("sagaId").`is`(sagaId).and("dispatchedAt").isNull.and("failedAt").isNull).with(Sort.by("seq")).limit(1),
-        SagaDispatchDocument::class.java,
-    )
-
-    private fun byId(id: String) = Query(Criteria.where("_id").`is`(id))
+    private fun markDispatched(entry: SagaDispatchDocument) = store.markDispatched(entry.id, clock.instant())
 
     // ---- the saga's dispatch lease -----------------------------------------------------------------------------
 
-    /** Takes the lease of [sagaId] when it is free or expired: an upsert on `{_id, until < now}` fails on the duplicate `_id` while it is held. */
+    /** Takes the lease of [sagaId] when it is free or expired. */
     private fun claim(sagaId: String): Boolean {
         val now = clock.instant()
-        return try {
-            mongo.findAndModify(
-                Query(Criteria.where("_id").`is`(sagaId).and("until").lt(now)),
-                Update().set("owner", owner).set("until", now.plus(settings.lease)),
-                FindAndModifyOptions.options().upsert(true).returnNew(true),
-                SagaDispatchLeaseDocument::class.java,
-            )
-            true
-        } catch (_: DuplicateKeyException) {
-            false
-        }
+        return store.claimLease(sagaId, owner, now.plus(settings.lease), now)
     }
 
-    private fun renew(sagaId: String): Boolean = mongo.updateFirst(
-        Query(Criteria.where("_id").`is`(sagaId).and("owner").`is`(owner)),
-        Update().set("until", clock.instant().plus(settings.lease)),
-        SagaDispatchLeaseDocument::class.java,
-    ).matchedCount == 1L
+    private fun renew(sagaId: String): Boolean = store.renewLease(sagaId, owner, clock.instant().plus(settings.lease))
 
     /** The heartbeat of a live send: extends the lease so that it never expires under an adapter call that is still running. */
     private fun keepLease(sagaId: String) {
@@ -413,7 +352,7 @@ class SagaDispatchRelay(
 
     private fun release(sagaId: String) {
         try {
-            mongo.remove(Query(Criteria.where("_id").`is`(sagaId).and("owner").`is`(owner)), SagaDispatchLeaseDocument::class.java)
+            store.releaseLease(sagaId, owner)
         } catch (e: Exception) {
             log.debug("Could not release the dispatch lease of saga {} (it expires): {}", sagaId, e.toString())
         }

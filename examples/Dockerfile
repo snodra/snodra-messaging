@@ -9,6 +9,7 @@ COPY gradlew settings.gradle.kts build.gradle.kts ./
 COPY gradle ./gradle
 COPY kraken-messaging-api ./kraken-messaging-api
 COPY kraken-messaging ./kraken-messaging
+COPY kraken-messaging-mongo ./kraken-messaging-mongo
 COPY kraken-messaging-test ./kraken-messaging-test
 COPY examples ./examples
 # sharing=locked: compose builds service-a and service-b in parallel, and two Gradle runs on one cache collide on its

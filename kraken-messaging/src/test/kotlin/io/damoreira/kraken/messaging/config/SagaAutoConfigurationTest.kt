@@ -6,7 +6,6 @@ import io.damoreira.kraken.messaging.config.idemscan.IdemBeanConfig
 import io.damoreira.kraken.messaging.config.idemscan.IdemScanConfig
 import io.damoreira.kraken.messaging.config.sagascan.SagaScanConfig
 import io.damoreira.kraken.messaging.deadline.DeadlineScheduler
-import io.damoreira.kraken.messaging.external.ExternalCallIndexes
 import io.damoreira.kraken.messaging.external.ExternalEventIngress
 import io.damoreira.kraken.messaging.external.ExternalKafkaSources
 import io.damoreira.kraken.messaging.external.ExternalRecordTranslator
@@ -23,7 +22,6 @@ import io.damoreira.kraken.messaging.saga.SagaCommandFailed
 import io.damoreira.kraken.messaging.saga.SagaDispatchRelay
 import io.damoreira.kraken.messaging.saga.SagaFailures
 import io.damoreira.kraken.messaging.saga.SagaGaugeSampler
-import io.damoreira.kraken.messaging.saga.SagaIndexes
 import io.damoreira.kraken.messaging.saga.SagaMetrics
 import io.damoreira.kraken.messaging.saga.SagaRuntime
 import io.damoreira.kraken.messaging.saga.SagaStage
@@ -57,7 +55,7 @@ class SagaAutoConfigurationTest {
                 TransactionAutoConfiguration::class.java,
             ),
         )
-        .withUserConfiguration(MongoMockConfig::class.java)
+        .withUserConfiguration(MessageStoreMockConfig::class.java)
         .withPropertyValues(
             "kraken.messaging.service-name=orders",
             "kraken.messaging.type-prefix=test",
@@ -65,7 +63,7 @@ class SagaAutoConfigurationTest {
             "kraken.messaging.kafka.bootstrap-servers=localhost:9",
             "kraken.messaging.kafka.consumer.enabled=false",
             "kraken.messaging.outbox.enabled=false",
-            // the mocked Mongo answers the pollers with nothing useful: keep them from spinning
+            // the mocked store answers the pollers with nothing useful: keep them from spinning
             "kraken.messaging.sagas.relay.poll-interval=1h",
             "kraken.messaging.deadlines.poll-interval=1h",
         )
@@ -78,14 +76,13 @@ class SagaAutoConfigurationTest {
         for (r in listOf(runner, runner.withUserConfiguration(EmptyScanConfig::class.java))) {
             r.run { context ->
                 assertEquals(null, context.startupFailure)
-                for (type in listOf(SagaRuntime::class.java, SagaDispatchRelay::class.java, DeadlineScheduler::class.java, SagaIndexes::class.java, SagaFailures::class.java, SagaGaugeSampler::class.java)) {
+                for (type in listOf(SagaRuntime::class.java, SagaDispatchRelay::class.java, DeadlineScheduler::class.java, SagaFailures::class.java, SagaGaugeSampler::class.java)) {
                     assertTrue(context.getBeansOfType(type).isEmpty(), "no ${type.simpleName}")
                 }
                 assertTrue(context.getBeansOfType(SagaStage::class.java).isEmpty())
                 // the dispatcher stays the plain one: it takes no interest in a saga's event type
                 assertTrue(!context.getBean(LocalEventDispatcher::class.java).interested("scan.Started"))
                 assertTrue(context.getBeansOfType(IdempotencyInterceptor::class.java).isEmpty())
-                assertTrue(context.getBeansOfType(ExternalCallIndexes::class.java).isEmpty())
             }
         }
     }
@@ -95,7 +92,6 @@ class SagaAutoConfigurationTest {
             assertEquals(null, context.startupFailure)
             val runtime = context.getBean(SagaRuntime::class.java)
             assertTrue(runtime.interested("scan.Started"))
-            assertEquals(1, context.getBeansOfType(SagaIndexes::class.java).size)
             assertNotNull(context.getBean(SagaFailures::class.java))
             // the runtime is the dispatcher's saga stage: an event no ordinary handler wants still reaches it
             assertTrue(context.getBean(LocalEventDispatcher::class.java).interested("scan.Started"))
@@ -143,14 +139,12 @@ class SagaAutoConfigurationTest {
             assertTrue(context.getBeansOfType(SagaRuntime::class.java).isEmpty())
             assertTrue(context.getBeansOfType(SagaDispatchRelay::class.java).isEmpty())
             assertTrue(context.getBeansOfType(DeadlineScheduler::class.java).isEmpty())
-            assertTrue(context.getBeansOfType(SagaIndexes::class.java).isEmpty())
         }
     }
 
-    @Test fun `an @IdempotentHandler brings the external_calls indexes and interceptor`() {
+    @Test fun `an @IdempotentHandler brings the interceptor`() {
         runner.withUserConfiguration(IdemScanConfig::class.java).run { context ->
             assertEquals(null, context.startupFailure)
-            assertEquals(1, context.getBeansOfType(ExternalCallIndexes::class.java).size)
             val interceptor = context.getBean(IdempotencyInterceptor::class.java)
             // the invoker runs idempotent handlers through it, else such a handler fails at call time
             assertTrue(field(context.getBean(HandlerInvoker::class.java), "idempotency") === interceptor)
@@ -165,7 +159,6 @@ class SagaAutoConfigurationTest {
     @Test fun `external calls enabled forces the interceptor and false removes it`() {
         runner.withUserConfiguration(EmptyScanConfig::class.java).withPropertyValues("kraken.messaging.external.calls.enabled=true").run { context ->
             assertEquals(1, context.getBeansOfType(IdempotencyInterceptor::class.java).size)
-            assertEquals(1, context.getBeansOfType(ExternalCallIndexes::class.java).size)
         }
         runner.withUserConfiguration(IdemScanConfig::class.java).withPropertyValues("kraken.messaging.external.calls.enabled=false").run { context ->
             assertTrue(context.getBeansOfType(IdempotencyInterceptor::class.java).isEmpty())

@@ -1,12 +1,14 @@
 package io.damoreira.kraken.messaging.saga
 
+import io.damoreira.kraken.messaging.SAGAS
+import io.damoreira.kraken.messaging.SAGA_DISPATCH
+import io.damoreira.kraken.messaging.SAGA_FAILURES
 import ch.qos.logback.classic.Level
 import ch.qos.logback.classic.Logger
 import ch.qos.logback.classic.spi.ILoggingEvent
 import ch.qos.logback.core.read.ListAppender
 import com.mongodb.client.MongoClient
 import com.mongodb.client.MongoClients
-import com.mongodb.client.result.UpdateResult
 import io.damoreira.kraken.messaging.MessageContext
 import io.damoreira.kraken.messaging.RetryPolicy
 import io.damoreira.kraken.messaging.SendOptions
@@ -21,7 +23,7 @@ import io.damoreira.kraken.messaging.handler.HandlerInvoker
 import io.damoreira.kraken.messaging.handler.HandlerRegistry
 import io.damoreira.kraken.messaging.handler.RequiresAuthentication
 import io.damoreira.kraken.messaging.kafka.LocalEventDispatcher
-import io.damoreira.kraken.messaging.kafka.OutboxDocument
+import io.damoreira.kraken.messaging.FaultyMessageStore
 import io.damoreira.kraken.messaging.kafka.OutboxEventBus
 import io.damoreira.kraken.messaging.saga.SagaCommandFailed.Reason
 import io.damoreira.kraken.messaging.test.KrakenContainers
@@ -41,7 +43,6 @@ import org.springframework.data.mongodb.core.MongoTemplate
 import org.springframework.data.mongodb.core.SimpleMongoClientDatabaseFactory
 import org.springframework.data.mongodb.core.query.Criteria
 import org.springframework.data.mongodb.core.query.Query
-import org.springframework.data.mongodb.core.query.UpdateDefinition
 import org.springframework.security.core.context.SecurityContextHolder
 import org.springframework.security.oauth2.jwt.Jwt
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken
@@ -218,44 +219,12 @@ private class RelayMetrics : SagaMetrics {
     override fun commandFailureUnhandled(commandType: String, reason: Reason) { unhandled += commandType to reason }
 }
 
-/** A template whose next update that sets `dispatchedAt` fails: the crash between sending (or publishing) and marking. */
-internal class MarkFailingTemplate(factory: SimpleMongoClientDatabaseFactory) : MongoTemplate(factory) {
-    val failNextMark = AtomicBoolean()
-
-    /** The next write of an `external_calls` record as SUCCEEDED fails: the store goes away right after the external call returned. */
-    val failNextSucceededWrite = AtomicBoolean()
-
-    /** The next update that clears a pending failure notice fails: the store goes away right after the notice was delivered. */
-    val failNextNoticeClear = AtomicBoolean()
-
-    /** Runs once right after the next read of an `external_calls` record by id: another call writes between that read and what follows. */
-    val afterNextExternalCallRead = java.util.concurrent.atomic.AtomicReference<(() -> Unit)?>()
-
-    override fun <T : Any> findById(id: Any, entityClass: Class<T>): T? {
-        val found = super.findById(id, entityClass)
-        if (entityClass == io.damoreira.kraken.messaging.external.ExternalCallDocument::class.java) afterNextExternalCallRead.getAndSet(null)?.invoke()
-        return found
-    }
-
-    override fun updateFirst(query: Query, update: UpdateDefinition, entityClass: Class<*>): UpdateResult {
-        if (entityClass == io.damoreira.kraken.messaging.external.ExternalCallDocument::class.java && "SUCCEEDED" in update.updateObject.toString() && failNextSucceededWrite.getAndSet(false)) {
-            throw org.springframework.dao.DataAccessResourceFailureException("the store went away after the external call returned")
-        }
-        if (entityClass == SagaDispatchDocument::class.java && "\$unset" in update.updateObject.toString() && "noticePending" in update.updateObject.toString() && failNextNoticeClear.getAndSet(false)) {
-            throw org.springframework.dao.DataAccessResourceFailureException("the store went away after the notice was delivered")
-        }
-        if (entityClass == SagaDispatchDocument::class.java && "dispatchedAt" in update.updateObject.toString() && failNextMark.getAndSet(false)) {
-            throw IllegalStateException("crashed before marking the entry dispatched")
-        }
-        return super.updateFirst(query, update, entityClass)
-    }
-}
-
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class SagaDispatchRelayTest {
     private val mongoContainer = KrakenContainers.mongo()
     private lateinit var client: MongoClient
-    private lateinit var mongo: MarkFailingTemplate
+    private lateinit var mongo: MongoTemplate
+    private lateinit var store: FaultyMessageStore
     private lateinit var tx: TransactionTemplate
     private val codec = JsonCodec()
     private val resolver = MessageTypeResolver("rl")
@@ -278,9 +247,9 @@ class SagaDispatchRelayTest {
         mongoContainer.start()
         client = MongoClients.create(mongoContainer.connectionString + "/?directConnection=true")
         val factory = SimpleMongoClientDatabaseFactory(client, "saga_relay_test")
-        mongo = MarkFailingTemplate(factory)
-        tx = TransactionTemplate(MongoTransactionManager(factory))
-        SagaIndexes(mongo, Duration.ofDays(30), Duration.ofDays(7), Duration.ofDays(7), Duration.ofDays(30)).afterPropertiesSet()
+        mongo = MongoTemplate(factory)
+        store = FaultyMessageStore(mongo)
+        tx = TransactionTemplate(store.transactions)
         listOf("processed_events", "saga_failures", "outbox").forEach { if (!mongo.collectionExists(it)) mongo.createCollection(it) }
     }
 
@@ -298,7 +267,7 @@ class SagaDispatchRelayTest {
         watcher = RlFailureWatcher()
         registry = HandlerRegistry(resolver).also { it.register(adapter) }
         runtime = SagaRuntime(
-            types = SagaModelScanner(resolver, codec).scan(listOf(RlSaga::class, RlQuietSaga::class, RlDeafSaga::class, RlGrumpySaga::class)), mongo = mongo, tx = tx, codec = codec, typeResolver = resolver,
+            types = SagaModelScanner(resolver, codec).scan(listOf(RlSaga::class, RlQuietSaga::class, RlDeafSaga::class, RlGrumpySaga::class)), ports = store.sagas, tx = tx, codec = codec, typeResolver = resolver,
             beans = { error("no beans") }, clock = clock, retry = SagaRetry(RetryPolicy(maxAttempts = 2, initialBackoff = Duration.ofMillis(1), multiplier = 1.0, maxBackoff = Duration.ofMillis(1))),
         )
         sender = ScriptedSender()
@@ -314,11 +283,10 @@ class SagaDispatchRelayTest {
 
     private fun relay(
         commands: RawCommandSender = sender, stage: SagaStage = runtime, settings: RelaySettings = this.settings,
-        template: MongoTemplate = mongo,
     ): SagaDispatchRelay {
-        val dispatcher = LocalEventDispatcher(registry, HandlerInvoker(registry, codec), tx, template, stage)
-        val events = OutboxEventBus(template, codec, resolver, TraceHeaders(null, null))
-        return SagaDispatchRelay(template, tx, commands, events, dispatcher, codec, resolver, clock, settings, metrics).also { relays += it }
+        val dispatcher = LocalEventDispatcher(registry, HandlerInvoker(registry, codec), store, stage)
+        val events = OutboxEventBus(store.outbox, codec, resolver, TraceHeaders(null, null))
+        return SagaDispatchRelay(store.sagas.dispatch, tx, commands, events, dispatcher, codec, resolver, clock, settings, metrics).also { relays += it }
     }
 
     private fun deliver(event: Event, id: String, correlationId: String = "corr-$id") {
@@ -326,9 +294,9 @@ class SagaDispatchRelayTest {
         runtime.process(type, codec.encode(event), MessageContext(id, type, correlationId, null, emptySet(), null, mapOf("id" to id, "type" to type)))
     }
 
-    private fun sagaOf(orderId: String) = mongo.findAll(SagaDocument::class.java).single { it.stateDoc.getString("orderId") == orderId }
-    private fun entries(sagaId: String) = mongo.find(Query(Criteria.where("sagaId").`is`(sagaId)).with(Sort.by("seq")), SagaDispatchDocument::class.java)
-    private fun entry(id: String) = mongo.findById(id, SagaDispatchDocument::class.java)!!
+    private fun sagaOf(orderId: String) = mongo.findAll(SagaDocument::class.java, SAGAS).single { it.stateDoc.getString("orderId") == orderId }
+    private fun entries(sagaId: String) = mongo.find(Query(Criteria.where("sagaId").`is`(sagaId)).with(Sort.by("seq")), SagaDispatchDocument::class.java, SAGA_DISPATCH)
+    private fun entry(id: String) = mongo.findById(id, SagaDispatchDocument::class.java, SAGA_DISPATCH)!!
     private fun failuresOf(orderId: String): List<String> = sagaOf(orderId).stateDoc.getList("failures", String::class.java) ?: emptyList()
 
     /** Records an entry as a saga transaction would have; [seq] decides its place in the saga's order. */
@@ -338,7 +306,7 @@ class SagaDispatchRelayTest {
     ): SagaDispatchDocument = SagaDispatchDocument(
         id = "$sagaId:$seq", sagaId = sagaId, seq = seq, kind = kind, type = type, payload = payload,
         headers = mapOf("correlation-id" to "corr-$sagaId"), routingKey = routingKey, createdAt = clock.now,
-    ).also { mongo.insert(it) }
+    ).also { mongo.insert(it, SAGA_DISPATCH) }
 
     @Test
     fun `entries of one saga are dispatched in seq order`() {
@@ -452,7 +420,7 @@ class SagaDispatchRelayTest {
         assertEquals(1, stuck.attempts)
         assertTrue(stuck.nextAttemptAt!! > clock.now)
         assertTrue(interrupted.await(5, TimeUnit.SECONDS), "the abandoned call's thread was interrupted")
-        assertEquals(null, mongo.findById("stuck", SagaDispatchLeaseDocument::class.java), "the saga's lease was released")
+        assertEquals(null, mongo.findById("stuck", org.bson.Document::class.java, "saga_dispatch_leases"), "the saga's lease was released")
     }
 
     @Test
@@ -482,7 +450,7 @@ class SagaDispatchRelayTest {
             awaitTrue("the send to start") { sender.calls.size == 1 }
 
             clock.now = clock.now.plus(Duration.ofHours(1)) // far past the lease the send started with
-            awaitTrue("the lease to be renewed to the new time") { mongo.findById("slow", SagaDispatchLeaseDocument::class.java)!!.until.isAfter(clock.now) }
+            awaitTrue("the lease to be renewed to the new time") { mongo.findById("slow", org.bson.Document::class.java, "saga_dispatch_leases")!!.getDate("until").toInstant().isAfter(clock.now) }
 
             second.pollOnce()
             assertEquals(1, sender.calls.size, "the live send still owns the saga: no second send of the same key")
@@ -523,7 +491,7 @@ class SagaDispatchRelayTest {
     fun `an event entry reaches the outbox exactly once`() {
         record("s1", 1000, type = "rl.Announced", payload = """{"orderId":"o1"}""", kind = DispatchKind.EVENT, routingKey = "key-o1")
         val relay = relay()
-        mongo.failNextMark.set(true) // the crash between inserting into the outbox and marking: one transaction, so neither survives
+        store.failNextMark.set(true) // the crash between inserting into the outbox and marking: one transaction, so neither survives
 
         relay.pollOnce()
         assertEquals(0, mongo.count(Query(), "outbox"), "the outbox insert rolled back with the failed mark")
@@ -532,11 +500,11 @@ class SagaDispatchRelayTest {
         relay.pollOnce()
         relay.pollOnce()
 
-        val outbox = mongo.findAll(OutboxDocument::class.java).single()
-        assertEquals("rl.Announced", outbox.type)
-        assertEquals("key-o1", outbox.key)
-        assertEquals("o1", outbox.payload.getString("orderId"))
-        assertEquals("corr-s1", outbox.headers["correlationId"])
+        val outbox = mongo.findAll(org.bson.Document::class.java, "outbox").single()
+        assertEquals("rl.Announced", outbox.getString("type"))
+        assertEquals("key-o1", outbox.getString("key"))
+        assertEquals("o1", outbox.get("payload", org.bson.Document::class.java).getString("orderId"))
+        assertEquals("corr-s1", outbox.get("headers", org.bson.Document::class.java)["correlationId"])
         assertNotNull(entry("s1:1000").dispatchedAt)
     }
 
@@ -559,7 +527,7 @@ class SagaDispatchRelayTest {
     fun `a crash after the send and before marking re-sends with the same key`() {
         record("s1", 1000)
         val relay = relay()
-        mongo.failNextMark.set(true)
+        store.failNextMark.set(true)
 
         relay.pollOnce()
         assertNull(entry("s1:1000").dispatchedAt, "the mark failed")
@@ -734,7 +702,7 @@ class SagaDispatchRelayTest {
             log.detachAppender(appender)
         }
 
-        val parked = mongo.findAll(SagaFailureDocument::class.java).single()
+        val parked = mongo.findAll(SagaFailureDocument::class.java, SAGA_FAILURES).single()
         assertEquals("rl.Grumpy", parked.sagaType)
         assertEquals(emptyList(), metrics.unhandled, "it reached the saga: the park is what a person looks at")
         assertEquals(emptyList(), appender.list.filter { it.level == Level.ERROR }.map { it.formattedMessage })
@@ -745,7 +713,7 @@ class SagaDispatchRelayTest {
     fun `a store failure after a failure notice was delivered is logged as such and the saga's later entries go on`() {
         record("n", 1000, type = "rl.Nobody")
         record("n", 2000)
-        mongo.failNextNoticeClear.set(true)
+        store.failNextNoticeClear.set(true)
         val log = LoggerFactory.getLogger(SagaDispatchRelay::class.java) as Logger
         val appender = ListAppender<ILoggingEvent>().also { it.start(); log.addAppender(it) }
 
@@ -767,7 +735,7 @@ class SagaDispatchRelayTest {
     fun `SagaCommandFailed reaches a saga that handles it by sagaId without associating itself with its own id`() {
         deliver(RlQuietStart("q1"), "e-q1")
         val sagaId = sagaOf("q1").id
-        assertEquals(setOf(Association("orderId", "q1")), mongo.findById(sagaId, SagaDocument::class.java)!!.associations.toSet(), "the saga never associated with its own id")
+        assertEquals(setOf(Association("orderId", "q1")), mongo.findById(sagaId, SagaDocument::class.java, SAGAS)!!.associations.toSet(), "the saga never associated with its own id")
         record(sagaId, 9001, type = "rl.Nobody", payload = """{"ref":"n"}""")
 
         relay(commands = LocalRawCommandSender(HandlerInvoker(registry, codec))).pollOnce()
@@ -813,7 +781,7 @@ class SagaDispatchRelayTest {
 
         assertEquals(listOf("rl.Charge"), sender.calls.map { it.type })
         assertEquals("ended-o9", adapterlessRef(sender.calls.single().payload))
-        assertEquals("rl.Announced", mongo.findAll(OutboxDocument::class.java).single().type)
+        assertEquals("rl.Announced", mongo.findAll(org.bson.Document::class.java, "outbox").single().getString("type"))
         assertTrue(entries(saga.id).all { it.dispatchedAt != null })
     }
 

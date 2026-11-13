@@ -1,8 +1,12 @@
 package io.damoreira.kraken.messaging.saga
 
-import org.springframework.data.annotation.Id
-import org.springframework.data.mongodb.core.mapping.Document
 import java.time.Instant
+
+/*
+ * The saga state as plain domain types, what the saga ports ([io.damoreira.kraken.messaging.store.SagaStores]) read and write.
+ * A message store add-on maps them to its database: the MongoDB one to the documents of `sagas`, `saga_dispatch`,
+ * `deadlines` and `saga_failures` (`id` as `_id`, the other properties under their own names).
+ */
 
 /**
  * One saga instance in the `sagas` collection. [state] is the saga object as JSON **text** (Jackson, the library's codec: its
@@ -12,9 +16,8 @@ import java.time.Instant
  * [SagaRuntime.startKey]; absent for `forceNew` instances) is unique. Ended
  * instances expire through the TTL index on [endedAt].
  */
-@Document("sagas")
 data class SagaDocument(
-    @Id val id: String,
+    val id: String,
     val type: String,
     val state: String,
     val associations: List<Association> = emptyList(),
@@ -43,9 +46,8 @@ enum class DispatchKind { COMMAND, EVENT }
  * ([noticeAttempts], [noticeNextAt]; the next try is not before [noticeNextAt], which also reserves the delivery for the
  * instance that claimed it) and never makes the relay send the command again. All of these are absent while unused.
  */
-@Document("saga_dispatch")
 data class SagaDispatchDocument(
-    @Id val id: String,
+    val id: String,
     val sagaId: String,
     val seq: Long,
     val kind: DispatchKind,
@@ -65,17 +67,6 @@ data class SagaDispatchDocument(
     val noticeNextAt: Instant? = null,
 )
 
-/**
- * The lease of one saga's dispatch order (`saga_dispatch_leases`, added by the S1 plan): the relay instance that holds it
- * dispatches that saga's entries one after the other. An expired lease is as good as none; the TTL index only tidies up.
- */
-@Document("saga_dispatch_leases")
-data class SagaDispatchLeaseDocument(
-    @Id val sagaId: String,
-    val owner: String,
-    val until: Instant,
-)
-
 /** Lifecycle of a [DeadlineDocument]. */
 enum class DeadlineStatus { SCHEDULED, FIRED, CANCELLED }
 
@@ -87,9 +78,8 @@ enum class DeadlineStatus { SCHEDULED, FIRED, CANCELLED }
  * correlation id of the message that scheduled it: the deadline handler's `MessageContext.correlationId` and the commands
  * it sends carry it, so a trace follows a saga through its timeouts.
  */
-@Document("deadlines")
 data class DeadlineDocument(
-    @Id val id: String,
+    val id: String,
     val sagaType: String,
     val sagaId: String,
     val name: String,
@@ -108,9 +98,8 @@ data class DeadlineDocument(
  * as received ([eventType], [payload], [headers], enough to rebuild its `MessageContext`), the last [error], how many
  * [attempts] were made. `SagaFailures` re-delivers or discards it.
  */
-@Document("saga_failures")
 data class SagaFailureDocument(
-    @Id val id: String,
+    val id: String,
     val sagaType: String,
     val eventId: String,
     val eventType: String,

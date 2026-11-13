@@ -6,14 +6,10 @@ import io.damoreira.kraken.messaging.handler.HandlerMethod
 import io.damoreira.kraken.messaging.saga.NoopSagaMetrics
 import io.damoreira.kraken.messaging.saga.SagaMetrics
 import io.damoreira.kraken.messaging.saga.SagaMetrics.ExternalOutcome
+import io.damoreira.kraken.messaging.store.ExternalCallRecord
+import io.damoreira.kraken.messaging.store.MessageStore
+import kotlinx.coroutines.runBlocking
 import org.slf4j.LoggerFactory
-import org.springframework.dao.DuplicateKeyException
-import org.springframework.data.mongodb.core.FindAndModifyOptions
-import org.springframework.data.mongodb.core.MongoTemplate
-import org.springframework.data.mongodb.core.query.Criteria
-import org.springframework.data.mongodb.core.query.Query
-import org.springframework.data.mongodb.core.query.Update
-import org.springframework.transaction.PlatformTransactionManager
 import org.springframework.transaction.TransactionDefinition
 import org.springframework.transaction.support.TransactionTemplate
 import java.time.Clock
@@ -30,7 +26,8 @@ data class ExternalCallSettings(val lease: Duration = Duration.ofMinutes(5)) {
 
 /**
  * Runs the handlers annotated with [IdempotentHandler] (the invoker hands each call to [execute]): the call is recorded in
- * `external_calls` under its key, so a repeat of the key never runs the body twice.
+ * the message store's external calls ([MessageStore.externalCalls], `external_calls`) under its key, so a repeat of the key
+ * never runs the body twice.
  *
  * 1. The record is inserted `IN_PROGRESS` with `leaseUntil = now + lease`; a duplicate key means an earlier call exists.
  * 2. An earlier `SUCCEEDED` call returns its stored reply, `FAILED` throws [ExternalCallFailedException] (permanent), `UNKNOWN`
@@ -49,29 +46,27 @@ data class ExternalCallSettings(val lease: Duration = Duration.ofMinutes(5)) {
  * it up, or inserted it again after a reset. A write that matches nothing is logged at warn; a body that returned is then
  * not reported as a success (see [lost]).
  *
- * Every write of the record is its own short transaction (REQUIRES_NEW when [txManager] is given), so a rollback of the
- * caller's transaction (an event handler runs inside one) does not forget a call that happened. The body itself runs in
+ * Every write of the record is its own short transaction (REQUIRES_NEW over [MessageStore.transactions]), so a rollback of
+ * the caller's transaction (an event handler runs inside one) does not forget a call that happened. The body itself runs in
  * whatever transaction the caller has: an `@EventHandler`'s inside the dispatcher's stage-1 transaction, a `@CommandHandler`'s
  * (what the saga relay calls) in none.
  */
 class IdempotencyInterceptor(
-    private val mongo: MongoTemplate,
+    store: MessageStore,
     private val codec: JsonCodec,
-    txManager: PlatformTransactionManager? = null,
     private val clock: Clock = Clock.systemUTC(),
     private val settings: ExternalCallSettings = ExternalCallSettings(),
     private val metrics: SagaMetrics = NoopSagaMetrics,
 ) {
     private val log = LoggerFactory.getLogger(IdempotencyInterceptor::class.java)
-    private val own: TransactionTemplate? = txManager?.let {
-        TransactionTemplate(it).apply { propagationBehavior = TransactionDefinition.PROPAGATION_REQUIRES_NEW }
-    }
+    private val calls = store.externalCalls
+    private val own = TransactionTemplate(store.transactions).apply { propagationBehavior = TransactionDefinition.PROPAGATION_REQUIRES_NEW }
 
     /** What [begin] decided: run the body, or the call is answered from the record. */
     private sealed interface Begin {
         /** Run the body; [owner] is the token this call wrote, its ownership token for every later write; [attempts] the record's count. */
         class Run(val owner: String, val attempts: Int) : Begin
-        class Replay(val reply: String?) : Begin
+        class Replay(val reply: ByteArray?) : Begin
     }
 
     /** Runs [proceed] (the handler's body) under the idempotency rules; returns its result, or the stored reply (a JSON tree). */
@@ -82,7 +77,7 @@ class IdempotencyInterceptor(
         val call = when (val begin = begin(key, idempotency.externalIdempotent, label)) {
             is Begin.Replay -> {
                 metrics.externalCall(label, ExternalOutcome.REPLAYED)
-                return begin.reply?.let { codec.decodeTree(it.toByteArray(Charsets.UTF_8)) } ?: Unit
+                return begin.reply?.let { codec.decodeTree(it) } ?: Unit
             }
             is Begin.Run -> Owned(key, begin.owner, begin.attempts)
         }
@@ -95,7 +90,7 @@ class IdempotencyInterceptor(
             throw e
         }
         val recorded = try {
-            short { mongo.updateFirst(call.query(), Update().set("status", ExternalCallStatus.SUCCEEDED).set("reply", String(codec.encode(result ?: Unit), Charsets.UTF_8)).set("updatedAt", clock.instant()).unset("leaseUntil").unset("owner").unset("error"), ExternalCallDocument::class.java) }.matchedCount > 0
+            short { calls.succeed(call.key, call.owner, codec.encode(result ?: Unit), clock.instant()) }
         } catch (e: Exception) {
             throw unrecorded(call, label, idempotency.externalIdempotent, e)
         }
@@ -105,21 +100,23 @@ class IdempotencyInterceptor(
     }
 
     /** The record as this call owns it: `IN_PROGRESS` with the [owner] token the call wrote ([attempts] is for the logs). */
-    private class Owned(val key: String, val owner: String, val attempts: Int) {
-        fun query() = Query(Criteria.where("_id").`is`(key).and("status").`is`(ExternalCallStatus.IN_PROGRESS).and("owner").`is`(owner))
-    }
+    private class Owned(val key: String, val owner: String, val attempts: Int)
 
-    private fun begin(key: String, externalIdempotent: Boolean, label: String): Begin {
+    private suspend fun begin(key: String, externalIdempotent: Boolean, label: String): Begin {
         repeat(MAX_BEGIN_ROUNDS) {
             val now = clock.instant()
             val owner = UUID.randomUUID().toString()
             try {
-                short { mongo.insert(ExternalCallDocument(key, ExternalCallStatus.IN_PROGRESS, attempts = 1, updatedAt = now, leaseUntil = now.plus(settings.lease), owner = owner)) }
+                short {
+                    val record = ExternalCallRecord(key, ExternalCallStatus.IN_PROGRESS, attempts = 1, updatedAt = now, leaseUntil = now.plus(settings.lease), owner = owner)
+                    // A duplicate may have aborted the store's transaction: roll it back rather than commit it.
+                    if (!calls.insert(record)) throw KeyTaken
+                }
                 return Begin.Run(owner, attempts = 1)
-            } catch (_: DuplicateKeyException) {
+            } catch (_: KeyTaken) {
                 // an earlier call of this key exists
             }
-            val existing = mongo.findById(key, ExternalCallDocument::class.java) ?: return@repeat // reset or expired meanwhile: insert again
+            val existing = calls.find(key) ?: return@repeat // reset or expired meanwhile: insert again
             when (existing.status) {
                 ExternalCallStatus.SUCCEEDED -> return Begin.Replay(existing.reply)
                 ExternalCallStatus.FAILED -> {
@@ -133,21 +130,11 @@ class IdempotencyInterceptor(
                         metrics.externalCall(label, ExternalOutcome.RETRYABLE)
                         throw RetryableExternalException("The call with key '$key' is already in progress (handler $label)")
                     }
-                    val sameRecord = Criteria.where("_id").`is`(key).and("status").`is`(ExternalCallStatus.IN_PROGRESS)
-                        .and("owner").`is`(existing.owner).and("leaseUntil").`is`(lease)
                     if (externalIdempotent) {
-                        val taken = short {
-                            mongo.findAndModify(
-                                Query(sameRecord),
-                                Update().set("leaseUntil", now.plus(settings.lease)).set("updatedAt", now).set("owner", owner).inc("attempts", 1),
-                                FindAndModifyOptions.options().returnNew(true), ExternalCallDocument::class.java,
-                            )
-                        }
+                        val taken = short { calls.takeOver(key, existing.owner, lease, owner, now.plus(settings.lease), now) }
                         if (taken != null) return Begin.Run(owner, taken.attempts)
                     } else {
-                        val givenUp = short {
-                            mongo.updateFirst(Query(sameRecord), Update().set("status", ExternalCallStatus.UNKNOWN).set("updatedAt", now).unset("leaseUntil").unset("owner"), ExternalCallDocument::class.java)
-                        }.matchedCount > 0
+                        val givenUp = short { calls.giveUp(key, existing.owner, lease, now) }
                         if (givenUp) throw unknown(key, label)
                         // The record changed since it was read (the slow call settled it, or another call gave it up or took it
                         // over): read it again rather than report an unknown outcome over what it says now.
@@ -169,7 +156,7 @@ class IdempotencyInterceptor(
      * de-duplicates a repeat, so it is retryable (the record stays `IN_PROGRESS`, its lease settles it); otherwise the record
      * is moved to `UNKNOWN` (best effort: if even that fails the lease does it later) and the call reports the unknown outcome.
      */
-    private fun unrecorded(call: Owned, label: String, externalIdempotent: Boolean, cause: Exception): RuntimeException {
+    private suspend fun unrecorded(call: Owned, label: String, externalIdempotent: Boolean, cause: Exception): RuntimeException {
         log.error("The call with key '{}' (handler {}) ran but its outcome could not be recorded: {}", call.key, label, cause.toString())
         if (externalIdempotent) {
             metrics.externalCall(label, ExternalOutcome.RETRYABLE)
@@ -193,9 +180,9 @@ class IdempotencyInterceptor(
         return unknown(call.key, label)
     }
 
-    private fun markUnknown(call: Owned, label: String) {
+    private suspend fun markUnknown(call: Owned, label: String) {
         try {
-            val marked = short { mongo.updateFirst(call.query(), Update().set("status", ExternalCallStatus.UNKNOWN).set("updatedAt", clock.instant()).unset("leaseUntil").unset("owner"), ExternalCallDocument::class.java) }.matchedCount > 0
+            val marked = short { calls.markUnknown(call.key, call.owner, clock.instant()) }
             if (!marked) notOwned(call, label, "UNKNOWN")
         } catch (bookkeeping: Exception) {
             log.warn("Could not mark the call with key '{}' UNKNOWN (its lease will): {}", call.key, bookkeeping.toString())
@@ -203,10 +190,10 @@ class IdempotencyInterceptor(
     }
 
     /** The record after the body failed: reset for a retryable failure, FAILED with the error for any other. Never masks the failure. */
-    private fun settleFailure(call: Owned, e: Throwable, label: String) {
+    private suspend fun settleFailure(call: Owned, e: Throwable, label: String) {
         try {
             if (e is RetryableExternalException) {
-                val reset = short { mongo.remove(call.query(), ExternalCallDocument::class.java) }.deletedCount > 0
+                val reset = short { calls.reset(call.key, call.owner) }
                 if (!reset) notOwned(call, label, "reset")
                 metrics.externalCall(label, ExternalOutcome.RETRYABLE)
             } else if (e is ExternalCallUnknownOutcomeException) {
@@ -215,10 +202,8 @@ class IdempotencyInterceptor(
                 markUnknown(call, label)
                 metrics.externalCall(label, ExternalOutcome.UNKNOWN)
             } else {
-                val error = String(codec.encode(mapOf("code" to "HANDLER_ERROR", "message" to describe(e))), Charsets.UTF_8)
-                val failed = short {
-                    mongo.updateFirst(call.query(), Update().set("status", ExternalCallStatus.FAILED).set("error", error).set("updatedAt", clock.instant()).unset("leaseUntil").unset("owner"), ExternalCallDocument::class.java)
-                }.matchedCount > 0
+                val error = codec.encode(mapOf("code" to "HANDLER_ERROR", "message" to describe(e)))
+                val failed = short { calls.fail(call.key, call.owner, error, clock.instant()) }
                 if (!failed) notOwned(call, label, "FAILED")
                 metrics.externalCall(label, ExternalOutcome.FAILED)
             }
@@ -230,16 +215,22 @@ class IdempotencyInterceptor(
     private fun notOwned(call: Owned, label: String, write: String) =
         log.warn("The call with key '{}' (handler {}) no longer owns its record (attempt {}), so it is not {}: its lease ran out and another call took it over, gave it up or reset it", call.key, label, call.attempts, write)
 
-    private fun storedMessage(doc: ExternalCallDocument): String =
-        doc.error?.let { runCatching { codec.decodeTree(it.toByteArray(Charsets.UTF_8)).get("message")?.asString() }.getOrNull() }
-            ?: "The call with key '${doc.id}' failed earlier"
+    private fun storedMessage(call: ExternalCallRecord): String =
+        call.error?.let { runCatching { codec.decodeTree(it).get("message")?.asString() }.getOrNull() }
+            ?: "The call with key '${call.id}' failed earlier"
 
     private fun describe(e: Throwable) = "${e::class.simpleName}: ${e.message}"
 
-    /** [block] in a transaction of its own (when there is a transaction manager), apart from any transaction the caller is in. */
-    private fun <T> short(block: () -> T): T {
-        val template = own ?: return block()
-        return template.execute { block() } // T may be null (a findAndModify that found nothing): no !!
+    /**
+     * [block] in a transaction of its own, apart from any transaction the caller is in, on the calling thread (where Spring
+     * binds the transaction the store joins).
+     */
+    @Suppress("UNCHECKED_CAST")
+    private fun <T> short(block: suspend () -> T): T = own.execute { runBlocking { block() } } as T // T may be null (a take-over that matched nothing)
+
+    /** Thrown inside the insert's transaction when the key has a record: rolls that transaction back. */
+    private object KeyTaken : RuntimeException("an earlier call of this key exists", null, false, false) {
+        private fun readResolve(): Any = KeyTaken
     }
 
     private companion object {

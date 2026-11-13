@@ -16,6 +16,8 @@ dependencyManagement {
 
 dependencies {
     implementation(project(":kraken-messaging"))
+    // The message store: the outbox, the processed events, the dead letters and the sagas in the service's MongoDB (ADR 0028).
+    implementation(project(":kraken-messaging-mongo"))
     implementation(project(":examples:examples-api"))
     implementation(libs.spring.boot.starter.webmvc)
     implementation(libs.spring.boot.starter.actuator)

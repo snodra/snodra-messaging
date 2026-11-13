@@ -1,6 +1,5 @@
 package io.damoreira.kraken.messaging.saga
 
-import com.mongodb.MongoException
 import io.damoreira.kraken.messaging.MessageContext
 import io.damoreira.kraken.messaging.codec.JsonCodec
 import io.damoreira.kraken.messaging.codec.MessageTypeResolver
@@ -9,7 +8,6 @@ import org.slf4j.LoggerFactory
 import org.slf4j.MDC
 import org.springframework.dao.DuplicateKeyException
 import org.springframework.dao.TransientDataAccessException
-import org.springframework.data.mongodb.core.MongoTemplate
 import org.springframework.transaction.support.TransactionOperations
 import java.time.Clock
 import java.time.Instant
@@ -28,14 +26,14 @@ import kotlin.reflect.KClass
  * recording objects ([SagaLifecycle], [SagaCommands], [DeadlineManager]); once every handler returned, the state is
  * written with an optimistic version check (`version + 1`; a version of 0 means just created), the recorded dispatch
  * entries (`seq = version * 1000 + index`) and deadline changes are written, and an ended instance cancels its
- * scheduled deadlines. A conflict (version, start key, Mongo write conflict) or any handler exception rolls the whole
+ * scheduled deadlines. A conflict (version, start key, a write conflict in the store) or any handler exception rolls the whole
  * transaction back and the event is retried with [retry] (R4); after the last attempt it is parked in `saga_failures`
  * together with the marker and the stage moves on. The only exception [process] throws is when parking itself fails
  * (the store is down): the consumer then redelivers the record instead of losing it.
  *
  * Handlers run in the calling thread inside the transaction, with the MDC keys `sagaType`, `sagaId`, `correlationId`.
- * Persistence is behind [ports] (Mongo by default); [tx] is the transaction template of the Mongo manager, or
- * [TransactionOperations.withoutTransaction] over in-memory ports.
+ * Persistence is behind [ports] (the message store's [io.damoreira.kraken.messaging.store.MessageStore.sagas]); [tx] is a
+ * transaction template over the store's transactions, or [TransactionOperations.withoutTransaction] over in-memory ports.
  */
 class SagaRuntime(
     types: List<SagaType>,
@@ -48,18 +46,6 @@ class SagaRuntime(
     private val retry: SagaRetry = SagaRetry(),
     private val metrics: SagaMetrics = NoopSagaMetrics,
 ) : SagaStage {
-    constructor(
-        types: List<SagaType>,
-        mongo: MongoTemplate,
-        tx: TransactionOperations,
-        codec: JsonCodec,
-        typeResolver: MessageTypeResolver,
-        beans: (KClass<*>) -> Any,
-        clock: Clock = Clock.systemUTC(),
-        retry: SagaRetry = SagaRetry(),
-        metrics: SagaMetrics = NoopSagaMetrics,
-    ) : this(types, SagaStores.mongo(mongo), tx, codec, typeResolver, beans, clock, retry, metrics)
-
     private val log = LoggerFactory.getLogger(SagaRuntime::class.java)
     private val commandFailedType: String = typeResolver.typeNameOf(SagaCommandFailed::class)
     private val byName: Map<String, SagaType> = types.associateBy { it.name }
@@ -453,10 +439,12 @@ class SagaRuntime(
         return "${root.javaClass.name}: ${root.message}".take(MAX_ERROR_LENGTH)
     }
 
-    /** Version, start-key and Mongo write conflicts: the transient kind a retry resolves. */
+    /**
+     * Version and start-key conflicts and the store's transient failures (a write conflict of two transactions, which a store
+     * reports as a [TransientDataAccessException]): the transient kind a retry resolves.
+     */
     private fun isConflict(e: Throwable): Boolean = generateSequence(e) { t -> t.cause?.takeIf { it !== t } }.any {
-        it is VersionConflict || it is DuplicateKeyException || it is TransientDataAccessException ||
-            (it is MongoException && (it.hasErrorLabel("TransientTransactionError") || it.code == WRITE_CONFLICT))
+        it is VersionConflict || it is DuplicateKeyException || it is TransientDataAccessException
     }
 
     /** The stored version of an instance (or the state of a deadline) is not the one this attempt read. */
@@ -464,7 +452,6 @@ class SagaRuntime(
 
     companion object {
         private const val MAX_ERROR_LENGTH = 2000
-        private const val WRITE_CONFLICT = 112
 
         /**
          * The start key of the association [key] = [value] of saga type [type]: `<type>|<key>=<value>` with `%`, `|` and `=`

@@ -1,5 +1,9 @@
 package io.damoreira.kraken.messaging.saga
 
+import io.damoreira.kraken.messaging.store.MessageStore
+import io.damoreira.kraken.messaging.mongoStore
+import io.damoreira.kraken.messaging.SAGA_DISPATCH
+import io.damoreira.kraken.messaging.mongo.MongoMessageStore
 import com.mongodb.client.MongoClients
 import io.damoreira.kraken.messaging.MessageContext
 import io.damoreira.kraken.messaging.RetryPolicy
@@ -13,7 +17,6 @@ import io.damoreira.kraken.messaging.deadline.DlSaga
 import io.damoreira.kraken.messaging.deadline.DlSwitch
 import io.damoreira.kraken.messaging.external.ExPrint
 import io.damoreira.kraken.messaging.external.ExPrinterAdapter
-import io.damoreira.kraken.messaging.external.ExternalCallIndexes
 import io.damoreira.kraken.messaging.external.ExternalCallSettings
 import io.damoreira.kraken.messaging.external.IdempotencyInterceptor
 import io.damoreira.kraken.messaging.handler.HandlerInvoker
@@ -58,6 +61,7 @@ class SagaMetricsTest {
     private val start = Instant.parse("2026-11-03T10:00:00Z")
     private val clock = SettableClock(start)
     private lateinit var registry: SimpleMeterRegistry
+    private lateinit var store: MessageStore
     private lateinit var metrics: MicrometerSagaMetrics
 
     @BeforeAll
@@ -67,8 +71,7 @@ class SagaMetricsTest {
         mongo = MongoTemplate(factory)
         txManager = MongoTransactionManager(factory)
         tx = TransactionTemplate(txManager)
-        SagaIndexes(mongo, Duration.ofDays(30), Duration.ofDays(7), Duration.ofDays(7), Duration.ofDays(30)).afterPropertiesSet()
-        ExternalCallIndexes(mongo, Duration.ofDays(30)).afterPropertiesSet()
+        store = mongoStore(mongo)
         listOf("processed_events", "saga_failures", "outbox", "external_calls").forEach { if (!mongo.collectionExists(it)) mongo.createCollection(it) }
     }
 
@@ -86,7 +89,7 @@ class SagaMetricsTest {
     }
 
     private fun runtime(vararg classes: kotlin.reflect.KClass<*>) = SagaRuntime(
-        types = SagaModelScanner(resolver, codec).scan(classes.toList()), mongo = mongo, tx = tx, codec = codec, typeResolver = resolver,
+        types = SagaModelScanner(resolver, codec).scan(classes.toList()), ports = store.sagas, tx = tx, codec = codec, typeResolver = resolver,
         beans = { type -> if (type == RtBean::class) RtBean("the-bean") else error("no bean $type") },
         clock = clock,
         retry = SagaRetry(RetryPolicy(maxAttempts = 3, initialBackoff = Duration.ofMillis(2), multiplier = 1.0, maxBackoff = Duration.ofMillis(5))),
@@ -138,7 +141,7 @@ class SagaMetricsTest {
     fun `deadlines fired and overdue are metered`() {
         val runtime = runtime(DlSaga::class)
         deliver(runtime, DlPlaced("d1", seconds = 60))
-        val scheduler = DeadlineScheduler(mongo, runtime, clock, DeadlineSettings(pollInterval = Duration.ofMillis(50), lease = Duration.ofSeconds(30)), metrics)
+        val scheduler = DeadlineScheduler(store.sagas.deadlines, runtime, clock, DeadlineSettings(pollInterval = Duration.ofMillis(50), lease = Duration.ofSeconds(30)), metrics)
 
         clock.now = start.plusSeconds(61)
         DlSwitch.broken.set(true)
@@ -156,7 +159,7 @@ class SagaMetricsTest {
     @Test
     fun `the pending dispatch and active saga gauges follow the stored state`() {
         val runtime = runtime(RtOrderSaga::class)
-        val sampler = SagaGaugeSampler(mongo, metrics)
+        val sampler = SagaGaugeSampler(store.sagas, metrics)
         assertEquals(0.0, gauge("kraken.sagas.active", "type", "rt.Order"), "a known saga type has a gauge before its first instance")
 
         deliver(runtime, RtOrderPlaced("o4")) // records a command and an event
@@ -166,7 +169,7 @@ class SagaMetricsTest {
         assertEquals(4.0, gauge("kraken.saga.dispatch.pending"))
 
         deliver(runtime, RtFinish("o4"))
-        mongo.updateMulti(Query(), org.springframework.data.mongodb.core.query.Update().set("dispatchedAt", start), SagaDispatchDocument::class.java)
+        mongo.updateMulti(Query(), org.springframework.data.mongodb.core.query.Update().set("dispatchedAt", start), SagaDispatchDocument::class.java, SAGA_DISPATCH)
         sampler.sampleOnce()
         assertEquals(1.0, gauge("kraken.sagas.active", "type", "rt.Order"))
         assertEquals(0.0, gauge("kraken.saga.dispatch.pending"), "dispatched entries are not pending")
@@ -178,8 +181,8 @@ class SagaMetricsTest {
         val handlers = HandlerRegistry(resolver) // nobody handles rt.DoIt
         val invoker = HandlerInvoker(handlers, codec)
         val relay = SagaDispatchRelay(
-            mongo, tx, LocalRawCommandSender(invoker), OutboxEventBus(mongo, codec, resolver, TraceHeaders(null, null)),
-            LocalEventDispatcher(handlers, invoker, tx, mongo, runtime), codec, resolver, clock,
+            store.sagas.dispatch, tx, LocalRawCommandSender(invoker), OutboxEventBus(store.outbox, codec, resolver, TraceHeaders(null, null)),
+            LocalEventDispatcher(handlers, invoker, store, runtime), codec, resolver, clock,
             RelaySettings(pollInterval = Duration.ofMillis(50), maxAttempts = 2), metrics,
         )
         deliver(runtime, RtOrderPlaced("o6"))
@@ -193,7 +196,7 @@ class SagaMetricsTest {
     fun `adapter calls are counted by handler and outcome`() {
         val adapter = ExPrinterAdapter()
         val handlers = HandlerRegistry(MessageTypeResolver("ex")).also { it.register(adapter) }
-        val interceptor = IdempotencyInterceptor(mongo, codec, txManager, clock, ExternalCallSettings(Duration.ofMinutes(5)), metrics)
+        val interceptor = IdempotencyInterceptor(store, codec, clock, ExternalCallSettings(Duration.ofMinutes(5)), metrics)
         val invoker = HandlerInvoker(handlers, codec, interceptor)
         val ctx = MessageContext("m-1", "ex.Print", "corr-1", null, emptySet(), null, mapOf("idempotency-key" to "k-1"))
 

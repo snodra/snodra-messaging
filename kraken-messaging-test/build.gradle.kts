@@ -13,8 +13,6 @@ dependencies {
     api("org.apache.kafka:kafka-clients")
     // InMemoryBuses synthesises a KrakenForwardedAuthentication (a Spring Security Authentication) for annotated handlers.
     implementation("org.springframework.security:spring-security-core")
-    // SagaTestFixture runs the library's SagaRuntime, whose ports speak the saga documents (bson) and TransactionOperations (spring-tx).
-    implementation(libs.spring.boot.starter.data.mongodb)
     api(libs.kotlinx.coroutines.core)
     // MessageStoreConformanceTest is a JUnit 5 class that store add-ons extend in their own tests.
     api("org.junit.jupiter:junit-jupiter-api")

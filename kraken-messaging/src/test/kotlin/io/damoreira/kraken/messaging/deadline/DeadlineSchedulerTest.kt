@@ -1,5 +1,11 @@
 package io.damoreira.kraken.messaging.deadline
 
+import io.damoreira.kraken.messaging.store.MessageStore
+import io.damoreira.kraken.messaging.mongoStore
+import io.damoreira.kraken.messaging.DEADLINES
+import io.damoreira.kraken.messaging.SAGAS
+import io.damoreira.kraken.messaging.SAGA_DISPATCH
+import io.damoreira.kraken.messaging.mongo.MongoMessageStore
 import io.damoreira.kraken.messaging.saga.payloadDoc
 import io.damoreira.kraken.messaging.saga.stateDoc
 import com.mongodb.client.MongoClient
@@ -22,7 +28,6 @@ import io.damoreira.kraken.messaging.saga.SagaCommands
 import io.damoreira.kraken.messaging.saga.SagaDispatchDocument
 import io.damoreira.kraken.messaging.saga.SagaDocument
 import io.damoreira.kraken.messaging.saga.SagaEventHandler
-import io.damoreira.kraken.messaging.saga.SagaIndexes
 import io.damoreira.kraken.messaging.saga.SagaMetrics
 import io.damoreira.kraken.messaging.saga.SagaModelScanner
 import io.damoreira.kraken.messaging.saga.SagaRetry
@@ -149,6 +154,7 @@ class DeadlineSchedulerTest {
     private val settings = DeadlineSettings(pollInterval = Duration.ofMillis(50), lease = Duration.ofSeconds(30))
     private lateinit var runtime: SagaRuntime
     private lateinit var metrics: OverdueMetrics
+    private lateinit var store: MessageStore
 
     @BeforeAll
     fun start() {
@@ -157,7 +163,7 @@ class DeadlineSchedulerTest {
         val factory = SimpleMongoClientDatabaseFactory(client, "deadline_scheduler_test")
         mongo = MongoTemplate(factory)
         tx = TransactionTemplate(MongoTransactionManager(factory))
-        SagaIndexes(mongo, Duration.ofDays(30), Duration.ofDays(7), Duration.ofDays(7), Duration.ofDays(30)).afterPropertiesSet()
+        store = mongoStore(mongo)
         listOf("processed_events", "saga_failures").forEach { if (!mongo.collectionExists(it)) mongo.createCollection(it) }
     }
 
@@ -174,14 +180,14 @@ class DeadlineSchedulerTest {
         DlSwitch.broken.set(false)
         metrics = OverdueMetrics()
         runtime = SagaRuntime(
-            types = SagaModelScanner(resolver, codec).scan(listOf(DlSaga::class)), mongo = mongo, tx = tx, codec = codec, typeResolver = resolver,
+            types = SagaModelScanner(resolver, codec).scan(listOf(DlSaga::class)), ports = store.sagas, tx = tx, codec = codec, typeResolver = resolver,
             beans = { error("no beans") }, clock = clock,
             retry = SagaRetry(RetryPolicy(maxAttempts = 2, initialBackoff = Duration.ofMillis(1), multiplier = 1.0, maxBackoff = Duration.ofMillis(1))),
             metrics = metrics,
         )
     }
 
-    private fun scheduler() = DeadlineScheduler(mongo, runtime, clock, settings, metrics)
+    private fun scheduler() = DeadlineScheduler(store.sagas.deadlines, runtime, clock, settings, metrics)
 
     private fun deliver(event: Event, id: String = UUID.randomUUID().toString()) {
         val type = resolver.typeNameOf(event::class)
@@ -192,9 +198,9 @@ class DeadlineSchedulerTest {
         clock.now = clock.now.plusSeconds(seconds)
     }
 
-    private fun saga(orderId: String) = mongo.findAll(SagaDocument::class.java).single { it.stateDoc.getString("orderId") == orderId }
+    private fun saga(orderId: String) = mongo.findAll(SagaDocument::class.java, SAGAS).single { it.stateDoc.getString("orderId") == orderId }
     private fun deadlines(sagaId: String? = null) = mongo.find(
-        if (sagaId == null) Query() else Query(Criteria.where("sagaId").`is`(sagaId)), DeadlineDocument::class.java,
+        if (sagaId == null) Query() else Query(Criteria.where("sagaId").`is`(sagaId)), DeadlineDocument::class.java, DEADLINES,
     )
     private fun fired(orderId: String) = saga(orderId).stateDoc.getInteger("fired")
 
@@ -208,7 +214,7 @@ class DeadlineSchedulerTest {
         scheduler().pollOnce()
 
         assertEquals("corr-e-40", saga("o40").stateDoc.getString("firedWithCorrelation"), "the handler's MessageContext")
-        val sent = mongo.findAll(SagaDispatchDocument::class.java).single()
+        val sent = mongo.findAll(SagaDispatchDocument::class.java, SAGA_DISPATCH).single()
         assertEquals("corr-e-40", sent.headers["correlation-id"], "the command it sent")
     }
 
@@ -282,14 +288,14 @@ class DeadlineSchedulerTest {
         val ended = saga("o1")
         assertTrue(ended.ended)
         // A deadline still scheduled for an ended saga (its write raced the saga's end) or for no saga: found due, it is cancelled, not run.
-        mongo.insert(DeadlineDocument("late", "dl.Charge", ended.id, "charge-timeout", """{"reason":"late"}""", "dl.TimeoutPayload", start.plusSeconds(10), "corr-late"))
-        mongo.insert(DeadlineDocument("orphan", "dl.Charge", "no-such-saga", "charge-timeout", """{"reason":"orphan"}""", "dl.TimeoutPayload", start.plusSeconds(10), "corr-orphan"))
+        mongo.insert(DeadlineDocument("late", "dl.Charge", ended.id, "charge-timeout", """{"reason":"late"}""", "dl.TimeoutPayload", start.plusSeconds(10), "corr-late"), DEADLINES)
+        mongo.insert(DeadlineDocument("orphan", "dl.Charge", "no-such-saga", "charge-timeout", """{"reason":"orphan"}""", "dl.TimeoutPayload", start.plusSeconds(10), "corr-orphan"), DEADLINES)
 
         advance(3600)
         scheduler().pollOnce()
 
-        assertEquals(DeadlineStatus.CANCELLED, mongo.findById("late", DeadlineDocument::class.java)!!.status)
-        assertEquals(DeadlineStatus.CANCELLED, mongo.findById("orphan", DeadlineDocument::class.java)!!.status)
+        assertEquals(DeadlineStatus.CANCELLED, mongo.findById("late", DeadlineDocument::class.java, DEADLINES)!!.status)
+        assertEquals(DeadlineStatus.CANCELLED, mongo.findById("orphan", DeadlineDocument::class.java, DEADLINES)!!.status)
         assertEquals(0, fired("o1"))
         assertEquals(emptyList(), metrics.fired)
     }
@@ -357,7 +363,7 @@ class DeadlineSchedulerTest {
 
         scheduler().pollOnce()
 
-        val entry = mongo.find(Query(Criteria.where("sagaId").`is`(sagaId)), SagaDispatchDocument::class.java).single()
+        val entry = mongo.find(Query(Criteria.where("sagaId").`is`(sagaId)), SagaDispatchDocument::class.java, SAGA_DISPATCH).single()
         assertEquals(DispatchKind.COMMAND, entry.kind)
         assertEquals("dl.CancelCharge", entry.type)
         assertEquals("ref-o1", entry.payloadDoc.getString("ref"))

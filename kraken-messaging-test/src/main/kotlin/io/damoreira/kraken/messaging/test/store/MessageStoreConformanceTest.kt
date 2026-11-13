@@ -8,6 +8,7 @@ import io.damoreira.kraken.messaging.external.ExternalCallStatus
 import io.damoreira.kraken.messaging.saga.Association
 import io.damoreira.kraken.messaging.saga.DeadlineDocument
 import io.damoreira.kraken.messaging.saga.DispatchKind
+import io.damoreira.kraken.messaging.saga.SagaCommandFailed
 import io.damoreira.kraken.messaging.saga.SagaDispatchDocument
 import io.damoreira.kraken.messaging.saga.SagaDocument
 import io.damoreira.kraken.messaging.saga.SagaFailureDocument
@@ -39,6 +40,7 @@ import java.time.Instant
 import java.time.temporal.ChronoUnit
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CyclicBarrier
+import java.util.concurrent.TimeUnit
 
 /**
  * The conformance kit of the message store (ADR 0028): the behaviour every store add-on must have, whatever its database.
@@ -123,11 +125,18 @@ abstract class MessageStoreConformanceTest {
 
         val published = ConcurrentHashMap<String, MutableList<String>>()
         val start = CyclicBarrier(2)
+        val firstClaimed = CyclicBarrier(2)
         suspend fun relay(owner: String) {
             val mine = published.getOrPut(owner) { mutableListOf() }
-            start.await() // both relays start claiming together
+            start.await(10, TimeUnit.SECONDS) // both relays start claiming together
+            var first = true
             while (true) {
                 val batch = store.outbox.claim(owner, Duration.ofSeconds(60), limit = 7)
+                if (first) {
+                    // Both relays hold their first batch before either marks anything sent: their claims overlapped in time.
+                    first = false
+                    firstClaimed.await(10, TimeUnit.SECONDS)
+                }
                 if (batch.isEmpty()) return
                 mine += batch.map { it.id }
                 store.outbox.markSent(batch.map { it.id })
@@ -141,10 +150,20 @@ abstract class MessageStoreConformanceTest {
         val b = published.getValue("relay-b")
         assertEquals(a.size, a.toSet().size, "relay-a published an entry twice")
         assertEquals(b.size, b.toSet().size, "relay-b published an entry twice")
-        assertTrue(a.isNotEmpty() && b.isNotEmpty(), "both relays claimed entries: ${a.size} and ${b.size}")
+        assertTrue(a.isNotEmpty() && b.isNotEmpty(), "both relays claimed entries while the other held its own: ${a.size} and ${b.size}")
         assertEquals(emptySet<String>(), a.toSet() intersect b.toSet(), "an entry was published by both relays")
         assertEquals(all.map { it.id }.toSet(), a.toSet() + b.toSet(), "every entry was published")
         assertEquals(0L, store.outbox.pending())
+    }
+
+    @Test
+    fun outboxPayloadMustBeAJsonObject() = runBlocking {
+        for (payload in listOf("[1,2]", "42", "\"text\"", "null", "{not json")) {
+            val entry = OutboxEntry("e-$payload", "t.Happened", "k", emptyMap(), payload.toByteArray(), now(), seq = 1)
+            assertThrows(IllegalArgumentException::class.java, { runBlocking { store.outbox.append(entry) } }, payload)
+        }
+        assertEquals(0L, store.outbox.pending(), "nothing was appended")
+        assertEquals(emptyList<OutboxEntry>(), store.outbox.claim("relay", Duration.ofSeconds(30), limit = 10))
     }
 
     @Test
@@ -527,15 +546,23 @@ abstract class MessageStoreConformanceTest {
         assertEquals(emptyList<SagaDocument>(), ports.sagas.findLive("t.Order", "orderId", "o-1"), "an ended saga is not live")
         ports.sagas.insert(saga.copy(id = "s2")) // the start key is free once its saga ended
         assertEquals(listOf("s2"), ports.sagas.findLive("t.Order", "orderId", "o-1").map { it.id })
+        ports.sagas.insert(SagaDocument("s3", "t.Ship", "{}", listOf(Association("orderId", "o-1")), createdAt = t, updatedAt = t)) // no start key
+        ports.sagas.insert(SagaDocument("s4", "t.Ship", "{}", createdAt = t, updatedAt = t)) // forceNew: no start key either
+        assertEquals(mapOf("t.Order" to 1L, "t.Ship" to 2L), ports.sagas.countLiveByType(), "live instances per type, the ended one not")
 
-        // dispatch: recorded (the relay reads it)
+        // dispatch: recorded, and read back in seq order (what the relay reads)
+        val charge = SagaDispatchDocument("s1:1000", "s1", 1000, DispatchKind.COMMAND, "t.Charge", """{"orderId":"o-1"}""", mapOf("correlation-id" to "c-1"), "o-1", t)
+        val charged = SagaDispatchDocument("s1:1001", "s1", 1001, DispatchKind.EVENT, "t.Charged", """{"orderId":"o-1"}""", createdAt = t)
         ports.dispatch.record(emptyList())
-        ports.dispatch.record(
-            listOf(
-                SagaDispatchDocument("s1:1000", "s1", 1000, DispatchKind.COMMAND, "t.Charge", """{"orderId":"o-1"}""", mapOf("correlationId" to "c-1"), "o-1", t),
-                SagaDispatchDocument("s1:1001", "s1", 1001, DispatchKind.EVENT, "t.Charged", """{"orderId":"o-1"}""", createdAt = t),
-            ),
-        )
+        ports.dispatch.record(listOf(charged, charge))
+        assertEquals(charge, ports.dispatch.nextPending("s1"))
+        assertNull(ports.dispatch.nextPending("s2"))
+        assertEquals(listOf("s1"), ports.dispatch.dueSagas(t, emptyList(), limit = 10))
+        assertEquals(2L, ports.dispatch.pendingDispatches())
+        ports.dispatch.markDispatched(charge.id, t)
+        assertEquals(charged, ports.dispatch.nextPending("s1"))
+        assertEquals(1L, ports.dispatch.pendingDispatches())
+        assertThrows(DuplicateKeyException::class.java) { ports.dispatch.record(listOf(charge)) }
 
         // deadlines
         val remind = DeadlineDocument("d1", "t.Order", "s2", "remind", """{"n":1}""", "t.Remind", t.plusSeconds(60), "c-1")
@@ -583,6 +610,108 @@ abstract class MessageStoreConformanceTest {
         ports.markers.insert("saga:t.Order:e1", "t.Paid", t)
         assertTrue(ports.markers.exists("saga:t.Order:e1"))
         assertThrows(DuplicateKeyException::class.java) { ports.markers.insert("saga:t.Order:e1", "t.Paid", t) }
+    }
+
+    @Test
+    fun sagaDispatchEntriesAreRelayedInOrderPerSaga() {
+        val dispatch = store.sagas.dispatch
+        val t = now()
+        fun command(saga: String, seq: Long, createdAt: Instant, next: Instant? = null) = SagaDispatchDocument(
+            "$saga:$seq", saga, seq, DispatchKind.COMMAND, "t.Charge", """{"n":$seq}""", mapOf("correlation-id" to "c-$saga"), "r-$saga",
+            createdAt, nextAttemptAt = next,
+        )
+        val a0 = command("a", 1000, t.plusMillis(2))
+        val a1 = command("a", 1001, t.plusMillis(3))
+        val b0 = command("b", 1000, t.plusMillis(1))
+        val c0 = command("c", 1000, t, next = t.plusSeconds(60))
+        val c1 = command("c", 1001, t)
+        dispatch.record(listOf(a1, c1, a0, b0, c0))
+
+        // Due: a saga whose first pending entry is due; oldest work first (by that entry's createdAt).
+        assertEquals(listOf("b", "a"), dispatch.dueSagas(t, emptyList(), limit = 10), "c's first entry waits, holding back its second")
+        assertEquals(listOf("b"), dispatch.dueSagas(t, emptyList(), limit = 1))
+        assertEquals(listOf("a"), dispatch.dueSagas(t, listOf("b"), limit = 10), "the excluded sagas are left out")
+        assertEquals(listOf("c", "b", "a"), dispatch.dueSagas(t.plusSeconds(60), emptyList(), limit = 10), "due once its time came")
+        assertEquals(c0, dispatch.nextPending("c"), "the first pending entry, due or not")
+        assertEquals(5L, dispatch.pendingDispatches())
+
+        dispatch.markDispatched(b0.id, t)
+        assertNull(dispatch.nextPending("b"))
+        dispatch.scheduleRetry(a0.id, attempts = 2, nextAttemptAt = t.plusSeconds(30))
+        assertEquals(a0.copy(attempts = 2, nextAttemptAt = t.plusSeconds(30)), dispatch.nextPending("a"))
+        assertEquals(emptyList<String>(), dispatch.dueSagas(t, emptyList(), limit = 10))
+        assertEquals(listOf("a"), dispatch.dueSagas(t.plusSeconds(30), emptyList(), limit = 10))
+
+        // Given up on: never pending again, with a failure notice reserved for the instance that failed it.
+        dispatch.markFailed(a0.id, attempts = 3, reason = SagaCommandFailed.Reason.EXHAUSTED, message = "gave up", now = t, noticeNextAt = t.plusSeconds(5))
+        assertEquals(a1, dispatch.nextPending("a"), "a failed entry is not pending: the saga's later entries go on")
+        assertEquals(3L, dispatch.pendingDispatches())
+        assertEquals(emptyList<String>(), dispatch.claimDueNotices(t, t.plusSeconds(30), limit = 10).map { it.id }, "still reserved")
+        val failed = a0.copy(
+            attempts = 3, nextAttemptAt = t.plusSeconds(30), failedAt = t, failureReason = SagaCommandFailed.Reason.EXHAUSTED,
+            failureMessage = "gave up", noticePending = true, noticeAttempts = 0,
+        )
+        assertEquals(listOf(failed.copy(noticeNextAt = t.plusSeconds(35))), dispatch.claimDueNotices(t.plusSeconds(5), t.plusSeconds(35), limit = 10))
+        assertEquals(emptyList<String>(), dispatch.claimDueNotices(t.plusSeconds(10), t.plusSeconds(40), limit = 10).map { it.id }, "claimed: reserved")
+        dispatch.scheduleNoticeRetry(a0.id, noticeAttempts = 1, noticeNextAt = t.plusSeconds(40))
+
+        // A second notice, due earlier: claims go earliest first, up to the limit.
+        dispatch.markFailed(c0.id, attempts = 0, reason = SagaCommandFailed.Reason.NO_HANDLER, message = "nobody", now = t, noticeNextAt = t.plusSeconds(20))
+        assertEquals(listOf(c0.id), dispatch.claimDueNotices(t.plusSeconds(40), t.plusSeconds(100), limit = 1).map { it.id })
+        val retried = dispatch.claimDueNotices(t.plusSeconds(40), t.plusSeconds(100), limit = 10)
+        assertEquals(listOf(a0.id to 1), retried.map { it.id to it.noticeAttempts })
+        dispatch.clearNotice(a0.id)
+        dispatch.clearNotice(c0.id)
+        assertEquals(emptyList<String>(), dispatch.claimDueNotices(t.plusSeconds(3600), t.plusSeconds(3700), limit = 10).map { it.id }, "settled")
+        assertEquals(a1, dispatch.nextPending("a"), "settling a notice never makes its entry pending again")
+    }
+
+    @Test
+    fun sagaDispatchLeaseIsExclusiveUntilItExpires() {
+        val dispatch = store.sagas.dispatch
+        val t = now()
+        assertTrue(dispatch.claimLease("s1", "relay-a", until = t.plusSeconds(30), now = t))
+        assertFalse(dispatch.claimLease("s1", "relay-b", until = t.plusSeconds(30), now = t.plusSeconds(10)), "held by relay-a")
+        assertFalse(dispatch.claimLease("s1", "relay-a", until = t.plusSeconds(30), now = t.plusSeconds(10)), "a held lease is renewed, not claimed")
+        assertTrue(dispatch.claimLease("s2", "relay-b", until = t.plusSeconds(30), now = t), "another saga's lease")
+        assertTrue(dispatch.renewLease("s1", "relay-a", until = t.plusSeconds(60)))
+        assertFalse(dispatch.renewLease("s1", "relay-b", until = t.plusSeconds(60)), "not relay-b's")
+        assertFalse(dispatch.claimLease("s1", "relay-b", until = t.plusSeconds(90), now = t.plusSeconds(45)), "renewed until t+60")
+        assertTrue(dispatch.claimLease("s1", "relay-b", until = t.plusSeconds(90), now = t.plusSeconds(61)), "expired: taken over")
+        assertFalse(dispatch.renewLease("s1", "relay-a", until = t.plusSeconds(120)), "relay-a lost it")
+        dispatch.releaseLease("s1", "relay-a") // not relay-a's any more: no effect
+        assertFalse(dispatch.claimLease("s1", "relay-c", until = t.plusSeconds(90), now = t.plusSeconds(62)))
+        dispatch.releaseLease("s1", "relay-b")
+        assertTrue(dispatch.claimLease("s1", "relay-c", until = t.plusSeconds(90), now = t.plusSeconds(62)), "released: free")
+    }
+
+    @Test
+    fun dueDeadlinesAreClaimedOnceUntilTheirLeaseExpires() {
+        val deadlines = store.sagas.deadlines
+        val t = now()
+        fun deadline(id: String, name: String, dueAt: Instant) = DeadlineDocument(id, "t.Order", "s-$id", name, null, null, dueAt, "c-$id")
+        val first = deadline("d1", "remind", t.minusSeconds(20))
+        val second = deadline("d2", "remind", t.minusSeconds(10))
+        val third = deadline("d3", "expire", t.minusSeconds(5))
+        val later = deadline("d4", "expire", t.plusSeconds(60))
+        listOf(later, third, second, first).forEach(deadlines::insert)
+        deadlines.insert(deadline("d5", "remind", t.minusSeconds(30)))
+        deadlines.cancel("s-d5", "d5", t) // not SCHEDULED: never due
+
+        assertEquals(mapOf("remind" to 2L, "expire" to 1L), deadlines.overdueByName(t))
+        assertEquals(first.copy(claimedBy = "a", claimedUntil = t.plusSeconds(30)), deadlines.claimDueDeadline("a", t, t.plusSeconds(30)), "due first")
+        assertEquals("d2", deadlines.claimDueDeadline("b", t, t.plusSeconds(30))?.id, "d1 is held")
+        assertEquals("d3", deadlines.claimDueDeadline("a", t, t.plusSeconds(30))?.id)
+        assertNull(deadlines.claimDueDeadline("b", t, t.plusSeconds(30)), "every due deadline is held, d4 is not due")
+        assertTrue(deadlines.markFired("d2", t))
+        assertEquals(mapOf("remind" to 1L, "expire" to 1L), deadlines.overdueByName(t), "claimed but not fired: still overdue")
+
+        // d1's claimer died: once its lease passed it is claimed again; a fired deadline never is.
+        assertEquals(first.copy(claimedBy = "b", claimedUntil = t.plusSeconds(61)), deadlines.claimDueDeadline("b", t.plusSeconds(31), t.plusSeconds(61)))
+        assertEquals("d3", deadlines.claimDueDeadline("b", t.plusSeconds(31), t.plusSeconds(61))?.id)
+        assertNull(deadlines.claimDueDeadline("b", t.plusSeconds(31), t.plusSeconds(61)))
+        assertEquals("d4", deadlines.claimDueDeadline("b", t.plusSeconds(60), t.plusSeconds(90))?.id, "due now")
+        assertEquals(emptyMap<String, Long>(), deadlines.overdueByName(t.minusSeconds(60)))
     }
 
     // -------------------------------------------------------------------------------------------------------------- helpers

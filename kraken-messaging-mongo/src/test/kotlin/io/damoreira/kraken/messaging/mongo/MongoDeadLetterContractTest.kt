@@ -1,6 +1,12 @@
-package io.damoreira.kraken.messaging.deadletter
+package io.damoreira.kraken.messaging.mongo
 
 import com.mongodb.client.MongoClients
+import io.damoreira.kraken.messaging.deadletter.DeadLetter
+import io.damoreira.kraken.messaging.deadletter.DeadLetterError
+import io.damoreira.kraken.messaging.deadletter.DeadLetterFactory
+import io.damoreira.kraken.messaging.deadletter.DeadLetterMode
+import io.damoreira.kraken.messaging.deadletter.DeadLetterReason
+import io.damoreira.kraken.messaging.deadletter.DeadLetters
 import io.damoreira.kraken.messaging.kafka.LocalEventDispatcher
 import io.damoreira.kraken.messaging.test.KrakenContainers
 import io.mockk.every
@@ -24,6 +30,7 @@ import java.time.Duration
 import java.time.Instant
 import java.time.ZoneOffset
 import java.util.Optional
+import kotlinx.coroutines.runBlocking
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
@@ -34,95 +41,97 @@ import kotlin.test.assertTrue
  * fixtures in `src/test/resources/dead_letters_contract` (written from the ADR's table, and byte for byte the Rust library's
  * `tests/fixtures/dead_letters_contract`), types included (Int32 `partition`, Int64 `offset`, BinData, dates), with no
  * `_class`, no null, a blank `id` or `type` header absent as `eventId` or `eventType`, and `replay` (P6b: parked while the
- * processor replayed the record) written only when true; every fixture document, as the
- * other library writes it, reads back through this library's store and admin API; the indexes have the ADR's names.
+ * processor replayed the record) written only when true: the core's [DeadLetterFactory] builds the letter, this add-on
+ * stores it. Every fixture document, as the other library writes it, reads back through the store and the core's admin
+ * API; the indexes have the ADR's names.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
-class DeadLetterContractTest {
+class MongoDeadLetterContractTest {
     private val mongoContainer = KrakenContainers.mongo()
     private lateinit var mongo: MongoTemplate
     private val now = Instant.parse("2026-11-04T10:00:00Z")
-    private lateinit var store: DeadLetterStore
+    private lateinit var store: MongoDeadLetterStore
+    private val letters = DeadLetterFactory(Duration.ofDays(30), Clock.fixed(now, ZoneOffset.UTC))
 
     @BeforeAll fun start() {
         mongoContainer.start()
         mongo = MongoTemplate(SimpleMongoClientDatabaseFactory(MongoClients.create(mongoContainer.connectionString + "/?directConnection=true"), "dead_letter_contract"))
-        store = DeadLetterStore(mongo, Duration.ofDays(30), Clock.fixed(now, ZoneOffset.UTC))
+        store = MongoDeadLetterStore(mongo, Clock.fixed(now, ZoneOffset.UTC))
     }
 
     @AfterAll fun stop() = mongoContainer.stop()
 
-    @BeforeEach fun clean() { mongo.remove(Query(), DeadLetterStore.COLLECTION) }
+    @BeforeEach fun clean() { mongo.remove(Query(), MongoDeadLetterStore.COLLECTION) }
 
     private fun fixture(name: String): BsonDocument =
         BsonDocument.parse(javaClass.getResource("/dead_letters_contract/$name.json")!!.readText())
 
     private fun stored(id: String): BsonDocument =
-        mongo.db.getCollection(DeadLetterStore.COLLECTION, BsonDocument::class.java).find(Document("_id", id)).first()!!
+        mongo.db.getCollection(MongoDeadLetterStore.COLLECTION, BsonDocument::class.java).find(Document("_id", id)).first()!!
 
-    /** A store whose clock stands at [at] (the fixture's `parkedAt`). */
-    private fun storeAt(at: String) = DeadLetterStore(mongo, Duration.ofDays(30), Clock.fixed(Instant.parse(at), ZoneOffset.UTC))
+    /** Letters built with the clock at [at] (the fixture's `parkedAt`). */
+    private fun storeAt(at: String) = DeadLetterFactory(Duration.ofDays(30), Clock.fixed(Instant.parse(at), ZoneOffset.UTC))
 
     private fun record(partition: Int, offset: Long, key: String?, value: ByteArray?, vararg headers: Pair<String, ByteArray?>) =
         ConsumerRecord("kraken.events", partition, offset, ConsumerRecord.NO_TIMESTAMP, TimestampType.NO_TIMESTAMP_TYPE,
             -1, -1, key, value, RecordHeaders(headers.map { RecordHeader(it.first, it.second) }), Optional.empty())
 
-    @Test fun `a HANDLER_FAILED letter is the fixture`() {
+    @Test fun `a HANDLER_FAILED letter is the fixture`() = runBlocking<Unit> {
         val r = record(1, 42, "order-7", """{"orderId":"o-7","amount":12.30}""".toByteArray(),
             "type" to "examples.OrderPlaced".toByteArray(), "id" to "evt-7".toByteArray(), "correlationId" to "c-0".toByteArray(),
             "correlationId" to "corr-7".toByteArray(), // a repeated header keeps its last value
             "userId" to ByteArray(0))
         val at = storeAt("2026-11-04T10:00:05Z")
         val letter = at.letter("orders", r, DeadLetterReason.HANDLER_FAILED, DeadLetterError("IllegalStateException", "boom"), attempts = 5)
-        assertTrue(at.park(letter))
+        assertTrue(store.park(letter))
         assertEquals(fixture("handler_failed"), stored("orders:kraken.events:1:42"))
     }
 
-    @Test fun `a SEQUENCED letter is the fixture`() {
+    @Test fun `a SEQUENCED letter is the fixture`() = runBlocking<Unit> {
         val r = record(1, 43, "order-7", """{"orderId":"o-7"}""".toByteArray(),
             "type" to "examples.OrderShipped".toByteArray(), "id" to "evt-8".toByteArray())
         val at = storeAt("2026-11-04T10:00:06.250Z")
-        assertTrue(at.park(at.sequenced("orders", r, headId = "orders:kraken.events:1:42")))
+        assertTrue(store.park(at.sequenced("orders", r, headId = "orders:kraken.events:1:42")))
         assertEquals(fixture("sequenced"), stored("orders:kraken.events:1:43"))
     }
 
-    @Test fun `INVALID letters with a binary or an empty value and no key are the fixtures`() {
+    @Test fun `INVALID letters with a binary or an empty value and no key are the fixtures`() = runBlocking<Unit> {
         val binary = record(0, 7, null, byteArrayOf(0xFF.toByte(), 0, 0xFE.toByte()), "source" to "legacy-".toByteArray() + 0xFF.toByte() + "tool".toByteArray())
         val at = storeAt("2026-11-04T10:01:00Z")
-        assertTrue(at.park(at.letter("default", binary, DeadLetterReason.INVALID, DeadLetterError.invalid("record without type header"), attempts = 0)))
+        assertTrue(store.park(at.letter("default", binary, DeadLetterReason.INVALID, DeadLetterError.invalid("record without type header"), attempts = 0)))
         assertEquals(fixture("invalid_binary"), stored("default:kraken.events:0:7"))
 
         val empty = record(2, 9, "order-9", ByteArray(0), "type" to "examples.OrderPlaced".toByteArray())
         val later = storeAt("2026-11-04T10:02:00Z")
-        assertTrue(later.park(later.letter("orders", empty, DeadLetterReason.INVALID, DeadLetterError.invalid("payload is not a JSON object"), attempts = 0)))
+        assertTrue(store.park(later.letter("orders", empty, DeadLetterReason.INVALID, DeadLetterError.invalid("payload is not a JSON object"), attempts = 0)))
         assertEquals(fixture("invalid_empty"), stored("orders:kraken.events:2:9"))
     }
 
-    @Test fun `blank id and type headers are kept in headers and absent as eventId and eventType`() {
+    @Test fun `blank id and type headers are kept in headers and absent as eventId and eventType`() = runBlocking<Unit> {
         val r = record(0, 8, null, "{}".toByteArray(), "type" to "  ".toByteArray(), "id" to ByteArray(0))
         val at = storeAt("2026-11-04T10:03:00Z")
-        assertTrue(at.park(at.letter("default", r, DeadLetterReason.INVALID, DeadLetterError.invalid("record without type header"), attempts = 0)))
+        assertTrue(store.park(at.letter("default", r, DeadLetterReason.INVALID, DeadLetterError.invalid("record without type header"), attempts = 0)))
         assertEquals(fixture("invalid_blank_headers"), stored("default:kraken.events:0:8"))
     }
 
-    @Test fun `a letter parked during a replay is the fixture, replay written only then`() {
+    @Test fun `a letter parked during a replay is the fixture, replay written only then`() = runBlocking<Unit> {
         val r = record(1, 44, "order-8", """{"orderId":"o-8"}""".toByteArray(),
             "type" to "examples.OrderPlaced".toByteArray(), "id" to "evt-9".toByteArray())
         val at = storeAt("2026-11-04T10:04:00Z")
-        assertTrue(at.park(at.letter("orders", r, DeadLetterReason.HANDLER_FAILED, DeadLetterError("IllegalStateException", "boom"), attempts = 5, replay = true)))
+        assertTrue(store.park(at.letter("orders", r, DeadLetterReason.HANDLER_FAILED, DeadLetterError("IllegalStateException", "boom"), attempts = 5, replay = true)))
         assertEquals(fixture("replayed"), stored("orders:kraken.events:1:44"))
         assertFalse("replay" in fixture("handler_failed"), "absent when false")
     }
 
-    @Test fun `parking is idempotent - the same record parks once`() {
+    @Test fun `parking is idempotent - the same record parks once`() = runBlocking<Unit> {
         val r = record(2, 41, "order-7", "{}".toByteArray(), "type" to "t".toByteArray())
-        assertTrue(store.park(store.letter("orders", r, DeadLetterReason.HANDLER_FAILED, DeadLetterError("X", "first"), attempts = 1)))
-        assertFalse(store.park(store.letter("orders", r, DeadLetterReason.HANDLER_FAILED, DeadLetterError("X", "second"), attempts = 1)))
+        assertTrue(store.park(letters.letter("orders", r, DeadLetterReason.HANDLER_FAILED, DeadLetterError("X", "first"), attempts = 1)))
+        assertFalse(store.park(letters.letter("orders", r, DeadLetterReason.HANDLER_FAILED, DeadLetterError("X", "second"), attempts = 1)))
         assertEquals("first", stored("orders:kraken.events:2:41").getDocument("error").getString("message").value)
     }
 
-    @Test fun `every shared fixture reads back through the store and the admin API`() {
-        val coll = mongo.db.getCollection(DeadLetterStore.COLLECTION, BsonDocument::class.java)
+    @Test fun `every shared fixture reads back through the store and the admin API`() = runBlocking<Unit> {
+        val coll = mongo.db.getCollection(MongoDeadLetterStore.COLLECTION, BsonDocument::class.java)
         for (name in FIXTURES) coll.insertOne(fixture(name))
 
         val failed = store.get("orders:kraken.events:1:42")!!
@@ -175,22 +184,15 @@ class DeadLetterContractTest {
         assertEquals(6L, admin.count(null))
     }
 
-    @Test fun `the indexes have the ADR's names, keys and TTL`() {
-        store.ensureIndexes()
-        store.ensureIndexes() // idempotent
-        val indexes = mongo.db.getCollection(DeadLetterStore.COLLECTION).listIndexes().associateBy { it.getString("name") }
+    @Test fun `the indexes have the ADR's names, keys and TTL`() = runBlocking<Unit> {
+        MongoIndexes.ensure(mongo, MongoStoreSettings())
+        MongoIndexes.ensure(mongo, MongoStoreSettings()) // idempotent
+        val indexes = mongo.db.getCollection(MongoDeadLetterStore.COLLECTION).listIndexes().associateBy { it.getString("name") }
         assertEquals(Document(mapOf("processor" to 1, "key" to 1, "offset" to 1)), indexes.getValue("dead_letters_processor_key_offset")["key"])
         assertEquals(Document(mapOf("processor" to 1, "parkedAt" to 1)), indexes.getValue("dead_letters_processor_parked")["key"])
         val ttl = indexes.getValue("dead_letters_expire")
         assertEquals(Document("expireAt", 1), ttl["key"])
         assertEquals(0L, (ttl["expireAfterSeconds"] as Number).toLong())
-    }
-
-    @Test fun `an error message is cut at 2000 code points without splitting a pair`() {
-        val long = "x".repeat(1999) + "😀" + "tail"
-        val cut = DeadLetterError("E", long).message
-        assertEquals(2000, cut.codePointCount(0, cut.length))
-        assertTrue(cut.endsWith("😀"))
     }
 }
 

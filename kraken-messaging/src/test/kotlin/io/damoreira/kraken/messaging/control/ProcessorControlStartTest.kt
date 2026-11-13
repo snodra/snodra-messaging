@@ -3,6 +3,8 @@ package io.damoreira.kraken.messaging.control
 import io.damoreira.kraken.messaging.deadletter.DeadLetters
 import io.damoreira.kraken.messaging.handler.HandlerRegistry
 import io.damoreira.kraken.messaging.kafka.EventConsumer
+import io.damoreira.kraken.messaging.store.ProcessorControlStore
+import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.verify
@@ -15,7 +17,7 @@ class ProcessorControlStartTest {
     @Test fun `a document that cannot be read at start keeps the consumer stopped until a poll reads it`() {
         val readable = AtomicBoolean(false)
         val store = mockk<ProcessorControlStore>()
-        every { store.read(any()) } answers { if (readable.get()) emptyMap() else throw IllegalStateException("MongoDB is down") }
+        coEvery { store.read(any()) } answers { if (readable.get()) emptyMap() else throw IllegalStateException("MongoDB is down") }
         val running = AtomicBoolean(false)
         val consumer = mockk<EventConsumer>(relaxed = true)
         every { consumer.processor } returns "audit"

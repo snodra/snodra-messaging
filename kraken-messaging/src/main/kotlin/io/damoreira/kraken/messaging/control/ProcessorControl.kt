@@ -16,6 +16,7 @@ import io.damoreira.kraken.messaging.deadletter.RetryResult
 import io.damoreira.kraken.messaging.handler.HandlerRegistry
 import io.damoreira.kraken.messaging.hub.ControlInbound
 import io.damoreira.kraken.messaging.kafka.EventConsumer
+import io.damoreira.kraken.messaging.store.ProcessorControlStore
 import io.damoreira.kraken.messaging.store.ProcessorControlStore.Control
 import io.damoreira.kraken.messaging.store.ProcessorControlStore.Lock
 import kotlinx.coroutines.runBlocking
@@ -118,7 +119,7 @@ class ProcessorControl(
     @Synchronized
     fun attach(consumers: List<EventConsumer>) {
         val docs = try {
-            if (consumers.isEmpty()) emptyMap() else store.read(consumers.map { it.processor })
+            if (consumers.isEmpty()) emptyMap() else runBlocking { store.read(consumers.map { it.processor }) }
         } catch (e: Exception) {
             log.warn("Could not read the processor control documents: no event processor starts until a poll reads them: {}", e.toString())
             null
@@ -221,7 +222,7 @@ class ProcessorControl(
     }
 
     private fun setPaused(slot: Slot, paused: Boolean, by: String) {
-        store.setPaused(slot.consumer.processor, paused, by)
+        runBlocking { store.setPaused(slot.consumer.processor, paused, by) }
         synchronized(slot) { if (paused) slot.consumer.pause() else slot.consumer.resume() }
     }
 
@@ -232,7 +233,7 @@ class ProcessorControl(
         val op = request.resetPrepare.operationId
         val lease = Duration.ofMillis(request.resetPrepare.leaseMs)
         val processor = slot.consumer.processor
-        if (store.renew(processor, op, lease)) return ok(request, "lease renewed")
+        if (runBlocking { store.renew(processor, op, lease) }) return ok(request, "lease renewed")
         // Its lease passed and was cleared, or it finished meanwhile: a late renewal must not take the free lock (ADR 0023).
         synchronized(slot) { if (slot.held?.id == op) slot.held = null }
         ended(slot, op, lease)
@@ -246,7 +247,7 @@ class ProcessorControl(
         if (hasEnded(slot, op)) return refused(request, ControlRefusal.CONTROL_REFUSAL_NOT_PREPARED, "operation $op already finished on this instance")
         val lease = Duration.ofMillis(leaseMs)
         val processor = slot.consumer.processor
-        return when (val lock = store.lock(processor, op, lease)) {
+        return when (val lock = runBlocking { store.lock(processor, op, lease) }) {
             is Lock.Held -> refused(
                 request, ControlRefusal.CONTROL_REFUSAL_LOCKED,
                 lock.by?.let { "operation ${it.id} holds the lock of processor $processor until ${it.leaseUntil}" } ?: "another operation holds the lock of processor $processor",
@@ -272,7 +273,7 @@ class ProcessorControl(
         val extension = leases?.scheduleAtFixedRate(
             {
                 if (System.nanoTime() < until) {
-                    runCatching { store.renew(slot.consumer.processor, op, held.lease) }
+                    runCatching { runBlocking { store.renew(slot.consumer.processor, op, held.lease) } }
                         .onFailure { log.debug("Could not extend the lease of reset operation {}: {}", op, it.toString()) }
                 }
             },
@@ -282,7 +283,7 @@ class ProcessorControl(
             return reset(slot, request, held, until)
         } finally {
             extension?.cancel(false)
-            if (System.nanoTime() < until) runCatching { store.renew(slot.consumer.processor, op, held.lease) } // a whole lease for the finish
+            if (System.nanoTime() < until) runCatching { runBlocking { store.renew(slot.consumer.processor, op, held.lease) } } // a whole lease for the finish
             slot.executing = null
         }
     }
@@ -291,7 +292,7 @@ class ProcessorControl(
     private fun leaseLost(slot: Slot, held: Held, until: Long): String? {
         if (System.nanoTime() - until >= 0) return "lease lost: the reset ran longer than ${executeLeaseLimit.toSeconds()} s"
         val renewed = try {
-            store.renew(slot.consumer.processor, held.id, held.lease)
+            runBlocking { store.renew(slot.consumer.processor, held.id, held.lease) }
         } catch (e: Exception) {
             return "lease lost: cannot extend it: ${e::class.java.simpleName}: ${e.message ?: ""}"
         }
@@ -374,7 +375,7 @@ class ProcessorControl(
                     "consumer group $group has ${members.size} active member(s): ${members.joinToString { it.clientId() }}",
                 )
             }
-            val doc = store.get(processor)
+            val doc = runBlocking { store.get(processor) }
             val open = doc?.replay.orEmpty()
             val ranges = if (target == ResetTarget.Latest) emptyList() else targets.mapNotNull { (tp, to) ->
                 val from = before[tp]?.offset() ?: return@mapNotNull null // nothing known handled there
@@ -404,9 +405,9 @@ class ProcessorControl(
             val replay: List<ReplayRange>
             try {
                 leaseLost(slot, held, until)?.let { return done.told(refused(request, ControlRefusal.CONTROL_REFUSAL_FAILED, it)) }
-                if (ranges.isNotEmpty()) done.markers = store.deleteMarkers(processor, ranges)
+                if (ranges.isNotEmpty()) done.markers = runBlocking { store.deleteMarkers(processor, ranges) }
                 replay = open.filter { o -> ranges.none { it.topic == o.topic && it.partition == o.partition } } + ranges
-                if (ranges.isNotEmpty()) store.setReplay(processor, replay)
+                if (ranges.isNotEmpty()) runBlocking { store.setReplay(processor, replay) }
                 done.ranges = ranges.isNotEmpty()
                 leaseLost(slot, held, until)?.let { return done.told(refused(request, ControlRefusal.CONTROL_REFUSAL_FAILED, it)) }
                 try {
@@ -450,21 +451,21 @@ class ProcessorControl(
         val processor = slot.consumer.processor
         ended(slot, op, slot.held?.takeIf { it.id == op }?.lease ?: Duration.ZERO)
         if (slot.held?.id == op) {
-            store.release(processor, op)
+            runBlocking { store.release(processor, op) }
             synchronized(slot) { slot.held = null }
             converge(slot)
             return ok(request, "released, consuming again")
         }
-        val current = store.get(processor)?.operation
+        val current = runBlocking { store.get(processor) }?.operation
         return when {
             current == null || current.expired(clock.instant()) -> { converge(slot); ok(request, "no operation holds the lock") }
-            current.id == op -> { store.release(processor, op); converge(slot); ok(request, "released, consuming again") }
+            current.id == op -> { runBlocking { store.release(processor, op) }; converge(slot); ok(request, "released, consuming again") }
             else -> refused(request, ControlRefusal.CONTROL_REFUSAL_NOT_PREPARED, "operation ${current.id} holds the lock of processor $processor, not $op")
         }
     }
 
     private fun notPrepared(slot: Slot, request: ControlRequest, op: String): ControlReply {
-        val current = store.get(slot.consumer.processor)?.operation?.takeIf { !it.expired(clock.instant()) }
+        val current = runBlocking { store.get(slot.consumer.processor) }?.operation?.takeIf { !it.expired(clock.instant()) }
         val holder = current?.let { "; operation ${it.id} holds the lock" }.orEmpty()
         return refused(request, ControlRefusal.CONTROL_REFUSAL_NOT_PREPARED, "operation $op is not prepared on this instance$holder")
     }
@@ -475,7 +476,7 @@ class ProcessorControl(
         val current = slots
         if (current.isEmpty()) return
         val docs = try {
-            store.read(current.keys)
+            runBlocking { store.read(current.keys) }
         } catch (e: Exception) {
             log.warn("Could not read the processor control documents, keeping the processors as they are: {}", e.toString())
             return
@@ -491,7 +492,7 @@ class ProcessorControl(
         }
     }
 
-    private fun converge(slot: Slot) = converge(slot, store.get(slot.consumer.processor), clock.instant())
+    private fun converge(slot: Slot) = converge(slot, runBlocking { store.get(slot.consumer.processor) }, clock.instant())
 
     /**
      * Applies [doc] to [slot]'s consumer: replay ranges, pause, and whether it runs (not while an unexpired operation holds the
@@ -508,7 +509,7 @@ class ProcessorControl(
                 slot.held = null // released (another instance's finish) or taken over after it expired
                 ended(slot, held.id, held.lease)
             } else if (operation.expired(now) && slot.executing == null) {
-                if (!store.release(processor, held.id, expiredOnly = true)) return@synchronized // renewed meanwhile: next poll
+                if (!runBlocking { store.release(processor, held.id, expiredOnly = true) }) return@synchronized // renewed meanwhile: next poll
                 log.warn("The lease of reset operation {} on processor {} passed without a renewal: released it, consuming again", held.id, processor)
                 slot.held = null
                 ended(slot, held.id, held.lease)
@@ -544,7 +545,7 @@ class ProcessorControl(
     private fun removePassed(slot: Slot) {
         val consumer = slot.consumer
         for (range in consumer.passedRanges()) {
-            if (store.removeReplay(consumer.processor, range)) {
+            if (runBlocking { store.removeReplay(consumer.processor, range) }) {
                 log.info("Processor {} replayed partition {} of {} up to offset {}", consumer.processor, range.partition, range.topic, range.until)
             }
             consumer.replay(consumer.replayRanges() - range)

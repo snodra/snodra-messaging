@@ -1,5 +1,9 @@
 package io.damoreira.kraken.messaging.external
 
+import io.damoreira.kraken.messaging.store.MessageStore
+import io.damoreira.kraken.messaging.mongoStore
+import io.damoreira.kraken.messaging.SAGAS
+import io.damoreira.kraken.messaging.mongo.MongoMessageStore
 import io.damoreira.kraken.messaging.saga.stateDoc
 import com.mongodb.client.MongoClients
 import io.damoreira.kraken.messaging.MessageContext
@@ -16,7 +20,6 @@ import io.damoreira.kraken.messaging.kafka.LocalEventDispatcher
 import io.damoreira.kraken.messaging.saga.Saga
 import io.damoreira.kraken.messaging.saga.SagaDocument
 import io.damoreira.kraken.messaging.saga.SagaEventHandler
-import io.damoreira.kraken.messaging.saga.SagaIndexes
 import io.damoreira.kraken.messaging.saga.SagaModelScanner
 import io.damoreira.kraken.messaging.saga.SagaRetry
 import io.damoreira.kraken.messaging.saga.SagaRuntime
@@ -99,6 +102,7 @@ class ExternalKafkaSourcesTest {
     private val kafkaContainer = KrakenContainers.kafka()
     private val mongoContainer = KrakenContainers.mongo()
     private lateinit var mongo: MongoTemplate
+    private lateinit var store: MessageStore
     private lateinit var tx: TransactionTemplate
     private lateinit var producerFactory: DefaultKafkaProducerFactory<String, ByteArray>
     private lateinit var kafka: KafkaTemplate<String, ByteArray>
@@ -117,7 +121,7 @@ class ExternalKafkaSourcesTest {
         val factory = SimpleMongoClientDatabaseFactory(MongoClients.create(mongoContainer.connectionString + "/?directConnection=true"), "external_kafka_test")
         mongo = MongoTemplate(factory)
         tx = TransactionTemplate(MongoTransactionManager(factory))
-        SagaIndexes(mongo, Duration.ofDays(30), Duration.ofDays(7), Duration.ofDays(7), Duration.ofDays(30)).afterPropertiesSet()
+        store = mongoStore(mongo)
         listOf("processed_events", "saga_failures", "outbox").forEach { if (!mongo.collectionExists(it)) mongo.createCollection(it) }
         producerFactory = DefaultKafkaProducerFactory(
             mapOf<String, Any>(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG to kafkaContainer.bootstrapServers, ProducerConfig.ACKS_CONFIG to "all"),
@@ -145,11 +149,11 @@ class ExternalKafkaSourcesTest {
         translator = EkTranslator(codec)
         val registry = HandlerRegistry(resolver).also { it.register(handlers) }
         val runtime = SagaRuntime(
-            types = SagaModelScanner(resolver, codec).scan(listOf(EkSaga::class)), mongo = mongo, tx = tx, codec = codec, typeResolver = resolver,
+            types = SagaModelScanner(resolver, codec).scan(listOf(EkSaga::class)), ports = store.sagas, tx = tx, codec = codec, typeResolver = resolver,
             beans = { error("no beans") },
             retry = SagaRetry(RetryPolicy(maxAttempts = 2, initialBackoff = Duration.ofMillis(1), multiplier = 1.0, maxBackoff = Duration.ofMillis(1))),
         )
-        dispatcher = LocalEventDispatcher(registry, HandlerInvoker(registry, codec), tx, mongo, runtime)
+        dispatcher = LocalEventDispatcher(registry, HandlerInvoker(registry, codec), store, runtime)
     }
 
     @AfterEach
@@ -175,7 +179,7 @@ class ExternalKafkaSourcesTest {
         kafka.send(record).get()
     }
 
-    private fun sagaOf(jobId: String) = mongo.findAll(SagaDocument::class.java).singleOrNull { it.stateDoc.getString("jobId") == jobId }
+    private fun sagaOf(jobId: String) = mongo.findAll(SagaDocument::class.java, SAGAS).singleOrNull { it.stateDoc.getString("jobId") == jobId }
     private fun awaitSaga(jobId: String, replies: Int = 1) = await().atMost(Duration.ofSeconds(20)).untilAsserted {
         assertEquals(replies, sagaOf(jobId)?.stateDoc?.getInteger("replies"), "saga $jobId")
     }

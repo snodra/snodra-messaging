@@ -32,10 +32,10 @@ import io.damoreira.kraken.messaging.hub.HubBus
 import io.damoreira.kraken.messaging.hub.HubChannelFactory
 import io.damoreira.kraken.messaging.hub.HubConnections
 import io.damoreira.kraken.messaging.kafka.EventConsumer
-import io.damoreira.kraken.messaging.kafka.MessagingIndexes
 import io.damoreira.kraken.messaging.kafka.OutboxEventBus
 import io.damoreira.kraken.messaging.kafka.OutboxPublisher
 import io.damoreira.kraken.messaging.security.ForwardedIdentityResolver
+import io.damoreira.kraken.messaging.store.MessageStore
 import io.damoreira.kraken.messaging.test.InProcessHub
 import io.damoreira.kraken.messaging.tracing.TraceHeaders
 import io.mockk.mockk
@@ -49,15 +49,9 @@ import org.springframework.boot.test.context.runner.ApplicationContextRunner
 import org.springframework.context.SmartLifecycle
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
-import org.springframework.data.mongodb.MongoDatabaseFactory
-import org.springframework.data.mongodb.core.MongoTemplate
 import org.springframework.kafka.core.KafkaTemplate
 import org.springframework.kafka.core.ProducerFactory
 import org.springframework.security.oauth2.jwt.JwtDecoder
-import org.springframework.transaction.support.TransactionTemplate
-import org.springframework.transaction.PlatformTransactionManager
-import org.springframework.transaction.config.TransactionManagementConfigUtils
-import org.springframework.data.mongodb.MongoTransactionManager
 import org.springframework.boot.transaction.autoconfigure.TransactionAutoConfiguration
 import java.time.Duration
 import java.time.Instant
@@ -107,10 +101,10 @@ class UserCommandBusConfig {
 @org.springframework.stereotype.Component
 class BusClient(val commandBus: CommandBus, val queryBus: QueryBus)
 
+/** A message store (ADR 0028) that answers everything with nothing: what the events configuration needs to exist. */
 @Configuration(proxyBeanMethods = false)
-class MongoMockConfig {
-    @Bean fun mongoTemplate(): MongoTemplate = mockk(relaxed = true)
-    @Bean fun mongoDatabaseFactory(): MongoDatabaseFactory = mockk(relaxed = true)
+class MessageStoreMockConfig {
+    @Bean fun messageStore(): MessageStore = mockk(relaxed = true)
 }
 
 /** A sender-only client of [hub], for what an application context under test is the other end of. */
@@ -181,7 +175,7 @@ class AutoConfigurationTest {
             // The emitter does not need the hub: emitting with no subscription is a no-op, so a service starts in any mode.
             assertIs<HubQueryUpdateEmitter>(context.getBean(QueryUpdateEmitter::class.java))
             assertEquals(1024, context.getBean(SubscriptionRegistry::class.java).maxSubscriptions)
-            // no MongoTemplate in this context: the Kafka/outbox configuration backs off
+            // no message store in this context: the Kafka/outbox configuration backs off
             assertTrue(context.getBeansOfType(EventBus::class.java).isEmpty())
         }
     }
@@ -311,8 +305,8 @@ class AutoConfigurationTest {
         }
     }
 
-    @Test fun `kafka events wiring with an application MongoTemplate`() {
-        runner.withUserConfiguration(MongoMockConfig::class.java)
+    @Test fun `kafka events wiring with a message store`() {
+        runner.withUserConfiguration(MessageStoreMockConfig::class.java)
             .withConfiguration(AutoConfigurations.of(TransactionAutoConfiguration::class.java))
             .withPropertyValues("kraken.messaging.kafka.bootstrap-servers=localhost:9")
             .run { context ->
@@ -325,21 +319,16 @@ class AutoConfigurationTest {
             assertEquals(30_000, producerFactory.configurationProperties["delivery.timeout.ms"])
             producerFactory.createProducer().close(Duration.ZERO)
             assertIs<KafkaTemplate<*, *>>(context.getBean("krakenKafkaTemplate"))
-            assertEquals(1, context.getBeansOfType(MessagingIndexes::class.java).size)
-            assertEquals(1, context.getBeansOfType(TransactionTemplate::class.java).size)
             assertTrue(context.getBeansOfType(OutboxPublisher::class.java).isEmpty()) // outbox.enabled=false
             assertTrue(context.getBeansOfType(io.damoreira.kraken.messaging.kafka.EventProcessors::class.java).isEmpty()) // kafka.consumer.enabled=false
             assertTrue(context.getBeansOfType(io.damoreira.kraken.messaging.control.ProcessorControl::class.java).isEmpty())
             // The admin API exists without the consumer (an admin-only instance), in mode collection by default.
             assertNotNull(context.getBean(io.damoreira.kraken.messaging.deadletter.DeadLetters::class.java))
-            // ordered before Boot's TransactionAutoConfiguration: @Transactional support sees the MongoTransactionManager
-            assertIs<MongoTransactionManager>(context.getBean(PlatformTransactionManager::class.java))
-            assertTrue(context.containsBean(TransactionManagementConfigUtils.TRANSACTION_ADVISOR_BEAN_NAME))
         }
     }
 
     @Test fun `event processors, their control and dead letters are wired, and the hub reads their status (P6a, P6b)`() {
-        runner.withUserConfiguration(MongoMockConfig::class.java)
+        runner.withUserConfiguration(MessageStoreMockConfig::class.java)
             .withConfiguration(AutoConfigurations.of(TransactionAutoConfiguration::class.java))
             .withPropertyValues("kraken.messaging.kafka.bootstrap-servers=localhost:9", "kraken.messaging.kafka.consumer.enabled=true")
             .run { context ->
@@ -348,17 +337,14 @@ class AutoConfigurationTest {
                 assertTrue(processors.isRunning)
                 assertEquals(emptyList(), processors.consumers(), "no @EventHandler and no saga: no processor starts")
                 assertEquals(emptyList(), context.getBean(io.damoreira.kraken.messaging.kafka.ProcessorStatusSource::class.java).processorStatuses())
-                assertEquals(1, context.getBeansOfType(io.damoreira.kraken.messaging.deadletter.DeadLetterStore::class.java).size)
                 // P6b: the processors' control, which the hub connection asks per control request.
                 assertNotNull(context.getBean(io.damoreira.kraken.messaging.control.ProcessorControl::class.java))
-                assertNotNull(context.getBean(io.damoreira.kraken.messaging.control.ProcessorControlStore::class.java))
             }
-        runner.withUserConfiguration(MongoMockConfig::class.java)
+        runner.withUserConfiguration(MessageStoreMockConfig::class.java)
             .withConfiguration(AutoConfigurations.of(TransactionAutoConfiguration::class.java))
             .withPropertyValues("kraken.messaging.kafka.bootstrap-servers=localhost:9", "kraken.messaging.kafka.dead-letter.mode=log")
             .run { context ->
                 assertEquals(null, context.startupFailure)
-                assertTrue(context.getBeansOfType(io.damoreira.kraken.messaging.deadletter.DeadLetterStore::class.java).isEmpty())
                 val e = kotlin.runCatching { context.getBean(io.damoreira.kraken.messaging.deadletter.DeadLetters::class.java).count() }.exceptionOrNull()
                 assertIs<IllegalStateException>(e)
                 assertTrue(e.message!!.contains("mode log"), e.message)

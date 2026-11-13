@@ -2,6 +2,9 @@ package io.damoreira.kraken.messaging.kafka
 
 import io.damoreira.kraken.messaging.metrics.MessagingMetrics
 import io.damoreira.kraken.messaging.metrics.NoopMessagingMetrics
+import io.damoreira.kraken.messaging.store.OutboxEntry
+import io.damoreira.kraken.messaging.store.OutboxStore
+import kotlinx.coroutines.runBlocking
 import org.apache.kafka.clients.producer.ProducerRecord
 import org.apache.kafka.common.errors.AuthorizationException
 import org.apache.kafka.common.errors.InvalidTopicException
@@ -10,33 +13,32 @@ import org.apache.kafka.common.errors.SerializationException
 import org.apache.kafka.common.header.internals.RecordHeader
 import org.slf4j.LoggerFactory
 import org.springframework.context.SmartLifecycle
-import org.springframework.data.domain.Sort
-import org.springframework.data.mongodb.core.MongoTemplate
-import org.springframework.data.mongodb.core.query.Criteria
-import org.springframework.data.mongodb.core.query.Query
-import org.springframework.data.mongodb.core.query.Update
 import org.springframework.kafka.core.KafkaTemplate
 import java.time.Duration
-import java.time.Instant
+import java.util.UUID
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
 /**
- * Relays unsent `outbox` documents to Kafka in creation order, on a single daemon thread.
+ * Relays the [outbox] entries to Kafka in creation order, on a single daemon thread.
  *
- * A retriable send failure increments the document's `attempts` and ends the batch (so per-key order holds); the next
- * poll retries it. A non-retriable failure ([NON_RETRIABLE] in the cause chain) or the [maxAttempts]-th failed attempt
- * marks the document failed (`failedAt`), logs it once at error (never the payload) and moves on to the next
- * document: one poison document does not block the outbox. Failed documents stay in the collection for inspection;
- * clearing `failedAt` (and `attempts`) re-queues one.
+ * Every poll [claims][OutboxStore.claim] a batch of up to [batchSize] entries for this relay under a [lease] and sends them one
+ * after the other: several instances relay one outbox at once, never the same entry while its lease holds, and the entries a
+ * crashed instance held are relayed by the others once its lease passed. A batch stops before its lease could run out under
+ * a send ([SEND_TIMEOUT_SECONDS] before its end); the next poll claims again, which renews the lease of what this relay holds.
  *
- * Reports to [metrics] (P9): every send attempt, and the oldest pending document of every poll. When the metrics want it
- * ([MessagingMetrics.countsOutbox]) the relay thread also counts the pending documents ([samplePending]) at most every
+ * A retriable send failure counts an attempt ([OutboxStore.markAttemptFailed]) and ends the batch (so per-key order holds): the
+ * entry stays this relay's and the next poll retries it first. A non-retriable failure ([NON_RETRIABLE] in the cause chain) or
+ * the [maxAttempts]-th failed attempt gives the entry up ([OutboxStore.markFailed]), logs it once at error (never the payload)
+ * and moves on to the next entry: one poison entry does not block the outbox. Failed entries stay in the store for inspection.
+ *
+ * Reports to [metrics] (P9): every send attempt, and the oldest entry of every claimed batch. When the metrics want it
+ * ([MessagingMetrics.countsOutbox]) the relay thread also counts the pending entries ([samplePending]) at most every
  * [pendingSampleInterval], so the gauge never makes the export thread touch the database.
  */
 class OutboxPublisher(
-    private val mongo: MongoTemplate,
+    private val outbox: OutboxStore,
     private val kafka: KafkaTemplate<String, ByteArray>,
     private val topic: String,
     private val source: String,
@@ -45,13 +47,17 @@ class OutboxPublisher(
     private val maxAttempts: Int = 10,
     private val metrics: MessagingMetrics = NoopMessagingMetrics,
     private val pendingSampleInterval: Duration = Duration.ofSeconds(5),
+    /** How long a claimed batch stays this relay's; longer than one send can take ([SEND_TIMEOUT_SECONDS]). */
+    private val lease: Duration = Duration.ofMinutes(2),
 ) : SmartLifecycle {
     private val log = LoggerFactory.getLogger(OutboxPublisher::class.java)
+    private val owner = UUID.randomUUID().toString()
     private val lock = ReentrantLock()
     private val wake = lock.newCondition()
 
     init {
         require(maxAttempts >= 1) { "maxAttempts must be >= 1" }
+        require(lease > Duration.ofSeconds(SEND_TIMEOUT_SECONDS)) { "lease must be longer than a send (${SEND_TIMEOUT_SECONDS}s), was $lease" }
     }
 
     @Volatile private var running = false
@@ -59,55 +65,50 @@ class OutboxPublisher(
     private var thread: Thread? = null
 
     /**
-     * Sends one batch of pending documents sequentially; returns how many were sent. Stops at the first retriable
-     * failure and between documents once [stop] was requested.
+     * Claims one batch and sends it sequentially; returns how many were sent. Stops at the first retriable failure, between
+     * entries once [stop] was requested, and before the batch's lease could run out under the next send.
      */
     fun publishPendingNow(): Int {
-        val pending = mongo.find(
-            Query(unsent()).with(Sort.by(Sort.Direction.ASC, "createdAt", "seq")).limit(batchSize),
-            OutboxDocument::class.java,
-        )
-        metrics.outboxOldest(pending.firstOrNull()?.createdAt)
+        val claimedAt = System.nanoTime()
+        val batch = runBlocking { outbox.claim(owner, lease, batchSize) }
+        metrics.outboxOldest(batch.firstOrNull()?.createdAt)
+        val sendUntil = claimedAt + lease.minusSeconds(SEND_TIMEOUT_SECONDS).toNanos()
         var sent = 0
-        for (doc in pending) {
-            if (stopRequested) return sent
+        for (entry in batch) {
+            if (stopRequested || System.nanoTime() - sendUntil >= 0) return sent
             try {
                 // Bounded by the producer's max.block.ms + delivery.timeout.ms (10 s + 30 s in the auto-configuration).
-                kafka.send(toRecord(doc)).get(SEND_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                kafka.send(toRecord(entry)).get(SEND_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             } catch (e: Exception) {
                 metrics.outboxPublished(ok = false)
                 if (e is InterruptedException) Thread.currentThread().interrupt()
-                val attempt = doc.attempts + 1
+                val attempt = entry.attempts + 1
                 val nonRetriable = nonRetriableCause(e)
                 if (e !is InterruptedException && (nonRetriable != null || attempt >= maxAttempts)) {
                     val cause = nonRetriable ?: rootCause(e)
                     log.error(
-                        "Outbox document {} of type {} marked failed after {} attempt(s){}: {}: {}",
-                        doc.id, doc.type, attempt, if (nonRetriable != null) " (not retriable)" else "",
+                        "Outbox entry {} of type {} marked failed after {} attempt(s){}: {}: {}",
+                        entry.id, entry.type, attempt, if (nonRetriable != null) " (not retriable)" else "",
                         cause::class.java.name, cause.message,
                     )
-                    mongo.updateFirst(
-                        byId(doc.id), Update().inc("attempts", 1).set("failedAt", Instant.now()), OutboxDocument::class.java,
-                    )
+                    runBlocking { outbox.markFailed(entry.id, "${cause::class.java.name}: ${cause.message}") }
                     continue
                 }
-                log.warn("Outbox send failed for {} ({}), attempt {}", doc.id, doc.type, attempt, e)
-                mongo.updateFirst(byId(doc.id), Update().inc("attempts", 1), OutboxDocument::class.java)
+                log.warn("Outbox send failed for {} ({}), attempt {}", entry.id, entry.type, attempt, e)
+                runBlocking { outbox.markAttemptFailed(entry.id, e.toString()) }
                 return sent
             }
             metrics.outboxPublished(ok = true)
-            mongo.updateFirst(byId(doc.id), Update().set("sentAt", Instant.now()), OutboxDocument::class.java)
+            runBlocking { outbox.markSent(listOf(entry.id)) }
             sent++
         }
         return sent
     }
 
-    /** Counts the documents not sent and not given up on, for [MessagingMetrics.outboxPending]. */
+    /** Counts the entries not sent and not given up on, for [MessagingMetrics.outboxPending]. */
     fun samplePending() {
-        metrics.outboxPending(mongo.count(Query(unsent()), OutboxDocument::class.java))
+        metrics.outboxPending(runBlocking { outbox.pending() })
     }
-
-    private fun unsent() = Criteria.where("sentAt").isNull.and("failedAt").isNull
 
     private fun causes(e: Throwable) = generateSequence(e) { it.cause.takeIf { c -> c !== it } }.take(16)
 
@@ -115,16 +116,12 @@ class OutboxPublisher(
 
     private fun rootCause(e: Throwable): Throwable = causes(e).last()
 
-    private fun byId(id: String) = Query(Criteria.where("_id").`is`(id))
-
-    private fun toRecord(doc: OutboxDocument): ProducerRecord<String, ByteArray> {
-        val record = ProducerRecord<String, ByteArray>(
-            topic, null, doc.key, doc.payload.toJson().toByteArray(Charsets.UTF_8),
-        )
-        val all = LinkedHashMap(doc.headers)
-        all[EventHeaders.TYPE] = doc.type
-        all[EventHeaders.ID] = doc.id
-        all[EventHeaders.TIMESTAMP] = doc.createdAt.toString()
+    private fun toRecord(entry: OutboxEntry): ProducerRecord<String, ByteArray> {
+        val record = ProducerRecord<String, ByteArray>(topic, null, entry.key, entry.payload)
+        val all = LinkedHashMap(entry.headers)
+        all[EventHeaders.TYPE] = entry.type
+        all[EventHeaders.ID] = entry.id
+        all[EventHeaders.TIMESTAMP] = entry.createdAt.toString()
         all[EventHeaders.SOURCE] = source
         all.forEach { (k, v) -> record.headers().add(RecordHeader(k, v.toByteArray(Charsets.UTF_8))) }
         return record
@@ -152,7 +149,7 @@ class OutboxPublisher(
                 try {
                     samplePending()
                 } catch (e: Exception) {
-                    log.debug("Counting the pending outbox documents failed, keeping the last value: {}", e.toString())
+                    log.debug("Counting the pending outbox entries failed, keeping the last value: {}", e.toString())
                 }
             }
             lock.withLock {

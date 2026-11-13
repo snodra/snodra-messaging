@@ -2,7 +2,6 @@ package io.damoreira.kraken.messaging.config
 
 import io.damoreira.kraken.messaging.codec.JsonCodec
 import io.damoreira.kraken.messaging.codec.MessageTypeResolver
-import io.damoreira.kraken.messaging.external.ExternalCallIndexes
 import io.damoreira.kraken.messaging.external.ExternalCallSettings
 import io.damoreira.kraken.messaging.external.ExternalEventIngress
 import io.damoreira.kraken.messaging.external.ExternalKafkaSources
@@ -12,18 +11,16 @@ import io.damoreira.kraken.messaging.external.WebhookSignatureVerifier
 import io.damoreira.kraken.messaging.kafka.LocalEventDispatcher
 import io.damoreira.kraken.messaging.saga.NoopSagaMetrics
 import io.damoreira.kraken.messaging.saga.SagaMetrics
+import io.damoreira.kraken.messaging.store.MessageStore
 import org.springframework.beans.factory.ListableBeanFactory
 import org.springframework.beans.factory.ObjectProvider
 import org.springframework.boot.autoconfigure.AutoConfiguration
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean
-import org.springframework.boot.autoconfigure.condition.ConditionalOnClass
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Conditional
 import org.springframework.context.annotation.Configuration
 import org.springframework.context.annotation.Import
-import org.springframework.data.mongodb.MongoTransactionManager
-import org.springframework.data.mongodb.core.MongoTemplate
 import java.time.Clock
 
 /**
@@ -32,16 +29,14 @@ import java.time.Clock
  * - the [WebhookSignatureVerifier] and the [ExternalEventIngress], always (they are passive: a service uses them from its own endpoint);
  * - [ExternalKafkaSources], only when `kraken.messaging.external.kafka.sources.<name>` is configured; each source needs an
  *   [ExternalRecordTranslator] bean named `<name>`, else the startup fails naming the source;
- * - the `external_calls` indexes and the [IdempotencyInterceptor] (which `HandlerInvoker` then uses for `@IdempotentHandler`
- *   methods), only when the application has an `@IdempotentHandler` method (scanned from its packages) or
- *   `kraken.messaging.external.calls.enabled=true`.
+ * - the [IdempotencyInterceptor] over the message store's external calls (which `HandlerInvoker` then uses for
+ *   `@IdempotentHandler` methods), only when the application has an `@IdempotentHandler` method (scanned from its packages)
+ *   or `kraken.messaging.external.calls.enabled=true`.
+ *
+ * All of it needs a [MessageStore] (and the local dispatcher over it).
  */
-@AutoConfiguration(
-    after = [KrakenMessagingAutoConfiguration::class, KafkaEventsAutoConfiguration::class],
-    afterName = ["org.springframework.boot.data.mongodb.autoconfigure.DataMongoAutoConfiguration"],
-)
-@ConditionalOnClass(MongoTemplate::class)
-@ConditionalOnBean(LocalEventDispatcher::class)
+@AutoConfiguration(after = [KrakenMessagingAutoConfiguration::class, KafkaEventsAutoConfiguration::class])
+@ConditionalOnBean(MessageStore::class, LocalEventDispatcher::class)
 class ExternalAutoConfiguration {
 
     @Bean
@@ -52,11 +47,11 @@ class ExternalAutoConfiguration {
     @ConditionalOnMissingBean
     fun externalEventIngress(
         dispatcher: LocalEventDispatcher,
-        mongo: MongoTemplate,
+        store: MessageStore,
         codec: JsonCodec,
         typeResolver: MessageTypeResolver,
         clock: ObjectProvider<Clock>,
-    ) = ExternalEventIngress(dispatcher, mongo, codec, typeResolver, clock.getIfAvailable { Clock.systemUTC() })
+    ) = ExternalEventIngress(dispatcher, store.processedEvents, codec, typeResolver, clock.getIfAvailable { Clock.systemUTC() })
 
     @Bean
     @ConditionalOnMissingBean
@@ -82,23 +77,17 @@ class ExternalAutoConfiguration {
     @Conditional(OnIdempotentHandlers::class)
     @Import(KrakenClockConfiguration::class)
     class IdempotentHandlersConfiguration {
-        @Bean
-        @ConditionalOnMissingBean
-        fun externalCallIndexes(mongo: MongoTemplate, properties: KrakenMessagingProperties) =
-            ExternalCallIndexes(mongo, properties.external.calls.retention)
-
-        /** Its bookkeeping writes use the Mongo transaction manager (REQUIRES_NEW), so a rolled-back caller never forgets a call that happened. */
+        /** Its bookkeeping writes run in transactions of their own (REQUIRES_NEW), so a rolled-back caller never forgets a call that happened. */
         @Bean
         @ConditionalOnMissingBean
         fun idempotencyInterceptor(
-            mongo: MongoTemplate,
+            store: MessageStore,
             codec: JsonCodec,
-            txManager: MongoTransactionManager,
             clock: Clock,
             properties: KrakenMessagingProperties,
             metrics: ObjectProvider<SagaMetrics>,
         ) = IdempotencyInterceptor(
-            mongo, codec, txManager, clock, ExternalCallSettings(properties.external.calls.lease), metrics.getIfAvailable { NoopSagaMetrics },
+            store, codec, clock, ExternalCallSettings(properties.external.calls.lease), metrics.getIfAvailable { NoopSagaMetrics },
         )
     }
 }

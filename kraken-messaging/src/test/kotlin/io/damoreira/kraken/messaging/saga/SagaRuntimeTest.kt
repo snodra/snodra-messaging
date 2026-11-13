@@ -1,5 +1,12 @@
 package io.damoreira.kraken.messaging.saga
 
+import io.damoreira.kraken.messaging.store.MessageStore
+import io.damoreira.kraken.messaging.mongoStore
+import io.damoreira.kraken.messaging.DEADLINES
+import io.damoreira.kraken.messaging.SAGAS
+import io.damoreira.kraken.messaging.SAGA_DISPATCH
+import io.damoreira.kraken.messaging.SAGA_FAILURES
+import io.damoreira.kraken.messaging.mongo.MongoMessageStore
 import com.mongodb.client.MongoClients
 import io.damoreira.kraken.messaging.MessageContext
 import io.damoreira.kraken.messaging.RetryPolicy
@@ -56,6 +63,7 @@ class SagaRuntimeTest {
     private val clock = Clock.fixed(now, ZoneOffset.UTC)
     private lateinit var metrics: RecordingMetrics
     private lateinit var runtime: SagaRuntime
+    private lateinit var store: MessageStore
 
     @BeforeAll
     fun start() {
@@ -63,7 +71,7 @@ class SagaRuntimeTest {
         val factory = SimpleMongoClientDatabaseFactory(MongoClients.create(mongoContainer.connectionString + "/?directConnection=true"), "saga_runtime_test")
         mongo = MongoTemplate(factory)
         tx = TransactionTemplate(MongoTransactionManager(factory))
-        SagaIndexes(mongo, Duration.ofDays(30), Duration.ofDays(7), Duration.ofDays(7), Duration.ofDays(30)).afterPropertiesSet()
+        store = mongoStore(mongo)
         listOf("processed_events", "saga_failures").forEach { if (!mongo.collectionExists(it)) mongo.createCollection(it) }
     }
 
@@ -80,7 +88,7 @@ class SagaRuntimeTest {
 
     private fun runtime(vararg classes: kotlin.reflect.KClass<*>) = SagaRuntime(
         types = SagaModelScanner(resolver, codec).scan(classes.toList()),
-        mongo = mongo,
+        ports = store.sagas,
         tx = tx,
         codec = codec,
         typeResolver = resolver,
@@ -97,11 +105,11 @@ class SagaRuntimeTest {
         on.process(type, codec.encode(event), ctx)
     }
 
-    private fun sagas(type: String = "rt.Order") = mongo.find(Query(Criteria.where("type").`is`(type)), SagaDocument::class.java)
+    private fun sagas(type: String = "rt.Order") = mongo.find(Query(Criteria.where("type").`is`(type)), SagaDocument::class.java, SAGAS)
     private fun saga(orderId: String) = sagas().single { it.stateDoc.getString("orderId") == orderId }
     private fun dispatch(sagaId: String) =
-        mongo.find(Query(Criteria.where("sagaId").`is`(sagaId)).with(Sort.by("seq")), SagaDispatchDocument::class.java)
-    private fun deadlines() = mongo.findAll(DeadlineDocument::class.java)
+        mongo.find(Query(Criteria.where("sagaId").`is`(sagaId)).with(Sort.by("seq")), SagaDispatchDocument::class.java, SAGA_DISPATCH)
+    private fun deadlines() = mongo.findAll(DeadlineDocument::class.java, DEADLINES)
     private fun log(doc: SagaDocument): List<String> = doc.stateDoc.getList("log", String::class.java) ?: emptyList()
     private fun marker(id: String) = mongo.exists(Query(Criteria.where("_id").`is`(id)), "processed_events")
 
@@ -320,7 +328,7 @@ class SagaRuntimeTest {
 
         assertEquals(1, sagas().size, "the healthy type handled it")
         assertEquals(0, sagas("rt.Broken").size)
-        val failure = assertNotNull(mongo.findById("rt.Broken:e-14", SagaFailureDocument::class.java))
+        val failure = assertNotNull(mongo.findById("rt.Broken:e-14", SagaFailureDocument::class.java, SAGA_FAILURES))
         assertEquals("rt.Broken", failure.sagaType)
         assertEquals("e-14", failure.eventId)
         assertEquals("rt.OrderPlaced", failure.eventType)
@@ -373,7 +381,7 @@ class SagaRuntimeTest {
     @Test
     fun `a saga type whose handler always throws is parked within well under a second, after two attempts`() {
         val broken = SagaRuntime(
-            types = SagaModelScanner(resolver, codec).scan(listOf(RtBrokenSaga::class)), mongo = mongo, tx = tx, codec = codec, typeResolver = resolver,
+            types = SagaModelScanner(resolver, codec).scan(listOf(RtBrokenSaga::class)), ports = store.sagas, tx = tx, codec = codec, typeResolver = resolver,
             beans = { error("no beans") }, clock = clock, retry = SagaRetry(), // the real policy: 5 attempts, 200 ms doubling
         )
 
@@ -383,7 +391,7 @@ class SagaRuntimeTest {
 
         assertTrue(tookMs < 1000, "parking took $tookMs ms: a handler exception must not back off like a conflict")
         assertEquals(2, RtGate.brokenCalls.get())
-        assertNotNull(mongo.findById("rt.Broken:e-30", SagaFailureDocument::class.java))
+        assertNotNull(mongo.findById("rt.Broken:e-30", SagaFailureDocument::class.java, SAGA_FAILURES))
     }
 
     @Test

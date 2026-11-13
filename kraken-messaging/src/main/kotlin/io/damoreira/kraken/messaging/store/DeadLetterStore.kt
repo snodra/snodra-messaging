@@ -54,4 +54,9 @@ interface DeadLetterStore {
      * when the letter is gone.
      */
     suspend fun recordFailure(id: String, error: DeadLetterError): Boolean
+
+    companion object {
+        /** A letter's id: `<processor>:<topic>:<partition>:<offset>`. */
+        fun id(processor: String, topic: String, partition: Int, offset: Long) = "$processor:$topic:$partition:$offset"
+    }
 }

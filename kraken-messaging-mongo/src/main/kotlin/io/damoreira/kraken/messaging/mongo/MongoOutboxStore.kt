@@ -25,7 +25,7 @@ internal class MongoOutboxStore(private val mongo: MongoTemplate, private val cl
         val doc = Document("_id", entry.id).append("type", entry.type)
         entry.key?.let { doc["key"] = it }
         doc["headers"] = Document(entry.headers)
-        doc["payload"] = Document.parse(String(entry.payload, Charsets.UTF_8))
+        doc["payload"] = payloadDocument(entry)
         doc["createdAt"] = Date.from(entry.createdAt)
         doc["seq"] = entry.seq
         doc["attempts"] = entry.attempts
@@ -68,6 +68,13 @@ internal class MongoOutboxStore(private val mongo: MongoTemplate, private val cl
     override suspend fun pending(): Long = collection.countDocuments(unfinished())
 
     override suspend fun purge(sentBefore: Instant): Long = collection.deleteMany(Filters.lt("sentAt", Date.from(sentBefore))).deletedCount
+
+    /** The payload as the document it is stored as; anything but a JSON object is refused (see [OutboxEntry]). */
+    private fun payloadDocument(entry: OutboxEntry): Document = try {
+        Document.parse(String(entry.payload, Charsets.UTF_8))
+    } catch (e: RuntimeException) {
+        throw IllegalArgumentException("The payload of outbox entry ${entry.id} (${entry.type}) is not a JSON object: ${e.message}", e)
+    }
 
     /** Not sent and not given up on (a missing field is null). */
     private fun unfinished() = Filters.and(Filters.eq("sentAt", null), Filters.eq("failedAt", null))

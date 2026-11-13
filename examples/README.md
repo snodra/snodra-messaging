@@ -27,8 +27,8 @@ A disposable sandbox that shows cross-service messaging on the real `kraken-hub`
    letters](#event-processors-and-dead-letters)): its own consumer group, a failure switch, and example admin endpoints over
    the library's dead letters.
 
-Everything is anonymous, nothing is persisted by the apps (MongoDB is only there because the starter's outbox and
-idempotent consumer need it), and the modules are never published. They build against the starter as a project
+Everything is anonymous, nothing is persisted by the apps (MongoDB is only there because the message store add-on
+`kraken-messaging-mongo` keeps the outbox and the idempotent consumer's markers in it), and the modules are never published. They build against the starter as a project
 dependency, so they always exercise the current library. Wire classes live in `examples-api`.
 
 | Module | Role | Host port |

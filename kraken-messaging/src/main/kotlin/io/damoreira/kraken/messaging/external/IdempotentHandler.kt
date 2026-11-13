@@ -24,7 +24,7 @@ import org.springframework.expression.spel.support.SimpleEvaluationContext
  * default is the `idempotency-key` header that the saga relay sets (`<sagaId>:<seq>`). An adapter that polls puts the
  * attempt in the key, e.g. `"'poll:' + message.jobId + ':' + message.attempt"`. Pass the key on to the external system
  * when it accepts one. The handler must not be `suspend`, and the bookkeeping runs in short transactions of its own,
- * so the bookkeeping never holds a Mongo transaction open. The body itself runs in the caller's transaction when there is one:
+ * so the bookkeeping never holds a store transaction open. The body itself runs in the caller's transaction when there is one:
  * the body of an `@EventHandler` runs inside the dispatcher's stage-1 transaction, so a slow call there holds it open; a
  * `@CommandHandler` adapter (what the saga relay calls) runs in none.
  */

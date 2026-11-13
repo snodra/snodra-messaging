@@ -1,5 +1,6 @@
 package io.damoreira.kraken.messaging.kafka
 
+import io.damoreira.kraken.messaging.mongoStore
 import io.damoreira.kraken.messaging.metrics.MessagingMetrics
 import io.damoreira.kraken.messaging.metrics.NoopMessagingMetrics
 import io.damoreira.kraken.messaging.metrics.RecordingMessagingMetrics
@@ -138,8 +139,8 @@ class EventConsumerTest {
         )
         val invoker = HandlerInvoker(registry, codec)
         consumer = EventConsumer(
-            factory, topic, "group-" + UUID.randomUUID(), registry, invoker, tx, mongo,
-            maxAttempts, backOffMs = backOffMs, dispatcher = LocalEventDispatcher(registry, invoker, tx, mongo, metrics = metrics), metrics = metrics,
+            factory, topic, "group-" + UUID.randomUUID(), LocalEventDispatcher(registry, invoker, mongoStore(mongo), metrics = metrics),
+            maxAttempts, backOffMs = backOffMs, metrics = metrics,
         ).also { it.start() }
     }
 

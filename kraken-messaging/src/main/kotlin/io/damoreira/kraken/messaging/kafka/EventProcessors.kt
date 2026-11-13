@@ -24,7 +24,7 @@ fun interface ProcessorStatusSource {
  * sagas run), each in its own consumer group; they start and stop together.
  *
  * [processorStatuses] builds the processors' status from their in-memory state only, so it never blocks the hub connection or
- * a consumer. Each call also asks, without waiting, a single background thread to refresh what needs Kafka or MongoDB: the
+ * a consumer. Each call also asks, without waiting, a single background thread to refresh what needs Kafka or the store: the
  * committed offsets and high watermarks through one `Admin` client ([adminConfig]; at most every [offsetsRefresh], each call
  * bounded by [adminTimeout]) and the dead-letter counts (every [deadLetterSample], and after a park). So the values in a report
  * are at most one status interval older than the refresh; until the first refresh they read -1.

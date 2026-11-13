@@ -1,7 +1,6 @@
 package io.damoreira.kraken.messaging.saga
 
 import io.damoreira.kraken.messaging.store.SagaFailureStore
-import org.springframework.data.mongodb.core.MongoTemplate
 
 /**
  * Admin API over the parked saga events (`saga_failures`): an event whose saga handler failed all its attempts waits here
@@ -13,8 +12,6 @@ import org.springframework.data.mongodb.core.MongoTemplate
  * with an [IllegalStateException] and writes nothing (H1): the parked event keeps its error.
  */
 class SagaFailures(private val store: SagaFailureStore, private val runtime: SagaRuntime) {
-    constructor(mongo: MongoTemplate, runtime: SagaRuntime) : this(MongoSagaFailureStore(mongo), runtime)
-
     /** The parked events of saga type [type] (every type when null), the longest waiting first. */
     fun list(type: String? = null): List<SagaFailureDocument> = store.list(type)
 

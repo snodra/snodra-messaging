@@ -3,7 +3,8 @@ package io.damoreira.kraken.messaging.kafka
 import io.damoreira.kraken.hub.v1.ProcessorState
 import io.damoreira.kraken.hub.v1.ProcessorStatus
 import io.damoreira.kraken.messaging.codec.MessageTypeResolver
-import io.damoreira.kraken.messaging.deadletter.DeadLetterStore
+import io.damoreira.kraken.messaging.DEAD_LETTERS
+import io.damoreira.kraken.messaging.deadletter.DeadLetterFactory
 import io.damoreira.kraken.messaging.fixtures.Happened
 import io.damoreira.kraken.messaging.handler.EventHandler
 import io.damoreira.kraken.messaging.handler.HandlerInvoker
@@ -57,7 +58,7 @@ class EventProcessorsTest {
 
     @BeforeEach fun setUp() {
         mongo.remove(Query(), "processed_events")
-        mongo.remove(Query(), DeadLetterStore.COLLECTION)
+        mongo.remove(Query(), DEAD_LETTERS)
         topic = support.newTopic("kraken.events.proc", partitions = 2)
         group = "svc-" + UUID.randomUUID()
         plain = PlainHandlers()
@@ -72,15 +73,14 @@ class EventProcessorsTest {
     private fun processors(vararg beans: Any, adminServers: String = support.bootstrapServers): EventProcessors {
         val registry = HandlerRegistry(MessageTypeResolver("test")).also { r -> beans.forEach { r.register(it) } }
         val invoker = HandlerInvoker(registry, support.codec)
-        val dispatcher = LocalEventDispatcher(registry, invoker, support.tx, mongo)
-        val store = DeadLetterStore(mongo, Duration.ofDays(30))
+        val dispatcher = LocalEventDispatcher(registry, invoker, support.store)
+        val sink = DeadLetterSink.Collection(support.store.deadLetters, DeadLetterFactory(Duration.ofDays(30)))
         return EventProcessors(
             dispatcher,
             consumerFor = { processor ->
                 EventConsumer(
-                    support.consumerFactory(), topic, io.damoreira.kraken.messaging.handler.Processors.groupId(group, processor), registry, invoker,
-                    support.tx, mongo, maxAttempts = 2, backOffMs = 50, codec = support.codec, dispatcher = dispatcher,
-                    processor = processor, deadLetters = DeadLetterSink.Collection(store),
+                    support.consumerFactory(), topic, io.damoreira.kraken.messaging.handler.Processors.groupId(group, processor), dispatcher,
+                    maxAttempts = 2, backOffMs = 50, codec = support.codec, processor = processor, deadLetters = sink,
                 )
             },
             adminConfig = mapOf("bootstrap.servers" to adminServers, "request.timeout.ms" to 2000, "default.api.timeout.ms" to 2000),
@@ -124,7 +124,7 @@ class EventProcessorsTest {
         support.send(topic, "bad-1", key = "k1", partition = 0)
         support.send(topic, "ok-1", key = "k1", partition = 0)
         await().atMost(Duration.ofSeconds(20)).until { plain.seen.size == 2 && support.committed("$group.orders")[0] == 2L }
-        val letters = mongo.findAll(Document::class.java, DeadLetterStore.COLLECTION)
+        val letters = mongo.findAll(Document::class.java, DEAD_LETTERS)
         assertEquals(listOf("orders" to "HANDLER_FAILED", "orders" to "SEQUENCED"), letters.map { it.getString("processor") to it.getString("reason") }.sortedBy { it.second })
         assertEquals(listOf("bad-1", "ok-1"), plain.seen.toList())
         await().atMost(Duration.ofSeconds(15)).untilAsserted {

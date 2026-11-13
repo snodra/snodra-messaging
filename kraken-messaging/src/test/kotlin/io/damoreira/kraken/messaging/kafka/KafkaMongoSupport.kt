@@ -3,6 +3,7 @@ package io.damoreira.kraken.messaging.kafka
 import com.mongodb.client.MongoClients
 import io.damoreira.kraken.messaging.codec.JsonCodec
 import io.damoreira.kraken.messaging.fixtures.Happened
+import io.damoreira.kraken.messaging.mongo.MongoMessageStore
 import io.damoreira.kraken.messaging.test.KrakenContainers
 import org.apache.kafka.clients.admin.AdminClient
 import org.apache.kafka.clients.admin.NewTopic
@@ -34,11 +35,13 @@ class KafkaMongoSupport(database: String) {
     val mongoContainer: org.testcontainers.mongodb.MongoDBContainer = KrakenContainers.mongo().also { it.start() }
     private val factory = SimpleMongoClientDatabaseFactory(MongoClients.create(mongoContainer.connectionString + "/?directConnection=true"), database)
     val mongo = MongoTemplate(factory)
-    val tx = TransactionTemplate(MongoTransactionManager(factory))
+    /** The MongoDB message store over [mongo], its indexes created as at startup. */
+    val store = MongoMessageStore(mongo, MongoTransactionManager(factory)).also { it.ensureIndexes() }
+    val tx = TransactionTemplate(store.transactions)
 
     init {
-        // As MessagingIndexes does at startup: two processors' first transactions must not both create the collection
-        // implicitly (MongoDB makes the second wait for the first's lock, stalling both consumers).
+        // Two processors' first transactions must not both create the collection implicitly (MongoDB makes the second wait
+        // for the first's lock, stalling both consumers).
         for (name in listOf("processed_events", "dead_letters")) if (!mongo.collectionExists(name)) mongo.createCollection(name)
     }
     val codec = JsonCodec()

@@ -1,5 +1,9 @@
 package io.damoreira.kraken.messaging.external
 
+import io.damoreira.kraken.messaging.store.MessageStore
+import io.damoreira.kraken.messaging.mongoStore
+import io.damoreira.kraken.messaging.SAGAS
+import io.damoreira.kraken.messaging.mongo.MongoMessageStore
 import io.damoreira.kraken.messaging.saga.stateDoc
 import com.mongodb.client.MongoClients
 import io.damoreira.kraken.messaging.RetryPolicy
@@ -14,7 +18,6 @@ import io.damoreira.kraken.messaging.kafka.LocalEventDispatcher
 import io.damoreira.kraken.messaging.saga.Saga
 import io.damoreira.kraken.messaging.saga.SagaDocument
 import io.damoreira.kraken.messaging.saga.SagaEventHandler
-import io.damoreira.kraken.messaging.saga.SagaIndexes
 import io.damoreira.kraken.messaging.saga.SagaModelScanner
 import io.damoreira.kraken.messaging.saga.SagaRetry
 import io.damoreira.kraken.messaging.saga.SagaRuntime
@@ -73,6 +76,7 @@ class WhHandlers {
 class WebhookIngressTest {
     private val mongoContainer = KrakenContainers.mongo()
     private lateinit var mongo: MongoTemplate
+    private lateinit var store: MessageStore
     private lateinit var tx: TransactionTemplate
     private val codec = JsonCodec()
     private val resolver = MessageTypeResolver("wh")
@@ -85,7 +89,7 @@ class WebhookIngressTest {
         val factory = SimpleMongoClientDatabaseFactory(MongoClients.create(mongoContainer.connectionString + "/?directConnection=true"), "webhook_ingress_test")
         mongo = MongoTemplate(factory)
         tx = TransactionTemplate(MongoTransactionManager(factory))
-        SagaIndexes(mongo, Duration.ofDays(30), Duration.ofDays(7), Duration.ofDays(7), Duration.ofDays(30)).afterPropertiesSet()
+        store = mongoStore(mongo)
         listOf("processed_events", "saga_failures").forEach { if (!mongo.collectionExists(it)) mongo.createCollection(it) }
     }
 
@@ -98,14 +102,14 @@ class WebhookIngressTest {
         handlers = WhHandlers()
         val registry = HandlerRegistry(resolver).also { it.register(handlers) }
         val runtime = SagaRuntime(
-            types = SagaModelScanner(resolver, codec).scan(listOf(WhSaga::class)), mongo = mongo, tx = tx, codec = codec, typeResolver = resolver,
+            types = SagaModelScanner(resolver, codec).scan(listOf(WhSaga::class)), ports = store.sagas, tx = tx, codec = codec, typeResolver = resolver,
             beans = { error("no beans") },
             retry = SagaRetry(RetryPolicy(maxAttempts = 2, initialBackoff = Duration.ofMillis(1), multiplier = 1.0, maxBackoff = Duration.ofMillis(1))),
         )
-        ingress = ExternalEventIngress(LocalEventDispatcher(registry, HandlerInvoker(registry, codec), tx, mongo, runtime), mongo, codec, resolver)
+        ingress = ExternalEventIngress(LocalEventDispatcher(registry, HandlerInvoker(registry, codec), store, runtime), store.processedEvents, codec, resolver)
     }
 
-    private fun sagaOf(jobId: String) = mongo.findAll(SagaDocument::class.java).singleOrNull { it.stateDoc.getString("jobId") == jobId }
+    private fun sagaOf(jobId: String) = mongo.findAll(SagaDocument::class.java, SAGAS).singleOrNull { it.stateDoc.getString("jobId") == jobId }
 
     @Test
     fun `an accepted webhook event reaches a saga`() {

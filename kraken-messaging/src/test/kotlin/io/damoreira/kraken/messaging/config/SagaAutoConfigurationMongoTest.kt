@@ -1,5 +1,9 @@
 package io.damoreira.kraken.messaging.config
 
+import io.damoreira.kraken.messaging.EXTERNAL_CALLS
+import io.damoreira.kraken.messaging.SAGAS
+import io.damoreira.kraken.messaging.mongo.MongoMessageStoreAutoConfiguration
+import io.damoreira.kraken.messaging.SAGA_DISPATCH
 import io.damoreira.kraken.messaging.saga.stateDoc
 import com.mongodb.client.MongoClients
 import io.damoreira.kraken.messaging.MessageContext
@@ -30,7 +34,7 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 /**
- * The saga toolkit wired only by the auto-configurations over a real MongoDB: an event reaches a saga through the local
+ * The saga toolkit wired only by the auto-configurations (the MongoDB store add-on's included) over a real MongoDB: an event reaches a saga through the local
  * dispatcher, the saga's command is relayed to an `@IdempotentHandler` adapter (through the interceptor the invoker got), its
  * deadline fires, and a bean the handler asks for by type is the application's.
  */
@@ -58,7 +62,7 @@ class SagaAutoConfigurationMongoTest {
                 AutoConfigurations.of(
                     KrakenMessagingAutoConfiguration::class.java, HubAutoConfiguration::class.java, KafkaEventsAutoConfiguration::class.java,
                     SagaAutoConfiguration::class.java, ExternalAutoConfiguration::class.java, SagaMetricsAutoConfiguration::class.java,
-                    TransactionAutoConfiguration::class.java,
+                    MongoMessageStoreAutoConfiguration::class.java, TransactionAutoConfiguration::class.java,
                 ),
             )
             .withUserConfiguration(E2eScanConfig::class.java)
@@ -84,13 +88,13 @@ class SagaAutoConfigurationMongoTest {
                 dispatcher.dispatch("evt-1", "e2e.Started", """{"jobId":"j1"}""".toByteArray(), ctx)
 
                 await().atMost(Duration.ofSeconds(20)).untilAsserted {
-                    val saga = mongo.findAll(SagaDocument::class.java).single()
+                    val saga = mongo.findAll(SagaDocument::class.java, SAGAS).single()
                     assertEquals(true, saga.stateDoc.getBoolean("timedOut"), "the deadline fired")
                     assertEquals(1, counter.prints.get(), "the adapter's body ran once")
-                    val entry = mongo.findAll(SagaDispatchDocument::class.java).single()
+                    val entry = mongo.findAll(SagaDispatchDocument::class.java, SAGA_DISPATCH).single()
                     assertNotNull(entry.dispatchedAt, "the relay marked the command dispatched")
-                    val call = mongo.findById(entry.id, io.damoreira.kraken.messaging.external.ExternalCallDocument::class.java)
-                    assertEquals(io.damoreira.kraken.messaging.external.ExternalCallStatus.SUCCEEDED, call?.status, "recorded under sagaId:seq")
+                    val call = mongo.findById(entry.id, org.bson.Document::class.java, EXTERNAL_CALLS)
+                    assertEquals("SUCCEEDED", call?.getString("status"), "recorded under sagaId:seq")
                 }
                 assertTrue(mongo.exists(Query(Criteria.where("_id").`is`("saga:e2e.Job:evt-1")), "processed_events"))
             }

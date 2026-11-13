@@ -37,7 +37,7 @@ class MessagingMetricsAutoConfigurationTest {
                 TransactionAutoConfiguration::class.java,
             ),
         )
-        .withUserConfiguration(MongoMockConfig::class.java)
+        .withUserConfiguration(MessageStoreMockConfig::class.java)
         .withBean("krakenHubChannelFactory", HubChannelFactory::class.java, { HubChannelFactory { hub.channel() } })
         .withPropertyValues(
             "kraken.messaging.service-name=orders",

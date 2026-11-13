@@ -5,7 +5,8 @@ import java.time.Instant
 
 /**
  * One event in the outbox (ADR 0005): written in the service's transaction, relayed to the event store afterwards.
- * [payload] is the event as JSON. [createdAt] and [seq] order the outbox ([seq] breaks ties of one millisecond within one
+ * [payload] is the event as a JSON object (UTF-8): a store rejects any other JSON value, or bytes that are not JSON, with an
+ * [IllegalArgumentException] and appends nothing. [createdAt] and [seq] order the outbox ([seq] breaks ties of one millisecond within one
  * publishing instance); [attempts] counts the relay's failed sends.
  */
 class OutboxEntry(

@@ -29,7 +29,6 @@ dependencies {
     implementation(libs.spring.kafka)
     // ExternalRecordTranslator.translate takes a Kafka ConsumerRecord: a service writing one needs the client on its compile classpath.
     api("org.apache.kafka:kafka-clients")
-    implementation(libs.spring.boot.starter.data.mongodb)
     implementation(libs.jackson.module.kotlin)
     implementation(libs.kotlin.reflect)
     // gRPC stubs generated from src/main/proto/hub.proto (see proto/README.md).
@@ -55,6 +54,8 @@ dependencies {
     testImplementation(libs.awaitility)
     testImplementation(libs.grpc.inprocess)
     testImplementation(project(":kraken-messaging-test"))
+    // The tests that need a real store run on MongoDB through the add-on (which depends on this module's main code).
+    testImplementation(project(":kraken-messaging-mongo"))
     testImplementation(libs.spring.boot.testcontainers)
     testImplementation(libs.testcontainers.kafka)
     testImplementation(libs.testcontainers.mongodb)

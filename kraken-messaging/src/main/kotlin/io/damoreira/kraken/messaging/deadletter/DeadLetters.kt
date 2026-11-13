@@ -4,7 +4,9 @@ import io.damoreira.kraken.messaging.MessageContext
 import io.damoreira.kraken.messaging.kafka.EventHeaders
 import io.damoreira.kraken.messaging.kafka.LocalEventDispatcher
 import io.damoreira.kraken.messaging.kafka.RecordPosition
+import io.damoreira.kraken.messaging.store.DeadLetterStore
 import io.damoreira.kraken.messaging.store.DeadLetterStore.Summary
+import kotlinx.coroutines.runBlocking
 import org.slf4j.LoggerFactory
 
 /**
@@ -13,7 +15,7 @@ import org.slf4j.LoggerFactory
  * sagas run): a call naming another processor, or a letter of one, throws [IllegalArgumentException] naming it. In modes
  * `topic` and `log` there are no letters and every call throws [IllegalStateException] naming the mode.
  *
- * Every call is blocking (MongoDB, and for a retry the handlers via `runBlocking` on the calling thread, like the consumer):
+ * Every call is blocking (the message store, and for a retry the handlers via `runBlocking` on the calling thread, like the consumer):
  * call it from a request thread, not from a coroutine that must not block.
  *
  * - [retry] runs the letter's processor's stage 1 (all its handlers for the type, under the processor's marker) once, **in the
@@ -38,12 +40,12 @@ class DeadLetters(
         val store = available()
         require(limit >= 1) { "limit must be >= 1, was $limit" }
         processor?.let(::requireRuns)
-        return store.list(processor, limit)
+        return runBlocking { store.list(processor, limit) }
     }
 
     /** The letter [id], or null. */
     fun get(id: String): DeadLetter? {
-        val letter = available().get(id) ?: return null
+        val letter = runBlocking { available().get(id) } ?: return null
         requireRuns(letter.processor)
         return letter
     }
@@ -53,13 +55,13 @@ class DeadLetters(
     fun count(processor: String? = null): Long {
         val store = available()
         processor?.let(::requireRuns)
-        return store.count(processor)
+        return runBlocking { store.count(processor) }
     }
 
     /** Retries the letter [id] once; see [RetryResult] and the class comment. */
     fun retry(id: String): RetryResult {
         val store = available()
-        val letter = store.get(id) ?: return RetryResult.NotFound
+        val letter = runBlocking { store.get(id) } ?: return RetryResult.NotFound
         requireRuns(letter.processor)
         return retry(store, letter)
     }
@@ -72,7 +74,7 @@ class DeadLetters(
     fun retryAll(processor: String): RetryAllResult {
         val store = available()
         requireRuns(processor)
-        val all = store.summaries(processor)
+        val all = runBlocking { store.summaries(processor) }
         var retried = 0
         var failed = 0
         var blocked = 0
@@ -87,7 +89,7 @@ class DeadLetters(
             var stopped = false
             for (summary in group) {
                 if (stopped) { blocked++; continue }
-                val letter = store.get(summary.id)
+                val letter = runBlocking { store.get(summary.id) }
                 if (letter == null) { skipped++; continue }
                 when (retry(store, letter)) {
                     RetryResult.Retried, RetryResult.Duplicate -> retried++
@@ -104,14 +106,14 @@ class DeadLetters(
     /** Deletes the letter [id]; false when there was none. */
     fun discard(id: String): Boolean {
         val store = available()
-        val letter = store.get(id) ?: return false
+        val letter = runBlocking { store.get(id) } ?: return false
         requireRuns(letter.processor)
-        return store.delete(id).also { if (it) log.info("Discarded dead letter {} ({} of type {})", id, letter.reason, letter.eventType) }
+        return runBlocking { store.delete(id) }.also { if (it) log.info("Discarded dead letter {} ({} of type {})", id, letter.reason, letter.eventType) }
     }
 
     private fun retry(store: DeadLetterStore, letter: DeadLetter): RetryResult {
         if (letter.reason == DeadLetterReason.INVALID) return RetryResult.NotRetriable
-        letter.key?.let { key -> store.earlier(letter.processor, key, letter.offset)?.let { return RetryResult.Blocked(it) } }
+        letter.key?.let { key -> runBlocking { store.earlier(letter.processor, key, letter.offset) }?.let { return RetryResult.Blocked(it) } }
         val type = letter.eventType ?: return RetryResult.NotRetriable // only INVALID letters lack a type
         val dedupeId = letter.eventId?.takeIf { it.isNotBlank() } ?: "${letter.topic}-${letter.partition}-${letter.offset}"
         val ctx = MessageContext(
@@ -127,12 +129,12 @@ class DeadLetters(
             val position = RecordPosition(letter.topic, letter.partition, letter.offset) // it is that record's stage 1 (P6b)
             // A letter parked during a replay is retried as one: without its @DisallowReplay handlers (P6b).
             val outcome = dispatcher.runStage1(letter.processor, dedupeId, type, letter.value(), ctx, position, letter.replay) {
-                if (!store.deleteInTransaction(letter.id)) throw Gone // retried or discarded meanwhile: roll the handling back
+                if (!runBlocking { store.deleteInTransaction(letter.id) }) throw Gone // retried or discarded meanwhile: roll the handling back
             }
             when (outcome) {
                 LocalEventDispatcher.Stage1.HANDLED -> RetryResult.Retried.also { log.info("Retried dead letter {}", letter.id) }
                 LocalEventDispatcher.Stage1.DUPLICATE -> {
-                    store.delete(letter.id)
+                    runBlocking { store.delete(letter.id) }
                     RetryResult.Duplicate.also { log.info("Dead letter {} was already handled; deleted it", letter.id) }
                 }
                 LocalEventDispatcher.Stage1.NO_HANDLER ->
@@ -146,7 +148,7 @@ class DeadLetters(
     }
 
     private fun failed(store: DeadLetterStore, letter: DeadLetter, error: DeadLetterError): RetryResult {
-        if (!store.recordFailure(letter.id, error)) return RetryResult.NotFound
+        if (!runBlocking { store.recordFailure(letter.id, error) }) return RetryResult.NotFound
         log.warn("Retry of dead letter {} failed: {}: {}", letter.id, error.type, error.message)
         return RetryResult.Failed(error.message)
     }

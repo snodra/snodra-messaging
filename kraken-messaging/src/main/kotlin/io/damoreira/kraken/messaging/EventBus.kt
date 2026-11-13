@@ -3,7 +3,7 @@ package io.damoreira.kraken.messaging
 import io.damoreira.kraken.messaging.api.Event
 import kotlinx.coroutines.runBlocking
 
-/** Publishes domain events to Kafka topic `kraken.events` (through the outbox when inside a Mongo transaction). */
+/** Publishes domain events to Kafka topic `kraken.events` through the outbox (joining the store transaction of the calling thread). */
 interface EventBus {
     suspend fun publish(event: Event, key: String? = null)
 

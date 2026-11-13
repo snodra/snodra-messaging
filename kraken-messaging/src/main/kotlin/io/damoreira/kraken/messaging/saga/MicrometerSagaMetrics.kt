@@ -1,13 +1,10 @@
 package io.damoreira.kraken.messaging.saga
 
+import io.damoreira.kraken.messaging.store.SagaStores
 import io.micrometer.core.instrument.Gauge
 import io.micrometer.core.instrument.MeterRegistry
 import org.slf4j.LoggerFactory
 import org.springframework.context.SmartLifecycle
-import org.springframework.data.mongodb.core.MongoTemplate
-import org.springframework.data.mongodb.core.aggregation.Aggregation
-import org.springframework.data.mongodb.core.query.Criteria
-import org.springframework.data.mongodb.core.query.Query
 import java.time.Duration
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
@@ -79,13 +76,13 @@ class MicrometerSagaMetrics(private val registry: MeterRegistry, sagaTypes: Coll
 }
 
 /**
- * Counts what the database knows and no hook reports, every [interval] on a daemon thread (and on [sampleOnce]): the live
- * (`ended: false`) instances per saga type in `sagas` (one grouped count, served by the partial index on live instances) and
- * the pending entries of `saga_dispatch` (not dispatched, not failed; the `(dispatchedAt, nextAttemptAt)` index serves it).
- * A failed sample is logged and keeps the last values. Starts with the application, in the relay's phase.
+ * Counts what the store knows and no hook reports, every [interval] on a daemon thread (and on [sampleOnce]): the live (not
+ * ended) instances per saga type ([io.damoreira.kraken.messaging.store.SagaRepository.countLiveByType]) and the pending
+ * dispatch entries ([io.damoreira.kraken.messaging.store.SagaDispatchStore.pendingDispatches]). A failed sample is logged
+ * and keeps the last values. Starts with the application, in the relay's phase.
  */
 class SagaGaugeSampler(
-    private val mongo: MongoTemplate,
+    private val sagas: SagaStores,
     private val metrics: MicrometerSagaMetrics,
     private val interval: Duration = Duration.ofSeconds(15),
 ) : SmartLifecycle {
@@ -99,16 +96,8 @@ class SagaGaugeSampler(
     /** One sample of both gauges. */
     fun sampleOnce() {
         try {
-            val aggregation = Aggregation.newAggregation(
-                Aggregation.match(Criteria.where("ended").`is`(false)),
-                Aggregation.group("type").count().`as`("n"),
-            )
-            metrics.activeSagas(
-                mongo.aggregate(aggregation, "sagas", org.bson.Document::class.java).mappedResults.associate { it.getString("_id") to (it["n"] as Number).toLong() },
-            )
-            metrics.dispatchPending(
-                mongo.count(Query(Criteria.where("dispatchedAt").isNull.and("failedAt").isNull), "saga_dispatch"),
-            )
+            metrics.activeSagas(sagas.sagas.countLiveByType())
+            metrics.dispatchPending(sagas.dispatch.pendingDispatches())
         } catch (e: Exception) {
             log.warn("Sampling the saga gauges failed, keeping the last values: {}", e.toString())
         }

@@ -13,19 +13,18 @@ import io.damoreira.kraken.messaging.saga.NoopSagaMetrics
 import io.damoreira.kraken.messaging.saga.RawEventPublisher
 import io.damoreira.kraken.messaging.saga.SagaDispatchRelay
 import io.damoreira.kraken.messaging.saga.SagaFailures
-import io.damoreira.kraken.messaging.saga.SagaIndexes
 import io.damoreira.kraken.messaging.saga.SagaMetrics
 import io.damoreira.kraken.messaging.saga.SagaModelScanner
 import io.damoreira.kraken.messaging.saga.SagaRetry
 import io.damoreira.kraken.messaging.saga.SagaRuntime
 import io.damoreira.kraken.messaging.saga.SagaType
+import io.damoreira.kraken.messaging.store.MessageStore
 import io.damoreira.kraken.messaging.tracing.TraceHeaders
 import org.springframework.beans.factory.BeanFactory
 import org.springframework.beans.factory.ObjectProvider
 import org.springframework.beans.factory.annotation.Qualifier
 import org.springframework.boot.autoconfigure.AutoConfiguration
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean
-import org.springframework.boot.autoconfigure.condition.ConditionalOnClass
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
 import org.springframework.context.annotation.Bean
@@ -33,7 +32,6 @@ import org.springframework.context.annotation.Conditional
 import org.springframework.context.annotation.Import
 import org.springframework.core.env.Environment
 import org.springframework.core.io.ResourceLoader
-import org.springframework.data.mongodb.core.MongoTemplate
 import org.springframework.transaction.support.TransactionTemplate
 import java.time.Clock
 import java.time.Duration
@@ -47,20 +45,16 @@ class SagaCatalog(val types: List<SagaType>)
 /**
  * Sagas, deadlines and the dispatch relay (S1 plan, Task 13): the [SagaRuntime] (handed to the [LocalEventDispatcher] as its
  * saga stage), the [SagaDispatchRelay] and the [DeadlineScheduler] as lifecycles in phases after the outbox publisher starts
- * and before the event consumer stops, [SagaFailures] and the saga indexes.
+ * and before the event consumer stops, and [SagaFailures], all over the message store's saga ports ([MessageStore.sagas]).
  *
  * Everything here exists only when a class in the application's packages is annotated `@Saga` and
  * `kraken.messaging.sagas.enabled` is not false; a service without sagas gets none of it. A saga that violates the model's
- * rules fails the startup (see the `SagaModelScanner`). Needs what [KafkaEventsAutoConfiguration] provides (the Mongo
- * transaction template, the local dispatcher). Commands go through the [HubBus] when the hub is enabled, else to this
- * service's own handlers; events go through the outbox.
+ * rules fails the startup (see the `SagaModelScanner`); without a message store a saga fails the startup naming the missing
+ * store ([MessageStoreGuard]). Needs what [KafkaEventsAutoConfiguration] provides (the store, the local dispatcher). Commands
+ * go through the [HubBus] when the hub is enabled, else to this service's own handlers; events go through the outbox.
  */
-@AutoConfiguration(
-    after = [KrakenMessagingAutoConfiguration::class, HubAutoConfiguration::class, KafkaEventsAutoConfiguration::class],
-    afterName = ["org.springframework.boot.data.mongodb.autoconfigure.DataMongoAutoConfiguration"],
-)
-@ConditionalOnClass(MongoTemplate::class)
-@ConditionalOnBean(LocalEventDispatcher::class)
+@AutoConfiguration(after = [KrakenMessagingAutoConfiguration::class, HubAutoConfiguration::class, KafkaEventsAutoConfiguration::class])
+@ConditionalOnBean(MessageStore::class, LocalEventDispatcher::class)
 @ConditionalOnProperty(prefix = "kraken.messaging.sagas", name = ["enabled"], havingValue = "true", matchIfMissing = true)
 @Conditional(OnSagaClasses::class)
 @Import(KrakenClockConfiguration::class)
@@ -73,15 +67,9 @@ class SagaAutoConfiguration {
 
     @Bean
     @ConditionalOnMissingBean
-    fun sagaIndexes(mongo: MongoTemplate, properties: KrakenMessagingProperties) =
-        SagaIndexes(mongo, properties.sagas.endedRetention, properties.sagas.dispatchRetention, properties.deadlines.retention, properties.sagas.failedRetention)
-
-    @Bean
-    @ConditionalOnMissingBean
     fun sagaRuntime(
         catalog: SagaCatalog,
-        mongo: MongoTemplate,
-        tx: TransactionTemplate,
+        store: MessageStore,
         codec: JsonCodec,
         typeResolver: MessageTypeResolver,
         beanFactory: BeanFactory,
@@ -90,8 +78,8 @@ class SagaAutoConfiguration {
         metrics: ObjectProvider<SagaMetrics>,
     ) = SagaRuntime(
         types = catalog.types,
-        mongo = mongo,
-        tx = tx,
+        ports = store.sagas,
+        tx = TransactionTemplate(store.transactions),
         codec = codec,
         typeResolver = typeResolver,
         beans = { beanFactory.getBean(it.java) }, // handler parameters: any Spring bean by type, resolved per call
@@ -102,13 +90,12 @@ class SagaAutoConfiguration {
 
     @Bean
     @ConditionalOnMissingBean
-    fun sagaFailures(mongo: MongoTemplate, runtime: SagaRuntime) = SagaFailures(mongo, runtime)
+    fun sagaFailures(store: MessageStore, runtime: SagaRuntime) = SagaFailures(store.sagas.failures, runtime)
 
     @Bean
     @ConditionalOnMissingBean
     fun sagaDispatchRelay(
-        mongo: MongoTemplate,
-        tx: TransactionTemplate,
+        store: MessageStore,
         @Qualifier("hubBus") hubBus: ObjectProvider<HubBus>,
         invoker: HandlerInvoker,
         events: ObjectProvider<RawEventPublisher>,
@@ -120,10 +107,10 @@ class SagaAutoConfiguration {
         properties: KrakenMessagingProperties,
         metrics: ObjectProvider<SagaMetrics>,
     ) = SagaDispatchRelay(
-        mongo = mongo,
-        tx = tx,
+        store = store.sagas.dispatch,
+        tx = TransactionTemplate(store.transactions),
         commands = hubBus.getIfAvailable() ?: LocalRawCommandSender(invoker),
-        events = events.getIfAvailable { OutboxEventBus(mongo, codec, typeResolver, traceHeaders) },
+        events = events.getIfAvailable { OutboxEventBus(store.outbox, codec, typeResolver, traceHeaders) },
         local = dispatcher,
         codec = codec,
         typeResolver = typeResolver,
@@ -135,10 +122,10 @@ class SagaAutoConfiguration {
     @Bean
     @ConditionalOnMissingBean
     fun deadlineScheduler(
-        mongo: MongoTemplate,
+        store: MessageStore,
         runtime: SagaRuntime,
         clock: Clock,
         properties: KrakenMessagingProperties,
         metrics: ObjectProvider<SagaMetrics>,
-    ) = DeadlineScheduler(mongo, runtime, clock, properties.deadlines.toSettings(), metrics.getIfAvailable { NoopSagaMetrics })
+    ) = DeadlineScheduler(store.sagas.deadlines, runtime, clock, properties.deadlines.toSettings(), metrics.getIfAvailable { NoopSagaMetrics })
 }

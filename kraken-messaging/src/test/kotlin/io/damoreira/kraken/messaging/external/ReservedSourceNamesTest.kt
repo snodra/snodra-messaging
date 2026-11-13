@@ -9,7 +9,7 @@ import io.damoreira.kraken.messaging.kafka.LocalEventDispatcher
 import io.mockk.mockk
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
-import org.springframework.data.mongodb.core.MongoTemplate
+import io.damoreira.kraken.messaging.store.ProcessedEventStore
 import kotlin.test.assertTrue
 
 @MessageType("rs.Thing")
@@ -38,7 +38,7 @@ class ReservedSourceNamesTest {
     }
 
     @Test fun `a webhook source named like a marker family is refused`() {
-        val ingress = ExternalEventIngress(mockk<LocalEventDispatcher>(relaxed = true), mockk<MongoTemplate>(relaxed = true), JsonCodec(), MessageTypeResolver("rs"))
+        val ingress = ExternalEventIngress(mockk<LocalEventDispatcher>(relaxed = true), mockk<ProcessedEventStore>(relaxed = true), JsonCodec(), MessageTypeResolver("rs"))
         for (name in listOf("processor", "saga", "ingress", "failed")) {
             val e = assertThrows<IllegalArgumentException> { ingress.accept(name, "k-1", RsThing("1")) }
             assertTrue(e.message!!.contains(name) && e.message!!.contains("reserved"), e.message)

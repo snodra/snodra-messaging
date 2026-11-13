@@ -20,7 +20,11 @@ import io.damoreira.kraken.hub.v1.ResetTarget as WireTarget
 import io.damoreira.kraken.messaging.MessageContext
 import io.damoreira.kraken.messaging.codec.MessageTypeResolver
 import io.damoreira.kraken.messaging.deadletter.DeadLetterMode
-import io.damoreira.kraken.messaging.deadletter.DeadLetterStore
+import io.damoreira.kraken.messaging.DEAD_LETTERS
+import io.damoreira.kraken.messaging.PROCESSOR_CONTROL
+import io.damoreira.kraken.messaging.deadletter.DeadLetterFactory
+import io.damoreira.kraken.messaging.store.DeadLetterStore
+import kotlinx.coroutines.runBlocking
 import io.damoreira.kraken.messaging.deadletter.DeadLetters
 import io.damoreira.kraken.messaging.fixtures.Happened
 import io.damoreira.kraken.messaging.handler.DisallowReplay
@@ -134,7 +138,7 @@ class ProcessorControlTest {
     @AfterAll fun stop() = support.close()
 
     @BeforeEach fun setUp() {
-        for (c in listOf("processed_events", DeadLetterStore.COLLECTION, ProcessorControlStore.COLLECTION)) mongo.remove(Query(), c)
+        for (c in listOf("processed_events", DEAD_LETTERS, PROCESSOR_CONTROL)) mongo.remove(Query(), c)
         group = "svc-" + UUID.randomUUID()
         projection = ReplayedProjection()
         once = OnceOnly()
@@ -152,13 +156,12 @@ class ProcessorControlTest {
     private inner class Instance(beans: List<Any>, controlled: Boolean = true, executeLeaseLimit: Duration = Duration.ofSeconds(120)) {
         val registry = HandlerRegistry(MessageTypeResolver("test")).also { r -> beans.forEach { r.register(it) } }
         val invoker = HandlerInvoker(registry, support.codec)
-        val dispatcher = LocalEventDispatcher(registry, invoker, support.tx, mongo, sagas)
-        val letters = DeadLetterStore(mongo, Duration.ofDays(30))
-        val deadLetters = DeadLetters(DeadLetterMode.COLLECTION, letters, dispatcher)
+        val dispatcher = LocalEventDispatcher(registry, invoker, support.store, sagas)
+        val deadLetters = DeadLetters(DeadLetterMode.COLLECTION, support.store.deadLetters, dispatcher)
         val adminConfig = mapOf<String, Any>("bootstrap.servers" to support.bootstrapServers, "request.timeout.ms" to 5000, "default.api.timeout.ms" to 5000)
         val control = if (controlled) {
             ProcessorControl(
-                ProcessorControlStore(mongo), registry, deadLetters, adminConfig, pollInterval = Duration.ofMillis(300), executeLeaseLimit = executeLeaseLimit,
+                support.store.processorControl, registry, deadLetters, adminConfig, pollInterval = Duration.ofMillis(300), executeLeaseLimit = executeLeaseLimit,
             )
         } else {
             null
@@ -167,9 +170,9 @@ class ProcessorControlTest {
             dispatcher,
             consumerFor = { processor ->
                 EventConsumer(
-                    support.consumerFactory(), topic, Processors.groupId(group, processor), registry, invoker, support.tx, mongo,
-                    maxAttempts = 2, backOffMs = 50, codec = support.codec, dispatcher = dispatcher, processor = processor,
-                    deadLetters = DeadLetterSink.Collection(letters),
+                    support.consumerFactory(), topic, Processors.groupId(group, processor), dispatcher,
+                    maxAttempts = 2, backOffMs = 50, codec = support.codec, processor = processor,
+                    deadLetters = DeadLetterSink.Collection(support.store.deadLetters, DeadLetterFactory(Duration.ofDays(30))),
                 )
             },
             adminConfig = adminConfig,
@@ -218,7 +221,7 @@ class ProcessorControlTest {
 
     private fun markers(): Set<String> = mongo.findAll(Document::class.java, "processed_events").map { it.getString("_id") }.toSet()
 
-    private fun control(processor: String = "default") = ProcessorControlStore(mongo).get(processor)
+    private fun control(processor: String = "default") = runBlocking { support.store.processorControl.get(processor) }
 
     private fun ControlReply.refusal(): ControlRefusal? = if (hasRefused()) refused.code else null
 
@@ -300,7 +303,7 @@ class ProcessorControlTest {
 
     @Test fun `an instance that starts under a held lock stays out of the group until the lock clears`() {
         topic = support.newTopic("kraken.events.ctl", partitions = 1)
-        ProcessorControlStore(mongo).lock("default", "op-x", Duration.ofSeconds(4))
+        runBlocking { support.store.processorControl.lock("default", "op-x", Duration.ofSeconds(4)) }
         val a = instance(projection)
         assertEquals(ProcessorState.PROCESSOR_STOPPED, a.status().state)
         assertEquals("op-x", a.status().operationId)
@@ -315,7 +318,7 @@ class ProcessorControlTest {
     @Test fun `a reset of a group that never committed makes no range and commits the target`() {
         topic = support.newTopic("kraken.events.ctl", partitions = 1)
         repeat(2) { support.send(topic, "n-$it") }
-        ProcessorControlStore(mongo).lock("default", "op-1", Duration.ofSeconds(30)) // before any instance joined the group
+        runBlocking { support.store.processorControl.lock("default", "op-1", Duration.ofSeconds(30)) } // before any instance joined the group
         val a = instance(projection, resets)
         assertTrue(a.ask(prepare("op-1")).hasOk())
         val reply = a.ask(execute("op-1", latest))
@@ -629,7 +632,7 @@ class ProcessorControlTest {
 
         // The lock is cleared under the held operation (another instance cleared its passed lease).
         assertTrue(a.ask(prepare("op-2")).hasOk())
-        ProcessorControlStore(mongo).release("default", "op-2")
+        runBlocking { support.store.processorControl.release("default", "op-2") }
         val lost = a.ask(prepare("op-2"))
         assertEquals(ControlRefusal.CONTROL_REFUSAL_NOT_PREPARED, lost.refusal(), lost.toString())
         // Whichever notices the lost lock first answers (ADR 0023 ruling 19): the renewal ("lock lost"), or the 300 ms poll,
@@ -650,9 +653,9 @@ class ProcessorControlTest {
         repeat(2) { support.send(topic, "s-$it") }
         await().atMost(Duration.ofSeconds(30)).until { projection.seen.size == 2 && support.committed(defaultGroup)[0] == 2L }
         val before = markers()
-        val store = ProcessorControlStore(mongo)
+        val store = support.store.processorControl
         // Another instance cleared the passed lease and took the lock.
-        resets.during = { store.release("default", "op-1"); store.lock("default", "op-other", Duration.ofSeconds(60)) }
+        resets.during = { runBlocking { store.release("default", "op-1"); store.lock("default", "op-other", Duration.ofSeconds(60)) } }
         assertTrue(a.ask(prepare("op-1")).hasOk())
         val reply = a.ask(execute("op-1", earliest))
         assertEquals(ControlRefusal.CONTROL_REFUSAL_FAILED, reply.refusal(), reply.toString())
@@ -706,7 +709,7 @@ class ProcessorControlTest {
         assertTrue(a.ask(finish("op-1")).hasOk())
         await().atMost(Duration.ofSeconds(30)).until { a.deadLetters.count("default") == 1L }
         val id = DeadLetterStore.id("default", topic, 0, 0)
-        val parked = mongo.db.getCollection(DeadLetterStore.COLLECTION).find(Document("_id", id)).first()!!
+        val parked = mongo.db.getCollection(DEAD_LETTERS).find(Document("_id", id)).first()!!
         assertEquals(true, parked.getBoolean("replay"), parked.toJson())
         assertTrue(a.deadLetters.get(id)!!.replay)
         flaky.failing = null

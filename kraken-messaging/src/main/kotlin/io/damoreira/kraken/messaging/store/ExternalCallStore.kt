@@ -47,7 +47,10 @@ class ExternalCallRecord(
  * whether it matched; a write that matched nothing changed nothing.
  */
 interface ExternalCallStore {
-    /** Inserts [call]; false when a record with its id exists. */
+    /**
+     * Inserts [call]; false when a record with its id exists. Inside a transaction the caller then rolls it back (a database
+     * may have aborted it on the duplicate), as after [ProcessedEventStore.record].
+     */
     suspend fun insert(call: ExternalCallRecord): Boolean
 
     suspend fun find(id: String): ExternalCallRecord?

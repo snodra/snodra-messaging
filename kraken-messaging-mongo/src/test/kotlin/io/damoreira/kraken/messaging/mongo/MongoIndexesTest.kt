@@ -1,7 +1,7 @@
-package io.damoreira.kraken.messaging.saga
+package io.damoreira.kraken.messaging.mongo
 
 import com.mongodb.client.MongoClients
-import io.damoreira.kraken.messaging.external.ExternalCallIndexes
+import io.damoreira.kraken.messaging.saga.SagaDocument
 import io.damoreira.kraken.messaging.test.KrakenContainers
 import org.junit.jupiter.api.AfterAll
 import org.junit.jupiter.api.BeforeAll
@@ -20,11 +20,15 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
+/** The indexes [MongoIndexes] creates (the spec's storage tables): names, keys, partial filters, TTLs, idempotence. */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
-class SagaIndexesTest {
+class MongoIndexesTest {
     private val mongoContainer = KrakenContainers.mongo()
     private lateinit var mongo: MongoTemplate
-    private lateinit var indexes: SagaIndexes
+    private val settings = MongoStoreSettings(
+        sagaEndedRetention = Duration.ofDays(30), sagaDispatchRetention = Duration.ofDays(7), deadlineRetention = Duration.ofDays(7),
+        failedRetention = Duration.ofDays(30), externalCallRetention = Duration.ofDays(30),
+    )
     private val now = Instant.parse("2026-11-03T10:00:00Z")
 
     @BeforeAll
@@ -39,9 +43,7 @@ class SagaIndexesTest {
     @BeforeEach
     fun setUp() {
         mongo.db.drop()
-        indexes = SagaIndexes(mongo, Duration.ofDays(30), Duration.ofDays(7), Duration.ofDays(7), failedRetention = Duration.ofDays(30))
-        indexes.afterPropertiesSet()
-        ExternalCallIndexes(mongo, Duration.ofDays(30)).afterPropertiesSet()
+        MongoIndexes.ensure(mongo, settings)
     }
 
     private fun index(collection: String, keys: List<String>): IndexInfo {
@@ -49,8 +51,9 @@ class SagaIndexesTest {
         return assertNotNull(found.singleOrNull(), "no single index on $collection$keys among ${mongo.indexOps(collection).indexInfo.map { it.name }}")
     }
 
-    private fun saga(id: String, startKey: String?, ended: Boolean) =
-        SagaDocument(id, "PaymentSaga", "{}", startKey = startKey, ended = ended, endedAt = if (ended) now else null, createdAt = now, updatedAt = now)
+    private fun saga(id: String, startKey: String?, ended: Boolean) = mongo.db.getCollection("sagas").insertOne(
+        sagaDocument(SagaDocument(id, "PaymentSaga", "{}", startKey = startKey, ended = ended, endedAt = if (ended) now else null, createdAt = now, updatedAt = now)),
+    )
 
     @Test
     fun `the indexes of the spec's storage table exist`() {
@@ -82,36 +85,36 @@ class SagaIndexesTest {
         assertEquals(Duration.ofDays(30), index("saga_failures", listOf("lastFailedAt")).expireAfter.orElse(null), "a parked event expires after its last failure")
 
         assertEquals(Duration.ofDays(30), index("external_calls", listOf("updatedAt")).expireAfter.orElse(null))
+        index("outbox", listOf("sentAt", "createdAt", "seq"))
+        assertEquals(Duration.ofDays(7), index("outbox", listOf("sentAt")).expireAfter.orElse(null))
+        assertEquals(Duration.ofDays(30), index("processed_events", listOf("processedAt")).expireAfter.orElse(null))
         assertEquals(Sort.Direction.ASC, index("deadlines", listOf("status", "dueAt")).indexFields.first().direction)
     }
 
     @Test
     fun `creating them twice is idempotent`() {
-        val before = listOf("sagas", "saga_dispatch", "deadlines", "saga_failures").associateWith { mongo.indexOps(it).indexInfo.map { i -> i.name }.sorted() }
+        val collections = listOf("outbox", "processed_events", "external_calls", "dead_letters", "sagas", "saga_dispatch", "saga_dispatch_leases", "deadlines", "saga_failures")
+        val before = collections.associateWith { mongo.indexOps(it).indexInfo.map { i -> i.name }.sorted() }
 
-        indexes.afterPropertiesSet()
-        ExternalCallIndexes(mongo, Duration.ofDays(30)).afterPropertiesSet()
+        MongoIndexes.ensure(mongo, settings)
 
         assertEquals(before, before.keys.associateWith { mongo.indexOps(it).indexInfo.map { i -> i.name }.sorted() })
     }
 
     @Test
     fun `two live instances with the same startKey are refused while an ended one is not counted`() {
-        mongo.insert(saga("s-1", "PaymentSaga|orderId=o-1", ended = true))
-        mongo.insert(saga("s-2", "PaymentSaga|orderId=o-1", ended = true))
-        mongo.insert(saga("s-3", "PaymentSaga|orderId=o-1", ended = false))
+        saga("s-1", "PaymentSaga|orderId=o-1", ended = true)
+        saga("s-2", "PaymentSaga|orderId=o-1", ended = true)
+        saga("s-3", "PaymentSaga|orderId=o-1", ended = false)
 
-        assertFailsWith<DuplicateKeyException> { mongo.insert(saga("s-4", "PaymentSaga|orderId=o-1", ended = false)) }
+        assertFailsWith<DuplicateKeyException> { translated { saga("s-4", "PaymentSaga|orderId=o-1", ended = false) } }
 
         // forceNew instances carry no startKey: any number may be live.
-        mongo.insert(saga("s-5", null, ended = false))
-        mongo.insert(saga("s-6", null, ended = false))
+        saga("s-5", null, ended = false)
+        saga("s-6", null, ended = false)
         // another key is independent, and ending the live one frees the key.
-        mongo.insert(saga("s-7", "PaymentSaga|orderId=o-2", ended = false))
-        mongo.updateFirst(
-            org.springframework.data.mongodb.core.query.Query(org.springframework.data.mongodb.core.query.Criteria.where("_id").`is`("s-3")),
-            org.springframework.data.mongodb.core.query.Update().set("ended", true), SagaDocument::class.java,
-        )
-        mongo.insert(saga("s-8", "PaymentSaga|orderId=o-1", ended = false))
+        saga("s-7", "PaymentSaga|orderId=o-2", ended = false)
+        mongo.db.getCollection("sagas").updateOne(org.bson.Document("_id", "s-3"), org.bson.Document("\$set", org.bson.Document("ended", true)))
+        saga("s-8", "PaymentSaga|orderId=o-1", ended = false)
     }
 }

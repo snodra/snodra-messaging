@@ -1,12 +1,16 @@
 package io.damoreira.kraken.messaging.kafka
 
+import io.damoreira.kraken.messaging.DEAD_LETTERS
 import io.damoreira.kraken.messaging.metrics.MessagingMetrics
 import io.damoreira.kraken.messaging.metrics.RecordingMessagingMetrics
 import io.damoreira.kraken.messaging.MessageContext
 import io.damoreira.kraken.messaging.codec.MessageTypeResolver
 import io.damoreira.kraken.messaging.deadletter.DeadLetterMode
 import io.damoreira.kraken.messaging.deadletter.DeadLetterReason
-import io.damoreira.kraken.messaging.deadletter.DeadLetterStore
+import io.damoreira.kraken.messaging.deadletter.DeadLetter
+import io.damoreira.kraken.messaging.deadletter.DeadLetterFactory
+import io.damoreira.kraken.messaging.store.DeadLetterStore
+import kotlinx.coroutines.runBlocking
 import io.damoreira.kraken.messaging.handler.HandlerInvoker
 import io.damoreira.kraken.messaging.handler.HandlerRegistry
 import io.damoreira.kraken.messaging.saga.SagaStage
@@ -34,12 +38,12 @@ private class SeenStage : SagaStage {
     override fun process(type: String, payload: ByteArray, ctx: MessageContext): Boolean { seen += ctx.messageId; return true }
 }
 
-/** A store whose parking fails while [down] is set (MongoDB unreachable while parking). */
-private class FlakyStore(support: KafkaMongoSupport) : DeadLetterStore(support.mongo, Duration.ofDays(30)) {
+/** The MongoDB dead letters, whose parking fails while [down] is set (the store unreachable while parking). */
+private class FlakyStore(private val inner: DeadLetterStore) : DeadLetterStore by inner {
     val down = AtomicBoolean(false)
-    override fun park(letter: Document): Boolean {
+    override suspend fun park(letter: DeadLetter): Boolean {
         if (down.get()) throw IllegalStateException("mongo down")
-        return super.park(letter)
+        return inner.park(letter)
     }
 }
 
@@ -53,14 +57,15 @@ class DeadLetterConsumerTest {
     private lateinit var handlers: RecordingHandlers
     private lateinit var registry: HandlerRegistry
     private var consumer: EventConsumer? = null
-    private val store = FlakyStore(support)
+    private val store = FlakyStore(support.store.deadLetters)
+    private val factory = DeadLetterFactory(Duration.ofDays(30))
     private lateinit var metrics: RecordingMessagingMetrics
 
     @AfterAll fun stop() = support.close()
 
     @BeforeEach fun setUp() {
         mongo.remove(Query(), "processed_events")
-        mongo.remove(Query(), DeadLetterStore.COLLECTION)
+        mongo.remove(Query(), DEAD_LETTERS)
         store.down.set(false)
         topic = support.newTopic("kraken.events.dl")
         group = "group-" + UUID.randomUUID()
@@ -77,18 +82,18 @@ class DeadLetterConsumerTest {
     private fun start(mode: DeadLetterMode = DeadLetterMode.COLLECTION, maxAttempts: Int = 3, stage: SagaStage = SagaStage.NONE): EventConsumer {
         val invoker = HandlerInvoker(registry, support.codec)
         val sink = when (mode) {
-            DeadLetterMode.COLLECTION -> DeadLetterSink.Collection(store)
+            DeadLetterMode.COLLECTION -> DeadLetterSink.Collection(store, factory)
             DeadLetterMode.TOPIC -> DeadLetterSink.Topic(support.kafka)
             DeadLetterMode.LOG -> DeadLetterSink.Log
         }
         return EventConsumer(
-            support.consumerFactory(), topic, group, registry, invoker, support.tx, mongo, maxAttempts, backOffMs = 50,
-            codec = support.codec, dispatcher = LocalEventDispatcher(registry, invoker, support.tx, mongo, stage, metrics), deadLetters = sink,
+            support.consumerFactory(), topic, group, LocalEventDispatcher(registry, invoker, support.store, stage, metrics), maxAttempts, backOffMs = 50,
+            codec = support.codec, deadLetters = sink,
             metrics = metrics,
         ).also { consumer = it; it.start() }
     }
 
-    private fun letters(): List<Document> = mongo.findAll(Document::class.java, DeadLetterStore.COLLECTION).sortedBy { (it["offset"] as Number).toLong() }
+    private fun letters(): List<Document> = mongo.findAll(Document::class.java, DEAD_LETTERS).sortedBy { (it["offset"] as Number).toLong() }
     private fun awaitSeen(vararg ids: String) =
         await().atMost(Duration.ofSeconds(15)).untilAsserted { assertTrue(handlers.seen.containsAll(ids.toList()), "seen=${handlers.seen}") }
     private fun awaitCommitted(offset: Long) =
@@ -163,7 +168,7 @@ class DeadLetterConsumerTest {
         start(maxAttempts = 1)
         support.send(topic, "m-1", key = "k1")
         await().atMost(Duration.ofSeconds(15)).until { letters().size == 1 }
-        mongo.remove(Query(), DeadLetterStore.COLLECTION) // another instance discarded it
+        mongo.remove(Query(), DEAD_LETTERS) // another instance discarded it
         support.send(topic, "m-2", key = "k1")
         awaitSeen("m-2")
         awaitCommitted(2)
@@ -196,7 +201,7 @@ class DeadLetterConsumerTest {
         // The letter of offset 0 exists (parked, then the instance died before the commit): the redelivery must not park twice.
         val r0 = ConsumerRecord<String, ByteArray>(topic, 0, 0L, "k1", ByteArray(0))
         r0.headers().add("type", "test.Happened".toByteArray())
-        store.park(store.letter("default", r0, DeadLetterReason.HANDLER_FAILED, io.damoreira.kraken.messaging.deadletter.DeadLetterError("X", "first"), 3))
+        runBlocking { store.park(factory.letter("default", r0, DeadLetterReason.HANDLER_FAILED, io.damoreira.kraken.messaging.deadletter.DeadLetterError("X", "first"), 3)) }
         start()
         support.send(topic, "r-1", key = "k1")
         support.send(topic, "r-2", key = "k2")
@@ -211,7 +216,7 @@ class DeadLetterConsumerTest {
         // Its INVALID letter exists (parked, then the instance died before the commit); INVALID letters block no key, so
         // the redelivery parks again and the store reports the letter there.
         val r0 = ConsumerRecord<String, ByteArray>(topic, 0, 0L, null, ByteArray(0))
-        store.park(store.letter("default", r0, DeadLetterReason.INVALID, io.damoreira.kraken.messaging.deadletter.DeadLetterError("Invalid", "first"), 0))
+        runBlocking { store.park(factory.letter("default", r0, DeadLetterReason.INVALID, io.damoreira.kraken.messaging.deadletter.DeadLetterError("Invalid", "first"), 0)) }
         start()
         support.send(topic, null, type = null, key = null)
         support.send(topic, "i-2", key = "k2")

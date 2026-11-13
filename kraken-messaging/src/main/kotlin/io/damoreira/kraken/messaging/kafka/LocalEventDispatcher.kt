@@ -7,11 +7,11 @@ import io.damoreira.kraken.messaging.handler.Processors
 import io.damoreira.kraken.messaging.metrics.MessagingMetrics
 import io.damoreira.kraken.messaging.metrics.NoopMessagingMetrics
 import io.damoreira.kraken.messaging.saga.SagaStage
+import io.damoreira.kraken.messaging.store.MessageStore
+import io.damoreira.kraken.messaging.store.ProcessedMarker
 import io.damoreira.kraken.messaging.tracing.CorrelationContext
 import kotlinx.coroutines.runBlocking
 import org.slf4j.LoggerFactory
-import org.springframework.dao.DuplicateKeyException
-import org.springframework.data.mongodb.core.MongoTemplate
 import org.springframework.transaction.support.TransactionTemplate
 import java.time.Instant
 
@@ -20,11 +20,11 @@ import java.time.Instant
  * stage 2). Shared by the Kafka event processors ([EventConsumer], one per processor, [dispatchIn]), the external sources
  * and the webhook ingress ([dispatch]).
  *
- * Stage 1 runs per event processor (ADR 0022): the processor's idempotency marker ([ProcessedEventDocument], id
- * [Processors.markerId]: `processor:<name>:<dedupeId>`, `default` included) is inserted and
- * the processor's handlers run inside one Mongo transaction; a duplicate marker (from the marker insert only) skips the
- * processor, a handler failure rolls the marker back. Handlers run via `runBlocking` on the calling thread so the
- * thread-bound transaction wraps them. Stage 2 runs only for the `default` processor, after stage 1 committed, with markers
+ * Stage 1 runs per event processor (ADR 0022): the processor's idempotency marker ([ProcessedMarker], id
+ * [Processors.markerId]: `processor:<name>:<dedupeId>`, `default` included) is recorded and the processor's handlers run
+ * inside one transaction of the message [store]; a duplicate marker (from the marker's record only) skips the processor, a
+ * handler failure rolls the marker back. Handlers run via `runBlocking` on the calling thread so the thread-bound
+ * transaction wraps them. Stage 2 runs only for the `default` processor, after stage 1 committed, with markers
  * and transactions of its own, so a redelivered record whose stage 1 is done goes straight to it. **Stage 2 runs even when
  * stage 1 failed** (review amendment, ADR 0021 ruling 26): the failure is held, stage 2 runs, and then the failure is
  * thrown, so the caller redelivers, parks or skips the record by its own rules; a redelivery applies nothing twice because
@@ -36,12 +36,12 @@ import java.time.Instant
 class LocalEventDispatcher(
     private val registry: HandlerRegistry,
     private val invoker: HandlerInvoker,
-    private val tx: TransactionTemplate,
-    private val mongo: MongoTemplate,
+    private val store: MessageStore,
     private val sagaStage: SagaStage = SagaStage.NONE,
     private val metrics: MessagingMetrics = NoopMessagingMetrics,
 ) {
     private val log = LoggerFactory.getLogger(LocalEventDispatcher::class.java)
+    private val tx = TransactionTemplate(store.transactions)
 
     /** What [dispatch] did with an event. */
     enum class Outcome {
@@ -178,17 +178,16 @@ class LocalEventDispatcher(
         val marker = Processors.markerId(processor, dedupeId)
         return try {
             tx.executeWithoutResult {
-                try {
-                    mongo.insert(
-                        ProcessedEventDocument(
+                runBlocking(CorrelationContext(ctx.correlationId)) {
+                    val recorded = store.processedEvents.record(
+                        ProcessedMarker(
                             marker, type, Instant.now(),
                             processor.takeIf { position != null }, position?.topic, position?.partition, position?.offset,
                         ),
                     )
-                } catch (_: DuplicateKeyException) {
-                    throw AlreadyProcessed // only the marker's duplicate means "seen before"; a handler's is a failure
+                    if (!recorded) throw AlreadyProcessed // only the marker's duplicate means "seen before"; a handler's is a failure
+                    invoker.invokeEvent(type, payload, ctx, processor, replay)
                 }
-                runBlocking(CorrelationContext(ctx.correlationId)) { invoker.invokeEvent(type, payload, ctx, processor, replay) }
                 inTransaction()
             }
             true

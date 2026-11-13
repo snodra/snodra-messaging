@@ -13,6 +13,7 @@ import io.damoreira.kraken.messaging.security.ForwardedIdentityResolver
 import io.damoreira.kraken.messaging.tracing.TraceHeaders
 import io.micrometer.tracing.Tracer
 import io.micrometer.tracing.propagation.Propagator
+import org.springframework.beans.factory.BeanFactory
 import org.springframework.beans.factory.ObjectProvider
 import org.springframework.boot.actuate.endpoint.SanitizingFunction
 import org.springframework.boot.autoconfigure.AutoConfiguration
@@ -22,6 +23,7 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.boot.context.properties.bind.Binder
 import org.springframework.context.annotation.Bean
 import org.springframework.core.env.Environment
+import org.springframework.core.io.ResourceLoader
 import org.springframework.context.annotation.Configuration
 import org.springframework.security.oauth2.jwt.JwtDecoder
 
@@ -45,6 +47,11 @@ class KrakenMessagingAutoConfiguration {
     @Bean
     @ConditionalOnMissingBean
     fun handlerRegistry(typeResolver: MessageTypeResolver) = HandlerRegistry(typeResolver)
+
+    /** Fails the startup when an event handler, a saga or an idempotent handler has no message store to run on (ADR 0028). */
+    @Bean
+    fun krakenMessageStoreGuard(beanFactory: BeanFactory, registry: HandlerRegistry, environment: Environment, resourceLoader: ResourceLoader) =
+        MessageStoreGuard(beanFactory, registry, environment, resourceLoader)
 
     @Bean
     @ConditionalOnMissingBean

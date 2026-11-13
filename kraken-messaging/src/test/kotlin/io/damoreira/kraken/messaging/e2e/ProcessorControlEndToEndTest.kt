@@ -1,7 +1,7 @@
 package io.damoreira.kraken.messaging.e2e
 
 import io.damoreira.kraken.messaging.codec.JsonCodec
-import io.damoreira.kraken.messaging.control.ProcessorControlStore
+import io.damoreira.kraken.messaging.store.MessageStore
 import io.damoreira.kraken.messaging.control.ResetTarget
 import io.damoreira.kraken.messaging.e2e.control.Catalog
 import io.damoreira.kraken.messaging.e2e.control.ControlService
@@ -143,7 +143,7 @@ class ProcessorControlEndToEndTest {
         val paused = call("POST", "$base/catalog/pause", WRITE_TOKEN)
         assertEquals(200, paused.status, paused.body.toString())
         assertEquals(1, paused.body["acknowledged"].asInt())
-        assertTrue(ctx.getBean(ProcessorControlStore::class.java).get("catalog")!!.paused)
+        assertTrue(runBlocking { ctx.getBean(MessageStore::class.java).processorControl.get("catalog") }!!.paused)
         await().atMost(Duration.ofSeconds(15)).until { processor("catalog")?.get("state")?.asString() == "PAUSED" }
         publish(ItemAdded("i-4"), partition = 0)
         await().atMost(Duration.ofSeconds(20)).until { "i-4" in ledger.seen }
@@ -163,7 +163,7 @@ class ProcessorControlEndToEndTest {
         assertEquals(setOf(2), catalog.seen.groupingBy { it }.eachCount().values.toSet(), "every record of the range once more")
         assertEquals(5, notifier.seen.size, "@DisallowReplay did not run again")
         assertEquals(5, ledger.seen.size, "default was not reset")
-        await().atMost(Duration.ofSeconds(20)).until { ctx.getBean(ProcessorControlStore::class.java).get("catalog")!!.replay.isEmpty() }
+        await().atMost(Duration.ofSeconds(20)).until { runBlocking { ctx.getBean(MessageStore::class.java).processorControl.get("catalog") }!!.replay.isEmpty() }
 
         // Dead letters of default, through the hub.
         publish(ItemAdded("bad-1", poison = true), partition = 1)

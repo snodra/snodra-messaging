@@ -5,6 +5,7 @@ import io.damoreira.kraken.messaging.codec.JsonCodec
 import io.damoreira.kraken.messaging.codec.MessageTypeResolver
 import io.damoreira.kraken.messaging.fixtures.Happened
 import io.damoreira.kraken.messaging.metrics.RecordingMessagingMetrics
+import io.damoreira.kraken.messaging.mongo.MongoMessageStore
 import io.damoreira.kraken.messaging.test.KrakenContainers
 import io.damoreira.kraken.messaging.test.KrakenTestKafka
 import io.damoreira.kraken.messaging.tracing.TraceHeaders
@@ -37,8 +38,10 @@ import org.springframework.kafka.core.KafkaProducerException
 import org.springframework.kafka.core.KafkaTemplate
 import org.springframework.kafka.support.SendResult
 import org.springframework.transaction.support.TransactionTemplate
+import org.bson.Document
 import java.time.Duration
 import java.time.Instant
+import java.util.Date
 import java.util.concurrent.CompletableFuture
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -52,6 +55,7 @@ class OutboxTest {
     private val mongoContainer = KrakenContainers.mongo()
     private lateinit var mongo: MongoTemplate
     private lateinit var txManager: MongoTransactionManager
+    private lateinit var store: MongoMessageStore
     private lateinit var producerFactory: DefaultKafkaProducerFactory<String, ByteArray>
     private lateinit var kafka: KafkaTemplate<String, ByteArray>
     private val codec = JsonCodec()
@@ -66,6 +70,7 @@ class OutboxTest {
         val factory = SimpleMongoClientDatabaseFactory(MongoClients.create(mongoContainer.connectionString + "/?directConnection=true"), "outbox_test")
         mongo = MongoTemplate(factory)
         txManager = MongoTransactionManager(factory)
+        store = MongoMessageStore(mongo, txManager)
         producerFactory = DefaultKafkaProducerFactory(
             mapOf<String, Any>(
                 ProducerConfig.BOOTSTRAP_SERVERS_CONFIG to kafkaContainer.bootstrapServers,
@@ -83,7 +88,7 @@ class OutboxTest {
                 if (e.cause !is org.apache.kafka.common.errors.TopicExistsException) throw e
             }
         }
-        bus = OutboxEventBus(mongo, codec, resolver, TraceHeaders(null, null))
+        bus = OutboxEventBus(store.outbox, codec, resolver, TraceHeaders(null, null))
     }
 
     @AfterAll
@@ -98,7 +103,7 @@ class OutboxTest {
         mongo.remove(Query(), "outbox")
     }
 
-    private fun publisher() = OutboxPublisher(mongo, kafka, topic, "orders", Duration.ofMillis(100), 100)
+    private fun publisher() = OutboxPublisher(store.outbox, kafka, topic, "orders", Duration.ofMillis(100), 100)
 
     /** A real template that fails records whose key is in [failing] with [failure]. */
     private fun failingTemplate(failing: Set<String>, failure: () -> Throwable) =
@@ -108,7 +113,47 @@ class OutboxTest {
                 else super.send(record)
         }
 
-    private fun doc(key: String) = mongo.findOne(Query(Criteria.where("key").`is`(key)), OutboxDocument::class.java)!!
+    /** An `outbox` document as stored. */
+    private class Doc(d: Document) {
+        val id: String = d.getString("_id")
+        val type: String = d.getString("type")
+        val key: String? = d.getString("key")
+        val headers: Map<String, Any?> = d.get("headers", Document::class.java)
+        val payload: Document = d.get("payload", Document::class.java)
+        val createdAt: Instant = d.getDate("createdAt").toInstant()
+        val sentAt: Date? = d.getDate("sentAt")
+        val failedAt: Date? = d.getDate("failedAt")
+        val attempts: Int = (d["attempts"] as Number).toInt()
+    }
+
+    private fun doc(key: String) = Doc(mongo.findOne(Query(Criteria.where("key").`is`(key)), Document::class.java, "outbox")!!)
+
+    @Test
+    fun `two relays on one outbox send every entry once, and a stopped relay holds what it claimed until its lease passes`() {
+        val ids = (1..30).map { "two-%02d".format(it) }
+        ids.forEach { bus.publishBlocking(Happened(it, Instant.now()), key = it) }
+        val sent = java.util.concurrent.ConcurrentLinkedQueue<String>()
+        val counting = object : KafkaTemplate<String, ByteArray>(producerFactory) {
+            override fun send(record: ProducerRecord<String, ByteArray>): CompletableFuture<SendResult<String, ByteArray>> {
+                sent += record.key()
+                return super.send(record)
+            }
+        }
+        val a = OutboxPublisher(store.outbox, counting, topic, "orders", Duration.ofMillis(100), batchSize = 7)
+        val b = OutboxPublisher(store.outbox, counting, topic, "orders", Duration.ofMillis(100), batchSize = 7)
+        do {
+            val sentNow = a.publishPendingNow() + b.publishPendingNow()
+        } while (sentNow > 0)
+        assertEquals(ids.sorted(), sent.sorted(), "each entry sent once")
+
+        // A relay that claimed a batch and stopped before sending it holds it until its lease passes.
+        bus.publishBlocking(Happened("held", Instant.now()), key = "held")
+        val crashed = OutboxPublisher(store.outbox, counting, topic, "orders", Duration.ofMillis(100), 100, lease = Duration.ofSeconds(46))
+        crashed.stop() // stop requested: it claims, then sends nothing
+        assertEquals(0, crashed.publishPendingNow())
+        assertEquals(0, a.publishPendingNow(), "held by the stopped relay")
+        assertNull(doc("held").sentAt)
+    }
 
     @Test
     fun `non retriable send failure marks document failed and continues`() {
@@ -116,7 +161,7 @@ class OutboxTest {
         bus.publishBlocking(Happened("nr-poison", Instant.now()), key = "nr-poison")
         bus.publishBlocking(Happened("nr-2", Instant.now()), key = "nr-2")
         val template = failingTemplate(setOf("nr-poison")) { RecordTooLargeException("record too large") }
-        val publisher = OutboxPublisher(mongo, template, topic, "orders", Duration.ofMillis(100), 100, maxAttempts = 10)
+        val publisher = OutboxPublisher(store.outbox, template, topic, "orders", Duration.ofMillis(100), 100, maxAttempts = 10)
 
         assertEquals(2, publisher.publishPendingNow()) // the poison document did not stop the batch
 
@@ -135,7 +180,7 @@ class OutboxTest {
         bus.publishBlocking(Happened("r-poison", Instant.now()), key = "r-poison")
         bus.publishBlocking(Happened("r-1", Instant.now()), key = "r-1")
         val template = failingTemplate(setOf("r-poison")) { org.apache.kafka.common.errors.TimeoutException("broker down") }
-        val publisher = OutboxPublisher(mongo, template, topic, "orders", Duration.ofMillis(100), 100, maxAttempts = 2)
+        val publisher = OutboxPublisher(store.outbox, template, topic, "orders", Duration.ofMillis(100), 100, maxAttempts = 2)
 
         assertEquals(0, publisher.publishPendingNow()) // retriable: attempts 1, batch stopped to keep order
         assertNull(doc("r-poison").failedAt)
@@ -152,10 +197,10 @@ class OutboxTest {
         bus.publishBlocking(Happened("m-poison", Instant.now()), key = "m-poison")
         bus.publishBlocking(Happened("m-2", Instant.now()), key = "m-2")
         bus.publishBlocking(Happened("m-dead", Instant.now()), key = "m-dead")
-        mongo.updateFirst(Query(Criteria.where("key").`is`("m-dead")), org.springframework.data.mongodb.core.query.Update().set("failedAt", Instant.now()), OutboxDocument::class.java)
+        mongo.updateFirst(Query(Criteria.where("key").`is`("m-dead")), org.springframework.data.mongodb.core.query.Update().set("failedAt", Date()), "outbox")
         val metrics = RecordingMessagingMetrics()
         val template = failingTemplate(setOf("m-poison")) { org.apache.kafka.common.errors.TimeoutException("broker down") }
-        val publisher = OutboxPublisher(mongo, template, topic, "orders", Duration.ofMillis(100), 100, maxAttempts = 2, metrics = metrics)
+        val publisher = OutboxPublisher(store.outbox, template, topic, "orders", Duration.ofMillis(100), 100, maxAttempts = 2, metrics = metrics)
 
         publisher.samplePending()
         assertEquals(listOf(3L), metrics.pending.toList(), "unsent and not given up on: the failed document is not pending")
@@ -178,7 +223,7 @@ class OutboxTest {
     fun `the running relay counts the outbox when the metrics want it, and never without them`() {
         bus.publishBlocking(Happened("c-1", Instant.now()), key = "c-1")
         val metrics = RecordingMessagingMetrics()
-        val publisher = OutboxPublisher(mongo, kafka, topic, "orders", Duration.ofMillis(50), 100, metrics = metrics, pendingSampleInterval = Duration.ofMillis(100))
+        val publisher = OutboxPublisher(store.outbox, kafka, topic, "orders", Duration.ofMillis(50), 100, metrics = metrics, pendingSampleInterval = Duration.ofMillis(100))
         publisher.start()
         try {
             await atMost Duration.ofSeconds(10) until { metrics.pending.size >= 2 && metrics.pending.last() == 0L }
@@ -190,7 +235,7 @@ class OutboxTest {
         val quiet = object : io.damoreira.kraken.messaging.metrics.MessagingMetrics {
             override fun outboxPending(count: Long) = counted.set(true)
         }
-        val relay = OutboxPublisher(mongo, kafka, topic, "orders", Duration.ofMillis(50), 100, metrics = quiet, pendingSampleInterval = Duration.ofMillis(10))
+        val relay = OutboxPublisher(store.outbox, kafka, topic, "orders", Duration.ofMillis(50), 100, metrics = quiet, pendingSampleInterval = Duration.ofMillis(10))
         relay.start()
         Thread.sleep(300)
         relay.stop()
@@ -201,7 +246,7 @@ class OutboxTest {
     fun `publish writes outbox document with headers and camelCase payload`() {
         bus.publishBlocking(Happened("a-1", Instant.parse("2026-01-01T00:00:00Z")), key = "a-1")
 
-        val docs = mongo.findAll(OutboxDocument::class.java)
+        val docs = mongo.findAll(Document::class.java, "outbox").map(::Doc)
         assertEquals(1, docs.size)
         val doc = docs.single()
         assertEquals("test.Happened", doc.type)
@@ -237,7 +282,7 @@ class OutboxTest {
             assertTrue(headers.containsKey(h), "missing header $h in $headers")
         }
         assertEquals("orders", headers["source"])
-        val doc = mongo.findOne(Query(Criteria.where("payload.id").`is`("h-1")), OutboxDocument::class.java)!!
+        val doc = Doc(mongo.findOne(Query(Criteria.where("payload.id").`is`("h-1")), Document::class.java, "outbox")!!)
         assertNotNull(doc.sentAt)
         assertEquals(doc.id, headers["id"])
         assertEquals(doc.type, headers["type"])
@@ -269,18 +314,5 @@ class OutboxTest {
             }
         }
         assertEquals(ids, seen)
-    }
-
-    @Test
-    fun `indexes exist with expected ttl`() {
-        MessagingIndexes(mongo, Duration.ofDays(7), Duration.ofDays(30)).afterPropertiesSet()
-        MessagingIndexes(mongo, Duration.ofDays(7), Duration.ofDays(30)).afterPropertiesSet() // idempotent
-
-        fun indexes(collection: String): List<org.bson.Document> =
-            mongo.getCollection(collection).listIndexes(org.bson.Document::class.java).into(mutableListOf())
-        val outbox = indexes("outbox")
-        assertTrue(outbox.any { (it["key"] as org.bson.Document).keys.toList() == listOf("sentAt", "createdAt", "seq") })
-        assertTrue(outbox.any { (it["expireAfterSeconds"] as Number?)?.toLong() == Duration.ofDays(7).seconds })
-        assertTrue(indexes("processed_events").any { (it["expireAfterSeconds"] as Number?)?.toLong() == Duration.ofDays(30).seconds })
     }
 }

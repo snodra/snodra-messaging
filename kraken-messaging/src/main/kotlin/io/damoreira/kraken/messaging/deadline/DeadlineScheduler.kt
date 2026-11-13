@@ -1,22 +1,14 @@
 package io.damoreira.kraken.messaging.deadline
 
 import io.damoreira.kraken.messaging.saga.DeadlineDocument
-import io.damoreira.kraken.messaging.saga.DeadlineStatus
 import io.damoreira.kraken.messaging.saga.NoopSagaMetrics
 import io.damoreira.kraken.messaging.saga.SagaMetrics
 import io.damoreira.kraken.messaging.saga.SagaRuntime
+import io.damoreira.kraken.messaging.store.DeadlineStore
 import org.slf4j.LoggerFactory
 import org.springframework.context.SmartLifecycle
-import org.springframework.data.domain.Sort
-import org.springframework.data.mongodb.core.FindAndModifyOptions
-import org.springframework.data.mongodb.core.MongoTemplate
-import org.springframework.data.mongodb.core.aggregation.Aggregation
-import org.springframework.data.mongodb.core.query.Criteria
-import org.springframework.data.mongodb.core.query.Query
-import org.springframework.data.mongodb.core.query.Update
 import java.time.Clock
 import java.time.Duration
-import java.util.Date
 import java.util.UUID
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
@@ -40,8 +32,8 @@ data class DeadlineSettings(
 /**
  * Fires the due deadlines of the sagas of this service, at least once.
  *
- * A poll claims due deadlines one at a time with `findAndModify` (status SCHEDULED, `dueAt <= now`, not claimed or the
- * claim expired; it sets `claimedBy` and `claimedUntil = now + lease`) and hands each to [SagaRuntime.applyDeadline],
+ * A poll claims due deadlines one at a time ([DeadlineStore.claimDueDeadline]: status SCHEDULED, `dueAt <= now`, not claimed
+ * or the claim expired; it sets `claimedBy` and `claimedUntil = now + lease`) and hands each to [SagaRuntime.applyDeadline],
  * which fires it in a transaction (loads the saga, runs the `@DeadlineHandler`, writes state, marks it FIRED; a deadline
  * of an ended or missing saga is CANCELLED instead). Several service instances can run a scheduler: the lease makes each
  * deadline fire on one of them. When firing fails (or the instance dies) the claim is left alone, so the deadline fires
@@ -51,7 +43,7 @@ data class DeadlineSettings(
  * publisher starts and stops before the event consumer, like the dispatch relay.
  */
 class DeadlineScheduler(
-    private val mongo: MongoTemplate,
+    private val deadlines: DeadlineStore,
     private val runtime: SagaRuntime,
     private val clock: Clock = Clock.systemUTC(),
     private val settings: DeadlineSettings = DeadlineSettings(),
@@ -80,31 +72,13 @@ class DeadlineScheduler(
                 log.debug("Deadline failure", e)
             }
         }
-        metrics.deadlinesOverdue(overdue())
+        metrics.deadlinesOverdue(deadlines.overdueByName(clock.instant()))
         return claimed
     }
 
     private fun claimNext(): DeadlineDocument? {
         val now = clock.instant()
-        return mongo.findAndModify(
-            Query(
-                Criteria.where("status").`is`(DeadlineStatus.SCHEDULED).and("dueAt").lte(now)
-                    .orOperator(Criteria.where("claimedUntil").isNull, Criteria.where("claimedUntil").lt(now)),
-            ).with(Sort.by("dueAt")),
-            Update().set("claimedBy", owner).set("claimedUntil", now.plus(settings.lease)),
-            FindAndModifyOptions.options().returnNew(true),
-            DeadlineDocument::class.java,
-        )
-    }
-
-    /** The SCHEDULED deadlines past their due time, per name. */
-    private fun overdue(): Map<String, Long> {
-        val aggregation = Aggregation.newAggregation(
-            Aggregation.match(Criteria.where("status").`is`(DeadlineStatus.SCHEDULED.name).and("dueAt").lte(Date.from(clock.instant()))),
-            Aggregation.group("name").count().`as`("n"),
-        )
-        return mongo.aggregate(aggregation, "deadlines", org.bson.Document::class.java).mappedResults
-            .associate { it.getString("_id") to (it["n"] as Number).toLong() }
+        return deadlines.claimDueDeadline(owner, now, now.plus(settings.lease))
     }
 
     override fun start() {

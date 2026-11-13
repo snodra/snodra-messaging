@@ -4,6 +4,7 @@ import io.damoreira.kraken.messaging.saga.MicrometerSagaMetrics
 import io.damoreira.kraken.messaging.saga.SagaGaugeSampler
 import io.damoreira.kraken.messaging.saga.SagaMetrics
 import io.damoreira.kraken.messaging.saga.SagaRuntime
+import io.damoreira.kraken.messaging.store.MessageStore
 import io.micrometer.core.instrument.MeterRegistry
 import org.springframework.beans.factory.ObjectProvider
 import org.springframework.boot.autoconfigure.AutoConfiguration
@@ -12,7 +13,6 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnClass
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Conditional
-import org.springframework.data.mongodb.core.MongoTemplate
 
 /**
  * The Micrometer meters of the saga toolkit ([MicrometerSagaMetrics], and the [SagaGaugeSampler] with sagas): only when
@@ -41,9 +41,9 @@ class SagaMetricsAutoConfiguration {
     fun micrometerSagaMetrics(registry: MeterRegistry, catalog: ObjectProvider<SagaCatalog>) =
         MicrometerSagaMetrics(registry, catalog.getIfAvailable()?.types?.map { it.name }.orEmpty())
 
-    /** Samples the two database-backed gauges; only with sagas, and only when the metrics are ours. */
+    /** Samples the two store-backed gauges; only with sagas, and only when the metrics are ours. */
     @Bean
     @ConditionalOnBean(SagaRuntime::class, MicrometerSagaMetrics::class)
     @ConditionalOnMissingBean
-    fun sagaGaugeSampler(mongo: MongoTemplate, metrics: MicrometerSagaMetrics) = SagaGaugeSampler(mongo, metrics)
+    fun sagaGaugeSampler(store: MessageStore, metrics: MicrometerSagaMetrics) = SagaGaugeSampler(store.sagas, metrics)
 }

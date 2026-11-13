@@ -1,5 +1,6 @@
 package io.damoreira.kraken.messaging.kafka
 
+import io.damoreira.kraken.messaging.mongo.MongoMessageStore
 import com.mongodb.client.MongoClients
 import io.damoreira.kraken.messaging.MessageContext
 import io.damoreira.kraken.messaging.codec.JsonCodec
@@ -73,7 +74,7 @@ class LocalEventDispatcherTest {
 
     private fun dispatcher(stage: SagaStage = SagaStage.NONE, withHandlers: Boolean = true): LocalEventDispatcher {
         val reg = if (withHandlers) registry else HandlerRegistry(MessageTypeResolver("test"))
-        return LocalEventDispatcher(reg, HandlerInvoker(reg, codec), tx, mongo, stage)
+        return LocalEventDispatcher(reg, HandlerInvoker(reg, codec), MongoMessageStore(mongo), stage)
     }
 
     private fun payload(id: String) = codec.encode(Happened(id, Instant.now()))

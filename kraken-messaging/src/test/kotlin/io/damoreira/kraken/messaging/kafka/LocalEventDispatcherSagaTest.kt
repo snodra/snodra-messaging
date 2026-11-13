@@ -1,5 +1,9 @@
 package io.damoreira.kraken.messaging.kafka
 
+import io.damoreira.kraken.messaging.store.MessageStore
+import io.damoreira.kraken.messaging.mongoStore
+import io.damoreira.kraken.messaging.SAGAS
+import io.damoreira.kraken.messaging.mongo.MongoMessageStore
 import com.mongodb.client.MongoClients
 import io.damoreira.kraken.messaging.MessageContext
 import io.damoreira.kraken.messaging.RetryPolicy
@@ -12,7 +16,6 @@ import io.damoreira.kraken.messaging.saga.RtBean
 import io.damoreira.kraken.messaging.saga.RtOrderPlaced
 import io.damoreira.kraken.messaging.saga.RtOrderSaga
 import io.damoreira.kraken.messaging.saga.SagaDocument
-import io.damoreira.kraken.messaging.saga.SagaIndexes
 import io.damoreira.kraken.messaging.saga.SagaModelScanner
 import io.damoreira.kraken.messaging.saga.SagaRetry
 import io.damoreira.kraken.messaging.saga.SagaRuntime
@@ -49,6 +52,7 @@ class LocalEventDispatcherSagaTest {
     private val mongoContainer = KrakenContainers.mongo()
     private lateinit var mongo: MongoTemplate
     private lateinit var tx: TransactionTemplate
+    private lateinit var store: MessageStore
     private val codec = JsonCodec()
     private val resolver = MessageTypeResolver("rt")
 
@@ -58,7 +62,7 @@ class LocalEventDispatcherSagaTest {
         val factory = SimpleMongoClientDatabaseFactory(MongoClients.create(mongoContainer.connectionString + "/?directConnection=true"), "dispatcher_saga_test")
         mongo = MongoTemplate(factory)
         tx = TransactionTemplate(MongoTransactionManager(factory))
-        SagaIndexes(mongo, Duration.ofDays(30), Duration.ofDays(7), Duration.ofDays(7), Duration.ofDays(30)).afterPropertiesSet()
+        store = mongoStore(mongo)
         listOf("processed_events", "saga_failures").forEach { if (!mongo.collectionExists(it)) mongo.createCollection(it) }
     }
 
@@ -75,17 +79,17 @@ class LocalEventDispatcherSagaTest {
         val handler = FailingOrderHandler()
         val registry = HandlerRegistry(resolver).also { it.register(handler) }
         val runtime = SagaRuntime(
-            types = SagaModelScanner(resolver, codec).scan(listOf(RtOrderSaga::class)), mongo = mongo, tx = tx, codec = codec, typeResolver = resolver,
+            types = SagaModelScanner(resolver, codec).scan(listOf(RtOrderSaga::class)), ports = store.sagas, tx = tx, codec = codec, typeResolver = resolver,
             beans = { RtBean("bean") }, retry = SagaRetry(RetryPolicy(maxAttempts = 2, initialBackoff = Duration.ofMillis(1), multiplier = 1.0, maxBackoff = Duration.ofMillis(1))),
         )
-        val dispatcher = LocalEventDispatcher(registry, HandlerInvoker(registry, codec), tx, mongo, runtime)
+        val dispatcher = LocalEventDispatcher(registry, HandlerInvoker(registry, codec), store, runtime)
         val type = resolver.typeNameOf(RtOrderPlaced::class)
         val ctx = MessageContext("e-1", type, "corr-1", null, emptySet(), null, mapOf("id" to "e-1", "type" to type))
 
         repeat(3) { assertFailsWith<IllegalStateException> { dispatcher.dispatch("e-1", type, codec.encode(RtOrderPlaced("o1")), ctx) } }
 
         assertEquals(3, handler.calls.get(), "stage 1 ran on every delivery and failed")
-        val saga = mongo.findAll(SagaDocument::class.java).single()
+        val saga = mongo.findAll(SagaDocument::class.java, SAGAS).single()
         assertEquals(1, saga.stateDoc.getInteger("placed"), "the saga applied the event once, however often the record came back")
     }
 }
