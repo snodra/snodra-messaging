@@ -194,7 +194,7 @@ class SagaDispatchRelay(
     private fun dispatch(entry: SagaDispatchDocument): Boolean = when (entry.kind) {
         DispatchKind.EVENT -> {
             tx.executeWithoutResult {
-                events.publishRaw(entry.type, entry.routingKey, org.bson.Document.parse(entry.payload), entry.headers[DISPATCH_CORRELATION_HEADER] ?: entry.id)
+                events.publishRaw(entry.type, entry.routingKey, entry.payload.toByteArray(Charsets.UTF_8), entry.headers[DISPATCH_CORRELATION_HEADER] ?: entry.id)
                 markDispatched(entry)
             }
             true

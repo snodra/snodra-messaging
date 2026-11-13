@@ -9,20 +9,20 @@ import io.damoreira.kraken.messaging.codec.MessageTypeResolver
 import io.damoreira.kraken.messaging.saga.Association
 import io.damoreira.kraken.messaging.saga.DeadlineDocument
 import io.damoreira.kraken.messaging.saga.DeadlineStatus
-import io.damoreira.kraken.messaging.saga.DeadlineStore
 import io.damoreira.kraken.messaging.saga.DispatchKind
 import io.damoreira.kraken.messaging.saga.SagaCommandFailed
 import io.damoreira.kraken.messaging.saga.SagaDispatchDocument
-import io.damoreira.kraken.messaging.saga.SagaDispatchRecorder
 import io.damoreira.kraken.messaging.saga.SagaDocument
 import io.damoreira.kraken.messaging.saga.SagaFailureDocument
-import io.damoreira.kraken.messaging.saga.SagaFailureStore
-import io.damoreira.kraken.messaging.saga.SagaMarkerStore
 import io.damoreira.kraken.messaging.saga.SagaModelScanner
-import io.damoreira.kraken.messaging.saga.SagaPorts
-import io.damoreira.kraken.messaging.saga.SagaRepository
 import io.damoreira.kraken.messaging.saga.SagaRetry
 import io.damoreira.kraken.messaging.saga.SagaRuntime
+import io.damoreira.kraken.messaging.store.DeadlineStore
+import io.damoreira.kraken.messaging.store.SagaDispatchRecorder
+import io.damoreira.kraken.messaging.store.SagaFailureStore
+import io.damoreira.kraken.messaging.store.SagaMarkerStore
+import io.damoreira.kraken.messaging.store.SagaRepository
+import io.damoreira.kraken.messaging.store.SagaStores
 import org.springframework.dao.DuplicateKeyException
 import org.springframework.transaction.TransactionStatus
 import org.springframework.transaction.support.SimpleTransactionStatus
@@ -285,7 +285,7 @@ private class InMemorySagaStore : TransactionOperations {
         markers.clear(); markers.addAll(s.markers)
     }
 
-    fun ports() = SagaPorts(
+    fun ports() = SagaStores(
         sagas = object : SagaRepository {
             override fun findById(id: String) = sagas[id]
 

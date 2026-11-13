@@ -35,8 +35,8 @@ class OutboxEventBus(
     override fun publishBlocking(event: Event, key: String?) = insert(event, key, null)
 
     /** A saga's recorded event: no caller (so an empty `userId` header) and the correlation id of the message that caused it. */
-    override fun publishRaw(type: String, key: String?, payload: org.bson.Document, correlationId: String) =
-        insertDocument(type, key, payload, correlationId, userId = "")
+    override fun publishRaw(type: String, key: String?, payload: ByteArray, correlationId: String) =
+        insertDocument(type, key, org.bson.Document.parse(String(payload, Charsets.UTF_8)), correlationId, userId = "")
 
     /** The correlation id comes from [context]'s [CorrelationContext], else the MDC, else a fresh UUID. */
     private fun insert(event: Event, key: String?, context: CoroutineContext?) = insertDocument(

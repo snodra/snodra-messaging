@@ -24,6 +24,8 @@ dependencies {
     api(project(":kraken-messaging-api"))
     api(libs.kotlinx.coroutines.core)
     implementation(libs.spring.boot.starter)
+    // MessageStore.transactions is a PlatformTransactionManager: the store interfaces speak spring-tx.
+    api("org.springframework:spring-tx")
     implementation(libs.spring.kafka)
     // ExternalRecordTranslator.translate takes a Kafka ConsumerRecord: a service writing one needs the client on its compile classpath.
     api("org.apache.kafka:kafka-clients")

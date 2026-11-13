@@ -6,6 +6,8 @@ import io.damoreira.kraken.messaging.RetryPolicy
 import io.damoreira.kraken.messaging.api.Event
 import io.damoreira.kraken.messaging.codec.JsonCodec
 import io.damoreira.kraken.messaging.codec.MessageTypeResolver
+import io.damoreira.kraken.messaging.store.SagaFailureStore
+import io.damoreira.kraken.messaging.store.SagaStores
 import io.damoreira.kraken.messaging.test.KrakenContainers
 import org.junit.jupiter.api.AfterAll
 import org.junit.jupiter.api.BeforeAll
@@ -166,7 +168,7 @@ class SagaFailuresTest {
     @Test
     fun `a discard that lands during a failing retry is not undone by the retry's bookkeeping`() {
         val discarding = DiscardAfterRollbacks(MongoSagaFailureStore(mongo), plain, after = 2)
-        val ports = SagaPorts.mongo(mongo).let { SagaPorts(it.sagas, it.dispatch, it.deadlines, discarding, it.markers) }
+        val ports = SagaStores.mongo(mongo).let { SagaStores(it.sagas, it.dispatch, it.deadlines, discarding, it.markers) }
         val racing = SagaRuntime(
             types = SagaModelScanner(resolver, codec).scan(listOf(RtFlakySaga::class)), ports = ports, tx = tx, codec = codec, typeResolver = resolver,
             beans = { RtBean("the-bean") }, clock = clock,

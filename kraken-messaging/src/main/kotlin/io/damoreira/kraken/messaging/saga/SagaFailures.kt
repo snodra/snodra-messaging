@@ -1,5 +1,6 @@
 package io.damoreira.kraken.messaging.saga
 
+import io.damoreira.kraken.messaging.store.SagaFailureStore
 import org.springframework.data.mongodb.core.MongoTemplate
 
 /**

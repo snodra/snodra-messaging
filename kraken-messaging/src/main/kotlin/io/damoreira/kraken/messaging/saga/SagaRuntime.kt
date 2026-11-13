@@ -4,6 +4,7 @@ import com.mongodb.MongoException
 import io.damoreira.kraken.messaging.MessageContext
 import io.damoreira.kraken.messaging.codec.JsonCodec
 import io.damoreira.kraken.messaging.codec.MessageTypeResolver
+import io.damoreira.kraken.messaging.store.SagaStores
 import org.slf4j.LoggerFactory
 import org.slf4j.MDC
 import org.springframework.dao.DuplicateKeyException
@@ -38,7 +39,7 @@ import kotlin.reflect.KClass
  */
 class SagaRuntime(
     types: List<SagaType>,
-    private val ports: SagaPorts,
+    private val ports: SagaStores,
     private val tx: TransactionOperations,
     private val codec: JsonCodec,
     private val typeResolver: MessageTypeResolver,
@@ -57,7 +58,7 @@ class SagaRuntime(
         clock: Clock = Clock.systemUTC(),
         retry: SagaRetry = SagaRetry(),
         metrics: SagaMetrics = NoopSagaMetrics,
-    ) : this(types, SagaPorts.mongo(mongo), tx, codec, typeResolver, beans, clock, retry, metrics)
+    ) : this(types, SagaStores.mongo(mongo), tx, codec, typeResolver, beans, clock, retry, metrics)
 
     private val log = LoggerFactory.getLogger(SagaRuntime::class.java)
     private val commandFailedType: String = typeResolver.typeNameOf(SagaCommandFailed::class)
