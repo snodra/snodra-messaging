@@ -13,9 +13,12 @@ import io.damoreira.kraken.hub.v1.ResetOutcome
 import io.damoreira.kraken.messaging.deadletter.DeadLetter
 import io.damoreira.kraken.messaging.deadletter.DeadLetters
 import io.damoreira.kraken.messaging.deadletter.RetryResult
+import io.damoreira.kraken.messaging.eventstore.ReplayRange
+import io.damoreira.kraken.messaging.eventstore.ResetTarget
 import io.damoreira.kraken.messaging.handler.HandlerRegistry
 import io.damoreira.kraken.messaging.hub.ControlInbound
 import io.damoreira.kraken.messaging.kafka.EventConsumer
+import io.damoreira.kraken.messaging.kafka.KafkaRange
 import io.damoreira.kraken.messaging.store.ProcessorControlStore
 import io.damoreira.kraken.messaging.store.ProcessorControlStore.Control
 import io.damoreira.kraken.messaging.store.ProcessorControlStore.Lock
@@ -326,7 +329,7 @@ class ProcessorControl(
             WireTarget.ToCase.EARLIEST -> ResetTarget.Earliest
             WireTarget.ToCase.LATEST -> ResetTarget.Latest
             WireTarget.ToCase.TIMESTAMP_MS -> ResetTarget.Timestamp(wire.timestampMs)
-            WireTarget.ToCase.OFFSETS -> ResetTarget.Offsets(wire.offsets.offsetsList.associate { it.partition to it.offset })
+            WireTarget.ToCase.OFFSETS -> ResetTarget.Positions(wire.offsets.offsetsList.associate { it.partition.toString() to it.offset.toString() })
             else -> return refused(request, ControlRefusal.CONTROL_REFUSAL_INVALID, "the reset has no target")
         }
         val timeout = adminTimeout.toMillis()
@@ -344,21 +347,29 @@ class ProcessorControl(
                     val found = offsets { OffsetSpec.forTimestamp(target.timestampMs) }
                     partitions.associateWith { tp -> found[tp]?.takeIf { it >= 0 } ?: high.getValue(tp) } // no record that late: the end
                 }
-                is ResetTarget.Offsets -> {
+                is ResetTarget.Positions -> {
                     if (wire.offsets.offsetsCount == 0) return refused(request, ControlRefusal.CONTROL_REFUSAL_INVALID, "the offsets target lists no partition")
-                    if (target.offsets.size != wire.offsets.offsetsCount) {
+                    if (target.positions.size != wire.offsets.offsetsCount) {
                         return refused(request, ControlRefusal.CONTROL_REFUSAL_INVALID, "the offsets target names a partition twice")
+                    }
+                    // Segments and positions of this event store: partitions and offsets in decimal.
+                    val wanted = target.positions.entries.associate { (segment, position) ->
+                        val p = segment.toIntOrNull()
+                            ?: return refused(request, ControlRefusal.CONTROL_REFUSAL_INVALID, "topic $topic has no partition $segment")
+                        val o = position.toLongOrNull()
+                            ?: return refused(request, ControlRefusal.CONTROL_REFUSAL_INVALID, "offset $position of partition $p is not a number")
+                        p to o
                     }
                     val high = offsets { OffsetSpec.latest() }
                     val known = partitions.associateBy { it.partition() }
-                    for ((p, o) in target.offsets) {
+                    for ((p, o) in wanted) {
                         val tp = known[p] ?: return refused(request, ControlRefusal.CONTROL_REFUSAL_INVALID, "topic $topic has no partition $p")
                         if (o < 0) return refused(request, ControlRefusal.CONTROL_REFUSAL_INVALID, "offset $o of partition $p is negative")
                         if (o > high.getValue(tp)) {
                             return refused(request, ControlRefusal.CONTROL_REFUSAL_INVALID, "offset $o of partition $p is past its high watermark ${high.getValue(tp)}")
                         }
                     }
-                    target.offsets.mapKeys { known.getValue(it.key) }
+                    wanted.mapKeys { known.getValue(it.key) }
                 }
             }
             // 2. Where the group is (a group that never existed has no offsets and no members).
@@ -377,13 +388,14 @@ class ProcessorControl(
             }
             val doc = runBlocking { store.get(processor) }
             val open = doc?.replay.orEmpty()
-            val ranges = if (target == ResetTarget.Latest) emptyList() else targets.mapNotNull { (tp, to) ->
+            val kafkaRanges = if (target == ResetTarget.Latest) emptyList() else targets.mapNotNull { (tp, to) ->
                 val from = before[tp]?.offset() ?: return@mapNotNull null // nothing known handled there
                 if (to >= from) return@mapNotNull null
                 // An open range of the partition is not replayed past `before` yet (its markers are gone): it is kept in.
-                val still = open.filter { it.topic == topic && it.partition == tp.partition() }.maxOfOrNull { it.until } ?: 0L
-                ReplayRange(topic, tp.partition(), to, maxOf(from, still))
+                val still = open.mapNotNull { KafkaRange.of(it, topic) }.filter { it.partition == tp.partition() }.maxOfOrNull { it.until } ?: 0L
+                KafkaRange(topic, tp.partition(), to, maxOf(from, still))
             }.sortedBy { it.partition }
+            val ranges = kafkaRanges.map { it.range }
             // 4. The reset handlers, before any marker or offset changes.
             val done = Changed()
             if (ranges.isNotEmpty()) {
@@ -406,7 +418,7 @@ class ProcessorControl(
             try {
                 leaseLost(slot, held, until)?.let { return done.told(refused(request, ControlRefusal.CONTROL_REFUSAL_FAILED, it)) }
                 if (ranges.isNotEmpty()) done.markers = runBlocking { store.deleteMarkers(processor, ranges) }
-                replay = open.filter { o -> ranges.none { it.topic == o.topic && it.partition == o.partition } } + ranges
+                replay = open.filter { o -> ranges.none { it.source == o.source && it.segment == o.segment } } + ranges
                 if (ranges.isNotEmpty()) runBlocking { store.setReplay(processor, replay) }
                 done.ranges = ranges.isNotEmpty()
                 leaseLost(slot, held, until)?.let { return done.told(refused(request, ControlRefusal.CONTROL_REFUSAL_FAILED, it)) }
@@ -432,7 +444,7 @@ class ProcessorControl(
             )
             return reply(request).setReset(
                 ResetOutcome.newBuilder()
-                    .addAllRanges(ranges.map { WireRange.newBuilder().setPartition(it.partition).setFrom(it.from).setUntil(it.until).build() })
+                    .addAllRanges(kafkaRanges.map { WireRange.newBuilder().setPartition(it.partition).setFrom(it.from).setUntil(it.until).build() })
                     .setMarkersDeleted(deleted)
                     .setResetHandlers(handlers),
             ).build()
@@ -546,7 +558,7 @@ class ProcessorControl(
         val consumer = slot.consumer
         for (range in consumer.passedRanges()) {
             if (runBlocking { store.removeReplay(consumer.processor, range) }) {
-                log.info("Processor {} replayed partition {} of {} up to offset {}", consumer.processor, range.partition, range.topic, range.until)
+                log.info("Processor {} replayed partition {} of {} up to offset {}", consumer.processor, range.segment, range.source, range.until)
             }
             consumer.replay(consumer.replayRanges() - range)
         }

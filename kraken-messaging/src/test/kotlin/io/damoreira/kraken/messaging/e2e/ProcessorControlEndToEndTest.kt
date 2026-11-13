@@ -1,8 +1,8 @@
 package io.damoreira.kraken.messaging.e2e
 
 import io.damoreira.kraken.messaging.codec.JsonCodec
+import io.damoreira.kraken.messaging.eventstore.ResetTarget
 import io.damoreira.kraken.messaging.store.MessageStore
-import io.damoreira.kraken.messaging.control.ResetTarget
 import io.damoreira.kraken.messaging.e2e.control.Catalog
 import io.damoreira.kraken.messaging.e2e.control.ControlService
 import io.damoreira.kraken.messaging.e2e.control.ItemAdded

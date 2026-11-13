@@ -1,8 +1,8 @@
 package io.damoreira.kraken.examples.b
 
-import io.damoreira.kraken.messaging.control.ReplayRange
 import io.damoreira.kraken.messaging.control.ResetContext
-import io.damoreira.kraken.messaging.control.ResetTarget
+import io.damoreira.kraken.messaging.eventstore.ReplayRange
+import io.damoreira.kraken.messaging.eventstore.ResetTarget
 import io.damoreira.kraken.messaging.handler.DisallowReplay
 import io.damoreira.kraken.messaging.handler.ProcessingGroup
 import io.damoreira.kraken.messaging.handler.ResetHandler
@@ -55,8 +55,8 @@ class AuditHandlerTest {
     @Test fun `a reset of the audit processor is recorded with its target and ranges (P6b)`() {
         val audit = AuditHandler()
         assertTrue(AuditHandler::class.java.getMethod("onReset", ResetContext::class.java).isAnnotationPresent(ResetHandler::class.java))
-        audit.onReset(ResetContext("audit", "op-1", ResetTarget.Earliest, listOf(ReplayRange("kraken.events", 0, 0, 3))))
-        audit.onReset(ResetContext("audit", "op-2", ResetTarget.Timestamp(42), listOf(ReplayRange("kraken.events", 1, 2, 5))))
+        audit.onReset(ResetContext("audit", "op-1", ResetTarget.Earliest, listOf(ReplayRange("kraken.events", "0", "0", "3"))))
+        audit.onReset(ResetContext("audit", "op-2", ResetTarget.Timestamp(42), listOf(ReplayRange("kraken.events", "1", "2", "5"))))
         assertEquals(
             listOf(
                 AuditReset("op-1", "earliest", listOf(AuditRange(0, 0, 3))),

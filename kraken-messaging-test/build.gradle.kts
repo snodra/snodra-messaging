@@ -14,7 +14,7 @@ dependencies {
     // InMemoryBuses synthesises a KrakenForwardedAuthentication (a Spring Security Authentication) for annotated handlers.
     implementation("org.springframework.security:spring-security-core")
     api(libs.kotlinx.coroutines.core)
-    // MessageStoreConformanceTest is a JUnit 5 class that store add-ons extend in their own tests.
+    // MessageStoreConformanceTest and EventStoreConformanceTest are JUnit 5 classes that add-ons extend in their own tests.
     api("org.junit.jupiter:junit-jupiter-api")
     api(libs.grpc.inprocess)
     implementation(libs.grpc.stub)

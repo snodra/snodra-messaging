@@ -4,6 +4,7 @@ import io.damoreira.kraken.messaging.EventBus
 import io.damoreira.kraken.messaging.api.Event
 import io.damoreira.kraken.messaging.codec.JsonCodec
 import io.damoreira.kraken.messaging.codec.MessageTypeResolver
+import io.damoreira.kraken.messaging.eventstore.EventHeaders
 import io.damoreira.kraken.messaging.saga.RawEventPublisher
 import io.damoreira.kraken.messaging.security.CallerContext
 import io.damoreira.kraken.messaging.tracing.TraceHeaders

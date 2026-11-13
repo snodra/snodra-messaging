@@ -1178,9 +1178,11 @@ class OrderMails(private val mail: Mail) {
 }
 ```
 
-`ResetContext(processor, operationId, target, ranges)`: `target` is `ResetTarget.Earliest`, `Latest`, `Timestamp(timestampMs)` or
-`Offsets(map of partition to offset)`; `ranges` the `ReplayRange(topic, partition, from, until)` the reset replays (never empty: a
-reset that replays nothing runs no reset handler). A `@ResetHandler` belongs to its class's processor (`@ProcessingGroup`, else
+`ResetContext(processor, operationId, target, ranges)` (`ResetTarget` and `ReplayRange` are in
+`io.damoreira.kraken.messaging.eventstore`): `target` is `ResetTarget.Earliest`, `Latest`, `Timestamp(timestampMs)` or
+`Positions(map of segment to position)`; `ranges` the `ReplayRange(source, segment, from, until)` the reset replays, segments and
+positions as strings (a partition and offsets in decimal on Kafka; never empty: a reset that replays nothing runs no reset
+handler). A `@ResetHandler` belongs to its class's processor (`@ProcessingGroup`, else
 `default`) and may suspend.
 
 The `processor_control` document (the same from the Rust library; every field is always written):

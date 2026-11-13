@@ -1,9 +1,9 @@
 package io.damoreira.kraken.messaging.test.store
 
-import io.damoreira.kraken.messaging.control.ReplayRange
 import io.damoreira.kraken.messaging.deadletter.DeadLetter
 import io.damoreira.kraken.messaging.deadletter.DeadLetterError
 import io.damoreira.kraken.messaging.deadletter.DeadLetterReason
+import io.damoreira.kraken.messaging.eventstore.ReplayRange
 import io.damoreira.kraken.messaging.external.ExternalCallStatus
 import io.damoreira.kraken.messaging.saga.Association
 import io.damoreira.kraken.messaging.saga.DeadlineDocument
@@ -404,9 +404,9 @@ abstract class MessageStoreConformanceTest {
     @Test
     fun replayRangesRoundTrip() = runBlocking {
         val control = store.processorControl
-        val r1 = ReplayRange(TOPIC, 0, 10, 20)
-        val r2 = ReplayRange(TOPIC, 1, 0, 5)
-        val r3 = ReplayRange("other.topic", 0, 10, 20)
+        val r1 = ReplayRange(TOPIC, "0", "10", "20")
+        val r2 = ReplayRange(TOPIC, "1", "0", "5")
+        val r3 = ReplayRange("other.topic", "0", "10", "20")
         assertEquals(ProcessorControlStore.Lock.Taken, control.lock(PROCESSOR, "op-a", Duration.ofSeconds(30)))
         control.setReplay(PROCESSOR, listOf(r1, r2, r3))
         assertEquals(listOf(r1, r2, r3), control.get(PROCESSOR)!!.replay, "the ranges, in order")
@@ -414,7 +414,7 @@ abstract class MessageStoreConformanceTest {
 
         assertTrue(control.removeReplay(PROCESSOR, r2))
         assertFalse(control.removeReplay(PROCESSOR, r2), "removed once")
-        assertFalse(control.removeReplay(PROCESSOR, ReplayRange(TOPIC, 0, 10, 21)), "exactly that range")
+        assertFalse(control.removeReplay(PROCESSOR, ReplayRange(TOPIC, "0", "10", "21")), "exactly that range")
         assertFalse(control.removeReplay("audit", r1), "another processor's document")
         assertEquals(listOf(r1, r3), control.get(PROCESSOR)!!.replay)
 
@@ -438,12 +438,12 @@ abstract class MessageStoreConformanceTest {
 
         val control = store.processorControl
         assertEquals(0L, control.deleteMarkers(PROCESSOR, emptyList()))
-        assertEquals(0L, control.deleteMarkers(PROCESSOR, listOf(ReplayRange(TOPIC, 0, 100, 200))))
-        assertEquals(4L, control.deleteMarkers(PROCESSOR, listOf(ReplayRange(TOPIC, 0, 3, 6), ReplayRange(TOPIC, 2, 7, 8))))
+        assertEquals(0L, control.deleteMarkers(PROCESSOR, listOf(ReplayRange(TOPIC, "0", "100", "200"))))
+        assertEquals(4L, control.deleteMarkers(PROCESSOR, listOf(ReplayRange(TOPIC, "0", "3", "6"), ReplayRange(TOPIC, "2", "7", "8"))))
 
         (inRange + inSecondRange).forEach { assertFalse(markers.exists(it.id), "${it.id} is deleted") }
         kept.forEach { assertTrue(markers.exists(it.id), "${it.id} is kept") }
-        assertEquals(0L, control.deleteMarkers(PROCESSOR, listOf(ReplayRange(TOPIC, 0, 3, 6))), "deleted once")
+        assertEquals(0L, control.deleteMarkers(PROCESSOR, listOf(ReplayRange(TOPIC, "0", "3", "6"))), "deleted once")
     }
 
     @Test
@@ -472,12 +472,12 @@ abstract class MessageStoreConformanceTest {
         inTransaction(rollback = true) {
             control.setPaused(PROCESSOR, true, "control-1")
             assertEquals(ProcessorControlStore.Lock.Taken, control.lock("audit", "op-a", Duration.ofSeconds(30)))
-            control.setReplay("audit", listOf(ReplayRange(TOPIC, 0, 1, 2)))
+            control.setReplay("audit", listOf(ReplayRange(TOPIC, "0", "1", "2")))
         }
         assertTrue(control.get(PROCESSOR)!!.paused, "a pause commits on its own")
         val audit = control.get("audit")!!
         assertEquals("op-a", audit.operation?.id, "a lock commits on its own")
-        assertEquals(listOf(ReplayRange(TOPIC, 0, 1, 2)), audit.replay, "a replay range commits on its own")
+        assertEquals(listOf(ReplayRange(TOPIC, "0", "1", "2")), audit.replay, "a replay range commits on its own")
     }
 
     // ------------------------------------------------------------------------------------------------------- external calls

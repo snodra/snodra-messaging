@@ -1,7 +1,7 @@
 package io.damoreira.kraken.messaging.deadletter
 
 import io.damoreira.kraken.messaging.MessageContext
-import io.damoreira.kraken.messaging.kafka.EventHeaders
+import io.damoreira.kraken.messaging.eventstore.EventHeaders
 import io.damoreira.kraken.messaging.kafka.LocalEventDispatcher
 import io.damoreira.kraken.messaging.kafka.RecordPosition
 import io.damoreira.kraken.messaging.store.DeadLetterStore

@@ -312,7 +312,7 @@ class HandlerRegistryTest {
         registry.register(ResettingAudit())
         assertEquals(listOf("ResettingProjection.clear", "ResettingProjection.note"), registry.resetHandlers("default").map { it.label })
         assertEquals(listOf("audit"), registry.resetHandlers("audit").map { it.processor })
-        val ctx = io.damoreira.kraken.messaging.control.ResetContext("default", "op-1", io.damoreira.kraken.messaging.control.ResetTarget.Earliest, emptyList())
+        val ctx = io.damoreira.kraken.messaging.control.ResetContext("default", "op-1", io.damoreira.kraken.messaging.eventstore.ResetTarget.Earliest, emptyList())
         registry.resetHandlers("default").forEach { it.invoke(ctx) }
         assertEquals(listOf("clear", "note:op-1"), projection.calls)
         val e = assertThrows<IllegalStateException> { registry.register(ResetWithWrongParameter()) }

@@ -3,7 +3,7 @@ package io.damoreira.kraken.examples.b
 import io.damoreira.kraken.messaging.api.Event
 import io.damoreira.kraken.messaging.api.MessageType
 import io.damoreira.kraken.messaging.control.ResetContext
-import io.damoreira.kraken.messaging.control.ResetTarget
+import io.damoreira.kraken.messaging.eventstore.ResetTarget
 import io.damoreira.kraken.messaging.handler.DisallowReplay
 import io.damoreira.kraken.messaging.handler.EventHandler
 import io.damoreira.kraken.messaging.handler.ProcessingGroup
@@ -64,9 +64,9 @@ class AuditHandler {
             ResetTarget.Earliest -> "earliest"
             ResetTarget.Latest -> "latest"
             is ResetTarget.Timestamp -> "timestamp ${t.timestampMs}"
-            is ResetTarget.Offsets -> "offsets ${t.offsets}"
+            is ResetTarget.Positions -> "offsets ${t.positions}"
         }
-        resetLog += AuditReset(ctx.operationId, target, ctx.ranges.map { AuditRange(it.partition, it.from, it.until) })
+        resetLog += AuditReset(ctx.operationId, target, ctx.ranges.map { AuditRange(it.segment.toInt(), it.from.toLong(), it.until.toLong()) })
         log.info("B: audit reset {} to {}, replaying {}", ctx.operationId, target, ctx.ranges)
     }
 }

@@ -23,6 +23,8 @@ import io.damoreira.kraken.messaging.deadletter.DeadLetterMode
 import io.damoreira.kraken.messaging.DEAD_LETTERS
 import io.damoreira.kraken.messaging.PROCESSOR_CONTROL
 import io.damoreira.kraken.messaging.deadletter.DeadLetterFactory
+import io.damoreira.kraken.messaging.eventstore.ReplayRange
+import io.damoreira.kraken.messaging.eventstore.ResetTarget
 import io.damoreira.kraken.messaging.store.DeadLetterStore
 import kotlinx.coroutines.runBlocking
 import io.damoreira.kraken.messaging.deadletter.DeadLetters
@@ -391,11 +393,11 @@ class ProcessorControlTest {
         val ctx = resets.contexts.single()
         assertEquals(ResetTarget.Earliest, ctx.target)
         assertEquals("op-1", ctx.operationId)
-        assertEquals(listOf(ReplayRange(topic, 0, 0, 3), ReplayRange(topic, 1, 0, 3)), ctx.ranges)
+        assertEquals(listOf(ReplayRange(topic, "0", "0", "3"), ReplayRange(topic, "1", "0", "3")), ctx.ranges)
         assertEquals(0, audit.resets, "another processor's reset handler does not run")
         assertEquals(mapOf(0 to 0L, 1 to 0L), support.committed(defaultGroup))
         assertTrue(markers().containsAll(auditMarkers + others), "only default's markers in the range went")
-        assertEquals(listOf(ReplayRange(topic, 0, 0, 3), ReplayRange(topic, 1, 0, 3)), control()!!.replay)
+        assertEquals(listOf(ReplayRange(topic, "0", "0", "3"), ReplayRange(topic, "1", "0", "3")), control()!!.replay)
 
         assertTrue(a.ask(finish("op-1")).hasOk())
         assertTrue(b.ask(finish("op-1")).hasOk())

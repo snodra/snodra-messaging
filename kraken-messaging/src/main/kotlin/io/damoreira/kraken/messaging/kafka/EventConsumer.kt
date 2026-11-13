@@ -6,10 +6,11 @@ import io.damoreira.kraken.hub.v1.ProcessorStatus
 import io.damoreira.kraken.messaging.InvalidMessageException
 import io.damoreira.kraken.messaging.MessageContext
 import io.damoreira.kraken.messaging.codec.JsonCodec
-import io.damoreira.kraken.messaging.control.ReplayRange
 import io.damoreira.kraken.messaging.deadletter.DeadLetterError
 import io.damoreira.kraken.messaging.deadletter.DeadLetterMode
 import io.damoreira.kraken.messaging.deadletter.DeadLetterReason
+import io.damoreira.kraken.messaging.eventstore.EventHeaders
+import io.damoreira.kraken.messaging.eventstore.ReplayRange
 import io.damoreira.kraken.messaging.handler.Processors
 import io.damoreira.kraken.messaging.metrics.MessagingMetrics
 import io.damoreira.kraken.messaging.metrics.MessagingMetrics.Consumed
@@ -105,7 +106,7 @@ class EventConsumer(
     @Volatile private var started = false
     @Volatile private var container: ConcurrentMessageListenerContainer<String, ByteArray>? = null
     @Volatile private var pauseRequested = false
-    @Volatile private var replayRanges: List<ReplayRange> = emptyList()
+    @Volatile private var replayRanges: List<KafkaRange> = emptyList()
 
     init {
         require(maxAttempts >= 1) { "maxAttempts must be >= 1" }
@@ -198,19 +199,22 @@ class EventConsumer(
     /** The reset operation holding this processor's lock (P6b), reported as `operation_id`; empty when none. */
     @Volatile var operationId: String = ""
 
-    /** Sets the open replay ranges (P6b) from the processor's control document; those of another topic are ignored. */
+    /**
+     * Sets the open replay ranges (P6b) from the processor's control document; those of another topic (or not a partition and
+     * offsets in decimal) are ignored.
+     */
     fun replay(ranges: List<ReplayRange>) {
-        replayRanges = ranges.filter { it.topic == topic }
+        replayRanges = ranges.mapNotNull { KafkaRange.of(it, topic) }
     }
 
     /** The open replay ranges of this processor's topic. */
-    fun replayRanges(): List<ReplayRange> = replayRanges
+    fun replayRanges(): List<ReplayRange> = replayRanges.map { it.range }
 
     /** The open ranges of the assigned partitions this instance's acknowledged position or the group's committed offset has reached the end of. */
     fun passedRanges(): List<ReplayRange> = replayRanges.filter { range ->
         val track = assigned[range.partition] ?: return@filter false
         maxOf(track.position.get(), track.committed) >= range.until
-    }
+    }.map { it.range }
 
     private fun inReplay(record: ConsumerRecord<*, *>): Boolean =
         replayRanges.any { it.partition == record.partition() && record.offset() < it.until }

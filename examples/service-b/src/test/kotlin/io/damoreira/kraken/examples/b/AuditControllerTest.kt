@@ -145,8 +145,8 @@ class AuditControllerTest {
     @Test fun `GET resets lists the resets of the audit processor and GET notified what the notifier sent once (P6b)`() {
         audit.onReset(
             io.damoreira.kraken.messaging.control.ResetContext(
-                "audit", "op-1", io.damoreira.kraken.messaging.control.ResetTarget.Earliest,
-                listOf(io.damoreira.kraken.messaging.control.ReplayRange("kraken.events", 0, 0, 3)),
+                "audit", "op-1", io.damoreira.kraken.messaging.eventstore.ResetTarget.Earliest,
+                listOf(io.damoreira.kraken.messaging.eventstore.ReplayRange("kraken.events", "0", "0", "3")),
             ),
         )
         assertThat(mvc.get().uri("/audit/resets")).hasStatus(HttpStatus.OK).bodyJson()

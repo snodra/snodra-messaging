@@ -1,7 +1,7 @@
 package io.damoreira.kraken.messaging.mongo
 
 import com.mongodb.client.MongoClients
-import io.damoreira.kraken.messaging.control.ReplayRange
+import io.damoreira.kraken.messaging.eventstore.ReplayRange
 import io.damoreira.kraken.messaging.store.ProcessorControlStore.Control
 import io.damoreira.kraken.messaging.store.ProcessorControlStore.Lock
 import io.damoreira.kraken.messaging.test.KrakenContainers
@@ -21,6 +21,7 @@ import java.time.Instant
 import java.time.ZoneOffset
 import java.util.Date
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNull
@@ -103,8 +104,8 @@ class MongoProcessorControlStoreTest {
 
     @Test fun `replay ranges are written as Int32 partitions and Int64 offsets and pulled one by one`() = runBlocking<Unit> {
         store.lock("default", "op-1", Duration.ofSeconds(30))
-        val a = ReplayRange("kraken.events", 0, 0, 120)
-        val b = ReplayRange("kraken.events", 1, 5, 9)
+        val a = ReplayRange("kraken.events", "0", "0", "120")
+        val b = ReplayRange("kraken.events", "1", "5", "9")
         store.setReplay("default", listOf(a, b))
         val item = (raw("default")["replay"] as List<*>).first() as Document
         assertEquals(listOf("topic", "partition", "from", "until"), item.keys.toList())
@@ -112,11 +113,25 @@ class MongoProcessorControlStoreTest {
         assertIs<Long>(item["from"])
         assertIs<Long>(item["until"])
         assertEquals(listOf(a, b), store.get("default")!!.replay)
-        assertFalse(store.removeReplay("default", a.copy(until = 121)), "only the exact range")
+        assertEquals(0, (item["partition"] as Int))
+        assertEquals(120L, (item["until"] as Long))
+        assertFalse(store.removeReplay("default", a.copy(until = "121")), "only the exact range")
         assertTrue(store.removeReplay("default", a))
         assertFalse(store.removeReplay("default", a))
         assertEquals(listOf(b), store.get("default")!!.replay)
         assertEquals(setOf("default"), store.read(listOf("default", "audit")).keys, "a missing document is absent")
+    }
+
+    @Test fun `a range whose segment or positions are not decimal is refused, and is never there to remove`() = runBlocking<Unit> {
+        store.lock("default", "op-1", Duration.ofSeconds(30))
+        val ok = ReplayRange("kraken.events", "0", "0", "3")
+        store.setReplay("default", listOf(ok))
+        for (bad in listOf(ok.copy(segment = "kraken.events-0"), ok.copy(from = "a"), ok.copy(until = ""))) {
+            assertFailsWith<IllegalArgumentException> { store.setReplay("default", listOf(bad)) }
+            assertFailsWith<IllegalArgumentException> { store.deleteMarkers("default", listOf(bad)) }
+            assertFalse(store.removeReplay("default", bad))
+        }
+        assertEquals(listOf(ok), store.get("default")!!.replay, "nothing written")
     }
 
     @Test fun `a document written with missing fields reads as not paused, no operation and no replay`() = runBlocking<Unit> {
