@@ -40,6 +40,8 @@ import java.time.Instant
 import java.time.temporal.ChronoUnit
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CyclicBarrier
+import java.util.concurrent.Callable
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 /**
@@ -158,12 +160,32 @@ abstract class MessageStoreConformanceTest {
 
     @Test
     fun outboxPayloadMustBeAJsonObject() = runBlocking {
-        for (payload in listOf("[1,2]", "42", "\"text\"", "null", "{not json")) {
+        val tooBig = "9223372036854775808" // Long.MAX_VALUE + 1
+        for (payload in listOf("[1,2]", "42", "\"text\"", "null", "{not json", """{"n":$tooBig}""", """{"a":{"b":[-9223372036854775809]}}""")) {
             val entry = OutboxEntry("e-$payload", "t.Happened", "k", emptyMap(), payload.toByteArray(), now(), seq = 1)
             assertThrows(IllegalArgumentException::class.java, { runBlocking { store.outbox.append(entry) } }, payload)
         }
         assertEquals(0L, store.outbox.pending(), "nothing was appended")
         assertEquals(emptyList<OutboxEntry>(), store.outbox.claim("relay", Duration.ofSeconds(30), limit = 10))
+        // The bounds themselves are fine.
+        store.outbox.append(OutboxEntry("bounds", "t.Happened", "k", emptyMap(), """{"max":${Long.MAX_VALUE},"min":${Long.MIN_VALUE}}""".toByteArray(), now(), seq = 2))
+        assertJson("""{"max":${Long.MAX_VALUE},"min":${Long.MIN_VALUE}}""".toByteArray(), store.outbox.claim("relay", Duration.ofSeconds(30), limit = 10).single().payload)
+    }
+
+    @Test
+    fun oldestPendingIsTheOldestEntryNeitherSentNorFailed() = runBlocking {
+        assertNull(store.outbox.oldestPending(), "an empty outbox")
+        val t0 = now()
+        listOf(entry("a", t0, 1), entry("b", t0.plusMillis(1), 2), entry("c", t0.plusMillis(2), 3), entry("d", t0.plusMillis(3), 4))
+            .forEach { store.outbox.append(it) }
+        assertEquals(t0, store.outbox.oldestPending())
+        store.outbox.claim("relay-1", Duration.ofSeconds(30), limit = 3) // held entries count: the gauge is store-wide
+        assertEquals(t0, store.outbox.oldestPending())
+        store.outbox.markSent(listOf("a"))
+        store.outbox.markFailed("b", "not retriable")
+        assertEquals(t0.plusMillis(2), store.outbox.oldestPending(), "sent and failed entries are not pending")
+        store.outbox.markSent(listOf("c", "d"))
+        assertNull(store.outbox.oldestPending())
     }
 
     @Test
@@ -558,10 +580,10 @@ abstract class MessageStoreConformanceTest {
         assertEquals(charge, ports.dispatch.nextPending("s1"))
         assertNull(ports.dispatch.nextPending("s2"))
         assertEquals(listOf("s1"), ports.dispatch.dueSagas(t, emptyList(), limit = 10))
-        assertEquals(2L, ports.dispatch.pendingDispatches())
+        assertEquals(2L, ports.dispatch.pending())
         ports.dispatch.markDispatched(charge.id, t)
         assertEquals(charged, ports.dispatch.nextPending("s1"))
-        assertEquals(1L, ports.dispatch.pendingDispatches())
+        assertEquals(1L, ports.dispatch.pending())
         assertThrows(DuplicateKeyException::class.java) { ports.dispatch.record(listOf(charge)) }
 
         // deadlines
@@ -633,7 +655,7 @@ abstract class MessageStoreConformanceTest {
         assertEquals(listOf("a"), dispatch.dueSagas(t, listOf("b"), limit = 10), "the excluded sagas are left out")
         assertEquals(listOf("c", "b", "a"), dispatch.dueSagas(t.plusSeconds(60), emptyList(), limit = 10), "due once its time came")
         assertEquals(c0, dispatch.nextPending("c"), "the first pending entry, due or not")
-        assertEquals(5L, dispatch.pendingDispatches())
+        assertEquals(5L, dispatch.pending())
 
         dispatch.markDispatched(b0.id, t)
         assertNull(dispatch.nextPending("b"))
@@ -645,7 +667,7 @@ abstract class MessageStoreConformanceTest {
         // Given up on: never pending again, with a failure notice reserved for the instance that failed it.
         dispatch.markFailed(a0.id, attempts = 3, reason = SagaCommandFailed.Reason.EXHAUSTED, message = "gave up", now = t, noticeNextAt = t.plusSeconds(5))
         assertEquals(a1, dispatch.nextPending("a"), "a failed entry is not pending: the saga's later entries go on")
-        assertEquals(3L, dispatch.pendingDispatches())
+        assertEquals(3L, dispatch.pending())
         assertEquals(emptyList<String>(), dispatch.claimDueNotices(t, t.plusSeconds(30), limit = 10).map { it.id }, "still reserved")
         val failed = a0.copy(
             attempts = 3, nextAttemptAt = t.plusSeconds(30), failedAt = t, failureReason = SagaCommandFailed.Reason.EXHAUSTED,
@@ -664,6 +686,54 @@ abstract class MessageStoreConformanceTest {
         dispatch.clearNotice(c0.id)
         assertEquals(emptyList<String>(), dispatch.claimDueNotices(t.plusSeconds(3600), t.plusSeconds(3700), limit = 10).map { it.id }, "settled")
         assertEquals(a1, dispatch.nextPending("a"), "settling a notice never makes its entry pending again")
+    }
+
+    @Test
+    fun sagaEventTheOutboxWouldRefuseIsNotRecorded() {
+        val dispatch = store.sagas.dispatch
+        val t = now()
+        val command = SagaDispatchDocument("s1:1000", "s1", 1000, DispatchKind.COMMAND, "t.Charge", """{"n":1}""", createdAt = t)
+        for (payload in listOf("[1,2]", "42", "{not json", """{"n":9223372036854775808}""")) {
+            val event = SagaDispatchDocument("s1:1001", "s1", 1001, DispatchKind.EVENT, "t.Charged", payload, createdAt = t)
+            assertThrows(IllegalArgumentException::class.java, { dispatch.record(listOf(command, event)) }, payload)
+            assertNull(dispatch.nextPending("s1"), "nothing of the batch was recorded: $payload")
+        }
+        assertEquals(0L, dispatch.pending())
+    }
+
+    @Test
+    fun concurrentLeaseClaimsGrantOneOwner() {
+        val dispatch = store.sagas.dispatch
+        val t = now()
+        val sagas = (0 until 20).map { "s$it" }
+        val won = race { owner -> sagas.filter { dispatch.claimLease(it, owner, until = t.plusSeconds(30), now = t) } }
+        assertEquals(sagas.toSet(), won.values.flatten().toSet(), "every lease was taken")
+        assertEquals(emptySet<String>(), won.getValue("a").toSet() intersect won.getValue("b").toSet(), "a lease taken twice")
+    }
+
+    @Test
+    fun concurrentDeadlineClaimsReturnEachDeadlineOnce() {
+        val deadlines = store.sagas.deadlines
+        val t = now()
+        val ids = (0 until 40).map { "d%02d".format(it) }
+        ids.forEachIndexed { i, id -> deadlines.insert(DeadlineDocument(id, "t.Order", "s-$id", "remind", null, null, t.minusSeconds(60L - i), "c-$id")) }
+        val claimed = race { owner -> generateSequence { deadlines.claimDue(owner, t, t.plusSeconds(30)) }.map { it.id }.toList() }
+        assertEquals(ids.toSet(), claimed.values.flatten().toSet(), "every due deadline was claimed")
+        assertEquals(ids.size, claimed.values.sumOf { it.size }, "a deadline was claimed twice: $claimed")
+    }
+
+    @Test
+    fun concurrentNoticeClaimsReturnEachNoticeOnce() {
+        val dispatch = store.sagas.dispatch
+        val t = now()
+        val ids = (0 until 40).map { "s$it:1000" }
+        dispatch.record(ids.map { SagaDispatchDocument(it, it.substringBefore(':'), 1000, DispatchKind.COMMAND, "t.Charge", "{}", createdAt = t) })
+        ids.forEach { dispatch.markFailed(it, 1, SagaCommandFailed.Reason.NO_HANDLER, "nobody", t, noticeNextAt = t) }
+        val claimed = race { _ ->
+            generateSequence { dispatch.claimDueNotices(t, t.plusSeconds(30), limit = 3).takeIf { it.isNotEmpty() } }.flatten().map { it.id }.toList()
+        }
+        assertEquals(ids.toSet(), claimed.values.flatten().toSet(), "every due notice was claimed")
+        assertEquals(ids.size, claimed.values.sumOf { it.size }, "a notice was claimed twice: $claimed")
     }
 
     @Test
@@ -698,23 +768,40 @@ abstract class MessageStoreConformanceTest {
         deadlines.insert(deadline("d5", "remind", t.minusSeconds(30)))
         deadlines.cancel("s-d5", "d5", t) // not SCHEDULED: never due
 
-        assertEquals(mapOf("remind" to 2L, "expire" to 1L), deadlines.overdueByName(t))
-        assertEquals(first.copy(claimedBy = "a", claimedUntil = t.plusSeconds(30)), deadlines.claimDueDeadline("a", t, t.plusSeconds(30)), "due first")
-        assertEquals("d2", deadlines.claimDueDeadline("b", t, t.plusSeconds(30))?.id, "d1 is held")
-        assertEquals("d3", deadlines.claimDueDeadline("a", t, t.plusSeconds(30))?.id)
-        assertNull(deadlines.claimDueDeadline("b", t, t.plusSeconds(30)), "every due deadline is held, d4 is not due")
+        assertEquals(mapOf("remind" to 2L, "expire" to 1L), deadlines.countOverdueByName(t))
+        assertEquals(first.copy(claimedBy = "a", claimedUntil = t.plusSeconds(30)), deadlines.claimDue("a", t, t.plusSeconds(30)), "due first")
+        assertEquals("d2", deadlines.claimDue("b", t, t.plusSeconds(30))?.id, "d1 is held")
+        assertEquals("d3", deadlines.claimDue("a", t, t.plusSeconds(30))?.id)
+        assertNull(deadlines.claimDue("b", t, t.plusSeconds(30)), "every due deadline is held, d4 is not due")
         assertTrue(deadlines.markFired("d2", t))
-        assertEquals(mapOf("remind" to 1L, "expire" to 1L), deadlines.overdueByName(t), "claimed but not fired: still overdue")
+        assertEquals(mapOf("remind" to 1L, "expire" to 1L), deadlines.countOverdueByName(t), "claimed but not fired: still overdue")
 
         // d1's claimer died: once its lease passed it is claimed again; a fired deadline never is.
-        assertEquals(first.copy(claimedBy = "b", claimedUntil = t.plusSeconds(61)), deadlines.claimDueDeadline("b", t.plusSeconds(31), t.plusSeconds(61)))
-        assertEquals("d3", deadlines.claimDueDeadline("b", t.plusSeconds(31), t.plusSeconds(61))?.id)
-        assertNull(deadlines.claimDueDeadline("b", t.plusSeconds(31), t.plusSeconds(61)))
-        assertEquals("d4", deadlines.claimDueDeadline("b", t.plusSeconds(60), t.plusSeconds(90))?.id, "due now")
-        assertEquals(emptyMap<String, Long>(), deadlines.overdueByName(t.minusSeconds(60)))
+        assertEquals(first.copy(claimedBy = "b", claimedUntil = t.plusSeconds(61)), deadlines.claimDue("b", t.plusSeconds(31), t.plusSeconds(61)))
+        assertEquals("d3", deadlines.claimDue("b", t.plusSeconds(31), t.plusSeconds(61))?.id)
+        assertNull(deadlines.claimDue("b", t.plusSeconds(31), t.plusSeconds(61)))
+        assertEquals("d4", deadlines.claimDue("b", t.plusSeconds(60), t.plusSeconds(90))?.id, "due now")
+        assertEquals(emptyMap<String, Long>(), deadlines.countOverdueByName(t.minusSeconds(60)))
     }
 
     // -------------------------------------------------------------------------------------------------------------- helpers
+
+    /**
+     * Runs [work] on two threads (owners `a` and `b`) released together by a barrier, each bounded by a timeout so a broken
+     * store fails the check instead of hanging it; returns what each returned.
+     */
+    private fun <T> race(work: (owner: String) -> T): Map<String, T> {
+        val start = CyclicBarrier(2)
+        val pool = Executors.newFixedThreadPool(2)
+        try {
+            val futures = listOf("a", "b").associateWith { owner ->
+                pool.submit(Callable { start.await(10, TimeUnit.SECONDS); work(owner) })
+            }
+            return futures.mapValues { it.value.get(30, TimeUnit.SECONDS) }
+        } finally {
+            pool.shutdownNow()
+        }
+    }
 
     /** Runs [block] in a transaction of [MessageStore.transactions] on this thread: committed, or rolled back when [rollback]. */
     private fun inTransaction(rollback: Boolean = false, block: suspend () -> Unit) {

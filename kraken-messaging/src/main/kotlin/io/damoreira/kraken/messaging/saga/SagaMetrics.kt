@@ -38,7 +38,10 @@ interface SagaMetrics {
 
     fun externalCall(handler: String, outcome: ExternalOutcome) = Unit
 
-    /** A `SagaCommandFailed` for [commandType] reached no saga or handler: logged at error, `kraken_saga_command_failures_total`. */
+    /**
+     * A `SagaCommandFailed` for [commandType] reached no saga or handler, or a saga's event of that type could not be
+     * published (reason INVALID): logged at error, `kraken_saga_command_failures_total`.
+     */
     fun commandFailureUnhandled(commandType: String, reason: SagaCommandFailed.Reason) = Unit
 }
 

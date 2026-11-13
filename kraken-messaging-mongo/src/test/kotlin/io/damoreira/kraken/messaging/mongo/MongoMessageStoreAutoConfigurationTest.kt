@@ -54,9 +54,18 @@ class MongoMessageStoreAutoConfigurationTest {
             assertEquals("mongo", store.name)
             // The store's transactions are the application's @Transactional manager: business writes and outbox commit together.
             assertSame(context.getBean(PlatformTransactionManager::class.java), store.transactions)
-            assertTrue(store.transactions is MongoTransactionManager)
+            assertTrue(store.transactions is MongoStoreTransactionManager, "transient commit failures are reported as such")
             assertEquals(MongoStoreSettings(), store.settings, "the defaults of kraken.messaging.*.retention")
             verify { mongo.indexOps("outbox") } // init-schema defaults to true
+        }
+    }
+
+    @Test
+    fun anApplicationTransactionManagerIsKept() {
+        val mine = MongoTransactionManager(factory)
+        withMongo().withBean(MongoTransactionManager::class.java, { mine }).run { context ->
+            assertNull(context.startupFailure)
+            assertSame(mine, context.getBean(MessageStore::class.java).transactions, "kept, without the transient commit mapping")
         }
     }
 

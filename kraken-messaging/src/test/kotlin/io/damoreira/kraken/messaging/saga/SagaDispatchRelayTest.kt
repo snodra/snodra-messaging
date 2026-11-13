@@ -321,6 +321,26 @@ class SagaDispatchRelayTest {
     }
 
     @Test
+    fun `an event the outbox refuses is given up as INVALID once, and the saga's later entries go on`() {
+        // Recorded behind the store's back (the store's record refuses it): the relay's backstop.
+        record("s1", 1000, type = "rl.Announced", payload = "[1,2]", kind = DispatchKind.EVENT)
+        record("s1", 2000)
+
+        relay().pollOnce()
+
+        val refused = entry("s1:1000")
+        assertNotNull(refused.failedAt)
+        assertEquals(Reason.INVALID, refused.failureReason)
+        assertNull(refused.noticePending, "no SagaCommandFailed for an event")
+        assertEquals(0, mongo.count(Query(), "outbox"))
+        assertEquals(listOf("rl.Announced" to Reason.INVALID), metrics.unhandled.toList(), "counted")
+        assertEquals(listOf("s1:2000"), sender.keys(), "the later command was not held back")
+        relay().pollOnce()
+        assertEquals(listOf("s1:2000"), sender.keys(), "never retried")
+        assertEquals(1, metrics.unhandled.size)
+    }
+
+    @Test
     fun `the oldest work is dispatched first when more sagas are due than one pass takes`() {
         val names = listOf("h", "g", "f", "e", "d", "c", "b", "a") // created in this order: the opposite of their ids
         names.forEachIndexed { i, name ->

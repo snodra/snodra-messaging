@@ -78,7 +78,7 @@ class MicrometerSagaMetrics(private val registry: MeterRegistry, sagaTypes: Coll
 /**
  * Counts what the store knows and no hook reports, every [interval] on a daemon thread (and on [sampleOnce]): the live (not
  * ended) instances per saga type ([io.damoreira.kraken.messaging.store.SagaRepository.countLiveByType]) and the pending
- * dispatch entries ([io.damoreira.kraken.messaging.store.SagaDispatchStore.pendingDispatches]). A failed sample is logged
+ * dispatch entries ([io.damoreira.kraken.messaging.store.SagaDispatchStore.pending]). A failed sample is logged
  * and keeps the last values. Starts with the application, in the relay's phase.
  */
 class SagaGaugeSampler(
@@ -97,7 +97,7 @@ class SagaGaugeSampler(
     fun sampleOnce() {
         try {
             metrics.activeSagas(sagas.sagas.countLiveByType())
-            metrics.dispatchPending(sagas.dispatch.pendingDispatches())
+            metrics.dispatchPending(sagas.dispatch.pending())
         } catch (e: Exception) {
             log.warn("Sampling the saga gauges failed, keeping the last values: {}", e.toString())
         }

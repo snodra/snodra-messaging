@@ -129,7 +129,7 @@ class OutboxTest {
     private fun doc(key: String) = Doc(mongo.findOne(Query(Criteria.where("key").`is`(key)), Document::class.java, "outbox")!!)
 
     @Test
-    fun `two relays on one outbox send every entry once, and a stopped relay holds what it claimed until its lease passes`() {
+    fun `two relays taking turns on one outbox send every entry once, and a stopped relay holds what it claimed until its lease passes`() {
         val ids = (1..30).map { "two-%02d".format(it) }
         ids.forEach { bus.publishBlocking(Happened(it, Instant.now()), key = it) }
         val sent = java.util.concurrent.ConcurrentLinkedQueue<String>()
@@ -192,7 +192,7 @@ class OutboxTest {
     }
 
     @Test
-    fun `the relay reports every send attempt, the oldest pending document of each poll and the pending count`() {
+    fun `the relay reports every send attempt, and samples the pending count and the oldest pending entry store-wide`() {
         bus.publishBlocking(Happened("m-1", Instant.now()), key = "m-1")
         bus.publishBlocking(Happened("m-poison", Instant.now()), key = "m-poison")
         bus.publishBlocking(Happened("m-2", Instant.now()), key = "m-2")
@@ -204,19 +204,25 @@ class OutboxTest {
 
         publisher.samplePending()
         assertEquals(listOf(3L), metrics.pending.toList(), "unsent and not given up on: the failed document is not pending")
+        assertEquals(listOf<Instant?>(doc("m-1").createdAt), metrics.oldest.toList(), "the oldest pending entry")
         assertEquals(1, publisher.publishPendingNow())
         assertEquals(listOf(true, false), metrics.published.toList(), "m-1 sent, m-poison failed (retriable), the batch stopped")
-        assertEquals(listOf<Instant?>(doc("m-1").createdAt), metrics.oldest.toList(), "the oldest pending document as the poll saw it")
+        assertEquals(1, metrics.oldest.size, "a poll does not report the oldest entry: only a sample does")
         publisher.samplePending()
         assertEquals(2L, metrics.pending.last())
+        assertEquals(doc("m-poison").createdAt, metrics.oldest.last(), "held by this relay, still the oldest pending entry")
+
+        // Another relay's view is the same: the gauge is store-wide, whoever holds the entries.
+        val other = RecordingMessagingMetrics()
+        OutboxPublisher(store.outbox, template, topic, "orders", Duration.ofMillis(100), 100, metrics = other).samplePending()
+        assertEquals(doc("m-poison").createdAt, other.oldest.single())
 
         assertEquals(1, publisher.publishPendingNow()) // max attempts: m-poison given up on, m-2 sent
         assertEquals(listOf(true, false, false, true), metrics.published.toList())
-        assertEquals(doc("m-poison").createdAt, metrics.oldest.last())
         assertEquals(0, publisher.publishPendingNow())
-        assertNull(metrics.oldest.last(), "nothing pending")
         publisher.samplePending()
         assertEquals(0L, metrics.pending.last())
+        assertNull(metrics.oldest.last(), "nothing pending")
     }
 
     @Test

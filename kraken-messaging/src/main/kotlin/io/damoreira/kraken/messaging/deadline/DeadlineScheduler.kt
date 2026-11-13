@@ -32,7 +32,7 @@ data class DeadlineSettings(
 /**
  * Fires the due deadlines of the sagas of this service, at least once.
  *
- * A poll claims due deadlines one at a time ([DeadlineStore.claimDueDeadline]: status SCHEDULED, `dueAt <= now`, not claimed
+ * A poll claims due deadlines one at a time ([DeadlineStore.claimDue]: status SCHEDULED, `dueAt <= now`, not claimed
  * or the claim expired; it sets `claimedBy` and `claimedUntil = now + lease`) and hands each to [SagaRuntime.applyDeadline],
  * which fires it in a transaction (loads the saga, runs the `@DeadlineHandler`, writes state, marks it FIRED; a deadline
  * of an ended or missing saga is CANCELLED instead). Several service instances can run a scheduler: the lease makes each
@@ -72,13 +72,13 @@ class DeadlineScheduler(
                 log.debug("Deadline failure", e)
             }
         }
-        metrics.deadlinesOverdue(deadlines.overdueByName(clock.instant()))
+        metrics.deadlinesOverdue(deadlines.countOverdueByName(clock.instant()))
         return claimed
     }
 
     private fun claimNext(): DeadlineDocument? {
         val now = clock.instant()
-        return deadlines.claimDueDeadline(owner, now, now.plus(settings.lease))
+        return deadlines.claimDue(owner, now, now.plus(settings.lease))
     }
 
     override fun start() {

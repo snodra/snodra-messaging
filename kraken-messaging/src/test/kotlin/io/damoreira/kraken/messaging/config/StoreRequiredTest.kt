@@ -1,5 +1,13 @@
 package io.damoreira.kraken.messaging.config
 
+import kotlin.test.assertFails
+import org.springframework.context.annotation.Import
+import org.springframework.boot.test.system.OutputCaptureExtension
+import org.springframework.boot.test.system.CapturedOutput
+import org.springframework.boot.autoconfigure.ImportAutoConfiguration
+import org.springframework.boot.WebApplicationType
+import org.springframework.boot.SpringApplication
+import org.junit.jupiter.api.extension.ExtendWith
 import io.damoreira.kraken.messaging.CommandBus
 import io.damoreira.kraken.messaging.EventBus
 import io.damoreira.kraken.messaging.config.sagascan.SagaScanConfig
@@ -46,10 +54,17 @@ class PublisherConfig {
     @Bean fun publisher(events: EventBus) = Publisher(events)
 }
 
+/** A Spring Boot application that publishes events and has no message store: only the starter's own configurations. */
+@Configuration(proxyBeanMethods = false)
+@ImportAutoConfiguration(KrakenMessagingAutoConfiguration::class, HubAutoConfiguration::class, KafkaEventsAutoConfiguration::class)
+@Import(PublisherConfig::class)
+class PublisherApp
+
 /**
  * No message store (ADR 0028): commands and queries run without one; an event handler, a saga or a publisher fails the startup
  * with a message naming what needs the store and the add-on that provides one.
  */
+@ExtendWith(OutputCaptureExtension::class)
 class StoreRequiredTest {
     private val hub = InProcessHub().start()
 
@@ -121,6 +136,16 @@ class StoreRequiredTest {
             assertTrue("EventBus" in analysis.description && "needs a message store" in analysis.description, analysis.description)
             assertTrue("kraken-messaging-mongo" in analysis.action.orEmpty(), analysis.action)
         }
+    }
+
+    @Test
+    fun theStartupFailureReportNamesTheAddOn(output: CapturedOutput) {
+        val app = SpringApplication(PublisherApp::class.java).apply { setWebApplicationType(WebApplicationType.NONE) }
+        assertFails { app.run("--kraken.messaging.service-name=orders", "--kraken.messaging.type-prefix=test", "--kraken.messaging.hub.enabled=false") }
+        // Spring Boot's failure report, as a service prints it: our analysis, not the generic "consider defining a bean".
+        assertTrue("APPLICATION FAILED TO START" in output.all, output.all)
+        assertTrue("the EventBus needs a message store" in output.all, output.all)
+        assertTrue("kraken-messaging-mongo" in output.all, output.all)
     }
 
     private fun failureOf(failure: Throwable?): String {

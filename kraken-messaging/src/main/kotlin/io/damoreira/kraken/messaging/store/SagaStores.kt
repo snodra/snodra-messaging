@@ -41,7 +41,11 @@ interface SagaRepository {
  * a pending failure notice (`noticePending`) until the relay delivered its `SagaCommandFailed` locally.
  */
 interface SagaDispatchStore {
-    /** Inserts [entries] (none: nothing). */
+    /**
+     * Inserts [entries] (none: nothing). An EVENT entry whose payload the outbox would refuse (not a JSON object whose integers
+     * fit in a signed 64-bit integer, see [OutboxEntry]) is refused here with an [IllegalArgumentException] and nothing is inserted, so the saga's transaction rolls
+     * back (its attempt fails and is retried, then parked) instead of committing an entry the relay could never publish.
+     */
     fun record(entries: List<SagaDispatchDocument>)
 
     /**
@@ -91,7 +95,7 @@ interface SagaDispatchStore {
     fun releaseLease(sagaId: String, owner: String)
 
     /** How many entries are pending (the `kraken.saga.dispatch.pending` gauge). */
-    fun pendingDispatches(): Long
+    fun pending(): Long
 }
 
 /** The `deadlines` collection, as far as the runtime writes it. */
@@ -118,10 +122,10 @@ interface DeadlineStore {
      * [now]): it is [owner]'s until [leaseUntil] (`claimedBy`, `claimedUntil`), and returned as updated; null when none is due.
      * Atomic: two claims never return the same deadline while its lease holds.
      */
-    fun claimDueDeadline(owner: String, now: Instant, leaseUntil: Instant): DeadlineDocument?
+    fun claimDue(owner: String, now: Instant, leaseUntil: Instant): DeadlineDocument?
 
     /** How many SCHEDULED deadlines are due (`dueAt` not after [now]), per name; a name without one is absent. */
-    fun overdueByName(now: Instant): Map<String, Long>
+    fun countOverdueByName(now: Instant): Map<String, Long>
 }
 
 /** The `saga_failures` collection: parked events. */

@@ -41,6 +41,7 @@ class PropertiesBindingTest {
             assertEquals(100, p.outbox.batchSize)
             assertEquals(10, p.outbox.maxAttempts)
             assertEquals(Duration.ofDays(7), p.outbox.retention)
+            assertEquals(Duration.ofMinutes(2), p.outbox.lease)
             assertEquals(Duration.ofDays(30), p.idempotency.retention)
             assertEquals(true, p.security.forwardJwt)
         }
@@ -171,6 +172,16 @@ class PropertiesBindingTest {
                 assertTrue(expected in messages, "$on, $property: $messages")
                 assertTrue("kraken.messaging.hub.retry" in messages, "$on, $property: $messages")
             }
+        }
+    }
+
+    @Test fun `outbox lease binds and must be longer than a send`() {
+        runner.withPropertyValues(*required, "kraken.messaging.outbox.lease=90s").run { context ->
+            assertEquals(Duration.ofSeconds(90), context.getBean(KrakenMessagingProperties::class.java).outbox.lease)
+        }
+        for (value in listOf("45s", "10s")) {
+            val messages = startupFailure("kraken.messaging.outbox.lease=$value")
+            assertTrue("kraken.messaging.outbox.lease must be longer than a send" in messages, messages)
         }
     }
 

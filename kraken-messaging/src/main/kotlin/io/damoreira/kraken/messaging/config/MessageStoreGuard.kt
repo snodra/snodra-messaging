@@ -7,9 +7,12 @@ import io.damoreira.kraken.messaging.saga.RawEventPublisher
 import io.damoreira.kraken.messaging.store.MessageStore
 import org.springframework.beans.factory.BeanFactory
 import org.springframework.beans.factory.NoSuchBeanDefinitionException
+import org.springframework.beans.factory.ObjectProvider
 import org.springframework.beans.factory.SmartInitializingSingleton
 import org.springframework.boot.diagnostics.AbstractFailureAnalyzer
 import org.springframework.boot.diagnostics.FailureAnalysis
+import org.springframework.core.Ordered
+import org.springframework.core.annotation.Order
 import org.springframework.core.env.Environment
 import org.springframework.core.io.ResourceLoader
 
@@ -44,9 +47,27 @@ class MessageStoreGuard(
 }
 
 /**
+ * Applies the message store's schema at startup ([MessageStore.initSchema]: its indexes or tables) unless
+ * `kraken.messaging.store.init-schema` is false, whichever store the application has (an add-on's or its own). Runs once
+ * every singleton exists and before any lifecycle (the outbox relay, the consumers) starts.
+ */
+class MessageStoreSchema(private val store: ObjectProvider<MessageStore>, private val environment: Environment) : SmartInitializingSingleton {
+    override fun afterSingletonsInstantiated() {
+        if (!environment.getProperty(INIT_SCHEMA, Boolean::class.java, true)) return
+        store.ifAvailable { it.initSchema() }
+    }
+
+    companion object {
+        /** On by default: false when the service applies the store's schema itself (a migration tool, a DBA). */
+        const val INIT_SCHEMA = "kraken.messaging.store.init-schema"
+    }
+}
+
+/**
  * Explains a startup that failed because a bean needs an [EventBus] (or the saga relay's [RawEventPublisher]) and there is
  * none: without a message store there is no outbox, so no event bus (ADR 0028).
  */
+@Order(Ordered.HIGHEST_PRECEDENCE) // before Boot's generic NoSuchBeanDefinitionException analyzer, which would explain it first
 class MissingMessageStoreFailureAnalyzer : AbstractFailureAnalyzer<NoSuchBeanDefinitionException>() {
     override fun analyze(rootFailure: Throwable, cause: NoSuchBeanDefinitionException): FailureAnalysis? {
         val type = cause.beanType?.takeIf { it == EventBus::class.java || it == RawEventPublisher::class.java } ?: return null

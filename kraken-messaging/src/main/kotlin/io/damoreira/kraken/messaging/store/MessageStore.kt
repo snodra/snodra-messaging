@@ -38,4 +38,11 @@ interface MessageStore {
 
     /** The transaction manager of the service's database, which the stores above join. */
     val transactions: PlatformTransactionManager
+
+    /**
+     * Creates what the stores need in the database (indexes, tables), idempotently. The core calls it once at startup, after
+     * every bean exists and before any lifecycle starts, unless `kraken.messaging.store.init-schema` is false (then the
+     * service applies the schema itself). A store without a schema keeps the default, which does nothing.
+     */
+    fun initSchema() = Unit
 }

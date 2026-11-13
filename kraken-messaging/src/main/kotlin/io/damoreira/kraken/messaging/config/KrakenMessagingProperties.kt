@@ -4,6 +4,7 @@ import io.damoreira.kraken.messaging.RetryPolicy
 import io.damoreira.kraken.messaging.deadletter.DeadLetterMode
 import io.damoreira.kraken.messaging.deadline.DeadlineSettings
 import io.damoreira.kraken.messaging.hub.HubTargets
+import io.damoreira.kraken.messaging.kafka.OutboxPublisher
 import io.damoreira.kraken.messaging.saga.RelaySettings
 import org.springframework.boot.context.properties.ConfigurationProperties
 import java.net.URI
@@ -275,7 +276,16 @@ data class KrakenMessagingProperties(
         val retention: Duration = Duration.ofDays(7),
         /** Send attempts per document before it is marked failed (`failedAt`) and skipped. */
         val maxAttempts: Int = 10,
-    )
+        /**
+         * How long a batch the relay claimed stays its own: another instance relays it only after that (its claimer crashed).
+         * Longer than one send can take (45 s).
+         */
+        val lease: Duration = Duration.ofMinutes(2),
+    ) {
+        init {
+            require(lease > OutboxPublisher.SEND_TIMEOUT) { "kraken.messaging.outbox.lease must be longer than a send (${OutboxPublisher.SEND_TIMEOUT}), was $lease" }
+        }
+    }
 
     data class Idempotency(
         /** `processed_events` documents older than this are deleted (TTL index). */

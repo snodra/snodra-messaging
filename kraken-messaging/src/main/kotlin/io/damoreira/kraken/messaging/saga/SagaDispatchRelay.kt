@@ -64,7 +64,9 @@ data class RelaySettings(
  * with a lease ([SagaDispatchStore.claimLease], so two service instances never dispatch one saga's entries at once) and works
  * through its entries in `seq` order; different sagas go in parallel. An ended saga's entries are dispatched like any.
  *
- * - An EVENT entry is inserted into the outbox and marked dispatched **in one transaction**: exactly once.
+ * - An EVENT entry is inserted into the outbox and marked dispatched **in one transaction**: exactly once. One the outbox
+ *   refuses (its payload is not a JSON object the store can hold; the store's `record` refuses it first) is given up as
+ *   INVALID, logged at error and counted, and never retried.
  * - A COMMAND entry is sent as raw bytes by wire type name ([RawCommandSender]) with `retry = RetryPolicy.NONE` (the bus's
  *   own retry, when configured, must never stack under the relay's) and the headers `idempotency-key` =
  *   `<sagaId>:<seq>` (the entry's id) and `saga-id`, the entry's routing key and the correlation id of the message that
@@ -174,13 +176,30 @@ class SagaDispatchRelay(
     /** Dispatches [entry]; false when this saga's turn must end (the entry waits). */
     private fun dispatch(entry: SagaDispatchDocument): Boolean = when (entry.kind) {
         DispatchKind.EVENT -> {
-            tx.executeWithoutResult {
-                events.publishRaw(entry.type, entry.routingKey, entry.payload.toByteArray(Charsets.UTF_8), entry.headers[DISPATCH_CORRELATION_HEADER] ?: entry.id)
-                markDispatched(entry)
+            try {
+                tx.executeWithoutResult {
+                    events.publishRaw(entry.type, entry.routingKey, entry.payload.toByteArray(Charsets.UTF_8), entry.headers[DISPATCH_CORRELATION_HEADER] ?: entry.id)
+                    markDispatched(entry)
+                }
+            } catch (e: IllegalArgumentException) {
+                invalidEvent(entry, e) // the outbox refuses it: retrying cannot change the payload
             }
             true
         }
         DispatchKind.COMMAND -> sendCommand(entry)
+    }
+
+    /**
+     * The backstop for an EVENT entry the outbox refuses (the store's [SagaDispatchStore.record] refuses such an entry first):
+     * given up as INVALID, logged at error and counted, so it never holds back the saga's later entries. No failure notice:
+     * `SagaCommandFailed` is about commands.
+     */
+    private fun invalidEvent(entry: SagaDispatchDocument, error: IllegalArgumentException) {
+        val now = clock.instant()
+        store.markFailed(entry.id, entry.attempts, SagaCommandFailed.Reason.INVALID, error.message.orEmpty(), now, now)
+        store.clearNotice(entry.id)
+        metrics.commandFailureUnhandled(entry.type, SagaCommandFailed.Reason.INVALID)
+        log.error("Saga {} event {} ({}) cannot be published, given up as INVALID: {}", entry.sagaId, entry.id, entry.type, error.message)
     }
 
     private fun sendCommand(entry: SagaDispatchDocument): Boolean {

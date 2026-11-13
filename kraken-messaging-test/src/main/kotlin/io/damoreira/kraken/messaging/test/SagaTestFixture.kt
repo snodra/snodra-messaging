@@ -315,14 +315,14 @@ private class InMemorySagaStore : TransactionOperations {
                 dispatch += entries
             }
 
-            private fun pending() = dispatch.filter { it.dispatchedAt == null && it.failedAt == null }
+            private fun pendingEntries() = dispatch.filter { it.dispatchedAt == null && it.failedAt == null }
 
             override fun dueSagas(now: Instant, exclude: Collection<String>, limit: Int) =
-                pending().filter { it.sagaId !in exclude }.groupBy { it.sagaId }.mapValues { (_, entries) -> entries.minBy { it.seq } }
+                pendingEntries().filter { it.sagaId !in exclude }.groupBy { it.sagaId }.mapValues { (_, entries) -> entries.minBy { it.seq } }
                     .values.filter { it.nextAttemptAt?.isAfter(now) != true }
                     .sortedWith(compareBy({ it.createdAt }, { it.sagaId })).take(limit).map { it.sagaId }
 
-            override fun nextPending(sagaId: String) = pending().filter { it.sagaId == sagaId }.minByOrNull { it.seq }
+            override fun nextPending(sagaId: String) = pendingEntries().filter { it.sagaId == sagaId }.minByOrNull { it.seq }
 
             private fun update(id: String, change: (SagaDispatchDocument) -> SagaDispatchDocument) {
                 val i = dispatch.indexOfFirst { it.id == id }
@@ -371,7 +371,7 @@ private class InMemorySagaStore : TransactionOperations {
                 if (leases[sagaId]?.first == owner) leases.remove(sagaId)
             }
 
-            override fun pendingDispatches() = pending().size.toLong()
+            override fun pending() = pendingEntries().size.toLong()
         },
         deadlines = object : DeadlineStore {
             override fun insert(deadline: DeadlineDocument) {
@@ -400,12 +400,12 @@ private class InMemorySagaStore : TransactionOperations {
 
             private fun due(now: Instant) = deadlines.values.filter { it.status == DeadlineStatus.SCHEDULED && !it.dueAt.isAfter(now) }
 
-            override fun claimDueDeadline(owner: String, now: Instant, leaseUntil: Instant): DeadlineDocument? {
+            override fun claimDue(owner: String, now: Instant, leaseUntil: Instant): DeadlineDocument? {
                 val next = due(now).filter { it.claimedUntil?.isBefore(now) ?: true }.minByOrNull { it.dueAt } ?: return null
                 return next.copy(claimedBy = owner, claimedUntil = leaseUntil).also { deadlines[it.id] = it }
             }
 
-            override fun overdueByName(now: Instant) = due(now).groupingBy { it.name }.eachCount().mapValues { it.value.toLong() }
+            override fun countOverdueByName(now: Instant) = due(now).groupingBy { it.name }.eachCount().mapValues { it.value.toLong() }
         },
         failures = object : SagaFailureStore {
             override fun find(id: String) = failures[id]

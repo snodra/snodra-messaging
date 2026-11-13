@@ -1,5 +1,12 @@
 package io.damoreira.kraken.messaging.saga
 
+import java.util.concurrent.atomic.AtomicBoolean
+import org.springframework.transaction.support.TransactionOperations
+import org.springframework.data.mongodb.MongoDatabaseFactory
+import io.mockk.mockk
+import io.mockk.every
+import io.damoreira.kraken.messaging.mongo.MongoStoreTransactionManager
+import com.mongodb.MongoException
 import io.damoreira.kraken.messaging.store.MessageStore
 import io.damoreira.kraken.messaging.mongoStore
 import io.damoreira.kraken.messaging.DEADLINES
@@ -52,6 +59,18 @@ private class RecordingMetrics : SagaMetrics {
     fun count(type: String, outcome: SagaMetrics.Outcome) = events.count { it == type to outcome }
 }
 
+/** The store's transaction manager whose next commit fails with a transient error: the commit, not a write, conflicts. */
+private class CommitConflictsOnce(factory: MongoDatabaseFactory) : MongoStoreTransactionManager(factory) {
+    val failNext = AtomicBoolean()
+
+    override fun doCommit(transactionObject: MongoTransactionObject) {
+        if (!failNext.getAndSet(false)) return super.doCommit(transactionObject)
+        val conflict = MongoException(112, "WriteConflict at commit").apply { addLabel(MongoException.TRANSIENT_TRANSACTION_ERROR_LABEL) }
+        // The failing commit goes through the store's mapping; Spring then rolls the real transaction back.
+        super.doCommit(mockk<MongoTransactionObject>(relaxed = true) { every { commitTransaction() } throws conflict })
+    }
+}
+
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class SagaRuntimeTest {
     private val mongoContainer = KrakenContainers.mongo()
@@ -86,7 +105,7 @@ class SagaRuntimeTest {
         runtime = runtime(RtOrderSaga::class, RtHeaderSaga::class)
     }
 
-    private fun runtime(vararg classes: kotlin.reflect.KClass<*>) = SagaRuntime(
+    private fun runtime(vararg classes: kotlin.reflect.KClass<*>, tx: TransactionOperations = this.tx) = SagaRuntime(
         types = SagaModelScanner(resolver, codec).scan(classes.toList()),
         ports = store.sagas,
         tx = tx,
@@ -178,6 +197,19 @@ class SagaRuntimeTest {
         assertEquals(2, all.size)
         assertTrue(all.all { it.startKey == null })
         assertEquals(3, all.sumOf { it.stateDoc.getInteger("forced") }, "the first instance handled both, the second only its own")
+    }
+
+    @Test
+    fun `a transient error at commit is retried as a conflict, not parked as a handler failure`() {
+        val manager = CommitConflictsOnce(mongo.mongoDatabaseFactory)
+        val conflicted = runtime(RtOrderSaga::class, tx = TransactionTemplate(manager))
+        manager.failNext.set(true)
+
+        deliver(RtOrderPlaced("c1"), on = conflicted)
+
+        assertEquals(1, metrics.count("rt.Order", SagaMetrics.Outcome.CONFLICT), "the commit's conflict was counted and retried")
+        assertEquals(1, saga("c1").stateDoc.getInteger("placed"), "applied once, by the retry")
+        assertEquals(0, mongo.count(Query(), "saga_failures"))
     }
 
     @Test

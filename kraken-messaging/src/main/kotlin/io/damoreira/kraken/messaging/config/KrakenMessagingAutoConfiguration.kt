@@ -10,6 +10,7 @@ import io.damoreira.kraken.messaging.handler.HandlerRegistry
 import io.damoreira.kraken.messaging.hub.HubQueryUpdateEmitter
 import io.damoreira.kraken.messaging.hub.SubscriptionRegistry
 import io.damoreira.kraken.messaging.security.ForwardedIdentityResolver
+import io.damoreira.kraken.messaging.store.MessageStore
 import io.damoreira.kraken.messaging.tracing.TraceHeaders
 import io.micrometer.tracing.Tracer
 import io.micrometer.tracing.propagation.Propagator
@@ -52,6 +53,10 @@ class KrakenMessagingAutoConfiguration {
     @Bean
     fun krakenMessageStoreGuard(beanFactory: BeanFactory, registry: HandlerRegistry, environment: Environment, resourceLoader: ResourceLoader) =
         MessageStoreGuard(beanFactory, registry, environment, resourceLoader)
+
+    /** Applies the message store's schema at startup (`kraken.messaging.store.init-schema`, on by default). */
+    @Bean
+    fun krakenMessageStoreSchema(store: ObjectProvider<MessageStore>, environment: Environment) = MessageStoreSchema(store, environment)
 
     @Bean
     @ConditionalOnMissingBean

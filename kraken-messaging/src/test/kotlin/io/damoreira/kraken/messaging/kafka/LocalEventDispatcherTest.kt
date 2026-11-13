@@ -1,5 +1,8 @@
 package io.damoreira.kraken.messaging.kafka
 
+import io.damoreira.kraken.messaging.tracing.TraceHeaders
+import io.damoreira.kraken.messaging.handler.EventHandler
+import io.damoreira.kraken.messaging.EventBus
 import io.damoreira.kraken.messaging.mongo.MongoMessageStore
 import com.mongodb.client.MongoClients
 import io.damoreira.kraken.messaging.MessageContext
@@ -42,6 +45,17 @@ private class RecordingStage(private val interest: Boolean, private val mongo: M
         val committed = mongo.count(Query(Criteria.where("_id").`is`("processor:default:${ctx.messageId}")), "processed_events") == 1L
         calls += Call(type, payload, ctx, committed, handlers.seen.toList())
         return true
+    }
+}
+
+/** A handler that publishes through the [EventBus] (the store's outbox) and then fails when [failing] is set. */
+class PublishThenFail(private val bus: EventBus) {
+    @Volatile var failing = true
+
+    @EventHandler
+    suspend fun on(event: Happened) {
+        bus.publish(Happened("echo-${event.id}", event.at), key = event.id)
+        if (failing) throw IllegalStateException("failed after publishing")
     }
 }
 
@@ -137,6 +151,24 @@ class LocalEventDispatcherTest {
         handlers.failAlways.set(null) // fixed: the redelivery runs both stages again (stage 2's own markers make that safe)
         assertEquals(Outcome.HANDLED, dispatcher.dispatch("poison-1", "test.Happened", payload("poison-1"), ctx("poison-1")))
         assertEquals(2, stage.calls.size)
+        assertEquals(1, markers())
+    }
+
+    @Test
+    fun `a handler that published and then failed leaves no outbox entry, one that returned leaves its entry`() {
+        mongo.remove(Query(), "outbox")
+        val store = MongoMessageStore(mongo)
+        val handler = PublishThenFail(OutboxEventBus(store.outbox, codec, MessageTypeResolver("test"), TraceHeaders(null, null)))
+        val reg = HandlerRegistry(MessageTypeResolver("test")).also { it.register(handler) }
+        val dispatcher = LocalEventDispatcher(reg, HandlerInvoker(reg, codec), store)
+
+        assertFailsWith<IllegalStateException> { dispatcher.dispatch("p-1", "test.Happened", payload("p-1"), ctx("p-1")) }
+        assertEquals(0, mongo.count(Query(), "outbox"), "the event rolled back with the handler's transaction")
+        assertEquals(0, markers())
+
+        handler.failing = false
+        assertEquals(Outcome.HANDLED, dispatcher.dispatch("p-1", "test.Happened", payload("p-1"), ctx("p-1")))
+        assertEquals(1, mongo.count(Query(), "outbox"), "committed with the marker")
         assertEquals(1, markers())
     }
 

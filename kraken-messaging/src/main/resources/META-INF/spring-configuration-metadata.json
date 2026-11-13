@@ -406,6 +406,19 @@
       "defaultValue": 10
     },
     {
+      "name": "kraken.messaging.outbox.lease",
+      "type": "java.time.Duration",
+      "description": "How long a batch the outbox relay claimed stays its own; another instance relays it only after that. Longer than one send (45s).",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Outbox",
+      "defaultValue": "2m"
+    },
+    {
+      "name": "kraken.messaging.store.init-schema",
+      "type": "java.lang.Boolean",
+      "description": "Apply the message store's schema (indexes, tables) at startup. False when the service applies it itself.",
+      "defaultValue": true
+    },
+    {
       "name": "kraken.messaging.idempotency.retention",
       "type": "java.time.Duration",
       "description": "processed_events documents older than this are deleted.",

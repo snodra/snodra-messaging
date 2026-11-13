@@ -80,13 +80,16 @@ internal class MongoSagaDispatchStore(private val mongo: MongoTemplate) : SagaDi
     private val leases get() = mongo.joined(LEASES)
 
     override fun record(entries: List<SagaDispatchDocument>) {
-        if (entries.isNotEmpty()) translated { collection.insertMany(entries.map(::dispatchDocument)) }
+        if (entries.isEmpty()) return
+        // An event the outbox would refuse is refused here, inside the saga's transaction: never committed, then stuck.
+        for (e in entries) if (e.kind == DispatchKind.EVENT) outboxPayload(e.payload.toByteArray(Charsets.UTF_8), "saga event ${e.id} (${e.type})")
+        translated { collection.insertMany(entries.map(::dispatchDocument)) }
     }
 
     override fun dueSagas(now: Instant, exclude: Collection<String>, limit: Int): List<String> = translated {
         collection.aggregate(
             listOf(
-                Aggregates.match(Filters.and(pending(), Filters.nin("sagaId", exclude))),
+                Aggregates.match(Filters.and(notDone(), Filters.nin("sagaId", exclude))),
                 Aggregates.sort(Sorts.ascending("sagaId", "seq")),
                 Aggregates.group("\$sagaId", Accumulators.first("next", "\$nextAttemptAt"), Accumulators.first("since", "\$createdAt")),
                 Aggregates.match(Filters.or(Filters.eq("next", null), Filters.lte("next", Date.from(now)))),
@@ -97,7 +100,7 @@ internal class MongoSagaDispatchStore(private val mongo: MongoTemplate) : SagaDi
     }
 
     override fun nextPending(sagaId: String): SagaDispatchDocument? = translated {
-        collection.find(Filters.and(Filters.eq("sagaId", sagaId), pending())).sort(Sorts.ascending("seq")).limit(1).first()?.let(::readDispatch)
+        collection.find(Filters.and(Filters.eq("sagaId", sagaId), notDone())).sort(Sorts.ascending("seq")).limit(1).first()?.let(::readDispatch)
     }
 
     override fun markDispatched(id: String, now: Instant) {
@@ -161,10 +164,10 @@ internal class MongoSagaDispatchStore(private val mongo: MongoTemplate) : SagaDi
         translated { leases.deleteOne(Filters.and(Filters.eq("_id", sagaId), Filters.eq("owner", owner))) }
     }
 
-    override fun pendingDispatches(): Long = translated { collection.countDocuments(pending()) }
+    override fun pending(): Long = translated { collection.countDocuments(notDone()) }
 
     /** Not dispatched and not given up on (a missing field is null). */
-    private fun pending(): Bson = Filters.and(Filters.eq("dispatchedAt", null), Filters.eq("failedAt", null))
+    private fun notDone(): Bson = Filters.and(Filters.eq("dispatchedAt", null), Filters.eq("failedAt", null))
 
     private fun update(id: String, update: Bson) {
         translated { collection.updateOne(Filters.eq("_id", id), update) }
@@ -199,7 +202,7 @@ internal class MongoDeadlineStore(private val mongo: MongoTemplate) : DeadlineSt
     override fun markFired(id: String, now: Instant): Boolean =
         translated { collection.updateOne(Filters.and(Filters.eq("_id", id), scheduled()), finish(DeadlineStatus.FIRED, now)).modifiedCount == 1L }
 
-    override fun claimDueDeadline(owner: String, now: Instant, leaseUntil: Instant): DeadlineDocument? = translated {
+    override fun claimDue(owner: String, now: Instant, leaseUntil: Instant): DeadlineDocument? = translated {
         val at = Date.from(now)
         collection.findOneAndUpdate(
             Filters.and(scheduled(), Filters.lte("dueAt", at), Filters.or(Filters.eq("claimedUntil", null), Filters.lt("claimedUntil", at))),
@@ -208,7 +211,7 @@ internal class MongoDeadlineStore(private val mongo: MongoTemplate) : DeadlineSt
         )?.let(::readDeadline)
     }
 
-    override fun overdueByName(now: Instant): Map<String, Long> = translated {
+    override fun countOverdueByName(now: Instant): Map<String, Long> = translated {
         collection.aggregate(
             listOf(
                 Aggregates.match(Filters.and(scheduled(), Filters.lte("dueAt", Date.from(now)))),

@@ -124,6 +124,7 @@ class KafkaEventsAutoConfiguration {
         batchSize = properties.outbox.batchSize,
         maxAttempts = properties.outbox.maxAttempts,
         metrics = metrics.getIfAvailable { NoopMessagingMetrics },
+        lease = properties.outbox.lease,
     )
 
     /** Runs an event's ordinary handlers, then the saga stage when the saga runtime provides one (none: [SagaStage.NONE]). */

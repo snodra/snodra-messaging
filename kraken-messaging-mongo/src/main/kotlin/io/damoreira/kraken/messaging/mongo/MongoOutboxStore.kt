@@ -1,6 +1,7 @@
 package io.damoreira.kraken.messaging.mongo
 
 import com.mongodb.client.model.Filters
+import com.mongodb.client.model.Projections
 import com.mongodb.client.model.FindOneAndUpdateOptions
 import com.mongodb.client.model.ReturnDocument
 import com.mongodb.client.model.Sorts
@@ -67,14 +68,13 @@ internal class MongoOutboxStore(private val mongo: MongoTemplate, private val cl
 
     override suspend fun pending(): Long = collection.countDocuments(unfinished())
 
+    override suspend fun oldestPending(): Instant? =
+        collection.find(unfinished()).sort(Sorts.ascending("createdAt", "seq")).projection(Projections.include("createdAt")).limit(1)
+            .first()?.getDate("createdAt")?.toInstant()
+
     override suspend fun purge(sentBefore: Instant): Long = collection.deleteMany(Filters.lt("sentAt", Date.from(sentBefore))).deletedCount
 
-    /** The payload as the document it is stored as; anything but a JSON object is refused (see [OutboxEntry]). */
-    private fun payloadDocument(entry: OutboxEntry): Document = try {
-        Document.parse(String(entry.payload, Charsets.UTF_8))
-    } catch (e: RuntimeException) {
-        throw IllegalArgumentException("The payload of outbox entry ${entry.id} (${entry.type}) is not a JSON object: ${e.message}", e)
-    }
+    private fun payloadDocument(entry: OutboxEntry): Document = outboxPayload(entry.payload, "outbox entry ${entry.id} (${entry.type})")
 
     /** Not sent and not given up on (a missing field is null). */
     private fun unfinished() = Filters.and(Filters.eq("sentAt", null), Filters.eq("failedAt", null))
@@ -99,4 +99,15 @@ internal class MongoOutboxStore(private val mongo: MongoTemplate, private val cl
     companion object {
         const val COLLECTION = "outbox"
     }
+}
+
+/**
+ * [payload] as the document an outbox entry stores it as; anything but a JSON object whose integers fit in a signed 64-bit
+ * integer is refused with an [IllegalArgumentException] naming [what] (see [OutboxEntry]): the parser refuses a larger
+ * integer (`NumberFormatException`), which becomes that exception.
+ */
+internal fun outboxPayload(payload: ByteArray, what: String): Document = try {
+    Document.parse(String(payload, Charsets.UTF_8))
+} catch (e: RuntimeException) {
+    throw IllegalArgumentException("The payload of $what is not a JSON object: ${e.message}", e)
 }
