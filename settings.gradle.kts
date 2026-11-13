@@ -16,6 +16,7 @@ dependencyResolutionManagement {
 
 include("kraken-messaging-api")
 include("kraken-messaging")
+include("kraken-messaging-mongo")
 include("kraken-messaging-test")
 
 

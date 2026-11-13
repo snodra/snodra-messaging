@@ -14,6 +14,9 @@ import org.springframework.transaction.PlatformTransactionManager
  * calling thread (a `suspend` method never switches dispatchers to reach the database). With no active transaction such a
  * write commits on its own.
  *
+ * **Times are the application's.** A store stamps `sentAt`, leases, `updatedAt` and the like with the application clock (the
+ * JVM's), never the database's, so the margins the conformance kit uses hold whatever the database's own clock says.
+ *
  * Payloads cross these interfaces as JSON bytes, never as a database's own document type. `MessageStoreConformanceTest`
  * (in `kraken-messaging-test`) is the behaviour every implementation must pass.
  */

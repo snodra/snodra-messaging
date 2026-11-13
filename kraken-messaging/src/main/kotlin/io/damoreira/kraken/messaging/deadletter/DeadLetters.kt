@@ -4,6 +4,7 @@ import io.damoreira.kraken.messaging.MessageContext
 import io.damoreira.kraken.messaging.kafka.EventHeaders
 import io.damoreira.kraken.messaging.kafka.LocalEventDispatcher
 import io.damoreira.kraken.messaging.kafka.RecordPosition
+import io.damoreira.kraken.messaging.store.DeadLetterStore.Summary
 import org.slf4j.LoggerFactory
 
 /**
@@ -76,7 +77,7 @@ class DeadLetters(
         var failed = 0
         var blocked = 0
         var skipped = all.count { it.reason == DeadLetterReason.INVALID }
-        val order = compareBy<DeadLetterStore.Summary>({ it.parkedAt }, { it.id })
+        val order = compareBy<Summary>({ it.parkedAt }, { it.id })
         val retriable = all.filter { it.reason != DeadLetterReason.INVALID }
         val keys = retriable.filter { it.key != null }.groupBy { it.key!! }.values
             .map { letters -> letters.sortedWith(compareBy({ it.offset }, { it.id })) }

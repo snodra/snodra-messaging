@@ -38,6 +38,7 @@ import java.time.Duration
 import java.time.Instant
 import java.time.temporal.ChronoUnit
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CyclicBarrier
 
 /**
  * The conformance kit of the message store (ADR 0028): the behaviour every store add-on must have, whatever its database.
@@ -51,7 +52,7 @@ import java.util.concurrent.ConcurrentHashMap
  *
  * [store] is called once before every test and must return a store over **empty** state (a fresh database or schema, or
  * one cleared first): the checks count what the outbox holds. Its schema (indexes, tables) must be ready, as the add-on's
- * auto-configuration leaves it. The checks use the wall clock with leases of about a second, never a fake clock.
+ * auto-configuration leaves it. The checks use the wall clock with leases of about three seconds, never a fake clock.
  *
  * Transactions are Spring's: a check opens one with a [TransactionTemplate] over [MessageStore.transactions] and calls the
  * store inside it on the same thread, as the library does; a store joins it there.
@@ -121,8 +122,10 @@ abstract class MessageStoreConformanceTest {
         all.forEach { store.outbox.append(it) }
 
         val published = ConcurrentHashMap<String, MutableList<String>>()
+        val start = CyclicBarrier(2)
         suspend fun relay(owner: String) {
             val mine = published.getOrPut(owner) { mutableListOf() }
+            start.await() // both relays start claiming together
             while (true) {
                 val batch = store.outbox.claim(owner, Duration.ofSeconds(60), limit = 7)
                 if (batch.isEmpty()) return
@@ -138,6 +141,7 @@ abstract class MessageStoreConformanceTest {
         val b = published.getValue("relay-b")
         assertEquals(a.size, a.toSet().size, "relay-a published an entry twice")
         assertEquals(b.size, b.toSet().size, "relay-b published an entry twice")
+        assertTrue(a.isNotEmpty() && b.isNotEmpty(), "both relays claimed entries: ${a.size} and ${b.size}")
         assertEquals(emptySet<String>(), a.toSet() intersect b.toSet(), "an entry was published by both relays")
         assertEquals(all.map { it.id }.toSet(), a.toSet() + b.toSet(), "every entry was published")
         assertEquals(0L, store.outbox.pending())
@@ -147,7 +151,7 @@ abstract class MessageStoreConformanceTest {
     fun expiredLeaseIsReclaimed() = runBlocking {
         val base = now()
         listOf("e1", "e2", "e3").forEachIndexed { i, id -> store.outbox.append(entry(id, createdAt = base, seq = i.toLong())) }
-        val lease = Duration.ofSeconds(1)
+        val lease = Duration.ofSeconds(3)
 
         assertEquals(listOf("e1", "e2", "e3"), store.outbox.claim("crashed", lease, limit = 10).map { it.id })
         store.outbox.markAttemptFailed("e1", "broker unavailable") // one attempt, the entry stays the claimer's
@@ -297,7 +301,7 @@ abstract class MessageStoreConformanceTest {
     @Test
     fun controlLockIsExclusiveUntilLeaseExpires() = runBlocking {
         val control = store.processorControl
-        val lease = Duration.ofSeconds(1)
+        val lease = Duration.ofSeconds(3)
         assertNull(control.get(PROCESSOR))
 
         assertEquals(ProcessorControlStore.Lock.Taken, control.lock(PROCESSOR, "op-a", lease))
@@ -325,6 +329,114 @@ abstract class MessageStoreConformanceTest {
         assertTrue(control.release(PROCESSOR, "op-b"))
         assertNull(control.get(PROCESSOR)!!.operation)
         assertEquals(ProcessorControlStore.Lock.Taken, control.lock(PROCESSOR, "op-a", lease), "a released lock is free")
+    }
+
+    @Test
+    fun pauseStateRoundTrips() = runBlocking {
+        val control = store.processorControl
+        val before = Instant.now().truncatedTo(ChronoUnit.MILLIS)
+        control.setPaused(PROCESSOR, true, "control-1")
+        control.setPaused(PROCESSOR, true, "control-1") // idempotent
+        val paused = control.get(PROCESSOR)!!
+        assertTrue(paused.paused)
+        assertEquals("control-1", paused.pausedBy)
+        assertFalse(paused.pausedAt!!.isBefore(before), "pausedAt is now")
+        assertFalse(paused.updatedAt!!.isBefore(before))
+        assertNull(paused.operation)
+        assertEquals(emptyList<ReplayRange>(), paused.replay)
+        assertEquals(paused, control.read(listOf(PROCESSOR, "never-touched"))[PROCESSOR])
+
+        // Pausing leaves a reset lock alone, and a lock leaves the pause alone.
+        assertEquals(ProcessorControlStore.Lock.Taken, control.lock(PROCESSOR, "op-a", Duration.ofSeconds(30)))
+        assertTrue(control.get(PROCESSOR)!!.paused)
+        control.setPaused(PROCESSOR, false, "control-2")
+        val resumed = control.get(PROCESSOR)!!
+        assertFalse(resumed.paused)
+        assertNull(resumed.pausedAt)
+        assertNull(resumed.pausedBy)
+        assertEquals("op-a", resumed.operation?.id)
+
+        control.setPaused("audit", false, "local") // a resume creates the document, not paused
+        assertEquals(ProcessorControlStore.Control("audit", paused = false, updatedAt = control.get("audit")!!.updatedAt), control.get("audit"))
+    }
+
+    @Test
+    fun replayRangesRoundTrip() = runBlocking {
+        val control = store.processorControl
+        val r1 = ReplayRange(TOPIC, 0, 10, 20)
+        val r2 = ReplayRange(TOPIC, 1, 0, 5)
+        val r3 = ReplayRange("other.topic", 0, 10, 20)
+        assertEquals(ProcessorControlStore.Lock.Taken, control.lock(PROCESSOR, "op-a", Duration.ofSeconds(30)))
+        control.setReplay(PROCESSOR, listOf(r1, r2, r3))
+        assertEquals(listOf(r1, r2, r3), control.get(PROCESSOR)!!.replay, "the ranges, in order")
+        assertEquals("op-a", control.get(PROCESSOR)!!.operation?.id, "the lock is untouched")
+
+        assertTrue(control.removeReplay(PROCESSOR, r2))
+        assertFalse(control.removeReplay(PROCESSOR, r2), "removed once")
+        assertFalse(control.removeReplay(PROCESSOR, ReplayRange(TOPIC, 0, 10, 21)), "exactly that range")
+        assertFalse(control.removeReplay("audit", r1), "another processor's document")
+        assertEquals(listOf(r1, r3), control.get(PROCESSOR)!!.replay)
+
+        control.setReplay(PROCESSOR, listOf(r2))
+        assertEquals(listOf(r2), control.get(PROCESSOR)!!.replay, "setReplay replaces")
+        control.setReplay(PROCESSOR, emptyList())
+        assertEquals(emptyList<ReplayRange>(), control.get(PROCESSOR)!!.replay)
+    }
+
+    @Test
+    fun deleteMarkersRemovesOnlyTheRange() = runBlocking {
+        val markers = store.processedEvents
+        fun stage1(processor: String, topic: String, partition: Int, offset: Long) =
+            marker("processor:$processor:$topic:$partition:$offset", processor = processor, topic = topic, partition = partition, offset = offset)
+        val inRange = (3L until 6L).map { stage1(PROCESSOR, TOPIC, 0, it) }
+        val inSecondRange = listOf(stage1(PROCESSOR, TOPIC, 2, 7))
+        val kept = (0L until 3L).map { stage1(PROCESSOR, TOPIC, 0, it) } + stage1(PROCESSOR, TOPIC, 0, 6) + // the range is [3, 6)
+            stage1(PROCESSOR, TOPIC, 1, 4) + stage1(PROCESSOR, "other.topic", 0, 4) + stage1("audit", TOPIC, 0, 4) +
+            marker("saga:t.Order:evt-4") + marker("ingress:src:key-4")
+        (inRange + inSecondRange + kept).forEach { assertTrue(markers.record(it), "recorded ${it.id}") }
+
+        val control = store.processorControl
+        assertEquals(0L, control.deleteMarkers(PROCESSOR, emptyList()))
+        assertEquals(0L, control.deleteMarkers(PROCESSOR, listOf(ReplayRange(TOPIC, 0, 100, 200))))
+        assertEquals(4L, control.deleteMarkers(PROCESSOR, listOf(ReplayRange(TOPIC, 0, 3, 6), ReplayRange(TOPIC, 2, 7, 8))))
+
+        (inRange + inSecondRange).forEach { assertFalse(markers.exists(it.id), "${it.id} is deleted") }
+        kept.forEach { assertTrue(markers.exists(it.id), "${it.id} is kept") }
+        assertEquals(0L, control.deleteMarkers(PROCESSOR, listOf(ReplayRange(TOPIC, 0, 3, 6))), "deleted once")
+    }
+
+    @Test
+    fun deadLetterParkedInsideRolledBackTransactionIsKept() = runBlocking {
+        val letters = store.deadLetters
+        val parked = letter(PROCESSOR, "k1", partition = 0, offset = 1, parkedAt = now())
+        inTransaction(rollback = true) { assertTrue(letters.park(parked)) }
+        assertEquals(parked, letters.get(parked.id), "a dead letter commits on its own")
+        assertEquals(parked.id, letters.head(PROCESSOR, "k1"))
+
+        val thrown = letter(PROCESSOR, "k2", partition = 0, offset = 2, parkedAt = now())
+        assertThrows(HandlerFailed::class.java) {
+            inTransaction {
+                assertTrue(letters.park(thrown))
+                assertTrue(letters.recordFailure(parked.id, DeadLetterError("Boom", "failed again")))
+                throw HandlerFailed()
+            }
+        }
+        assertTrue(letters.exists(thrown.id), "parked before the handler failed")
+        assertEquals(DeadLetterError("Boom", "failed again"), letters.get(parked.id)!!.error, "a retry's failure is recorded on its own too")
+    }
+
+    @Test
+    fun processorControlWriteInsideRolledBackTransactionIsKept() = runBlocking {
+        val control = store.processorControl
+        inTransaction(rollback = true) {
+            control.setPaused(PROCESSOR, true, "control-1")
+            assertEquals(ProcessorControlStore.Lock.Taken, control.lock("audit", "op-a", Duration.ofSeconds(30)))
+            control.setReplay("audit", listOf(ReplayRange(TOPIC, 0, 1, 2)))
+        }
+        assertTrue(control.get(PROCESSOR)!!.paused, "a pause commits on its own")
+        val audit = control.get("audit")!!
+        assertEquals("op-a", audit.operation?.id, "a lock commits on its own")
+        assertEquals(listOf(ReplayRange(TOPIC, 0, 1, 2)), audit.replay, "a replay range commits on its own")
     }
 
     // ------------------------------------------------------------------------------------------------------- external calls

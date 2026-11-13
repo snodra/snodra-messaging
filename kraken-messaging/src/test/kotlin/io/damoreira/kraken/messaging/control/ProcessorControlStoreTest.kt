@@ -1,6 +1,8 @@
 package io.damoreira.kraken.messaging.control
 
 import com.mongodb.client.MongoClients
+import io.damoreira.kraken.messaging.store.ProcessorControlStore.Control
+import io.damoreira.kraken.messaging.store.ProcessorControlStore.Lock
 import io.damoreira.kraken.messaging.test.KrakenContainers
 import org.bson.Document
 import org.junit.jupiter.api.AfterAll
@@ -65,11 +67,11 @@ class ProcessorControlStoreTest {
         assertEquals(false, resumed["paused"])
         assertTrue(resumed.containsKey("pausedAt") && resumed["pausedAt"] == null)
         assertTrue(resumed.containsKey("pausedBy") && resumed["pausedBy"] == null)
-        assertEquals(ProcessorControlStore.Control("audit", paused = false, updatedAt = now), store.get("audit"))
+        assertEquals(Control("audit", paused = false, updatedAt = now), store.get("audit"))
     }
 
     @Test fun `one operation holds the lock until it releases it or its lease passes`() {
-        assertEquals(ProcessorControlStore.Lock.Taken, store.lock("audit", "op-1", Duration.ofSeconds(30)))
+        assertEquals(Lock.Taken, store.lock("audit", "op-1", Duration.ofSeconds(30)))
         val doc = raw("audit")
         assertEquals(setOf("_id", "paused", "pausedAt", "pausedBy", "operation", "replay", "updatedAt"), doc.keys)
         val op = doc["operation"] as Document
@@ -77,12 +79,12 @@ class ProcessorControlStoreTest {
         assertEquals("reset", op["kind"])
         assertEquals(Date.from(now.plusSeconds(30)), op["leaseUntil"])
 
-        val held = assertIs<ProcessorControlStore.Lock.Held>(store.lock("audit", "op-2", Duration.ofSeconds(30)))
+        val held = assertIs<Lock.Held>(store.lock("audit", "op-2", Duration.ofSeconds(30)))
         assertEquals("op-1", held.by!!.id)
         assertFalse(store.release("audit", "op-2"), "never releases another operation's lock")
 
         now = now.plusSeconds(20)
-        assertEquals(ProcessorControlStore.Lock.Taken, store.lock("audit", "op-1", Duration.ofSeconds(30)), "the same operation renews")
+        assertEquals(Lock.Taken, store.lock("audit", "op-1", Duration.ofSeconds(30)), "the same operation renews")
         val renewed = store.get("audit")!!.operation!!
         assertEquals(now.plusSeconds(30), renewed.leaseUntil)
         assertEquals(now.minusSeconds(20), renewed.preparedAt, "a renewal keeps preparedAt")
@@ -90,11 +92,11 @@ class ProcessorControlStoreTest {
 
         now = now.plusSeconds(31)
         assertTrue(store.get("audit")!!.operation!!.expired(now))
-        assertEquals(ProcessorControlStore.Lock.Taken, store.lock("audit", "op-2", Duration.ofSeconds(30)), "an expired lease is free")
+        assertEquals(Lock.Taken, store.lock("audit", "op-2", Duration.ofSeconds(30)), "an expired lease is free")
         assertFalse(store.release("audit", "op-1", expiredOnly = true))
         assertTrue(store.release("audit", "op-2"))
         assertNull(store.get("audit")!!.operation)
-        assertEquals(ProcessorControlStore.Lock.Taken, store.lock("audit", "op-3", Duration.ofSeconds(30)))
+        assertEquals(Lock.Taken, store.lock("audit", "op-3", Duration.ofSeconds(30)))
     }
 
     @Test fun `replay ranges are written as Int32 partitions and Int64 offsets and pulled one by one`() {
@@ -117,6 +119,6 @@ class ProcessorControlStoreTest {
 
     @Test fun `a document written with missing fields reads as not paused, no operation and no replay`() {
         mongo.db.getCollection(ProcessorControlStore.COLLECTION).insertOne(Document("_id", "audit"))
-        assertEquals(ProcessorControlStore.Control("audit"), store.get("audit"))
+        assertEquals(Control("audit"), store.get("audit"))
     }
 }

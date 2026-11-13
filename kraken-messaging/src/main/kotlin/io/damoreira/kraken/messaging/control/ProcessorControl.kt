@@ -16,6 +16,8 @@ import io.damoreira.kraken.messaging.deadletter.RetryResult
 import io.damoreira.kraken.messaging.handler.HandlerRegistry
 import io.damoreira.kraken.messaging.hub.ControlInbound
 import io.damoreira.kraken.messaging.kafka.EventConsumer
+import io.damoreira.kraken.messaging.store.ProcessorControlStore.Control
+import io.damoreira.kraken.messaging.store.ProcessorControlStore.Lock
 import kotlinx.coroutines.runBlocking
 import org.apache.kafka.clients.admin.Admin
 import org.apache.kafka.clients.admin.AdminClientConfig
@@ -245,11 +247,11 @@ class ProcessorControl(
         val lease = Duration.ofMillis(leaseMs)
         val processor = slot.consumer.processor
         return when (val lock = store.lock(processor, op, lease)) {
-            is ProcessorControlStore.Lock.Held -> refused(
+            is Lock.Held -> refused(
                 request, ControlRefusal.CONTROL_REFUSAL_LOCKED,
                 lock.by?.let { "operation ${it.id} holds the lock of processor $processor until ${it.leaseUntil}" } ?: "another operation holds the lock of processor $processor",
             )
-            ProcessorControlStore.Lock.Taken -> {
+            Lock.Taken -> {
                 synchronized(slot) {
                     slot.held = Held(op, lease)
                     slot.consumer.operationId = op
@@ -496,7 +498,7 @@ class ProcessorControl(
      * lock, its own included). A lease of the operation held here that passed is cleared (conditional on its id) and the
      * consumer resumes. [failFast]: a consumer that cannot start throws (at start) instead of waiting for the next poll.
      */
-    private fun converge(slot: Slot, doc: ProcessorControlStore.Control?, now: Instant, failFast: Boolean = false) = synchronized(slot) {
+    private fun converge(slot: Slot, doc: Control?, now: Instant, failFast: Boolean = false) = synchronized(slot) {
         val consumer = slot.consumer
         val processor = consumer.processor
         var operation = doc?.operation

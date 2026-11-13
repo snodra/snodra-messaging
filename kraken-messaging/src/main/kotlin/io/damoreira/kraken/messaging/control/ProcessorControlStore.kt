@@ -9,6 +9,10 @@ import com.mongodb.client.model.Updates
 import org.bson.Document
 import org.bson.conversions.Bson
 import org.springframework.data.mongodb.core.MongoTemplate
+import io.damoreira.kraken.messaging.store.ProcessorControlStore.Companion.KIND_RESET
+import io.damoreira.kraken.messaging.store.ProcessorControlStore.Control
+import io.damoreira.kraken.messaging.store.ProcessorControlStore.Lock
+import io.damoreira.kraken.messaging.store.ProcessorControlStore.Operation
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
@@ -24,31 +28,6 @@ open class ProcessorControlStore(
     private val mongo: MongoTemplate,
     private val clock: Clock = Clock.systemUTC(),
 ) {
-    /** The reset operation holding a processor's lock until [leaseUntil]. */
-    data class Operation(val id: String, val kind: String, val leaseUntil: Instant, val preparedAt: Instant) {
-        fun expired(now: Instant): Boolean = !leaseUntil.isAfter(now)
-    }
-
-    /** One processor's document. */
-    data class Control(
-        val processor: String,
-        val paused: Boolean = false,
-        val pausedAt: Instant? = null,
-        val pausedBy: String? = null,
-        val operation: Operation? = null,
-        val replay: List<ReplayRange> = emptyList(),
-        val updatedAt: Instant? = null,
-    )
-
-    /** What [lock] did. */
-    sealed interface Lock {
-        /** The lock is [op]'s now (it was free, expired, or already [op]'s). */
-        data object Taken : Lock
-
-        /** Another operation holds it. */
-        data class Held(val by: Operation?) : Lock
-    }
-
     private val collection: MongoCollection<Document> get() = mongo.db.getCollection(COLLECTION)
 
     /** The documents of [processors] that exist, by name. */
@@ -194,8 +173,5 @@ open class ProcessorControlStore(
 
         /** The idempotency markers' collection. */
         const val MARKERS = "processed_events"
-
-        /** `operation.kind` of a reset, the only kind so far. */
-        const val KIND_RESET = "reset"
     }
 }

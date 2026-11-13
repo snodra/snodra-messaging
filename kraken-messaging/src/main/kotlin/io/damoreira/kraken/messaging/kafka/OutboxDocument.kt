@@ -19,4 +19,7 @@ data class OutboxDocument(
     val attempts: Int = 0,
     /** Set when the document was given up on (non-retriable failure or `outbox.max-attempts`); excluded from relaying. */
     val failedAt: Instant? = null,
+    /** The relay holding the entry until [leaseUntil] (the message store's claim); absent = unclaimed. */
+    val owner: String? = null,
+    val leaseUntil: Instant? = null,
 )

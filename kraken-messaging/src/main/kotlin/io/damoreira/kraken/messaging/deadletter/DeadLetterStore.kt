@@ -9,6 +9,7 @@ import com.mongodb.client.model.Indexes
 import com.mongodb.client.model.Projections
 import com.mongodb.client.model.Sorts
 import com.mongodb.client.model.Updates
+import io.damoreira.kraken.messaging.store.DeadLetterStore.Summary
 import org.apache.kafka.clients.consumer.ConsumerRecord
 import org.bson.Document
 import org.bson.conversions.Bson
@@ -123,8 +124,6 @@ open class DeadLetterStore(
         collection.find(Filters.eq("processor", processor)).projection(Projections.include("key", "offset", "reason", "parkedAt"))
             .map { Summary(it.getString("_id"), it.getString("key"), (it["offset"] as Number).toLong(), DeadLetterReason.valueOf(it.getString("reason")), it.getDate("parkedAt").toInstant()) }
             .toList()
-
-    internal data class Summary(val id: String, val key: String?, val offset: Long, val reason: DeadLetterReason, val parkedAt: Instant)
 
     fun get(id: String): DeadLetter? = collection.find(Filters.eq("_id", id)).first()?.let { read(it) }
 

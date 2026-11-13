@@ -40,8 +40,8 @@ interface OutboxStore {
     /**
      * Up to [limit] entries not sent and not failed, in `(createdAt, seq)` order, that are free, already [owner]'s, or whose
      * lease passed; each is [owner]'s until [lease] from now. Two concurrent claims never return the same entry while its
-     * lease holds. A relay's next claim returns the entries it still holds first, so an entry whose send failed is retried
-     * before the later ones (order per key).
+     * lease holds. `(createdAt, seq)` is the only order: an entry [owner] still holds comes back in its place, so an entry whose
+     * send failed is retried before the later ones (order per key).
      */
     suspend fun claim(owner: String, lease: Duration, limit: Int): List<OutboxEntry>
 
