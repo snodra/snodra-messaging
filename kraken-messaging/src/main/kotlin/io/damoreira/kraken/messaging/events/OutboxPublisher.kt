@@ -72,14 +72,8 @@ class OutboxPublisher(
     /** Set by an append the outbox told of ([OutboxStore.onAppend]) while a poll ran: the next wait is skipped. */
     private var woken = false
 
-    init {
-        outbox.onAppend {
-            lock.withLock {
-                woken = true
-                wake.signalAll()
-            }
-        }
-    }
+    /** The registration with the outbox's appends while running ([start] to [stop]). */
+    private var listening: AutoCloseable? = null
 
     /**
      * Claims one batch and sends it sequentially; returns how many were sent. Stops at the first retriable failure, between
@@ -145,6 +139,12 @@ class OutboxPublisher(
             if (running) return
             running = true
             stopRequested = false
+            listening = outbox.onAppend {
+                lock.withLock {
+                    woken = true
+                    wake.signalAll()
+                }
+            }
             thread = Thread(::loop, "kraken-outbox-publisher").apply { isDaemon = true; start() }
         }
     }
@@ -176,6 +176,8 @@ class OutboxPublisher(
         val t = lock.withLock {
             running = false
             stopRequested = true
+            listening?.let { runCatching { it.close() } }
+            listening = null
             wake.signalAll()
             thread.also { thread = null }
         } ?: return

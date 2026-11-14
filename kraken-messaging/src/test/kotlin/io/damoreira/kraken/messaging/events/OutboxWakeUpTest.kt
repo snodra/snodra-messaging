@@ -8,6 +8,7 @@ import org.awaitility.Awaitility.await
 import org.junit.jupiter.api.Test
 import java.time.Duration
 import java.time.Instant
+import kotlin.test.assertEquals
 
 /** A store that tells of appends ([io.damoreira.kraken.messaging.store.OutboxStore.onAppend]) has them relayed at once, not at the next poll. */
 class OutboxWakeUpTest {
@@ -26,5 +27,19 @@ class OutboxWakeUpTest {
         } finally {
             relay.stop()
         }
+    }
+
+    @Test
+    fun aRelayListensForAppendsOnlyWhileItRuns() {
+        val store = MemoryMessageStore()
+        val relay = OutboxPublisher(store.outbox, MemoryEventStore(), "kraken.events", "orders", pollInterval = Duration.ofMinutes(10), batchSize = 100)
+        assertEquals(0, store.appendListenerCount(), "a relay that never started listens to nothing")
+        relay.start()
+        assertEquals(1, store.appendListenerCount())
+        relay.stop()
+        assertEquals(0, store.appendListenerCount(), "no listener outlives its relay")
+        relay.start()
+        relay.stop()
+        assertEquals(0, store.appendListenerCount(), "nor a restarted one")
     }
 }

@@ -148,7 +148,7 @@ internal class MemoryOutboxStore(private val store: MemoryMessageStore) : Outbox
         gone.size.toLong()
     }
 
-    override fun onAppend(wake: () -> Unit) = store.addAppendListener(wake)
+    override fun onAppend(wake: () -> Unit): AutoCloseable = store.addAppendListener(wake)
 
     private fun OutboxEntry.withAttempts(n: Int) = OutboxEntry(id, type, key, headers, payload, createdAt, seq, n)
 }

@@ -76,8 +76,9 @@ interface OutboxStore {
 
     /**
      * Registers [wake], called (on any thread, without blocking) after appended entries committed, by a store that can tell (the
-     * in-memory store at once; a database with notifications): the relay then claims at once instead of at its next poll. A store
-     * that cannot tell keeps this default and never calls it; the relay polls.
+     * in-memory store at once; a database with notifications): the relay then claims at once instead of at its next poll. Closing
+     * the handle returned unregisters it (the relay does when it stops). A store that cannot tell keeps this default and never
+     * calls it; the relay polls.
      */
-    fun onAppend(wake: () -> Unit) = Unit
+    fun onAppend(wake: () -> Unit): AutoCloseable = AutoCloseable {}
 }

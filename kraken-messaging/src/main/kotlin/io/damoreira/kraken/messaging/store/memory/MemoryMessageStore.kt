@@ -44,7 +44,7 @@ class MemoryMessageStore(internal val clock: Clock = Clock.systemUTC()) : Messag
 
     private val lock = Any()
     private var version = 0L
-    private val appendListeners = CopyOnWriteArrayList<() -> Unit>()
+    private val appendListeners = CopyOnWriteArrayList<AppendListener>()
 
     /** The key the [MemoryTransactionManager] binds this store's transaction under. */
     internal val transactionKey = Any()
@@ -90,13 +90,21 @@ class MemoryMessageStore(internal val clock: Clock = Clock.systemUTC()) : Messag
     /** [table] as the calling thread sees it: through its transaction when [joined] and one is bound, else as committed. */
     internal fun <V : Any> view(table: Table<V>, joined: Boolean): View<V> = View(table, if (joined) bound() else null, this)
 
-    internal fun addAppendListener(listener: () -> Unit) {
-        appendListeners += listener
+    /** Adds [listener] until the handle returned is closed. */
+    internal fun addAppendListener(listener: () -> Unit): AutoCloseable {
+        val registered = AppendListener(listener) // its own identity: one registration, one removal
+        appendListeners += registered
+        return AutoCloseable { appendListeners.remove(registered) }
     }
+
+    /** How many append listeners are registered (for tests). */
+    internal fun appendListenerCount(): Int = appendListeners.size
+
+    private class AppendListener(val wake: () -> Unit)
 
     /** An entry was appended and committed: wakes the relays up. */
     internal fun appended() {
-        for (listener in appendListeners) runCatching { listener() }
+        for (listener in appendListeners) runCatching { listener.wake() }
     }
 
     /**
