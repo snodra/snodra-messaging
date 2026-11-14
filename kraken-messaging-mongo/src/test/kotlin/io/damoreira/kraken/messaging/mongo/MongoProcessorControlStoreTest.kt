@@ -2,6 +2,7 @@ package io.damoreira.kraken.messaging.mongo
 
 import com.mongodb.client.MongoClients
 import io.damoreira.kraken.messaging.eventstore.ReplayRange
+import io.damoreira.kraken.messaging.store.ProcessedMarker
 import io.damoreira.kraken.messaging.store.ProcessorControlStore.Control
 import io.damoreira.kraken.messaging.store.ProcessorControlStore.Lock
 import io.damoreira.kraken.messaging.test.KrakenContainers
@@ -153,13 +154,13 @@ class MongoProcessorControlStoreTest {
             .append("processor", "default").append("topic", "kraken.events").append("partition", 0).append("offset", 4L))
         collection.insertOne(Document("_id", "processor:default:old-9").append("type", "t").append("processedAt", at)
             .append("processor", "default").append("topic", "kraken.events").append("partition", 0).append("offset", 9L))
-        val saga = io.damoreira.kraken.messaging.store.ProcessedMarker("saga:Order:e-1", "t", now)
-        val ingress = io.damoreira.kraken.messaging.store.ProcessedMarker("ingress:printer:k-1", "t", now)
-        val textual = io.damoreira.kraken.messaging.store.ProcessedMarker("processor:default:s-1", "t", now, "default", "orders-stream", "p-0", "a-5")
-        val decimal = io.damoreira.kraken.messaging.store.ProcessedMarker("processor:default:new-5", "t", now, "default", "kraken.events", "0", "5")
+        val saga = ProcessedMarker("saga:Order:e-1", "t", now)
+        val ingress = ProcessedMarker("ingress:printer:k-1", "t", now)
+        val textual = ProcessedMarker("processor:default:s-1", "t", now, "default", "orders-stream", "p-0", "a-5")
+        val decimal = ProcessedMarker("processor:default:new-5", "t", now, "default", "kraken.events", "0", "5")
         for (m in listOf(saga, ingress, textual, decimal)) assertTrue(markers.record(m))
         assertFalse(markers.record(saga), "a positionless marker dedupes")
-        assertFalse(markers.record(io.damoreira.kraken.messaging.store.ProcessedMarker("processor:default:old-4", "t", now)), "an old marker dedupes")
+        assertFalse(markers.record(ProcessedMarker("processor:default:old-4", "t", now)), "an old marker dedupes")
 
         val new = collection.find(Document("_id", decimal.id)).first()!!
         assertIs<Int>(new["partition"], "a decimal segment is written as before")

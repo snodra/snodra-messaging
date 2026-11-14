@@ -19,6 +19,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import org.slf4j.LoggerFactory
 import org.springframework.context.SmartLifecycle
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Reads the partner sources ([ExternalSourceProvider], one per source name: on Kafka `kraken.messaging.external.kafka.sources.<name>`
@@ -75,9 +76,22 @@ class ExternalSources(
         }
     }
 
+    /** Readers that outlived their [stop] (a handler still running); [start] waits for them rather than run a second reader. */
+    private val lingering = ArrayList<Thread>()
+
+    /** The sources whose reader an Error ended: they read nothing until the next [start]. */
+    private val stopped = ConcurrentHashMap.newKeySet<String>()
+
+    /** The sources whose reader an Error ended (logged at error): nothing reads them until the sources are started again. */
+    fun stoppedSources(): Set<String> = stopped.toSet()
+
     @Synchronized
     override fun start() {
         if (running) return
+        lingering.forEach { it.join(STOP_JOIN_MS) }
+        lingering.removeIf { !it.isAlive }
+        check(lingering.isEmpty()) { "external sources cannot start: a previous reader is still running a handler" }
+        stopped.clear()
         for ((name, provider) in sources) {
             val job = Job()
             val thread = Thread({ read(name, provider, job) }, "kraken-external-$name").apply {
@@ -96,6 +110,7 @@ class ExternalSources(
         running = false
         readers.values.forEach { it.first.cancel() }
         readers.values.forEach { it.second.join(STOP_JOIN_MS) }
+        lingering += readers.values.map { it.second }.filter { it.isAlive }
         readers.clear()
     }
 
@@ -118,7 +133,8 @@ class ExternalSources(
         } catch (_: CancellationException) {
             // stopped
         } catch (e: Throwable) {
-            log.error("External source {} stopped reading: {}", name, e.toString(), e)
+            stopped += name
+            log.error("External source {} stopped reading until the sources are started again: {}", name, e.toString(), e)
         }
     }
 

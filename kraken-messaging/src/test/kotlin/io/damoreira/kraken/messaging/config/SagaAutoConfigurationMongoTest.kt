@@ -1,19 +1,20 @@
 package io.damoreira.kraken.messaging.config
 
-import io.damoreira.kraken.messaging.EXTERNAL_CALLS
-import io.damoreira.kraken.messaging.SAGAS
-import io.damoreira.kraken.messaging.mongo.MongoMessageStoreAutoConfiguration
-import io.damoreira.kraken.messaging.SAGA_DISPATCH
-import io.damoreira.kraken.messaging.saga.stateDoc
 import com.mongodb.client.MongoClients
+import io.damoreira.kraken.messaging.EXTERNAL_CALLS
 import io.damoreira.kraken.messaging.MessageContext
+import io.damoreira.kraken.messaging.SAGAS
+import io.damoreira.kraken.messaging.SAGA_DISPATCH
 import io.damoreira.kraken.messaging.config.e2escan.E2eCounter
 import io.damoreira.kraken.messaging.config.e2escan.E2ePrintAdapter
 import io.damoreira.kraken.messaging.config.e2escan.E2eScanConfig
 import io.damoreira.kraken.messaging.config.e2escan.E2eStarted
 import io.damoreira.kraken.messaging.events.LocalEventDispatcher
+import io.damoreira.kraken.messaging.kafka.KafkaEventStoreAutoConfiguration
+import io.damoreira.kraken.messaging.mongo.MongoMessageStoreAutoConfiguration
 import io.damoreira.kraken.messaging.saga.SagaDispatchDocument
 import io.damoreira.kraken.messaging.saga.SagaDocument
+import io.damoreira.kraken.messaging.saga.stateDoc
 import io.damoreira.kraken.messaging.test.KrakenContainers
 import org.awaitility.Awaitility.await
 import org.junit.jupiter.api.AfterAll
@@ -63,7 +64,7 @@ class SagaAutoConfigurationMongoTest {
                     KrakenMessagingAutoConfiguration::class.java, HubAutoConfiguration::class.java, EventsAutoConfiguration::class.java,
                     SagaAutoConfiguration::class.java, ExternalAutoConfiguration::class.java, SagaMetricsAutoConfiguration::class.java,
                     MongoMessageStoreAutoConfiguration::class.java, TransactionAutoConfiguration::class.java,
-                    io.damoreira.kraken.messaging.kafka.KafkaEventStoreAutoConfiguration::class.java, // sagas need an event store
+                    KafkaEventStoreAutoConfiguration::class.java, // sagas need an event store
                 ),
             )
             .withUserConfiguration(E2eScanConfig::class.java)

@@ -21,6 +21,7 @@ import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.ConcurrentSkipListMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
@@ -86,7 +87,7 @@ internal class KafkaSubscription private constructor(
     @Volatile private var failure: Throwable? = null
 
     /** The latest trouble recovered from since the last [takeError] (a commit or a committed-offset read that failed). */
-    private val recovered = java.util.concurrent.atomic.AtomicReference<String?>(null)
+    private val recovered = AtomicReference<String?>(null)
     private val finished = CompletableDeferred<Unit>()
     private lateinit var thread: Thread
     private var nextRefresh = 0L

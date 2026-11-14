@@ -2,14 +2,15 @@ package io.damoreira.kraken.messaging.config
 
 import io.damoreira.kraken.messaging.codec.JsonCodec
 import io.damoreira.kraken.messaging.codec.MessageTypeResolver
+import io.damoreira.kraken.messaging.events.LocalEventDispatcher
 import io.damoreira.kraken.messaging.external.ExternalCallSettings
 import io.damoreira.kraken.messaging.external.ExternalEventIngress
 import io.damoreira.kraken.messaging.external.ExternalRecordTranslator
+import io.damoreira.kraken.messaging.external.ExternalSourceProvider
 import io.damoreira.kraken.messaging.external.ExternalSourceProviders
 import io.damoreira.kraken.messaging.external.ExternalSources
 import io.damoreira.kraken.messaging.external.IdempotencyInterceptor
 import io.damoreira.kraken.messaging.external.WebhookSignatureVerifier
-import io.damoreira.kraken.messaging.events.LocalEventDispatcher
 import io.damoreira.kraken.messaging.saga.NoopSagaMetrics
 import io.damoreira.kraken.messaging.saga.SagaMetrics
 import io.damoreira.kraken.messaging.store.MessageStore
@@ -66,7 +67,7 @@ class ExternalAutoConfiguration {
         codec: JsonCodec,
         typeResolver: MessageTypeResolver,
     ): ExternalSources {
-        val sources = LinkedHashMap<String, io.damoreira.kraken.messaging.external.ExternalSourceProvider>()
+        val sources = LinkedHashMap<String, ExternalSourceProvider>()
         for ((name, provider) in providers.flatMap { it.providers().entries }) {
             check(sources.put(name, provider) == null) { "external source '$name' is configured twice: source names must be unique" }
         }

@@ -6,17 +6,18 @@ import io.damoreira.kraken.messaging.config.idemscan.IdemBeanConfig
 import io.damoreira.kraken.messaging.config.idemscan.IdemScanConfig
 import io.damoreira.kraken.messaging.config.sagascan.SagaScanConfig
 import io.damoreira.kraken.messaging.deadline.DeadlineScheduler
+import io.damoreira.kraken.messaging.events.EventConsumer
+import io.damoreira.kraken.messaging.events.LocalEventDispatcher
 import io.damoreira.kraken.messaging.external.ExternalEventIngress
-import io.damoreira.kraken.messaging.external.ExternalSources
-import io.damoreira.kraken.messaging.kafka.KafkaEventStoreAutoConfiguration
-import io.damoreira.kraken.messaging.kafka.KafkaExternalSource
 import io.damoreira.kraken.messaging.external.ExternalRecordTranslator
+import io.damoreira.kraken.messaging.external.ExternalSourceProviders
+import io.damoreira.kraken.messaging.external.ExternalSources
 import io.damoreira.kraken.messaging.external.IdempotencyInterceptor
 import io.damoreira.kraken.messaging.external.WebhookSignatureVerifier
 import io.damoreira.kraken.messaging.handler.HandlerInvoker
 import io.damoreira.kraken.messaging.hub.HubBus
-import io.damoreira.kraken.messaging.events.EventConsumer
-import io.damoreira.kraken.messaging.events.LocalEventDispatcher
+import io.damoreira.kraken.messaging.kafka.KafkaEventStoreAutoConfiguration
+import io.damoreira.kraken.messaging.kafka.KafkaExternalSource
 import io.damoreira.kraken.messaging.saga.LocalRawCommandSender
 import io.damoreira.kraken.messaging.saga.MicrometerSagaMetrics
 import io.damoreira.kraken.messaging.saga.NoopSagaMetrics
@@ -195,7 +196,7 @@ class SagaAutoConfigurationTest {
         ).withBean("printer", ExternalRecordTranslator::class.java, { ExternalRecordTranslator { null } }).run { context ->
             assertEquals(null, context.startupFailure)
             assertNotNull(context.getBean(ExternalSources::class.java))
-            val provider = context.getBean(io.damoreira.kraken.messaging.external.ExternalSourceProviders::class.java).providers().getValue("printer")
+            val provider = context.getBean(ExternalSourceProviders::class.java).providers().getValue("printer")
             assertIs<KafkaExternalSource>(provider)
             assertEquals("orders.external.printer", provider.subscription)
             assertEquals("printer.events", provider.source)

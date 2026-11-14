@@ -1,21 +1,31 @@
 package io.damoreira.kraken.messaging.events
 
 import io.damoreira.kraken.hub.v1.ProcessorState
+import io.damoreira.kraken.messaging.codec.JsonCodec
 import io.damoreira.kraken.messaging.codec.MessageTypeResolver
 import io.damoreira.kraken.messaging.eventstore.Capability
 import io.damoreira.kraken.messaging.eventstore.EventStoreException
 import io.damoreira.kraken.messaging.eventstore.Subscription
 import io.damoreira.kraken.messaging.eventstore.SubscriptionSpec
+import io.damoreira.kraken.messaging.fixtures.Happened
+import io.damoreira.kraken.messaging.handler.EventHandler
 import io.damoreira.kraken.messaging.handler.HandlerInvoker
 import io.damoreira.kraken.messaging.handler.HandlerRegistry
 import io.damoreira.kraken.messaging.store.MessageStore
+import io.mockk.coEvery
 import io.mockk.mockk
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import org.awaitility.Awaitility.await
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Test
 import java.time.Duration
+import java.time.Instant
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
@@ -26,7 +36,7 @@ import kotlin.test.assertTrue
  */
 class EventConsumerSubscriptionTest {
     private val registry = HandlerRegistry(MessageTypeResolver("test")).also { it.register(RecordingHandlers()) }
-    private val dispatcher = LocalEventDispatcher(registry, HandlerInvoker(registry, io.damoreira.kraken.messaging.codec.JsonCodec()), mockk<MessageStore>(relaxed = true))
+    private val dispatcher = LocalEventDispatcher(registry, HandlerInvoker(registry, JsonCodec()), mockk<MessageStore>(relaxed = true))
     private var consumer: EventConsumer? = null
 
     @AfterEach fun tearDown() {
@@ -152,12 +162,130 @@ class EventConsumerSubscriptionTest {
                 n++
                 when (n) {
                     1, 2 -> Resubscribe.Ended.Failed(EventStoreException.Failed("quick"), delivered = false)
-                    3 -> { kotlinx.coroutines.delay(80); Resubscribe.Ended.Failed(EventStoreException.Failed("lived"), delivered = false) }
+                    3 -> { delay(80); Resubscribe.Ended.Failed(EventStoreException.Failed("lived"), delivered = false) }
                     else -> Resubscribe.Ended.Stopped
                 }
             },
             failed = { _, wait -> stable += wait },
         )
         assertEquals(listOf(10L, 20L, 10L), stable.map { it.toMillis() })
+    }
+
+    /** A message store whose markers always record (the handlers run) and whose transactions do nothing. */
+    private fun markingStore(): MessageStore = mockk(relaxed = true) {
+        coEvery { processedEvents.record(any()) } returns true
+    }
+
+    private fun happened(id: String): ByteArray = JsonCodec().encode(Happened(id, Instant.EPOCH))
+
+    @Test
+    fun aStopDuringSubscribeClosesTheSubscriptionItBuilt() {
+        val events = ScriptedEventStore()
+        events.subscribeGate = CompletableDeferred()
+        val c = start(events)
+        await().atMost(Duration.ofSeconds(10)).until { events.subscriptions.size == 1 } // built, subscribe() not returned yet
+        val stopped = CompletableFuture.runAsync { c.stop() }
+        Thread.sleep(200) // the stop is waiting for the subscribe in flight
+        events.subscribeGate!!.complete(Unit)
+        stopped.get(5, TimeUnit.SECONDS)
+        assertTrue(events.subscriptions.single().closed, "the subscription built while the processor stopped is closed, not left in its group")
+    }
+
+    @Test
+    fun aRecordWhoseDeadLetterCouldNotBeWrittenRunsItsHandlersAgainAfterAResubscribe() {
+        val events = ScriptedEventStore(capabilities = setOf(Capability.LAG, Capability.NATIVE_DEAD_LETTER))
+        val handlers = RecordingHandlers().also { it.failAlways.set("p-1") }
+        val registry = HandlerRegistry(MessageTypeResolver("test")).also { it.register(handlers) }
+        val dispatcher = LocalEventDispatcher(registry, HandlerInvoker(registry, JsonCodec()), markingStore())
+        consumer = EventConsumer(
+            events, SubscriptionSpec("svc.default", "kraken.events"), dispatcher, maxAttempts = 1, backOffMs = 50,
+            deadLetters = DeadLetterSink.EventStore(events), resubscribe = { Resubscribe(min = Duration.ofMillis(50)) },
+        ).also { it.start() }
+        events.failPublish = true
+        awaitSubscriptions(events, 1)
+        val first = events.subscriptions[0]
+        first.assign("0")
+        first.deliver("0", "0", "test.Happened", id = "p-1", payload = happened("p-1"))
+        await().atMost(Duration.ofSeconds(10)).until { first.redelivered.isNotEmpty() }
+        assertEquals(1, handlers.seen.size)
+
+        first.fail("the consumer cannot go on")
+        awaitSubscriptions(events, 2)
+        events.failPublish = false
+        val second = events.subscriptions[1]
+        second.assign("0")
+        second.deliver("0", "0", "test.Happened", id = "p-1", payload = happened("p-1"))
+        await().atMost(Duration.ofSeconds(10)).until { second.acks == listOf("0" to "0") }
+        assertEquals(2, handlers.seen.size, "a new subscription starts afresh: the handlers run again, as on another instance")
+        assertEquals(listOf("kraken.events.dlt"), events.published.map { it.source })
+    }
+
+    @Test
+    fun aReaderEndedByAnErrorShowsStoppedWithWhy() {
+        val events = ScriptedEventStore()
+        val c = start(events)
+        awaitSubscriptions(events, 1)
+        val sub = events.subscriptions[0]
+        sub.assign("0")
+        await().atMost(Duration.ofSeconds(10)).until { c.status().state == ProcessorState.PROCESSOR_RUNNING }
+        sub.failWith(StackOverflowError("deep"))
+        await().atMost(Duration.ofSeconds(10)).until { c.status().state == ProcessorState.PROCESSOR_STOPPED }
+        assertEquals("reader stopped: StackOverflowError: deep", c.status().lastError)
+        assertTrue(sub.closed)
+    }
+
+    /** A handler that waits until released. */
+    class BlockingHandlers {
+        val release = CountDownLatch(1)
+        val seen = CopyOnWriteArrayList<String>()
+        @EventHandler fun on(event: Happened) {
+            seen += event.id
+            release.await(30, TimeUnit.SECONDS)
+        }
+    }
+
+    @Test
+    fun aStopThatTimesOutNeverLetsASecondReaderStartBesideTheFirst() {
+        val events = ScriptedEventStore()
+        val handlers = BlockingHandlers()
+        val registry = HandlerRegistry(MessageTypeResolver("test")).also { it.register(handlers) }
+        val dispatcher = LocalEventDispatcher(registry, HandlerInvoker(registry, JsonCodec()), markingStore())
+        val c = EventConsumer(
+            events, SubscriptionSpec("svc.default", "kraken.events"), dispatcher, maxAttempts = 1, stopTimeout = Duration.ofMillis(300),
+        ).also { consumer = it; it.start() }
+        awaitSubscriptions(events, 1)
+        events.subscriptions[0].assign("0")
+        events.subscriptions[0].deliver("0", "0", "test.Happened", id = "b-1", payload = happened("b-1"))
+        await().atMost(Duration.ofSeconds(10)).until { handlers.seen.size == 1 }
+
+        val began = System.nanoTime()
+        c.stop()
+        assertTrue(Duration.ofNanos(System.nanoTime() - began) < Duration.ofSeconds(3), "the stop gave up after its timeout")
+        assertTrue(runCatching { c.start() }.exceptionOrNull() is IllegalStateException, "no second reader while the first runs a handler")
+        assertEquals(1, events.subscriptions.size)
+        assertTrue(!c.isRunning)
+
+        handlers.release.countDown()
+        await().atMost(Duration.ofSeconds(10)).until { events.subscriptions[0].closed }
+        c.start()
+        awaitSubscriptions(events, 2)
+    }
+
+    @Test
+    fun aDeliveryHandedBackBecauseOfAPauseDoesNotResetTheBackoff() {
+        val events = ScriptedEventStore()
+        val c = start(events) { Resubscribe(min = Duration.ofMillis(300), max = Duration.ofSeconds(5)) }
+        c.pause()
+        for (n in 1..2) {
+            awaitSubscriptions(events, n)
+            val sub = events.subscriptions[n - 1]
+            sub.assign("0")
+            sub.deliver("0", "$n", "test.Other")
+            await().atMost(Duration.ofSeconds(10)).until { sub.redelivered.isNotEmpty() }
+            sub.fail("broken $n")
+        }
+        awaitSubscriptions(events, 3)
+        val second = Duration.ofNanos(events.subscribedAt[2] - events.subscribedAt[1])
+        assertTrue(second >= Duration.ofMillis(550), "the wait doubled (300 ms, then 600 ms): $second")
     }
 }

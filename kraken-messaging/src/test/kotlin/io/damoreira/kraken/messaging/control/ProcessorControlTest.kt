@@ -1,8 +1,8 @@
 package io.damoreira.kraken.messaging.control
 
+import io.damoreira.kraken.hub.v1.ControlRefusal
 import io.damoreira.kraken.hub.v1.ControlReply
 import io.damoreira.kraken.hub.v1.ControlRequest
-import io.damoreira.kraken.hub.v1.ControlRefusal
 import io.damoreira.kraken.hub.v1.DeadLetterDiscard
 import io.damoreira.kraken.hub.v1.DeadLetterList
 import io.damoreira.kraken.hub.v1.DeadLetterRetry
@@ -13,26 +13,29 @@ import io.damoreira.kraken.hub.v1.ProcessorState
 import io.damoreira.kraken.hub.v1.ProcessorStatus
 import io.damoreira.kraken.hub.v1.ResetExecute
 import io.damoreira.kraken.hub.v1.ResetFinish
+import io.damoreira.kraken.hub.v1.ResetOutcome
 import io.damoreira.kraken.hub.v1.ResetPrepare
-import io.damoreira.kraken.hub.v1.ResetTarget as WireTarget
 import io.damoreira.kraken.hub.v1.SegmentPosition
 import io.damoreira.kraken.hub.v1.SegmentPositions
+import io.damoreira.kraken.messaging.DEAD_LETTERS
+import io.damoreira.kraken.messaging.MessageContext
+import io.damoreira.kraken.messaging.PROCESSOR_CONTROL
+import io.damoreira.kraken.messaging.codec.MessageTypeResolver
+import io.damoreira.kraken.messaging.deadletter.DeadLetterFactory
+import io.damoreira.kraken.messaging.deadletter.DeadLetterMode
+import io.damoreira.kraken.messaging.deadletter.DeadLetters
+import io.damoreira.kraken.messaging.events.DeadLetterSink
+import io.damoreira.kraken.messaging.events.EventConsumer
+import io.damoreira.kraken.messaging.events.EventProcessors
+import io.damoreira.kraken.messaging.events.KafkaMongoSupport
+import io.damoreira.kraken.messaging.events.LocalEventDispatcher
 import io.damoreira.kraken.messaging.eventstore.Capability
 import io.damoreira.kraken.messaging.eventstore.EventStore
 import io.damoreira.kraken.messaging.eventstore.EventStoreException
-import io.damoreira.kraken.messaging.eventstore.SubscriptionAdmin
-import io.damoreira.kraken.messaging.eventstore.SubscriptionSpec
-import io.damoreira.kraken.messaging.MessageContext
-import io.damoreira.kraken.messaging.codec.MessageTypeResolver
-import io.damoreira.kraken.messaging.deadletter.DeadLetterMode
-import io.damoreira.kraken.messaging.DEAD_LETTERS
-import io.damoreira.kraken.messaging.PROCESSOR_CONTROL
-import io.damoreira.kraken.messaging.deadletter.DeadLetterFactory
 import io.damoreira.kraken.messaging.eventstore.ReplayRange
 import io.damoreira.kraken.messaging.eventstore.ResetTarget
-import io.damoreira.kraken.messaging.store.DeadLetterStore
-import kotlinx.coroutines.runBlocking
-import io.damoreira.kraken.messaging.deadletter.DeadLetters
+import io.damoreira.kraken.messaging.eventstore.SubscriptionAdmin
+import io.damoreira.kraken.messaging.eventstore.SubscriptionSpec
 import io.damoreira.kraken.messaging.fixtures.Happened
 import io.damoreira.kraken.messaging.handler.DisallowReplay
 import io.damoreira.kraken.messaging.handler.EventHandler
@@ -41,12 +44,9 @@ import io.damoreira.kraken.messaging.handler.HandlerRegistry
 import io.damoreira.kraken.messaging.handler.ProcessingGroup
 import io.damoreira.kraken.messaging.handler.Processors
 import io.damoreira.kraken.messaging.handler.ResetHandler
-import io.damoreira.kraken.messaging.events.DeadLetterSink
-import io.damoreira.kraken.messaging.events.EventConsumer
-import io.damoreira.kraken.messaging.events.EventProcessors
-import io.damoreira.kraken.messaging.events.KafkaMongoSupport
-import io.damoreira.kraken.messaging.events.LocalEventDispatcher
 import io.damoreira.kraken.messaging.saga.SagaStage
+import io.damoreira.kraken.messaging.store.DeadLetterStore
+import kotlinx.coroutines.runBlocking
 import org.awaitility.Awaitility.await
 import org.bson.Document
 import org.junit.jupiter.api.AfterAll
@@ -66,6 +66,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import io.damoreira.kraken.hub.v1.ResetTarget as WireTarget
 
 class ReplayedProjection {
     val seen = CopyOnWriteArrayList<String>()
@@ -220,7 +221,7 @@ class ProcessorControlTest {
         SegmentPositions.newBuilder().addAllPositions(o.map { SegmentPosition.newBuilder().setSegment(it.first.toString()).setPosition(it.second.toString()).build() }),
     ).build()
 
-    private fun io.damoreira.kraken.hub.v1.ResetOutcome.triples() = rangesList.map { Triple(it.segment.toInt(), it.from.toLong(), it.until.toLong()) }
+    private fun ResetOutcome.triples() = rangesList.map { Triple(it.segment.toInt(), it.from.toLong(), it.until.toLong()) }
 
     private fun members(group: String = defaultGroup): Int = support.admin().use {
         try {

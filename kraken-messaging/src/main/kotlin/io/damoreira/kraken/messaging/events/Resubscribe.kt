@@ -12,7 +12,8 @@ import java.time.Duration
  * until it stops or the subscription fails ([io.damoreira.kraken.messaging.eventstore.EventStoreException.Failed] from `next`
  * ends a subscription), closes it, and subscribes again after a backoff: [min] doubling up to [max] while the subscriptions keep
  * failing before they delivered anything; it starts again from [min] after a subscription that delivered an event or lived
- * [stable] (an assignment alone does not count). Stops when the calling coroutine is cancelled.
+ * [stable] (an assignment alone does not count). Stops when the calling coroutine is cancelled; a subscribe in flight then
+ * completes, and the subscription it returns is closed.
  */
 class Resubscribe(
     private val min: Duration = MIN,
@@ -40,20 +41,21 @@ class Resubscribe(
         var wait = min
         while (true) {
             val started = System.nanoTime()
+            var subscription: Subscription? = null
             val ended: Ended.Failed = try {
-                val subscription = subscribe()
-                try {
-                    when (val end = read(subscription)) {
-                        Ended.Stopped -> return
-                        is Ended.Failed -> end
-                    }
-                } finally {
-                    withContext(NonCancellable) { runCatching { subscription.close() } }
+                // Not cancellable: a subscription built while the reader was stopped is still closed below (the stop surfaces
+                // at the first next()), never left behind holding its segments.
+                withContext(NonCancellable) { subscription = subscribe() }
+                when (val end = read(subscription!!)) {
+                    Ended.Stopped -> return
+                    is Ended.Failed -> end
                 }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 Ended.Failed(e, delivered = false)
+            } finally {
+                subscription?.let { withContext(NonCancellable) { runCatching { it.close() } } }
             }
             if (ended.delivered || Duration.ofNanos(System.nanoTime() - started) >= stable) wait = min
             failed(ended.error, wait)

@@ -106,7 +106,7 @@
     {
       "name": "kraken.messaging.service-name",
       "type": "java.lang.String",
-      "description": "Logical service name: Kafka consumer group, event source and hub registration name. Required.",
+      "description": "Logical service name: the prefix of the processors' subscriptions, event source and hub registration name. Required.",
       "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties"
     },
     {
@@ -366,7 +366,7 @@
     {
       "name": "kraken.messaging.outbox.enabled",
       "type": "java.lang.Boolean",
-      "description": "Run the outbox publisher that relays the outbox collection to Kafka.",
+      "description": "Run the outbox publisher that relays the outbox entries to the event store.",
       "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Outbox",
       "defaultValue": true
     },

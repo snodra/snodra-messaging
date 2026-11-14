@@ -101,6 +101,8 @@ class EventConsumer(
     private val clock: Clock = Clock.systemUTC(),
     private val metrics: MessagingMetrics = NoopMessagingMetrics,
     private val resubscribe: () -> Resubscribe = { Resubscribe() },
+    /** How long [stop] waits for the record in hand to finish and the subscription to close. */
+    private val stopTimeout: Duration = Duration.ofSeconds(30),
 ) : SmartLifecycle {
     private val log = LoggerFactory.getLogger(EventConsumer::class.java)
     private val running = AtomicBoolean(false)
@@ -133,6 +135,9 @@ class EventConsumer(
     @Volatile private var lastErrorAtMs = 0L
     @Volatile private var failingSinceMs = 0L
     @Volatile private var deadLetterCount = 0L
+
+    /** An Error ended the reader thread: nothing reads until the next [start]. */
+    @Volatile private var readerDied = false
     private val parkedSinceSample = AtomicBoolean(true)
 
     // --- processor thread only ---
@@ -142,9 +147,21 @@ class EventConsumer(
 
     private val store: DeadLetterStore? = (deadLetters as? DeadLetterSink.Collection)?.store
 
+    /**
+     * Starts reading. A reader that outlived its [stop] (a handler still running after [stopTimeout]) is waited for up to
+     * [stopTimeout] more; while it runs no second reader starts beside it ([IllegalStateException]: the caller tries again).
+     */
     @Synchronized
     override fun start() {
         if (running.get()) return
+        thread?.let { previous ->
+            previous.join(stopTimeout.toMillis())
+            check(!previous.isAlive) {
+                "event processor $processor cannot start: its previous reader is still running a handler; not starting a second one beside it"
+            }
+        }
+        thread = null
+        readerDied = false
         assignedOnce = false
         rebalancing = false
         started = true
@@ -214,13 +231,16 @@ class EventConsumer(
     override fun stop() {
         if (!running.compareAndSet(true, false)) return
         job?.cancel()
-        val reader = thread
-        if (reader != null && reader !== Thread.currentThread()) {
-            reader.join(STOP_JOIN_MS)
-            if (reader.isAlive) log.warn("Event processor {} did not stop within {} ms: a handler is still running", processor, STOP_JOIN_MS)
+        job = null
+        val reader = thread ?: return
+        if (reader !== Thread.currentThread()) {
+            reader.join(stopTimeout.toMillis())
+            if (reader.isAlive) {
+                log.warn("Event processor {} did not stop within {}: a handler is still running", processor, stopTimeout)
+                return // kept: start() waits for it rather than run a second reader beside it
+            }
         }
         thread = null
-        job = null
     }
 
     override fun isRunning(): Boolean = running.get()
@@ -248,7 +268,11 @@ class EventConsumer(
                             readSubscription(sub)
                         } finally {
                             synchronized(pauseLock) { current = null }
-                            forget(parkedKeys.keys.toList() + keysUnknown)
+                            // What this subscription held is gone with it: the next one starts afresh (a record whose letter
+                            // could not be written runs its handlers again, as on another instance).
+                            parkedKeys.clear()
+                            keysUnknown.clear()
+                            pending.clear()
                             rebalancing = true // STARTING until the next subscription's assignment
                         }
                     },
@@ -261,7 +285,10 @@ class EventConsumer(
         } catch (_: CancellationException) {
             // stopped
         } catch (e: Throwable) {
-            log.error("Event processor {} stopped reading: {}", processor, e.toString(), e)
+            // An Error ended the reader: the status says STOPPED with why, never RUNNING while nothing reads.
+            failing("reader stopped: ${e::class.java.simpleName.ifEmpty { e::class.java.name }}: ${e.message ?: ""}")
+            readerDied = true
+            log.error("Event processor {} stopped reading until it is started again: {}", processor, e.toString(), e)
         }
     }
 
@@ -292,12 +319,13 @@ class EventConsumer(
                     forget(segments)
                 }
                 is Delivery -> {
-                    delivered = true
                     if (pauseRequested) {
-                        // Paused after the subscription handed it out: not handled, handed out again on the resume.
+                        // Paused after the subscription handed it out: not handled, handed out again on the resume (and no
+                        // delivery as far as the backoff goes).
                         sub.redeliver(event.segment, event.position)
                         continue
                     }
+                    delivered = true
                     try {
                         handle(sub, event)
                     } catch (e: Exception) {
@@ -608,7 +636,7 @@ class EventConsumer(
         sub?.takeError()?.let(::failing)
         val now = clock.millis()
         val state = when {
-            !running.get() -> ProcessorState.PROCESSOR_STOPPED
+            !running.get() || readerDied -> ProcessorState.PROCESSOR_STOPPED
             pauseRequested -> ProcessorState.PROCESSOR_PAUSED
             failingSinceMs != 0L && now - failingSinceMs < FAILING_WINDOW_MS -> ProcessorState.PROCESSOR_FAILING
             !assignedOnce || rebalancing -> ProcessorState.PROCESSOR_STARTING
@@ -679,9 +707,6 @@ class EventConsumer(
 
         /** The most capabilities a status lists (hub.proto bounds). */
         const val MAX_CAPABILITIES = 16
-
-        /** How long [stop] waits for the record in hand to finish and the subscription to close. */
-        private const val STOP_JOIN_MS = 30_000L
 
         const val DLT_PROCESSOR = "kraken-dlt-processor"
         const val DLT_REASON = "kraken-dlt-reason"

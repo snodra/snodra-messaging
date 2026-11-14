@@ -11,6 +11,7 @@ import io.damoreira.kraken.messaging.eventstore.Subscription
 import io.damoreira.kraken.messaging.eventstore.SubscriptionAdmin
 import io.damoreira.kraken.messaging.eventstore.SubscriptionEvent
 import io.damoreira.kraken.messaging.eventstore.SubscriptionSpec
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.channels.Channel
 import java.util.concurrent.ConcurrentSkipListMap
 import java.util.concurrent.CopyOnWriteArrayList
@@ -33,12 +34,27 @@ class ScriptedEventStore(
     /** How many of the next [subscribe] calls fail. */
     val failSubscribe = AtomicInteger(0)
 
-    override suspend fun publish(event: OutgoingEvent) = Unit
+    /**
+     * When set, [subscribe] builds the subscription and then waits for it before returning: a naive implementation, cancellable
+     * after it built one (what the core must close all the same).
+     */
+    @Volatile var subscribeGate: CompletableDeferred<Unit>? = null
+
+    /** The events published; while [failPublish] is set, a publish fails. */
+    val published = CopyOnWriteArrayList<OutgoingEvent>()
+    @Volatile var failPublish = false
+
+    override suspend fun publish(event: OutgoingEvent) {
+        if (failPublish) throw EventStoreException.Failed("cannot reach the event store")
+        published += event
+    }
 
     override suspend fun subscribe(spec: SubscriptionSpec): Subscription {
         subscribedAt += System.nanoTime()
         if (failSubscribe.getAndDecrement() > 0) throw EventStoreException.Failed("cannot reach the event store")
-        return Scripted(spec).also { subscriptions += it }
+        val built = Scripted(spec).also { subscriptions += it }
+        subscribeGate?.await()
+        return built
     }
 
     override fun admin(spec: SubscriptionSpec): SubscriptionAdmin = throw EventStoreException.Unsupported(Capability.REPLAY)
@@ -63,8 +79,13 @@ class ScriptedEventStore(
 
         fun assign(vararg segments: String) = send(SubscriptionEvent.Assigned(segments.toList()))
 
-        fun deliver(segment: String, position: String, type: String, id: String = "e-$position") =
-            send(Delivery(segment, position, "k", mapOf("type" to type, "id" to id), "{}".toByteArray(), 0L))
+        fun deliver(segment: String, position: String, type: String, id: String = "e-$position", payload: ByteArray = "{}".toByteArray()) =
+            send(Delivery(segment, position, "k", mapOf("type" to type, "id" to id), payload, 0L))
+
+        /** After what was sent before, [next] throws [error] (not an event-store failure: the reader's own end). */
+        fun failWith(error: Error) {
+            events.trySend(error)
+        }
 
         /** After what was sent before, [next] fails with [why], then every later call too. */
         fun fail(why: String) {
@@ -78,6 +99,7 @@ class ScriptedEventStore(
                     failure.set(item)
                     throw item
                 }
+                is Error -> throw item
                 is SubscriptionEvent.Assigned -> item.also { it.segments.forEach { s -> assigned[s] = SegmentStatus(s) } }
                 is SubscriptionEvent.Revoked -> item.also { it.segments.forEach { s -> assigned.remove(s) } }
                 else -> item as SubscriptionEvent

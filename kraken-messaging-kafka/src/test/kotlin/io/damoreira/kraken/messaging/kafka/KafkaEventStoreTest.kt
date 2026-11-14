@@ -5,6 +5,11 @@ import io.damoreira.kraken.messaging.eventstore.Capability
 import io.damoreira.kraken.messaging.eventstore.EventStore
 import io.damoreira.kraken.messaging.eventstore.EventStoreException
 import io.damoreira.kraken.messaging.eventstore.SegmentOrder
+import org.apache.kafka.common.errors.InvalidTopicException
+import org.apache.kafka.common.errors.RecordTooLargeException
+import org.apache.kafka.common.errors.SerializationException
+import org.apache.kafka.common.errors.TimeoutException
+import org.apache.kafka.common.errors.TopicAuthorizationException
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -87,12 +92,12 @@ class KafkaEventStoreTest {
     @Test
     fun `a failure no retry can fix is rejected, others failed`() {
         for (e in listOf(
-            org.apache.kafka.common.errors.RecordTooLargeException("too large"),
-            org.apache.kafka.common.errors.TopicAuthorizationException("not allowed"),
-            org.apache.kafka.common.errors.InvalidTopicException("bad name"),
-            RuntimeException("wrapped", org.apache.kafka.common.errors.SerializationException("bad")),
+            RecordTooLargeException("too large"),
+            TopicAuthorizationException("not allowed"),
+            InvalidTopicException("bad name"),
+            RuntimeException("wrapped", SerializationException("bad")),
         )) assertTrue(KafkaEventStore.rejected(e), e.toString())
-        for (e in listOf(org.apache.kafka.common.errors.TimeoutException("broker down"), IllegalStateException("closed"))) {
+        for (e in listOf(TimeoutException("broker down"), IllegalStateException("closed"))) {
             assertTrue(!KafkaEventStore.rejected(e), e.toString())
         }
     }

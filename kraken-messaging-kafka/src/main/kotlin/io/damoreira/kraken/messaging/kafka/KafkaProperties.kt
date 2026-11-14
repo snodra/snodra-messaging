@@ -13,7 +13,9 @@ data class KafkaProperties(
     /**
      * Kafka client properties added to the producer's, the consumers' and the admin client's configuration (security, client
      * ids, quotas: `client-properties[security.protocol]=SASL_SSL`). They never replace what the store depends on (the group,
-     * the deserializers, manual commits, acks and idempotence). Their values never appear in logs.
+     * the deserializers, manual commits, acks and idempotence). Their values never appear in logs. An invalid one does not fail
+     * the startup: the clients are built on first use, so a processor reads FAILING (its `last_error` names the problem) and
+     * subscribes again with backoff, and the outbox relay retries its publishes.
      */
     val clientProperties: Map<String, String> = emptyMap(),
     /** The most one call to the brokers waits (an admin call, a commit, the offsets a status refresh reads). */

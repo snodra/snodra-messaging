@@ -265,10 +265,8 @@ class ExternalSourcesTest {
     }
 
     @Test
-    fun `the handlers see the dedupe id, the source and the record's headers, and the group id defaults to the service and source`() {
-        val s = sources()
-        assertEquals("service-b.external.printer", printer().subscription)
-        s.start()
+    fun `the handlers see the dedupe id, the source and the record's headers`() {
+        sources().start()
         send("""{"jobId":"j6","status":"done"}""", headers = mapOf("x-partner" to "acme"))
 
         awaitSaga("j6")

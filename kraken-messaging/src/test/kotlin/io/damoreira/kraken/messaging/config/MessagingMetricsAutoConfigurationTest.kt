@@ -1,14 +1,15 @@
 package io.damoreira.kraken.messaging.config
 
+import io.damoreira.kraken.messaging.events.LocalEventDispatcher
+import io.damoreira.kraken.messaging.events.OutboxPublisher
 import io.damoreira.kraken.messaging.hub.HubBus
 import io.damoreira.kraken.messaging.hub.HubChannelFactory
 import io.damoreira.kraken.messaging.hub.HubConnections
-import io.damoreira.kraken.messaging.events.LocalEventDispatcher
-import io.damoreira.kraken.messaging.events.OutboxPublisher
+import io.damoreira.kraken.messaging.kafka.KafkaEventStoreAutoConfiguration
+import io.damoreira.kraken.messaging.metrics.EventProcessorMetrics
 import io.damoreira.kraken.messaging.metrics.MessagingMetrics
 import io.damoreira.kraken.messaging.metrics.MicrometerMessagingMetrics
 import io.damoreira.kraken.messaging.metrics.NoopMessagingMetrics
-import io.damoreira.kraken.messaging.metrics.EventProcessorMetrics
 import io.damoreira.kraken.messaging.test.InProcessHub
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.junit.jupiter.api.AfterEach
@@ -35,7 +36,7 @@ class MessagingMetricsAutoConfigurationTest {
                 EventsAutoConfiguration::class.java,
                 MessagingMetricsAutoConfiguration::class.java,
                 TransactionAutoConfiguration::class.java,
-                io.damoreira.kraken.messaging.kafka.KafkaEventStoreAutoConfiguration::class.java,
+                KafkaEventStoreAutoConfiguration::class.java,
             ),
         )
         .withUserConfiguration(MessageStoreMockConfig::class.java)

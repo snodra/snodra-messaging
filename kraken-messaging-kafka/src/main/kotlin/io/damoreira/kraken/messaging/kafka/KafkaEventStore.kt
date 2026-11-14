@@ -8,6 +8,7 @@ import io.damoreira.kraken.messaging.eventstore.Subscription
 import io.damoreira.kraken.messaging.eventstore.SubscriptionAdmin
 import io.damoreira.kraken.messaging.eventstore.SubscriptionSpec
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import org.apache.kafka.clients.admin.AdminClientConfig
@@ -89,12 +90,19 @@ class KafkaEventStore(private val settings: KafkaEventStoreSettings) : EventStor
 
     override suspend fun subscribe(spec: SubscriptionSpec): Subscription {
         if (spec.name.isBlank() || spec.source.isBlank()) throw EventStoreException.Invalid("a subscription needs a name and a source")
-        return withContext(Dispatchers.IO) {
-            try {
-                KafkaSubscription.start(spec, settings, consumers.incrementAndGet())
-            } catch (e: Exception) {
-                throw EventStoreException.Failed("subscribing ${spec.name} to ${spec.source}: ${e.message ?: e::class.java.simpleName}", e)
+        var built: KafkaSubscription? = null
+        try {
+            return withContext(Dispatchers.IO) {
+                try {
+                    KafkaSubscription.start(spec, settings, consumers.incrementAndGet()).also { built = it }
+                } catch (e: Exception) {
+                    throw EventStoreException.Failed("subscribing ${spec.name} to ${spec.source}: ${e.message ?: e::class.java.simpleName}", e)
+                }
             }
+        } catch (e: CancellationException) {
+            // Cancelled after the subscription was built (withContext then drops its result): it must not stay in the group.
+            built?.let { withContext(NonCancellable) { it.close() } }
+            throw e
         }
     }
 

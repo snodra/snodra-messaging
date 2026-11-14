@@ -5,40 +5,50 @@ import io.damoreira.kraken.messaging.EventBus
 import io.damoreira.kraken.messaging.QueryBus
 import io.damoreira.kraken.messaging.QueryUpdateEmitter
 import io.damoreira.kraken.messaging.SubscriptionOptions
+import io.damoreira.kraken.messaging.api.Command
+import io.damoreira.kraken.messaging.codec.JsonCodec
+import io.damoreira.kraken.messaging.codec.MessageTypeResolver
+import io.damoreira.kraken.messaging.control.ProcessorControl
+import io.damoreira.kraken.messaging.deadletter.DeadLetters
+import io.damoreira.kraken.messaging.events.EventConsumer
+import io.damoreira.kraken.messaging.events.EventProcessors
+import io.damoreira.kraken.messaging.events.LocalEventDispatcher
+import io.damoreira.kraken.messaging.events.OutboxEventBus
+import io.damoreira.kraken.messaging.events.OutboxPublisher
+import io.damoreira.kraken.messaging.events.ProcessorStatusSource
+import io.damoreira.kraken.messaging.eventstore.Capability
+import io.damoreira.kraken.messaging.eventstore.EventStore
 import io.damoreira.kraken.messaging.fixtures.Balance
 import io.damoreira.kraken.messaging.fixtures.BalanceChanged
+import io.damoreira.kraken.messaging.fixtures.Count
+import io.damoreira.kraken.messaging.fixtures.GetCount
+import io.damoreira.kraken.messaging.fixtures.Ping
+import io.damoreira.kraken.messaging.fixtures.Pong
+import io.damoreira.kraken.messaging.fixtures.TestJwt
 import io.damoreira.kraken.messaging.fixtures.WatchAccount
+import io.damoreira.kraken.messaging.handler.CommandHandler
+import io.damoreira.kraken.messaging.handler.HandlerInvoker
+import io.damoreira.kraken.messaging.handler.HandlerRegistry
+import io.damoreira.kraken.messaging.handler.QueryHandler
 import io.damoreira.kraken.messaging.hub.AccountWatcher
+import io.damoreira.kraken.messaging.hub.HubBus
+import io.damoreira.kraken.messaging.hub.HubChannelFactory
+import io.damoreira.kraken.messaging.hub.HubConnections
 import io.damoreira.kraken.messaging.hub.HubQueryUpdateEmitter
 import io.damoreira.kraken.messaging.hub.SubscriptionRegistry
+import io.damoreira.kraken.messaging.kafka.KafkaEventStore
+import io.damoreira.kraken.messaging.kafka.KafkaEventStoreAutoConfiguration
+import io.damoreira.kraken.messaging.security.ForwardedIdentityResolver
+import io.damoreira.kraken.messaging.store.MessageStore
+import io.damoreira.kraken.messaging.test.InProcessHub
+import io.damoreira.kraken.messaging.tracing.TraceHeaders
+import io.mockk.every
+import io.mockk.mockk
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
-import io.damoreira.kraken.messaging.api.Command
-import io.damoreira.kraken.messaging.codec.JsonCodec
-import io.damoreira.kraken.messaging.codec.MessageTypeResolver
-import io.damoreira.kraken.messaging.fixtures.Ping
-import io.damoreira.kraken.messaging.fixtures.Pong
-import io.damoreira.kraken.messaging.fixtures.TestJwt
-import io.damoreira.kraken.messaging.handler.CommandHandler
-import io.damoreira.kraken.messaging.handler.QueryHandler
-import io.damoreira.kraken.messaging.fixtures.Count
-import io.damoreira.kraken.messaging.fixtures.GetCount
-import io.damoreira.kraken.messaging.handler.HandlerInvoker
-import io.damoreira.kraken.messaging.handler.HandlerRegistry
-import io.damoreira.kraken.messaging.hub.HubBus
-import io.damoreira.kraken.messaging.hub.HubChannelFactory
-import io.damoreira.kraken.messaging.hub.HubConnections
-import io.damoreira.kraken.messaging.events.EventConsumer
-import io.damoreira.kraken.messaging.events.OutboxEventBus
-import io.damoreira.kraken.messaging.events.OutboxPublisher
-import io.damoreira.kraken.messaging.security.ForwardedIdentityResolver
-import io.damoreira.kraken.messaging.store.MessageStore
-import io.damoreira.kraken.messaging.test.InProcessHub
-import io.damoreira.kraken.messaging.tracing.TraceHeaders
-import io.mockk.mockk
 import org.awaitility.kotlin.atMost
 import org.awaitility.kotlin.await
 import org.awaitility.kotlin.until
@@ -46,15 +56,11 @@ import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Test
 import org.springframework.boot.autoconfigure.AutoConfigurations
 import org.springframework.boot.test.context.runner.ApplicationContextRunner
+import org.springframework.boot.transaction.autoconfigure.TransactionAutoConfiguration
 import org.springframework.context.SmartLifecycle
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
-import io.damoreira.kraken.messaging.eventstore.Capability
-import io.damoreira.kraken.messaging.eventstore.EventStore
-import io.damoreira.kraken.messaging.kafka.KafkaEventStore
-import io.damoreira.kraken.messaging.kafka.KafkaEventStoreAutoConfiguration
 import org.springframework.security.oauth2.jwt.JwtDecoder
-import org.springframework.boot.transaction.autoconfigure.TransactionAutoConfiguration
 import java.time.Duration
 import java.time.Instant
 import kotlin.test.assertEquals
@@ -316,10 +322,10 @@ class AutoConfigurationTest {
             assertIs<KafkaEventStore>(context.getBean(EventStore::class.java))
             assertIs<OutboxEventBus>(context.getBean(EventBus::class.java))
             assertTrue(context.getBeansOfType(OutboxPublisher::class.java).isEmpty()) // outbox.enabled=false
-            assertTrue(context.getBeansOfType(io.damoreira.kraken.messaging.events.EventProcessors::class.java).isEmpty()) // events.consumer.enabled=false
-            assertTrue(context.getBeansOfType(io.damoreira.kraken.messaging.control.ProcessorControl::class.java).isEmpty())
+            assertTrue(context.getBeansOfType(EventProcessors::class.java).isEmpty()) // events.consumer.enabled=false
+            assertTrue(context.getBeansOfType(ProcessorControl::class.java).isEmpty())
             // The admin API exists without the consumer (an admin-only instance), in mode collection by default.
-            assertNotNull(context.getBean(io.damoreira.kraken.messaging.deadletter.DeadLetters::class.java))
+            assertNotNull(context.getBean(DeadLetters::class.java))
         }
     }
 
@@ -331,17 +337,17 @@ class AutoConfigurationTest {
                 assertEquals(null, context.startupFailure, "commands and queries need no event store")
                 assertTrue(context.getBeansOfType(EventBus::class.java).isEmpty())
                 assertTrue(context.getBeansOfType(OutboxPublisher::class.java).isEmpty())
-                assertTrue(context.getBeansOfType(io.damoreira.kraken.messaging.events.EventProcessors::class.java).isEmpty())
-                assertNotNull(context.getBean(io.damoreira.kraken.messaging.deadletter.DeadLetters::class.java))
-                assertNotNull(context.getBean(io.damoreira.kraken.messaging.events.LocalEventDispatcher::class.java))
+                assertTrue(context.getBeansOfType(EventProcessors::class.java).isEmpty())
+                assertNotNull(context.getBean(DeadLetters::class.java))
+                assertNotNull(context.getBean(LocalEventDispatcher::class.java))
             }
     }
 
     @Test fun `dead-letter mode event-store needs the capability native-dead-letter`() {
         val plain = mockk<EventStore>(relaxed = true)
-        io.mockk.every { plain.name } returns "plain"
-        io.mockk.every { plain.capabilities } returns setOf(Capability.REPLAY)
-        io.mockk.every { plain.supports(any()) } answers { firstArg<Capability>() in setOf(Capability.REPLAY) }
+        every { plain.name } returns "plain"
+        every { plain.capabilities } returns setOf(Capability.REPLAY)
+        every { plain.supports(any()) } answers { firstArg<Capability>() in setOf(Capability.REPLAY) }
         runner.withUserConfiguration(MessageStoreMockConfig::class.java)
             .withConfiguration(AutoConfigurations.of(TransactionAutoConfiguration::class.java))
             .withBean(EventStore::class.java, { plain })
@@ -358,19 +364,19 @@ class AutoConfigurationTest {
             .withPropertyValues("kraken.messaging.kafka.bootstrap-servers=localhost:9", "kraken.messaging.events.consumer.enabled=true")
             .run { context ->
                 assertEquals(null, context.startupFailure)
-                val processors = context.getBean(io.damoreira.kraken.messaging.events.EventProcessors::class.java)
+                val processors = context.getBean(EventProcessors::class.java)
                 assertTrue(processors.isRunning)
                 assertEquals(emptyList(), processors.consumers(), "no @EventHandler and no saga: no processor starts")
-                assertEquals(emptyList(), context.getBean(io.damoreira.kraken.messaging.events.ProcessorStatusSource::class.java).processorStatuses())
+                assertEquals(emptyList(), context.getBean(ProcessorStatusSource::class.java).processorStatuses())
                 // P6b: the processors' control, which the hub connection asks per control request.
-                assertNotNull(context.getBean(io.damoreira.kraken.messaging.control.ProcessorControl::class.java))
+                assertNotNull(context.getBean(ProcessorControl::class.java))
             }
         runner.withUserConfiguration(MessageStoreMockConfig::class.java)
             .withConfiguration(AutoConfigurations.of(TransactionAutoConfiguration::class.java, KafkaEventStoreAutoConfiguration::class.java))
             .withPropertyValues("kraken.messaging.kafka.bootstrap-servers=localhost:9", "kraken.messaging.events.dead-letter.mode=log")
             .run { context ->
                 assertEquals(null, context.startupFailure)
-                val e = kotlin.runCatching { context.getBean(io.damoreira.kraken.messaging.deadletter.DeadLetters::class.java).count() }.exceptionOrNull()
+                val e = kotlin.runCatching { context.getBean(DeadLetters::class.java).count() }.exceptionOrNull()
                 assertIs<IllegalStateException>(e)
                 assertTrue(e.message!!.contains("mode log"), e.message)
             }

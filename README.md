@@ -193,7 +193,7 @@ All keys (`kraken.messaging.*`; durations accept `200ms`, `5s`, `7d`; relaxed bi
 | `events.dead-letter.mode` | `collection` | What a processor does with a record it cannot handle: `collection` (park it in `dead_letters`, sequence its key, `DeadLetters` admin API), `event-store` (publish it to the event store's `<source>.dlt`; needs the capability `native-dead-letter`) or `log` (log and skip: nothing is parked). Case-insensitive; anything else fails the startup. See [Dead letters](#dead-letters). |
 | `events.dead-letter.retention` | `30d` | A letter is deleted this long after it was parked (TTL index on `expireAt`), which also unblocks its key. At least `1s`. |
 | `kafka.bootstrap-servers` | `broker:19092` | `kraken-messaging-kafka`: Kafka bootstrap servers. |
-| `kafka.client-properties.*` | none | `kraken-messaging-kafka`: Kafka client properties for the producer, the consumers and the admin client (security, client ids, quotas); they never replace what the store depends on. Their values never appear in logs. |
+| `kafka.client-properties.*` | none | `kraken-messaging-kafka`: Kafka client properties for the producer, the consumers and the admin client (security, client ids, quotas); they never replace what the store depends on. Their values never appear in logs. An invalid one does not fail the startup: the clients are built on first use, so a processor reads `FAILING` (its `last_error` names the problem) and subscribes again with backoff, and the relay retries its publishes. |
 | `kafka.admin-timeout`, `kafka.status-refresh`, `kafka.max-poll-records` | `10s`, `1s`, `100` | `kraken-messaging-kafka`: the longest call to the brokers, how often a subscription refreshes its lag, records per poll. |
 | `outbox.enabled` | `true` | Run the outbox publisher that relays the outbox entries to the event store. |
 | `outbox.poll-interval` | `200ms` | Outbox poll period. |
@@ -990,7 +990,7 @@ class Notifier {                         // no annotation: processor "default"
   bad name fails the startup naming the handler. Classes without the annotation are in processor `default`. Command and query
   handlers of an annotated class are not affected.
 - **Groups.** Every processor, `default` included, uses `<service group>.<name>`, the service group being
-  `kraken.messaging.kafka.group-id`, else the service name (`orders-service.default`, `orders-service.orders`), so a processor
+  `kraken.messaging.events.subscription-prefix`, else the service name (`orders-service.default`, `orders-service.orders`), so a processor
   starts from the earliest offset the first time it runs.
 - **Markers.** Every processor, `default` included, writes `processor:<name>:<eventId>` in `processed_events`, so one event type
   handled in two processors is handled by both, each exactly once. A marker a processor writes for a Kafka record also carries
@@ -1013,7 +1013,7 @@ projection that rebuilds idempotently may want exactly that; a handler with effe
 call) repeats every one of them. For such code either leave the handler where it is and put only new handlers in the named
 processor, or commit the new group's offsets at the end of the topic before you deploy it:
 `kafka-consumer-groups --bootstrap-server <broker> --group <group>.<name> --topic <events topic> --reset-offsets --to-latest --execute`
-(`<group>` is `kraken.messaging.kafka.group-id` or the service name; the group must have no running member). Records produced
+(`<group>` is `kraken.messaging.events.subscription-prefix` or the service name; the group must have no running member). Records produced
 between that reset and the moment the old instances stop are handled twice, once by the old `default` and once by the new
 processor, so reset right before the rollout. Once it runs, a reset to `latest` through the hub does the same without a shell
 ([Processor control](#processor-control)), but by then it has already run once over the topic.
@@ -1044,7 +1044,7 @@ application that wants it.
 
 ## Dead letters
 
-A record a processor cannot handle is not only logged: by default (`kraken.messaging.kafka.dead-letter.mode: collection`)
+A record a processor cannot handle is not only logged: by default (`kraken.messaging.events.dead-letter.mode: collection`)
 it is **parked** in the service's MongoDB collection `dead_letters`, the later records of the same Kafka key wait behind it, and an
 operator retries or discards it through the `DeadLetters` bean.
 

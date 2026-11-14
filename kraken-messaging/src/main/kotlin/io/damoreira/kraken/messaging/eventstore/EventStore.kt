@@ -42,7 +42,10 @@ interface EventStore {
      */
     suspend fun publish(event: OutgoingEvent)
 
-    /** Joins the subscription [spec] as one more instance. */
+    /**
+     * Joins the subscription [spec] as one more instance. A subscription returned is the caller's to close; an implementation
+     * that is cancelled after building one closes it.
+     */
     suspend fun subscribe(spec: SubscriptionSpec): Subscription
 
     /**

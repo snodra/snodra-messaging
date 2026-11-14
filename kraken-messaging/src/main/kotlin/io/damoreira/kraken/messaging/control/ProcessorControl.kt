@@ -25,18 +25,19 @@ import io.damoreira.kraken.messaging.store.ProcessorControlStore
 import io.damoreira.kraken.messaging.store.ProcessorControlStore.Control
 import io.damoreira.kraken.messaging.store.ProcessorControlStore.Lock
 import kotlinx.coroutines.runBlocking
-import io.damoreira.kraken.hub.v1.ReplayRange as WireRange
-import io.damoreira.kraken.hub.v1.ResetTarget as WireTarget
 import org.slf4j.LoggerFactory
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ExecutionException
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
+import io.damoreira.kraken.hub.v1.ReplayRange as WireRange
+import io.damoreira.kraken.hub.v1.ResetTarget as WireTarget
 
 /**
  * The control of this instance's event processors (P6b, ADR 0023): the hub's `ControlRequest`s ([handle]), the local
@@ -611,7 +612,7 @@ class ProcessorControl(
     }
 
     private fun failed(request: ControlRequest, e: Throwable): ControlReply {
-        val cause = if (e is java.util.concurrent.ExecutionException) e.cause ?: e else e
+        val cause = if (e is ExecutionException) e.cause ?: e else e
         return refused(request, ControlRefusal.CONTROL_REFUSAL_FAILED, "${cause::class.java.simpleName}: ${cause.message ?: ""}")
     }
 

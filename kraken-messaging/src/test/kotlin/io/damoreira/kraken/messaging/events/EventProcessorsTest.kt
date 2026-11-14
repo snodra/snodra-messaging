@@ -2,16 +2,20 @@ package io.damoreira.kraken.messaging.events
 
 import io.damoreira.kraken.hub.v1.ProcessorState
 import io.damoreira.kraken.hub.v1.ProcessorStatus
-import io.damoreira.kraken.messaging.codec.MessageTypeResolver
 import io.damoreira.kraken.messaging.DEAD_LETTERS
+import io.damoreira.kraken.messaging.codec.MessageTypeResolver
 import io.damoreira.kraken.messaging.deadletter.DeadLetterFactory
 import io.damoreira.kraken.messaging.eventstore.SubscriptionSpec
-import io.damoreira.kraken.messaging.handler.Processors
 import io.damoreira.kraken.messaging.fixtures.Happened
 import io.damoreira.kraken.messaging.handler.EventHandler
 import io.damoreira.kraken.messaging.handler.HandlerInvoker
 import io.damoreira.kraken.messaging.handler.HandlerRegistry
 import io.damoreira.kraken.messaging.handler.ProcessingGroup
+import io.damoreira.kraken.messaging.handler.Processors
+import org.apache.kafka.clients.producer.KafkaProducer
+import org.apache.kafka.clients.producer.ProducerRecord
+import org.apache.kafka.common.serialization.ByteArraySerializer
+import org.apache.kafka.common.serialization.StringSerializer
 import org.awaitility.Awaitility.await
 import org.bson.Document
 import org.junit.jupiter.api.AfterAll
@@ -19,12 +23,15 @@ import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.TestInstance
+import org.slf4j.LoggerFactory
 import org.springframework.data.mongodb.core.query.Query
 import java.time.Duration
+import java.time.Instant
 import java.util.UUID
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
@@ -46,7 +53,7 @@ class OrdersHandlers {
 }
 
 class CountingHandlers {
-    val count = java.util.concurrent.atomic.AtomicInteger()
+    val count = AtomicInteger()
     @EventHandler fun on(event: Happened) { count.incrementAndGet() }
 }
 
@@ -251,13 +258,13 @@ class EventProcessorsTest {
      */
     @Test fun `a processor reads thousands of events end to end without falling behind the old consumer`() {
         val total = 10_000
-        org.apache.kafka.clients.producer.KafkaProducer(
+        KafkaProducer(
             mapOf<String, Any>("bootstrap.servers" to support.bootstrapServers, "linger.ms" to 5),
-            org.apache.kafka.common.serialization.StringSerializer(), org.apache.kafka.common.serialization.ByteArraySerializer(),
+            StringSerializer(), ByteArraySerializer(),
         ).use { producer ->
             repeat(total) { n ->
-                val record = org.apache.kafka.clients.producer.ProducerRecord<String, ByteArray>(
-                    topic, "k${n % 50}", support.codec.encode(Happened("t-$n", java.time.Instant.now())),
+                val record = ProducerRecord<String, ByteArray>(
+                    topic, "k${n % 50}", support.codec.encode(Happened("t-$n", Instant.now())),
                 )
                 record.headers().add("type", "test.Happened".toByteArray())
                 record.headers().add("id", "t-$n".toByteArray())
@@ -273,7 +280,7 @@ class EventProcessorsTest {
         await().atMost(Duration.ofSeconds(240)).until { counter.get() >= total }
         val seconds = (System.nanoTime() - started) / 1e9
         val rate = total / seconds
-        org.slf4j.LoggerFactory.getLogger(EventProcessorsTest::class.java)
+        LoggerFactory.getLogger(EventProcessorsTest::class.java)
             .info("THROUGHPUT event-store path: {} events in {} s = {} events/s", total, "%.2f".format(seconds), rate.toLong())
         assertTrue(rate > 200, "at least 200 events/s end to end (the old consumer: about 575), was ${rate.toLong()}")
     }

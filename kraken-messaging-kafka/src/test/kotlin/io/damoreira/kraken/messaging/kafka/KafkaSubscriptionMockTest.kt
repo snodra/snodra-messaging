@@ -1,6 +1,7 @@
 package io.damoreira.kraken.messaging.kafka
 
 import io.damoreira.kraken.messaging.eventstore.Delivery
+import io.damoreira.kraken.messaging.eventstore.EventStoreException
 import io.damoreira.kraken.messaging.eventstore.SubscriptionEvent
 import io.damoreira.kraken.messaging.eventstore.SubscriptionSpec
 import kotlinx.coroutines.runBlocking
@@ -9,6 +10,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import org.apache.kafka.clients.consumer.ConsumerRecord
 import org.apache.kafka.clients.consumer.MockConsumer
 import org.apache.kafka.clients.consumer.OffsetAndMetadata
+import org.apache.kafka.common.KafkaException
 import org.apache.kafka.common.TopicPartition
 import org.apache.kafka.common.errors.TimeoutException
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -198,11 +200,11 @@ class KafkaSubscriptionMockTest {
         val subscription = KafkaSubscription.start(spec, settings, mock)
         // A next() racing with the caller's timers, cancelled before or after the failure arrived.
         assertNull(withTimeoutOrNull(50) { subscription.next() })
-        mock.setPollException(org.apache.kafka.common.KafkaException("fatal: the consumer cannot go on"))
+        mock.setPollException(KafkaException("fatal: the consumer cannot go on"))
         assertNull(withTimeoutOrNull(1) { runCatching { subscription.next() }.getOrNull() })
         repeat(2) {
             val thrown = runCatching { withTimeout(10_000) { subscription.next() } }.exceptionOrNull()
-            assertTrue(thrown is io.damoreira.kraken.messaging.eventstore.EventStoreException.Failed, "call ${it + 1}: $thrown")
+            assertTrue(thrown is EventStoreException.Failed, "call ${it + 1}: $thrown")
         }
         subscription.close()
     }

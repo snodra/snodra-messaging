@@ -1,5 +1,6 @@
 package io.damoreira.kraken.messaging.config
 
+import io.damoreira.kraken.messaging.deadletter.DeadLetterMode
 import org.junit.jupiter.api.Test
 import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.boot.test.context.runner.ApplicationContextRunner
@@ -239,7 +240,7 @@ class PropertiesBindingTest {
             val p = context.getBean(KrakenMessagingProperties::class.java)
             assertEquals(null, p.events.subscriptionPrefix)
             assertEquals("orders", p.events.subscriptionPrefix("orders"))
-            assertEquals(io.damoreira.kraken.messaging.deadletter.DeadLetterMode.COLLECTION, p.events.deadLetter.mode)
+            assertEquals(DeadLetterMode.COLLECTION, p.events.deadLetter.mode)
             assertEquals(Duration.ofDays(30), p.events.deadLetter.retention)
         }
         for (mode in listOf("event-store", "EVENT_STORE", "log")) {
