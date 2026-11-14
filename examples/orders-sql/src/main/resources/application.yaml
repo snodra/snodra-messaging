@@ -1,0 +1,20 @@
+# The orders example: PostgreSQL holds the service's orders and the message store's kraken_* tables (created at startup,
+# kraken.messaging.store.init-schema). The events go to the in-memory event store here (one process, not durable); a real
+# deployment adds an event-store add-on (kraken-messaging-kafka) instead.
+kraken:
+  messaging:
+    service-name: ${KRAKEN_SERVICE_NAME:orders-sql}
+    type-prefix: ${KRAKEN_SERVICE_NAME:orders-sql}
+    event-store: memory
+    hub:
+      address: ${KRAKEN_HUB_ADDRESS:static://localhost:7002}
+spring:
+  application:
+    name: ${KRAKEN_SERVICE_NAME:orders-sql}
+  datasource:
+    url: ${ORDERS_DATABASE_URL:jdbc:postgresql://localhost:5432/orders}
+    username: ${ORDERS_DATABASE_USER:orders}
+    password: ${ORDERS_DATABASE_PASSWORD:}
+  sql:
+    init:
+      mode: always # schema.sql: the service's own table
