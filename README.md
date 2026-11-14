@@ -36,6 +36,7 @@ Repo conventions: `../kraken/docs/04-repositories.md`.
 - [Requirements](#requirements)
 - [Build, test, publish](#build-test-publish)
 - [Using the starter](#using-the-starter)
+- [Message stores](#message-stores)
 - [In-memory event store and message store](#in-memory-event-store-and-message-store)
 - [Semantics worth knowing](#semantics-worth-knowing)
 - [Multiple hubs](#multiple-hubs)
@@ -62,13 +63,14 @@ Repo conventions: `../kraken/docs/04-repositories.md`.
 | `kraken-messaging` | `io.damoreira.kraken:kraken-messaging:0.1.0-SNAPSHOT` | Spring Boot starter: buses, handler annotations, hub client, outbox, event processors, sagas, deadlines and the external-integration toolkit, auto-configuration. Its state goes through the message store interfaces (`io.damoreira.kraken.messaging.store`, ADR 0028) and its events through the event-store interfaces (`io.damoreira.kraken.messaging.eventstore`, ADR 0027); it depends on no database and no event-store client. It ships the in-memory event store and message store (not durable: tests, local runs, demos; see [In-memory event store and message store](#in-memory-event-store-and-message-store)). |
 | `kraken-messaging-kafka` | `io.damoreira.kraken:kraken-messaging-kafka:0.1.0-SNAPSHOT` | The Kafka event store (`io.damoreira.kraken.messaging.eventstore`, ADR 0027): publish, competing subscriptions, replay, lag and dead-letter topics, over the plain Kafka clients; its settings `kraken.messaging.kafka.*` and the partner topics `kraken.messaging.external.kafka.sources.*`. Add it to publish or handle events on Kafka. |
 | `kraken-messaging-mongo` | `io.damoreira.kraken:kraken-messaging-mongo:0.1.0-SNAPSHOT` | The MongoDB message store: the outbox, processed events, dead letters, processor control, external calls and sagas in the service's MongoDB (a replica set), and its `MongoTransactionManager`. |
+| `kraken-messaging-jdbc` | `io.damoreira.kraken:kraken-messaging-jdbc:0.1.0-SNAPSHOT` | The SQL message store: the same stores in `kraken_*` tables of the service's PostgreSQL (13+) or MySQL (8.0+) through plain JDBC, joining its `DataSourceTransactionManager` or `JpaTransactionManager` transaction; schema files for Flyway or Liquibase. See [its README](kraken-messaging-jdbc/README.md). |
 | `kraken-messaging-test` | `io.damoreira.kraken:kraken-messaging-test:0.1.0-SNAPSHOT` | The zero-infrastructure mode `@KrakenInMemory` with `InMemoryEvents`, the conformance kits of the event store and the message store (`EventStoreConformanceTest`, `MessageStoreConformanceTest`), `InMemoryBuses`, `InProcessHub`, `KrakenContainers`, `KrakenTestKafka`, `SagaTestFixture`. |
-| `examples/examples-api`, `examples/service-a`, `examples/service-b` | not published | Two sample services talking through the hub; see [Examples](#examples). |
+| `examples/examples-api`, `examples/service-a`, `examples/service-b`, `examples/orders-sql` | not published | Sample services talking through the hub; see [Examples](#examples). |
 
 ## Requirements
 
 - JDK 25 (Temurin), found on the PATH or by the Gradle toolchain resolver.
-- Docker for the container tests (Kafka, MongoDB, and the hub image for the end-to-end test).
+- Docker for the container tests (Kafka, MongoDB, PostgreSQL, MySQL, and the hub image for the end-to-end tests).
 
 Rancher Desktop: Testcontainers needs two environment variables, otherwise it does not find the Docker socket.
 
@@ -112,7 +114,7 @@ repositories {
 dependencies {
     implementation("io.damoreira.kraken:kraken-messaging:0.1.0-SNAPSHOT")
     // the message store: needed to publish or handle events and to run sagas; commands and queries alone need none
-    implementation("io.damoreira.kraken:kraken-messaging-mongo:0.1.0-SNAPSHOT")
+    implementation("io.damoreira.kraken:kraken-messaging-mongo:0.1.0-SNAPSHOT") // or kraken-messaging-jdbc (PostgreSQL, MySQL)
     // a service's *-api module depends on the api artifact only:
     // api("io.damoreira.kraken:kraken-messaging-api:0.1.0-SNAPSHOT")
     testImplementation("io.damoreira.kraken:kraken-messaging-test:0.1.0-SNAPSHOT")
@@ -576,6 +578,23 @@ val urgent = commandBus.send(
 )
 val quick = queryBus.sendBlocking(GetWorkout(id), SendOptions(retry = RetryPolicy.NONE)) // no retry for this call
 ```
+
+## Message stores
+
+The library keeps its state (outbox, processed events, dead letters, processor control, external calls, sagas) in the service's
+own database, through one add-on per database (ADR 0028). Add the one that matches the service's database; a service with only
+command, query and subscription-query handlers needs none.
+
+| Add-on | Name (`store.type`) | For | Transactions it joins |
+|---|---|---|---|
+| `kraken-messaging-mongo` | `mongo` | MongoDB (a replica set) | `MongoTransactionManager` |
+| `kraken-messaging-jdbc` | `jdbc` | PostgreSQL 13+, MySQL 8.0+ ([README](kraken-messaging-jdbc/README.md)) | `DataSourceTransactionManager`, `JpaTransactionManager` |
+| the core | `memory` | tests, local runs, demos (not durable) | its own `MemoryTransactionManager` |
+
+The outbox entry and the processed marker commit in the same transaction as the service's own writes, whichever add-on. With
+two add-ons on the classpath, `kraken.messaging.store.type` chooses; `kraken.messaging.store.init-schema` (default `true`) creates
+the add-on's indexes or tables at startup. Third parties add a database by implementing the store interfaces
+(`io.damoreira.kraken.messaging.store`) and passing `MessageStoreConformanceTest`.
 
 ## In-memory event store and message store
 
@@ -1788,7 +1807,9 @@ docker build -t kraken-hub:dev .
 the hub and reacts to an event, service-b owns the command and the query and publishes the event. They run in
 Docker Compose from local builds together with the real `kraken-hub` image, Kafka and MongoDB, and are driven with
 `curl`. service-b also runs a saga against a fake partner (the postcard printer) over all three inbound channels; see
-[Sagas](#sagas) and [examples/README.md](examples/README.md).
+[Sagas](#sagas) and [examples/README.md](examples/README.md). `examples/orders-sql` is a small service on PostgreSQL with the SQL
+message store: its order row and the outbox entry of its event commit in one transaction (its end-to-end test runs it against the
+hub image).
 
 ## Known limitations
 
