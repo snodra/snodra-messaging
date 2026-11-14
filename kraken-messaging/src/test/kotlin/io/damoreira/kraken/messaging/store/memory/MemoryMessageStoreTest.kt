@@ -9,6 +9,8 @@ import org.springframework.dao.ConcurrencyFailureException
 import org.springframework.dao.DuplicateKeyException
 import org.springframework.transaction.TransactionDefinition
 import org.springframework.transaction.UnexpectedRollbackException
+import org.springframework.transaction.support.TransactionSynchronization
+import org.springframework.transaction.support.TransactionSynchronizationManager
 import org.springframework.transaction.support.TransactionTemplate
 import java.time.Duration
 import java.time.Instant
@@ -139,6 +141,19 @@ class MemoryMessageStoreTest {
             }
         }
         runBlocking { assertFalse(store.processedEvents.exists("m-1")) }
+    }
+
+    @Test
+    fun aWriteFromAnAfterCompletionCallbackCommitsOnItsOwn() {
+        tx.executeWithoutResult { status ->
+            TransactionSynchronizationManager.registerSynchronization(object : TransactionSynchronization {
+                override fun afterCompletion(status: Int) {
+                    runBlocking { store.processedEvents.record(marker("after")) } // the transaction ended: none to join
+                }
+            })
+            status.setRollbackOnly()
+        }
+        runBlocking { assertTrue(store.processedEvents.exists("after")) }
     }
 
     @Test
