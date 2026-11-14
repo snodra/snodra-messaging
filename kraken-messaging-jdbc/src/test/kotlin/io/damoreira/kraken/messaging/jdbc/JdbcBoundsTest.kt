@@ -191,6 +191,26 @@ abstract class JdbcBoundsTest(private val database: TestDatabase) {
         assertEquals(2L, store.sagas.sagas.countLiveByType()["t.Order"])
     }
 
+    /** U+0000 is refused on both databases (PostgreSQL cannot store it; MySQL would), before anything is written. */
+    @Test
+    fun theNulCharacterIsRefused() = runBlocking {
+        val nul = "a\u0000b"
+        fun entry(id: String, headers: Map<String, String> = emptyMap(), payload: String = "{}") =
+            OutboxEntry(id, "t", "k", headers, payload.toByteArray(), t, 1)
+        refused("U+0000") { store.outbox.append(entry("nul-$nul")) }
+        refused("U+0000") { store.outbox.append(entry("nul-1", headers = mapOf("h" to nul))) }
+        refused("U+0000") { store.outbox.append(entry("nul-2", payload = """{"s":"a\u0000b"}""")) }
+        refused("U+0000") { store.processedEvents.record(ProcessedMarker("processor:default:$nul", "t", t)) }
+        assertThrows(IllegalArgumentException::class.java) {
+            store.sagas.sagas.insert(SagaDocument("nul-s1", "t.Order", "{\"s\":\"$nul\"}", createdAt = t, updatedAt = t))
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            store.sagas.sagas.insert(SagaDocument("nul-s2", "t.Order", "{}", listOf(Association("k", nul)), createdAt = t, updatedAt = t))
+        }
+        assertEquals(0L, jdbc.sql("SELECT COUNT(*) FROM kraken_outbox WHERE id LIKE 'nul-%'").query(Long::class.javaObjectType).single())
+        assertEquals(null, store.sagas.sagas.findById("nul-s2"), "the association's refusal rolled its saga back")
+    }
+
     /** MySQL: a session without a STRICT sql_mode would truncate instead of refusing: the store refuses to start on it. */
     @Test
     fun mysqlNeedsAStrictSqlMode() {

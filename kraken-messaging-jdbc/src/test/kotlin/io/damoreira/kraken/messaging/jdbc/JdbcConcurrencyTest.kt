@@ -3,6 +3,7 @@ package io.damoreira.kraken.messaging.jdbc
 import com.zaxxer.hikari.HikariDataSource
 import io.damoreira.kraken.messaging.saga.Association
 import io.damoreira.kraken.messaging.saga.SagaDocument
+import io.damoreira.kraken.messaging.saga.SagaFailureDocument
 import io.damoreira.kraken.messaging.store.OutboxEntry
 import io.damoreira.kraken.messaging.store.ProcessorControlStore
 import kotlinx.coroutines.runBlocking
@@ -131,6 +132,24 @@ abstract class JdbcConcurrencyTest(private val database: TestDatabase) {
         }
         assertEquals(emptyList<Throwable>(), failures.filterNotNull())
         assertEquals(n.toLong(), store.sagas.sagas.countLiveByType()["t.Order"])
+    }
+
+    /** Two first-time saves of one saga failure at once (each in a transaction): both succeed, one row is left. */
+    @Test
+    fun concurrentFirstSavesOfOneFailureBothSucceed() {
+        val t = now()
+        repeat(10) { round ->
+            val id = "t.Order:e-$round"
+            val failures = race(2) { i ->
+                runCatching {
+                    TransactionTemplate(store.transactions).executeWithoutResult {
+                        store.sagas.failures.save(SagaFailureDocument(id, "t.Order", "e-$round", "t.Paid", "{}", emptyMap(), "boom $i", 3, t, t))
+                    }
+                }.exceptionOrNull()
+            }
+            assertEquals(listOf<Throwable?>(null, null), failures, "round $round")
+            assertEquals(1, store.sagas.failures.list("t.Order").count { it.id == id })
+        }
     }
 
     private fun <T> race(n: Int, work: (Int) -> T): List<T> {

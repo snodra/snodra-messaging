@@ -6,6 +6,15 @@ import io.damoreira.kraken.messaging.store.OutboxEntry
 import io.damoreira.kraken.messaging.store.ProcessedMarker
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertNull
+import org.springframework.boot.autoconfigure.AutoConfigurations
+import org.springframework.boot.test.context.runner.ApplicationContextRunner
+import org.springframework.boot.transaction.autoconfigure.TransactionAutoConfiguration
+import org.springframework.jdbc.datasource.DataSourceTransactionManager
+import org.springframework.transaction.PlatformTransactionManager
+import org.springframework.transaction.event.TransactionPhase
+import org.springframework.transaction.event.TransactionalEventListener
+import org.springframework.transaction.support.TransactionTemplate
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import java.time.Duration
@@ -18,6 +27,38 @@ import java.time.temporal.ChronoUnit
  * what it sent and never sends it again.
  */
 abstract class JdbcAutoCommitOffTest(private val database: TestDatabase) {
+    /** An event the service publishes in its transaction; its listener appends to the outbox after the commit. */
+    data class OrderPlaced(val id: String)
+
+    class AfterCommitListener(private val store: JdbcMessageStore) {
+        @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
+        fun on(event: OrderPlaced) = runBlocking {
+            store.outbox.append(OutboxEntry(event.id, "t.OrderPlaced", "k", emptyMap(), "{}".toByteArray(), Instant.now(), 1))
+        }
+    }
+
+    /**
+     * A `@TransactionalEventListener(AFTER_COMMIT)` runs once the transaction ended (its after-completion phase): the store's write
+     * there runs in a transaction of its own, so it commits on an auto-commit=false pool too.
+     */
+    @Test
+    fun anAfterCommitListenersWriteCommits() {
+        database.dataSource(autoCommit = false).use { ds ->
+            val store = JdbcMessageStore(ds, database.dialect).also { it.initSchema() }
+            ApplicationContextRunner()
+                .withConfiguration(AutoConfigurations.of(TransactionAutoConfiguration::class.java))
+                .withBean(PlatformTransactionManager::class.java, { DataSourceTransactionManager(ds) })
+                .withBean(AfterCommitListener::class.java, { AfterCommitListener(store) })
+                .run { context ->
+                    assertNull(context.startupFailure)
+                    TransactionTemplate(context.getBean(PlatformTransactionManager::class.java)).executeWithoutResult {
+                        context.publishEvent(OrderPlaced("after-commit"))
+                    }
+                    assertEquals(1L, runBlocking { store.outbox.pending() }, "the listener's append committed")
+                }
+        }
+    }
+
     @Test
     fun writesOutsideATransactionCommit() {
         database.dataSource(autoCommit = false).use { ds ->

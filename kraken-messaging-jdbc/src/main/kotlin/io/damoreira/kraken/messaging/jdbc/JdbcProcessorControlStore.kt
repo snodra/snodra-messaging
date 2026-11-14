@@ -110,7 +110,7 @@ internal class JdbcProcessorControlStore(private val db: Db) : ProcessorControlS
     }
 
     private fun writeReplay(jdbc: JdbcClient, processor: String, ranges: List<ReplayRange>) {
-        val json = Json.write(ranges.map { mapOf("source" to it.source, "segment" to it.segment, "from" to it.from, "until" to it.until) })
+        val json = Json.write("a replay range", ranges.map { mapOf("source" to it.source, "segment" to it.segment, "from" to it.from, "until" to it.until) })
         jdbc.sql("UPDATE kraken_processor_control SET replay = ${db.dialect.json(":replay")}, updated_at = :now WHERE processor = :processor")
             .param("replay", json).param("now", db.ts(db.now())).param("processor", processor).update()
     }

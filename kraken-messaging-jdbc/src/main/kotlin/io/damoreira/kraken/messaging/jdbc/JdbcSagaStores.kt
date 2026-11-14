@@ -112,22 +112,34 @@ internal class JdbcSagaRepository(private val db: Db) : SagaRepository {
         if (!got) throw CannotAcquireLockException("sagas: another transaction is starting a saga of type ${saga.type} with the start key $hash (hash)")
     }
 
-    /** MySQL: runs [statement] with `innodb_lock_wait_timeout` at [seconds], then puts the session's value back. */
+    /**
+     * MySQL: runs [statement] with `innodb_lock_wait_timeout` at [seconds], then puts the session's value back. A timeout rolls
+     * back that statement only (`innodb_rollback_on_timeout` OFF, MySQL's default; ON rolls back the whole transaction, still a
+     * retryable failure). A failure to put the value back never hides the statement's own failure: it is added to it.
+     */
     private fun waitingAtMost(jdbc: JdbcClient, seconds: Int, statement: () -> Unit) {
         val previous = jdbc.sql("SELECT @@SESSION.innodb_lock_wait_timeout").query(Long::class.javaObjectType).single()
         jdbc.sql("SET SESSION innodb_lock_wait_timeout = $seconds").update()
+        var failure: Throwable? = null
         try {
             statement()
+        } catch (e: Throwable) {
+            failure = e
+            throw e
         } finally {
-            jdbc.sql("SET SESSION innodb_lock_wait_timeout = $previous").update()
+            try {
+                jdbc.sql("SET SESSION innodb_lock_wait_timeout = $previous").update()
+            } catch (restore: Exception) {
+                if (failure != null) failure.addSuppressed(restore) else throw restore
+            }
         }
     }
 
     private fun insertAssociations(saga: SagaDocument) {
         if (saga.associations.isEmpty()) return
-        db.batch.batchUpdate(
+        db.batch(
             "INSERT INTO kraken_saga_associations (saga_id, idx, assoc_key, assoc_value, assoc_hash) VALUES (?, ?, ?, ?, ?)",
-            saga.associations.mapIndexed { i, a -> arrayOf<Any>(saga.id, i, a.k, a.v, Limits.associationHash(a.k, a.v)) },
+            saga.associations.mapIndexed { i, a -> arrayOf<Any?>(saga.id, i, a.k, a.v, Limits.associationHash(a.k, a.v)) },
         )
     }
 
@@ -172,13 +184,13 @@ internal class JdbcSagaDispatchStore(private val db: Db) : SagaDispatchStore {
             if (e.kind == DispatchKind.EVENT) Json.requireObject(e.payload.toByteArray(Charsets.UTF_8), "saga event ${e.id} (${e.type})")
         }
         db.tx {
-            db.batch.batchUpdate(
+            db.batch(
                 "INSERT INTO kraken_saga_dispatch (id, saga_id, seq, kind, type, payload, headers, routing_key, created_at, dispatched_at, attempts, " +
                     "next_attempt_at, failed_at, failure_reason, failure_message, notice_pending, notice_attempts, notice_next_at) " +
                     "VALUES (?, ?, ?, ?, ?, ?, ${db.dialect.json("?")}, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 entries.map { e ->
-                    arrayOf(
-                        e.id, e.sagaId, e.seq, e.kind.name, e.type, e.payload, Json.write(e.headers), e.routingKey, db.ts(e.createdAt),
+                    arrayOf<Any?>(
+                        e.id, e.sagaId, e.seq, e.kind.name, e.type, e.payload, Json.write("a saga-dispatch entry's headers", e.headers), e.routingKey, db.ts(e.createdAt),
                         db.ts(e.dispatchedAt), e.attempts, db.ts(e.nextAttemptAt), db.ts(e.failedAt), e.failureReason?.name,
                         e.failureMessage?.let(Limits::cut), e.noticePending, e.noticeAttempts, db.ts(e.noticeNextAt),
                     )
@@ -391,20 +403,31 @@ internal class JdbcSagaFailureStore(private val db: Db) : SagaFailureStore {
         it.sql("SELECT * FROM kraken_saga_failures WHERE id_hash = :idHash").param("idHash", Limits.sha256(id)).query(::readFailure).optional().orElse(null)
     }
 
-    /** Replaces the failure with that id (deleted, then inserted, in one transaction). */
+    /**
+     * Inserts or replaces the failure with that id, in one statement on PostgreSQL (`ON CONFLICT DO UPDATE`); on MySQL an insert,
+     * then on a duplicate key an update. Never a delete first: on MySQL a delete that finds no row takes a gap lock, and two
+     * first-time saves would deadlock on their inserts.
+     */
     override fun save(failure: SagaFailureDocument) {
         Limits.check("a saga failure's saga type", failure.sagaType, Limits.NAME)
+        val params = mapOf(
+            "idHash" to Limits.sha256(failure.id), "id" to failure.id, "sagaType" to failure.sagaType, "eventId" to failure.eventId,
+            "eventType" to failure.eventType, "payload" to failure.payload, "headers" to Json.write("a saga failure's headers", failure.headers),
+            "error" to Limits.cut(failure.error), "attempts" to failure.attempts, "first" to db.ts(failure.firstFailedAt), "last" to db.ts(failure.lastFailedAt),
+        )
+        val insert = "INSERT INTO kraken_saga_failures (id_hash, id, saga_type, event_id, event_type, payload, headers, error, attempts, first_failed_at, last_failed_at) " +
+            "VALUES (:idHash, :id, :sagaType, :eventId, :eventType, :payload, ${db.dialect.json(":headers")}, :error, :attempts, :first, :last)"
+        val set = "id = :id, saga_type = :sagaType, event_id = :eventId, event_type = :eventType, payload = :payload, " +
+            "headers = ${db.dialect.json(":headers")}, error = :error, attempts = :attempts, first_failed_at = :first, last_failed_at = :last"
         db.tx { jdbc ->
-            jdbc.sql("DELETE FROM kraken_saga_failures WHERE id_hash = :idHash").param("idHash", Limits.sha256(failure.id)).update()
-            jdbc.sql(
-                "INSERT INTO kraken_saga_failures (id_hash, id, saga_type, event_id, event_type, payload, headers, error, attempts, first_failed_at, last_failed_at) " +
-                    "VALUES (:idHash, :id, :sagaType, :eventId, :eventType, :payload, ${db.dialect.json(":headers")}, :error, :attempts, :first, :last)",
-            )
-                .param("idHash", Limits.sha256(failure.id)).param("id", failure.id).param("sagaType", failure.sagaType)
-                .param("eventId", failure.eventId).param("eventType", failure.eventType).param("payload", failure.payload)
-                .param("headers", Json.write(failure.headers)).param("error", Limits.cut(failure.error)).param("attempts", failure.attempts)
-                .param("first", db.ts(failure.firstFailedAt)).param("last", db.ts(failure.lastFailedAt))
-                .update()
+            when (db.dialect) {
+                PostgresDialect -> jdbc.sql("$insert ON CONFLICT (id_hash) DO UPDATE SET $set").params(params).update()
+                MySqlDialect -> try {
+                    jdbc.sql(insert).params(params).update()
+                } catch (_: DuplicateKeyException) {
+                    jdbc.sql("UPDATE kraken_saga_failures SET $set WHERE id_hash = :idHash").params(params).update()
+                }
+            }
         }
     }
 

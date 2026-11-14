@@ -3,6 +3,9 @@ package io.damoreira.kraken.messaging.jdbc
 import org.springframework.dao.DataAccessException
 import org.springframework.dao.DuplicateKeyException
 import org.springframework.jdbc.core.JdbcTemplate
+import org.springframework.jdbc.core.PreparedStatementCreator
+import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate
+import org.springframework.jdbc.core.namedparam.SqlParameterSource
 import org.springframework.jdbc.core.simple.JdbcClient
 import org.springframework.jdbc.datasource.DataSourceTransactionManager
 import org.springframework.jdbc.datasource.DelegatingDataSource
@@ -42,24 +45,33 @@ internal class Db(
     private val translator = DialectTranslator(dialect, SQLErrorCodeSQLExceptionTranslator(dataSource))
 
     private val joinedTemplate = JdbcTemplate(dataSource).also { it.exceptionTranslator = translator }
-    private val joinedClient = JdbcClient.create(joinedTemplate)
+    private val joinedClient = JdbcClient.create(NulRefusingTemplate(joinedTemplate))
     private val localTransactions = TransactionTemplate(DataSourceTransactionManager(dataSource))
 
     /** The same pool behind a key of its own: a transaction bound to [dataSource] is never this one's. */
     private val ownDataSource: DataSource = object : DelegatingDataSource(dataSource) {}
     private val ownTemplate = JdbcTemplate(ownDataSource).also { it.exceptionTranslator = translator }
-    private val ownClient = JdbcClient.create(ownTemplate)
+    private val ownClient = JdbcClient.create(NulRefusingTemplate(ownTemplate))
     private val ownTransactions = TransactionTemplate(DataSourceTransactionManager(ownDataSource)).also {
         it.propagationBehavior = TransactionDefinition.PROPAGATION_REQUIRES_NEW
         it.isolationLevel = TransactionDefinition.ISOLATION_READ_COMMITTED
     }
 
-    /** The template of [tx], for batches: only inside a [tx] block. */
-    val batch: JdbcTemplate get() = joinedTemplate
+    /** A batch of [sql] (positional parameters) over [rows]: only inside a [tx] block. */
+    fun batch(sql: String, rows: List<Array<Any?>>) {
+        rows.forEach { Limits.refuseNul("a parameter", it) }
+        joinedTemplate.batchUpdate(sql, rows)
+    }
 
-    /** Runs [block] with the service's writes: in the caller's transaction, else in a short one of its own. */
+    /**
+     * Runs [block] with the service's writes: in the caller's transaction, else in a short one of its own. A transaction still
+     * marked active while its synchronizations are gone has ended: its after-completion phase runs (where a
+     * `@TransactionalEventListener(AFTER_COMMIT)` runs); [block] then runs in a transaction of its own, on its own connection, so it
+     * commits whatever the pool's auto-commit (on the ended transaction's connection it would be rolled back when that returns).
+     */
     fun <T> tx(block: (JdbcClient) -> T): T {
         if (TransactionSynchronizationManager.isActualTransactionActive()) {
+            if (!TransactionSynchronizationManager.isSynchronizationActive()) return own(block)
             checkJoinable()
             return block(joinedClient)
         }
@@ -129,11 +141,23 @@ private class DialectTranslator(private val dialect: SqlDialect, private val fal
     }
 }
 
+/** Refuses U+0000 in every named parameter of every statement the store runs ([Limits.refuseNul]), naming the parameter. */
+private class NulRefusingTemplate(template: JdbcTemplate) : NamedParameterJdbcTemplate(template) {
+    override fun getPreparedStatementCreator(sql: String, paramSource: SqlParameterSource): PreparedStatementCreator {
+        paramSource.parameterNames?.forEach { name -> Limits.refuseNul("the parameter $name", paramSource.getValue(name)) }
+        return super.getPreparedStatementCreator(sql, paramSource)
+    }
+}
+
 /** JSON to and from the text the columns hold. */
 internal object Json {
     val mapper: JsonMapper = JsonMapper.builder().build()
 
-    fun write(value: Any): String = mapper.writeValueAsString(value)
+    /** [value] as JSON text; refuses U+0000 in its strings (written as an escape, which PostgreSQL's `jsonb` refuses), naming [field]. */
+    fun write(field: String, value: Any): String {
+        Limits.refuseNul(field, value)
+        return mapper.writeValueAsString(value)
+    }
 
     fun strings(text: String?): Map<String, String> =
         text?.let { mapper.readTree(it) }?.properties()?.associate { (k, v) -> k to (if (v.isString) v.asString() else v.toString()) } ?: emptyMap()
@@ -150,9 +174,16 @@ internal object Json {
         }
         require(node != null && node.isObject) { "The payload of $what is not a JSON object" }
         require(fits(node)) { "The payload of $what has an integer outside the signed 64-bit range" }
+        require(noNul(node)) { "The message store refuses the character U+0000 in the payload of $what" }
     }
 
     private fun fits(node: JsonNode): Boolean = if (node.isIntegralNumber) node.canConvertToLong() else node.values().all(::fits)
+
+    private fun noNul(node: JsonNode): Boolean = when {
+        node.isString -> node.asString().indexOf('\u0000') < 0
+        node.isObject -> node.properties().all { (k, v) -> k.indexOf('\u0000') < 0 && noNul(v) }
+        else -> node.values().all(::noNul)
+    }
 }
 
 /** A position (or segment) as the number it stands for when it is a canonical decimal one, else null: ordered by value. */

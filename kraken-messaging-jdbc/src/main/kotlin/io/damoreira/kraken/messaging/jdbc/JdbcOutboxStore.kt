@@ -30,7 +30,7 @@ internal class JdbcOutboxStore(
                     "VALUES (:id, :type, :key, ${db.dialect.json(":headers")}, ${db.dialect.json(":payload")}, :createdAt, :seq, :attempts)",
             )
                 .param("id", entry.id).param("type", entry.type).param("key", entry.key)
-                .param("headers", Json.write(entry.headers)).param("payload", String(entry.payload, Charsets.UTF_8))
+                .param("headers", Json.write("an outbox entry's headers", entry.headers)).param("payload", String(entry.payload, Charsets.UTF_8))
                 .param("createdAt", db.ts(entry.createdAt)).param("seq", entry.seq).param("attempts", entry.attempts)
                 .update()
             if (notifies) jdbc.sql(NOTIFY).query { _, _ -> }.list()
@@ -89,7 +89,12 @@ internal class JdbcOutboxStore(
     )
 
     companion object {
-        /** The relays' claim: the entries free, already the owner's or whose lease passed, in order, skipping those another claim locked. */
+        /**
+         * The relays' claim: the entries free, already the owner's or whose lease passed, in order, skipping those another claim
+         * locked. At READ COMMITTED a locking read on MySQL still locks each row it scans until it has evaluated the row's filter
+         * (then releases the ones that do not match): for that instant a concurrent claim can skip a row it could have taken, which
+         * it then takes at its next claim. Sub-millisecond, and only between two relays claiming at the same moment.
+         */
         const val CLAIM = "SELECT id, type, event_key, headers, payload, created_at, seq, attempts FROM kraken_outbox " +
             "WHERE sent_at IS NULL AND failed_at IS NULL AND (owner IS NULL OR owner = :owner OR lease_until <= :now) " +
             "ORDER BY created_at, seq, id LIMIT :limit FOR UPDATE SKIP LOCKED"

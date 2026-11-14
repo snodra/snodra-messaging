@@ -35,7 +35,7 @@ internal class JdbcDeadLetterStore(private val db: Db) : DeadLetterStore {
                 "id" to letter.id, "processor" to letter.processor, "source" to letter.source, "segment" to letter.segment,
                 "position" to letter.position, "positionNum" to positionNumber(letter.position), "key" to letter.key,
                 "keyHash" to letter.key?.let(Limits::sha256),
-                "eventId" to letter.eventId, "eventType" to letter.eventType, "headers" to Json.write(letter.headers),
+                "eventId" to letter.eventId, "eventType" to letter.eventType, "headers" to Json.write("a dead letter's headers", letter.headers),
                 "payload" to letter.payload, "payloadBinary" to letter.payloadBinary, "reason" to letter.reason.name,
                 "errorType" to Limits.cut(letter.error.type), "errorMessage" to Limits.cut(letter.error.message), "blockedBy" to letter.blockedBy,
                 "attempts" to letter.attempts, "parkedAt" to db.ts(letter.parkedAt), "lastAttemptAt" to db.ts(letter.lastAttemptAt),

@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS kraken_schema (
 -- The outbox (ADR 0005): events appended in the service's transaction, relayed to the event store afterwards.
 CREATE TABLE IF NOT EXISTS kraken_outbox (
     id          VARCHAR(255) COLLATE "C" NOT NULL PRIMARY KEY,
-    type        VARCHAR(255)   NOT NULL,
+    type        VARCHAR(255) COLLATE "C" NOT NULL,
     event_key   TEXT           NULL,
     headers     JSONB          NOT NULL,
     payload     JSONB          NOT NULL,
@@ -144,7 +144,7 @@ CREATE TABLE IF NOT EXISTS kraken_saga_dispatch (
     saga_id         VARCHAR(255) COLLATE "C" NOT NULL,
     seq             BIGINT         NOT NULL,
     kind            VARCHAR(16)    NOT NULL,
-    type            VARCHAR(255)   NOT NULL,
+    type            VARCHAR(255) COLLATE "C" NOT NULL,
     payload         TEXT           NOT NULL,
     headers         JSONB          NOT NULL,
     routing_key     TEXT           NULL,
@@ -175,7 +175,7 @@ CREATE TABLE IF NOT EXISTS kraken_saga_dispatch_leases (
 -- Saga deadlines. payload is JSON text (any JSON value), kept as written.
 CREATE TABLE IF NOT EXISTS kraken_deadlines (
     id             VARCHAR(255) COLLATE "C" NOT NULL PRIMARY KEY,
-    saga_type      VARCHAR(255)   NOT NULL,
+    saga_type      VARCHAR(255) COLLATE "C" NOT NULL,
     saga_id        VARCHAR(255) COLLATE "C" NOT NULL,
     name           VARCHAR(255) COLLATE "C" NOT NULL,
     payload        TEXT           NULL,

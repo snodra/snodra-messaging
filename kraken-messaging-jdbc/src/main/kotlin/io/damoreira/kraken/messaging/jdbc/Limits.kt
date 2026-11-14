@@ -37,11 +37,25 @@ internal object Limits {
     /** Free text (an error message, a send's last error) is cut to this many bytes of UTF-8. */
     const val FREE_TEXT_BYTES = 16 * 1024
 
-    /** Refuses [value] (when not null) longer than [max] characters, naming [field]. */
+    /** Refuses [value] (when not null) longer than [max] characters, or holding the character U+0000, naming [field]. */
     fun check(field: String, value: String?, max: Int) {
         if (value == null) return
         val length = value.codePointCount(0, value.length)
         require(length <= max) { "The message store keeps $field of at most $max characters; this one has $length" }
+        refuseNul(field, value)
+    }
+
+    /**
+     * Refuses the character U+0000 anywhere in [value] (a string, or the strings, keys included, of a map or a collection),
+     * naming [field]: PostgreSQL cannot store it in text or JSON, so neither database is given one (the same refusal on both).
+     */
+    fun refuseNul(field: String, value: Any?) {
+        when (value) {
+            is String -> require(value.indexOf('\u0000') < 0) { "The message store refuses the character U+0000 in $field" }
+            is Map<*, *> -> value.forEach { (k, v) -> refuseNul(field, k); refuseNul(field, v) }
+            is Collection<*> -> value.forEach { refuseNul(field, it) }
+            is Array<*> -> value.forEach { refuseNul(field, it) }
+        }
     }
 
     /** [text] cut to at most [FREE_TEXT_BYTES] bytes of UTF-8, never inside a character. */
