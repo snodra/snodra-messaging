@@ -55,6 +55,9 @@ class KafkaEventStore(private val settings: KafkaEventStoreSettings) : EventStor
     private val producer: KafkaProducer<String, ByteArray> get() = producerHolder.value
     private val consumers = AtomicInteger()
 
+    /** Whether the producer was built (it is built by the first publish). */
+    internal val producerBuilt: Boolean get() = producerHolder.isInitialized()
+
     override val name: String = NAME
 
     override val capabilities: Set<Capability> = setOf(Capability.REPLAY, Capability.BROWSE, Capability.LAG, Capability.NATIVE_DEAD_LETTER)

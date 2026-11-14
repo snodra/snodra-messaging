@@ -2,6 +2,7 @@ package io.damoreira.kraken.messaging.kafka
 
 import io.damoreira.kraken.messaging.config.KrakenMessagingAutoConfiguration
 import io.damoreira.kraken.messaging.eventstore.Capability
+import io.damoreira.kraken.messaging.eventstore.SegmentOrder
 import io.damoreira.kraken.messaging.eventstore.EventStore
 import io.damoreira.kraken.messaging.eventstore.EventStoreException
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -77,9 +78,9 @@ class KafkaEventStoreTest {
 
     @Test
     fun `closing a store that never published builds no producer`() {
-        // The producer is lazy; an unreachable broker would make building it log and wait, and close() must not do either.
-        val started = System.nanoTime()
-        KafkaEventStore(KafkaEventStoreSettings(bootstrapServers = "localhost:1")).close()
-        assertTrue(System.nanoTime() - started < 1_000_000_000L)
+        val closed = KafkaEventStore(KafkaEventStoreSettings(bootstrapServers = "localhost:1"))
+        assertTrue(!closed.producerBuilt)
+        closed.close()
+        assertTrue(!closed.producerBuilt, "close() built the producer only to close it")
     }
 }

@@ -1,10 +1,11 @@
-package io.damoreira.kraken.messaging.kafka
+package io.damoreira.kraken.messaging.eventstore
 
 /**
- * The order segments are listed in, the hub's: names of ASCII digits only first, by numeric value (compared as digit strings, so
- * no overflow: partition 10 follows 9), then every other name by its UTF-8 bytes.
+ * Segment order, the one every list of segments is in ([Subscription.segments], [SubscriptionAdmin.plan], the segments of an
+ * assignment), the hub's: names of ASCII digits only first, by numeric value (compared as digit strings, so no overflow:
+ * segment 10 follows 9), then every other name by its UTF-8 bytes.
  */
-internal object SegmentOrder : Comparator<String> {
+object SegmentOrder : Comparator<String> {
     override fun compare(a: String, b: String): Int {
         val x = digits(a)
         val y = digits(b)

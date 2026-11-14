@@ -3,9 +3,12 @@ package io.damoreira.kraken.messaging.kafka
 import io.damoreira.kraken.messaging.eventstore.Delivery
 import io.damoreira.kraken.messaging.eventstore.EventHeaders
 import io.damoreira.kraken.messaging.eventstore.EventStoreException
+import io.damoreira.kraken.messaging.eventstore.OutgoingEvent
 import io.damoreira.kraken.messaging.eventstore.ResetTarget
+import io.damoreira.kraken.messaging.eventstore.Subscription
 import io.damoreira.kraken.messaging.eventstore.SubscriptionSpec
 import io.damoreira.kraken.messaging.test.KrakenContainers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.apache.kafka.clients.admin.Admin
@@ -82,9 +85,8 @@ class KafkaEventStoreBrokerTest {
         }
         val seconds = (System.nanoTime() - startedAt) / 1e9
         val rate = total / seconds
-        println("KafkaEventStore throughput: $total events in ${"%.2f".format(seconds)} s = ${rate.toLong()} events/s")
         subscription.close()
-        assertTrue(rate > 3_000, "at least 3 000 events/s, was ${rate.toLong()}")
+        assertTrue(rate > 3_000, "at least 3 000 events/s, was ${rate.toLong()} ($total events in ${"%.2f".format(seconds)} s)")
     }
 
     @Test
@@ -101,5 +103,47 @@ class KafkaEventStoreBrokerTest {
         subscription.close()
         val error = assertThrows(EventStoreException.Failed::class.java) { runBlocking { subscription.next() } }
         assertTrue(error.message!!.contains("closed"), error.message)
+    }
+
+    private fun event(source: String, n: Int) = OutgoingEvent(
+        source, "e$n", "t", "k$n", mapOf(EventHeaders.TYPE to "t", EventHeaders.ID to "e$n"), """{"n":$n}""".toByteArray(),
+    )
+
+    private suspend fun lagOf(subscription: Subscription): Long? {
+        val lags = subscription.segments().map { it.lag }
+        return if (lags.isEmpty() || lags.any { it == null }) null else lags.sumOf { it!! }
+    }
+
+    private suspend fun until(what: String, done: suspend () -> Boolean) {
+        withTimeout(30_000) { while (!done()) delay(50) }
+    }
+
+    @Test
+    fun `the lag of a paused subscription follows the topic, also when it was paused before its first fetch`() = runBlocking {
+        val source = topic(2)
+        repeat(5) { store.publish(event(source, it)) }
+
+        val subscription = store.subscribe(SubscriptionSpec("lag.${UUID.randomUUID()}", source))
+        var read = 0
+        withTimeout(30_000) {
+            while (read < 5) {
+                val next = subscription.next()
+                if (next is Delivery) {
+                    subscription.ack(next.segment, next.position)
+                    read++
+                }
+            }
+        }
+        until("lag 0") { lagOf(subscription) == 0L }
+        subscription.pause()
+        repeat(7) { store.publish(event(source, 100 + it)) }
+        until("the lag grown by the 7 events published while paused") { lagOf(subscription) == 7L }
+        subscription.close()
+
+        // A subscription paused before it fetched anything: nothing fetched, yet the lag is the backlog.
+        val fresh = store.subscribe(SubscriptionSpec("lag.${UUID.randomUUID()}", source))
+        fresh.pause()
+        until("the backlog of 12 as the lag") { lagOf(fresh) == 12L }
+        fresh.close()
     }
 }

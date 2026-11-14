@@ -7,6 +7,7 @@ import io.damoreira.kraken.messaging.eventstore.EventStoreException
 import io.damoreira.kraken.messaging.eventstore.OutgoingEvent
 import io.damoreira.kraken.messaging.eventstore.ReplayRange
 import io.damoreira.kraken.messaging.eventstore.ResetTarget
+import io.damoreira.kraken.messaging.eventstore.SegmentOrder
 import io.damoreira.kraken.messaging.eventstore.SegmentStatus
 import io.damoreira.kraken.messaging.eventstore.Subscription
 import io.damoreira.kraken.messaging.eventstore.SubscriptionAdmin
@@ -242,7 +243,7 @@ private class Member(private val log: Log, private val spec: SubscriptionSpec, p
             val done = committed[s]
             val lag = if (supports(Capability.LAG)) head - (done ?: at) else null
             SegmentStatus(s.toString(), at.toString(), done?.toString(), head.toString(), lag)
-        }
+        }.sortedWith(compareBy(SegmentOrder) { it.segment })
     }
 
     override suspend fun close() {
@@ -269,7 +270,7 @@ private class Admin(private val log: Log, private val spec: SubscriptionSpec) : 
                 val to = position(at)
                 if (to > head(source, s)) throw EventStoreException.Invalid("$at past the head")
                 range(s, to)
-            }.sortedBy { it.segment }
+            }.sortedWith(compareBy(SegmentOrder) { it.segment })
         }
     }
 

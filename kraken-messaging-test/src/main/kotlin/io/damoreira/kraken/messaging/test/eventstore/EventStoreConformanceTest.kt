@@ -9,6 +9,7 @@ import io.damoreira.kraken.messaging.eventstore.MAX_POSITION_BYTES
 import io.damoreira.kraken.messaging.eventstore.MAX_SEGMENT_BYTES
 import io.damoreira.kraken.messaging.eventstore.OutgoingEvent
 import io.damoreira.kraken.messaging.eventstore.ResetTarget
+import io.damoreira.kraken.messaging.eventstore.SegmentOrder
 import io.damoreira.kraken.messaging.eventstore.Subscription
 import io.damoreira.kraken.messaging.eventstore.SubscriptionEvent
 import io.damoreira.kraken.messaging.eventstore.SubscriptionSpec
@@ -347,6 +348,7 @@ abstract class EventStoreConformanceTest {
 
         fun before(a: String, b: String) = events.compare(a, b) < 0
         val earliest = bounded("admin plan Earliest") { admin.plan(ResetTarget.Earliest) }
+        assertEquals(earliest.map { it.segment }.sortedWith(SegmentOrder), earliest.map { it.segment }, "a plan lists its segments in segment order")
         for (d in delivered) {
             assertTrue(
                 earliest.any { r ->
@@ -447,7 +449,10 @@ abstract class EventStoreConformanceTest {
             if (reader.seen.size == delivered && reader.knownLag() == 0L) break
             if (System.nanoTime() > deadline) fail<Unit>("the source drained within ${wait.seconds} s")
         }
-        assertEquals(reader.assigned.toSet(), reader.subscription.segments().map { it.segment }.toSet(), "segments() lists the assignment")
+        assertEquals(
+            reader.assigned.sortedWith(SegmentOrder), reader.subscription.segments().map { it.segment },
+            "segments() lists the assignment in segment order",
+        )
 
         val sent = (0 until 5).map { event(source, fresh("key")) }
         val all = ids(sent)

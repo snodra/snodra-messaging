@@ -36,7 +36,7 @@ interface SubscriptionAdmin {
     suspend fun members(): List<String>
 
     /**
-     * Where [target] moves each segment, from the event store's current positions; nothing moves yet. Sorted by segment. A
+     * Where [target] moves each segment, from the event store's current positions; nothing moves yet. In segment order ([SegmentOrder]). A
      * target position the segment does not have (a segment the source lacks, a position past the head) throws
      * [EventStoreException.Invalid].
      */

@@ -1,5 +1,6 @@
 package io.damoreira.kraken.messaging.kafka
 
+import io.damoreira.kraken.messaging.eventstore.SegmentOrder
 import io.damoreira.kraken.messaging.eventstore.Delivery
 import io.damoreira.kraken.messaging.eventstore.EventStoreException
 import io.damoreira.kraken.messaging.eventstore.SegmentStatus
@@ -9,6 +10,7 @@ import io.damoreira.kraken.messaging.eventstore.SubscriptionSpec
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.channels.Channel
 import org.apache.kafka.clients.consumer.ConsumerRebalanceListener
+import org.apache.kafka.clients.consumer.Consumer
 import org.apache.kafka.clients.consumer.KafkaConsumer
 import org.apache.kafka.clients.consumer.OffsetAndMetadata
 import org.apache.kafka.common.TopicPartition
@@ -43,7 +45,7 @@ import kotlin.concurrent.withLock
 internal class KafkaSubscription private constructor(
     private val spec: SubscriptionSpec,
     private val settings: KafkaEventStoreSettings,
-    private val consumer: KafkaConsumer<String, ByteArray>,
+    private val consumer: Consumer<String, ByteArray>,
 ) : Subscription {
     private val log = LoggerFactory.getLogger(KafkaSubscription::class.java)
     private val topic = spec.source
@@ -233,6 +235,8 @@ internal class KafkaSubscription private constructor(
         for ((partition, offset) in acked) {
             if (only != null && partition !in only) continue
             val track = tracks[partition] ?: continue
+            // Until the group's committed offset is known an ack could commit below what another instance committed.
+            if (!track.committedKnown) continue
             if (offset > track.committed) offsets[TopicPartition(topic, partition)] = OffsetAndMetadata(offset)
         }
         if (offsets.isEmpty()) return
@@ -246,9 +250,10 @@ internal class KafkaSubscription private constructor(
     }
 
     /**
-     * Refreshes what [segments] reports, without a request that could hold the fetching up: the head is the consumer's position
-     * plus its current lag (`currentLag` reads what the fetch responses reported; it is not updated while the partition is paused),
-     * and a committed offset the rebalance listener could not read is looked up again with a short timeout.
+     * Refreshes what [segments] reports without holding the fetching up. The hot path asks nothing of the brokers: the head is the
+     * consumer's position plus its `currentLag` (what the fetch responses reported). A partition without a lag (not fetched yet)
+     * or that the user paused (nothing is fetched for it, so its lag would freeze) gets its end offset from the brokers, at this
+     * cadence, with a short timeout. A committed offset the rebalance listener could not read is looked up again.
      */
     private fun refreshStatus() {
         val now = System.nanoTime()
@@ -256,16 +261,38 @@ internal class KafkaSubscription private constructor(
         nextRefresh = now + settings.statusRefresh.toNanos()
         val assignment = consumer.assignment()
         if (assignment.isEmpty()) return
+        val ask = HashSet<TopicPartition>()
         for (tp in assignment) {
             val track = tracks[tp.partition()] ?: continue
-            val position = try {
+            if (track.position.get() < 0) {
+                // The first position is the first record still queued for the partition, never the consumer's (which is past them).
+                lock.withLock {
+                    val queued = queue.firstOrNull { it is Delivery && it.segment == tp.partition().toString() } as Delivery?
+                    if (queued != null) {
+                        track.position.compareAndSet(-1, queued.position.toLong())
+                    } else {
+                        try {
+                            track.position.compareAndSet(-1, consumer.position(tp, Duration.ZERO))
+                        } catch (_: Exception) {
+                            // not known yet
+                        }
+                    }
+                }
+            }
+            val lag = if (paused) java.util.OptionalLong.empty() else consumer.currentLag(tp)
+            val fetched = try {
                 consumer.position(tp, Duration.ZERO)
             } catch (_: Exception) {
-                continue // not known yet
+                -1L
             }
-            if (track.position.get() < 0) track.position.compareAndSet(-1, position)
-            val lag = consumer.currentLag(tp)
-            if (lag.isPresent) track.head = position + lag.asLong
+            if (lag.isPresent && fetched >= 0) track.head = fetched + lag.asLong else ask += tp
+        }
+        if (ask.isNotEmpty()) {
+            try {
+                for ((tp, end) in consumer.endOffsets(ask, END_OFFSETS_LOOKUP)) tracks[tp.partition()]?.head = end
+            } catch (e: Exception) {
+                log.debug("Subscription {} could not read the end offsets of {}: {}", spec.name, topic, e.toString())
+            }
         }
         val unknown = assignment.filter { tracks[it.partition()]?.committedKnown == false }.toSet()
         if (unknown.isNotEmpty()) {
@@ -352,10 +379,15 @@ internal class KafkaSubscription private constructor(
         /** The longest a poll thread waits for the queue to drain while it holds the partitions paused. */
         private const val HOLD_MS = 20L
         private val COMMITTED_LOOKUP: Duration = Duration.ofMillis(200)
+        private val END_OFFSETS_LOOKUP: Duration = Duration.ofSeconds(1)
 
         /** Creates the consumer of [spec] and starts its thread; the group is joined by the first polls. */
         fun start(spec: SubscriptionSpec, settings: KafkaEventStoreSettings, number: Int): KafkaSubscription {
-            val consumer = KafkaConsumer<String, ByteArray>(settings.consumerProperties(spec.name, number))
+            return start(spec, settings, KafkaConsumer(settings.consumerProperties(spec.name, number)))
+        }
+
+        /** Starts the subscription over [consumer] (a `MockConsumer` in tests). */
+        fun start(spec: SubscriptionSpec, settings: KafkaEventStoreSettings, consumer: Consumer<String, ByteArray>): KafkaSubscription {
             val subscription = KafkaSubscription(spec, settings, consumer)
             subscription.thread = Thread(subscription::run, "kraken-kafka-${spec.name}").apply { isDaemon = true }
             subscription.thread.start()

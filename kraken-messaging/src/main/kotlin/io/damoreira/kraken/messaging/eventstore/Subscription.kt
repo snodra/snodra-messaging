@@ -46,7 +46,7 @@ interface Subscription {
     fun resume()
 
     /**
-     * The segments assigned now, sorted by segment, with their positions and lag as last known (refreshed by the subscription
+     * The segments assigned now, in segment order ([SegmentOrder]: names of ASCII digits by numeric value, then other names by bytes), with their positions and lag as last known (refreshed by the subscription
      * itself; never a blocking call).
      */
     fun segments(): List<SegmentStatus>
