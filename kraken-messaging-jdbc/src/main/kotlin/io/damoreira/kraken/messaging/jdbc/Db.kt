@@ -12,6 +12,7 @@ import org.springframework.jdbc.datasource.DelegatingDataSource
 import org.springframework.jdbc.support.SQLErrorCodeSQLExceptionTranslator
 import org.springframework.jdbc.support.SQLExceptionTranslator
 import org.springframework.transaction.TransactionDefinition
+import org.springframework.transaction.support.AbstractPlatformTransactionManager
 import org.springframework.transaction.support.TransactionSynchronizationManager
 import org.springframework.transaction.support.TransactionTemplate
 import tools.jackson.databind.JsonNode
@@ -57,6 +58,19 @@ internal class Db(
         it.isolationLevel = TransactionDefinition.ISOLATION_READ_COMMITTED
     }
 
+    /**
+     * The transactions of writes made once the caller's transaction ended (its after-completion phase): never touching the
+     * thread's transaction state (`SYNCHRONIZATION_NEVER`), which Spring still holds for the ended transaction and its later
+     * after-completion callbacks. A transaction that synchronized would clear that state when it ends: the callback's next write
+     * would then join the ended transaction's connection and be lost on a pool in `auto-commit=false`.
+     */
+    private val afterCompletionTransactions = TransactionTemplate(
+        DataSourceTransactionManager(ownDataSource).also { it.transactionSynchronization = AbstractPlatformTransactionManager.SYNCHRONIZATION_NEVER },
+    ).also {
+        it.propagationBehavior = TransactionDefinition.PROPAGATION_REQUIRES_NEW
+        it.isolationLevel = TransactionDefinition.ISOLATION_READ_COMMITTED
+    }
+
     /** A batch of [sql] (positional parameters) over [rows]: only inside a [tx] block. */
     fun batch(sql: String, rows: List<Array<Any?>>) {
         rows.forEach { Limits.refuseNul("a parameter", it) }
@@ -67,11 +81,12 @@ internal class Db(
      * Runs [block] with the service's writes: in the caller's transaction, else in a short one of its own. A transaction still
      * marked active while its synchronizations are gone has ended: its after-completion phase runs (where a
      * `@TransactionalEventListener(AFTER_COMMIT)` runs); [block] then runs in a transaction of its own, on its own connection, so it
-     * commits whatever the pool's auto-commit (on the ended transaction's connection it would be rolled back when that returns).
+     * commits whatever the pool's auto-commit (on the ended transaction's connection it would be rolled back when that returns), and
+     * leaves the thread's transaction state as it found it ([afterCompletionTransactions]).
      */
     fun <T> tx(block: (JdbcClient) -> T): T {
         if (TransactionSynchronizationManager.isActualTransactionActive()) {
-            if (!TransactionSynchronizationManager.isSynchronizationActive()) return own(block)
+            if (!TransactionSynchronizationManager.isSynchronizationActive()) return afterCompletionTransactions.execute { block(ownClient) }
             checkJoinable()
             return block(joinedClient)
         }

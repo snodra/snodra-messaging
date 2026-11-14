@@ -15,6 +15,9 @@ import org.springframework.transaction.PlatformTransactionManager
 import org.springframework.transaction.event.TransactionPhase
 import org.springframework.transaction.event.TransactionalEventListener
 import org.springframework.transaction.support.TransactionTemplate
+import org.springframework.transaction.support.TransactionSynchronizationManager
+import org.springframework.core.annotation.Order
+import org.springframework.jdbc.core.simple.JdbcClient
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import java.time.Duration
@@ -34,6 +37,54 @@ abstract class JdbcAutoCommitOffTest(private val database: TestDatabase) {
         @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
         fun on(event: OrderPlaced) = runBlocking {
             store.outbox.append(OutboxEntry(event.id, "t.OrderPlaced", "k", emptyMap(), "{}".toByteArray(), Instant.now(), 1))
+        }
+    }
+
+    /** Two appends in one AFTER_COMMIT listener, then a second listener that appends and looks at the thread's transaction state. */
+    class TwoAppendsListener(private val store: JdbcMessageStore) {
+        @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
+        @Order(1)
+        fun first(event: OrderPlaced) = runBlocking {
+            store.outbox.append(OutboxEntry("${event.id}-a", "t.OrderPlaced", "k", emptyMap(), "{}".toByteArray(), Instant.now(), 1))
+            store.outbox.append(OutboxEntry("${event.id}-b", "t.OrderPlaced", "k", emptyMap(), "{}".toByteArray(), Instant.now(), 2))
+        }
+    }
+
+    class LaterListener(private val store: JdbcMessageStore) {
+        @Volatile var seenActive: Boolean? = null
+        @Volatile var seenName: String? = null
+
+        @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
+        @Order(2)
+        fun later(event: OrderPlaced) {
+            runBlocking { store.outbox.append(OutboxEntry("${event.id}-c", "t.OrderPlaced", "k", emptyMap(), "{}".toByteArray(), Instant.now(), 3)) }
+            seenActive = TransactionSynchronizationManager.isActualTransactionActive()
+            seenName = TransactionSynchronizationManager.getCurrentTransactionName()
+        }
+    }
+
+    /**
+     * After-completion writes, several of them: two in one listener, one in a later listener, all committed on an auto-commit=false
+     * pool; and the store's own transactions leave the thread's transaction state as Spring left it for the listeners after them.
+     */
+    @Test
+    fun everyAfterCommitWriteCommitsAndTheThreadsStateIsUntouched() {
+        database.dataSource(autoCommit = false).use { ds ->
+            val store = JdbcMessageStore(ds, database.dialect).also { it.initSchema() }
+            val later = LaterListener(store)
+            ApplicationContextRunner()
+                .withConfiguration(AutoConfigurations.of(TransactionAutoConfiguration::class.java))
+                .withBean(PlatformTransactionManager::class.java, { DataSourceTransactionManager(ds) })
+                .withBean(TwoAppendsListener::class.java, { TwoAppendsListener(store) })
+                .withBean(LaterListener::class.java, { later })
+                .run { context ->
+                    assertNull(context.startupFailure)
+                    TransactionTemplate(context.getBean(PlatformTransactionManager::class.java)).also { it.setName("orders.place") }
+                        .executeWithoutResult { context.publishEvent(OrderPlaced("o")) }
+                    assertEquals(listOf("o-a", "o-b", "o-c"), JdbcClient.create(ds).sql("SELECT id FROM kraken_outbox ORDER BY id").query(String::class.java).list())
+                    assertEquals(true, later.seenActive, "the later listener still sees its (ended) transaction as Spring left it")
+                    assertEquals("orders.place", later.seenName)
+                }
         }
     }
 

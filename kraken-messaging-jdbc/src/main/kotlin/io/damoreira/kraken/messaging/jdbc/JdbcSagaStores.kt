@@ -404,9 +404,10 @@ internal class JdbcSagaFailureStore(private val db: Db) : SagaFailureStore {
     }
 
     /**
-     * Inserts or replaces the failure with that id, in one statement on PostgreSQL (`ON CONFLICT DO UPDATE`); on MySQL an insert,
-     * then on a duplicate key an update. Never a delete first: on MySQL a delete that finds no row takes a gap lock, and two
-     * first-time saves would deadlock on their inserts.
+     * Inserts or replaces the failure with that id, in one statement: `INSERT ... ON CONFLICT (id_hash) DO UPDATE` on PostgreSQL,
+     * `INSERT ... ON DUPLICATE KEY UPDATE` on MySQL (which locks a duplicate row exclusively at once: an insert that failed on the
+     * duplicate and then updated would hold a shared lock first, and two concurrent re-saves would deadlock upgrading it). Never a
+     * delete first: on MySQL a delete that finds no row takes a gap lock, and two first-time saves would deadlock on their inserts.
      */
     override fun save(failure: SagaFailureDocument) {
         Limits.check("a saga failure's saga type", failure.sagaType, Limits.NAME)
@@ -422,11 +423,7 @@ internal class JdbcSagaFailureStore(private val db: Db) : SagaFailureStore {
         db.tx { jdbc ->
             when (db.dialect) {
                 PostgresDialect -> jdbc.sql("$insert ON CONFLICT (id_hash) DO UPDATE SET $set").params(params).update()
-                MySqlDialect -> try {
-                    jdbc.sql(insert).params(params).update()
-                } catch (_: DuplicateKeyException) {
-                    jdbc.sql("UPDATE kraken_saga_failures SET $set WHERE id_hash = :idHash").params(params).update()
-                }
+                MySqlDialect -> jdbc.sql("$insert ON DUPLICATE KEY UPDATE $MYSQL_FAILURE_SET").params(params).update()
             }
         }
     }
@@ -458,6 +455,11 @@ internal class JdbcSagaFailureStore(private val db: Db) : SagaFailureStore {
         lastFailedAt = db.instant(rs, "last_failed_at")!!,
     )
 }
+
+/** MySQL's update of a saga failure re-saved: every column from the row the statement tried to insert (`VALUES(col)`, valid since 8.0.17's minimum). */
+private const val MYSQL_FAILURE_SET = "id = VALUES(id), saga_type = VALUES(saga_type), event_id = VALUES(event_id), event_type = VALUES(event_type), " +
+    "payload = VALUES(payload), headers = VALUES(headers), error = VALUES(error), attempts = VALUES(attempts), " +
+    "first_failed_at = VALUES(first_failed_at), last_failed_at = VALUES(last_failed_at)"
 
 /** The saga stage's markers, in `kraken_processed_events`. */
 internal class JdbcSagaMarkerStore(private val db: Db) : SagaMarkerStore {

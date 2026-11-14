@@ -152,6 +152,25 @@ abstract class JdbcConcurrencyTest(private val database: TestDatabase) {
         }
     }
 
+    /** Two re-saves of an existing saga failure at once (each in a transaction): both succeed, one row is left. */
+    @Test
+    fun concurrentReSavesOfOneFailureBothSucceed() {
+        val t = now()
+        repeat(10) { round ->
+            val id = "t.Order:r-$round"
+            store.sagas.failures.save(SagaFailureDocument(id, "t.Order", "r-$round", "t.Paid", "{}", emptyMap(), "first", 1, t, t))
+            val failures = race(2) { i ->
+                runCatching {
+                    TransactionTemplate(store.transactions).executeWithoutResult {
+                        store.sagas.failures.save(SagaFailureDocument(id, "t.Order", "r-$round", "t.Paid", "{}", emptyMap(), "again $i", 2, t, t))
+                    }
+                }.exceptionOrNull()
+            }
+            assertEquals(listOf<Throwable?>(null, null), failures, "round $round")
+            assertEquals(2, store.sagas.failures.find(id)!!.attempts)
+        }
+    }
+
     private fun <T> race(n: Int, work: (Int) -> T): List<T> {
         val start = CyclicBarrier(n)
         val pool = Executors.newFixedThreadPool(n)
