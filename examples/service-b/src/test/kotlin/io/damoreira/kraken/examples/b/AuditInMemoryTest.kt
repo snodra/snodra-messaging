@@ -1,10 +1,17 @@
 package io.damoreira.kraken.examples.b
 
+import com.mongodb.client.MongoClient
+import io.damoreira.kraken.messaging.external.ExternalSourceProviders
+import io.damoreira.kraken.messaging.kafka.KafkaEventStore
 import io.damoreira.kraken.messaging.test.InMemoryEvents
 import io.damoreira.kraken.messaging.test.KrakenInMemory
 import org.assertj.core.api.Assertions.assertThat
 import org.springframework.beans.factory.annotation.Autowired
+import org.junit.jupiter.api.extension.ExtendWith
 import org.springframework.boot.test.context.SpringBootTest
+import org.springframework.boot.test.system.CapturedOutput
+import org.springframework.boot.test.system.OutputCaptureExtension
+import org.springframework.context.ApplicationContext
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc
 import org.springframework.http.HttpStatus
 import org.springframework.http.MediaType
@@ -23,11 +30,23 @@ import kotlin.test.assertTrue
 @SpringBootTest(properties = ["kraken.messaging.events.consumer.max-attempts=1"])
 @AutoConfigureMockMvc
 @KrakenInMemory
+@ExtendWith(OutputCaptureExtension::class)
 class AuditInMemoryTest {
     @Autowired lateinit var mvc: MockMvcTester
     @Autowired lateinit var events: InMemoryEvents
     @Autowired lateinit var audit: AuditHandler
     @Autowired lateinit var notifier: AuditNotifier
+    @Autowired lateinit var context: ApplicationContext
+
+    @Test fun `nothing reaches for a broker or a database`(output: CapturedOutput) {
+        assertTrue(context.getBeanNamesForType(MongoClient::class.java).isEmpty(), "no MongoDB client is built")
+        assertTrue(context.getBeanNamesForType(KafkaEventStore::class.java).isEmpty(), "no Kafka event store")
+        assertTrue(context.getBeanNamesForType(ExternalSourceProviders::class.java).isEmpty(), "no partner topic is read")
+        Thread.sleep(500) // a client's monitor thread would have logged its first connection attempt by now
+        for (trace in listOf("27017", "MongoSocket", "Exception in monitor thread", "9092", "bootstrap")) {
+            assertTrue(trace !in output.out, "no \"$trace\" in the log:\n${output.out}")
+        }
+    }
 
     private fun until(what: String, done: () -> Boolean) {
         val deadline = System.nanoTime() + 10_000_000_000L

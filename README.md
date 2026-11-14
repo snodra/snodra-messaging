@@ -1654,8 +1654,13 @@ service-a and service-b of the [examples](#examples) export this way when switch
 
 - `@KrakenInMemory` on a `@SpringBootTest`: the zero-infrastructure mode. The application runs on the in-memory event store and
   message store (`kraken.messaging.event-store=memory`, `kraken.messaging.store.type=memory`), without a hub (`hub.enabled=false`: no
-  `CommandBus` or `QueryBus`; a service that injects one declares `InMemoryBuses` or an `InProcessHub` connection) and without the
-  Kafka add-on's auto-configuration (no partner topics either). The test gets an `InMemoryEvents` bean:
+  `CommandBus` or `QueryBus`; a service that injects one declares `InMemoryBuses` or an `InProcessHub` connection), and without the
+  auto-configurations in `@KrakenInMemory(exclude = ...)`: by default the Kafka add-on (no partner topics either) and Spring Boot's
+  MongoDB client and data ones (`KrakenInMemoryExclusions.DEFAULT`), so nothing connects to a broker or a database. They are added
+  to the application's own exclusions, never in their place. An application that uses MongoDB itself keeps Boot's MongoDB
+  auto-configurations with `@KrakenInMemory(exclude = [KrakenInMemoryExclusions.KAFKA])` and provides or replaces that database
+  in its test. It is meant for `@SpringBootTest` (it enables auto-configuration on the test class), not slice tests. The test gets
+  an `InMemoryEvents` bean:
   `publish(event, key)` hands an event to the service as another service would (its processors and sagas get it; returns its
   id), `published()` / `published(Type::class)` / `awaitPublished(Type::class, count)` read what the service published,
   `deadLetters(processor)` / `awaitDeadLetters(processor, count)` its processors' dead letters, and `processed(eventId,

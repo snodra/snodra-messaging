@@ -84,6 +84,12 @@ class KrakenInMemoryTest {
     }
 
     @Test
+    fun theApplicationsOwnAutoConfigurationExclusionsAreKept() {
+        assertTrue(context.getBeanNamesForType(ExcludedProbe::class.java).isEmpty(), "the application's spring.autoconfigure.exclude still applies")
+        assertTrue(context.getBeanNamesForType(KeptProbe::class.java).isNotEmpty(), "the other auto-configurations run")
+    }
+
+    @Test
     fun anEventPublishedToTheServiceIsHandledAndWhatItPublishesIsRead() {
         val id = events.publish(Ordered("o-1"), key = "o-1")
         events.awaitProcessed(id, processor = "shipping")

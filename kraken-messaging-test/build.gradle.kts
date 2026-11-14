@@ -22,6 +22,7 @@ dependencies {
     // @KrakenInMemory is a Spring test annotation (TestPropertySource, Import) for a service's @SpringBootTest.
     implementation("org.springframework:spring-test")
     implementation("org.springframework:spring-context")
+    implementation("org.springframework.boot:spring-boot-autoconfigure") // @KrakenInMemory enables auto-configuration with its exclusions
     // UnverifiedJwt reads the claims of a jwt credential.
     implementation("tools.jackson.core:jackson-databind")
     implementation(libs.grpc.kotlin.stub)
