@@ -63,7 +63,7 @@ Repo conventions: `../kraken/docs/04-repositories.md`.
 | `kraken-messaging` | `io.damoreira.kraken:kraken-messaging:0.1.0-SNAPSHOT` | Spring Boot starter: buses, handler annotations, hub client, outbox, event processors, sagas, deadlines and the external-integration toolkit, auto-configuration. Its state goes through the message store interfaces (`io.damoreira.kraken.messaging.store`, ADR 0028) and its events through the event-store interfaces (`io.damoreira.kraken.messaging.eventstore`, ADR 0027); it depends on no database and no event-store client. It ships the in-memory event store and message store (not durable: tests, local runs, demos; see [In-memory event store and message store](#in-memory-event-store-and-message-store)). |
 | `kraken-messaging-kafka` | `io.damoreira.kraken:kraken-messaging-kafka:0.1.0-SNAPSHOT` | The Kafka event store (`io.damoreira.kraken.messaging.eventstore`, ADR 0027): publish, competing subscriptions, replay, lag and dead-letter topics, over the plain Kafka clients; its settings `kraken.messaging.kafka.*` and the partner topics `kraken.messaging.external.kafka.sources.*`. Add it to publish or handle events on Kafka. |
 | `kraken-messaging-mongo` | `io.damoreira.kraken:kraken-messaging-mongo:0.1.0-SNAPSHOT` | The MongoDB message store: the outbox, processed events, dead letters, processor control, external calls and sagas in the service's MongoDB (a replica set), and its `MongoTransactionManager`. |
-| `kraken-messaging-jdbc` | `io.damoreira.kraken:kraken-messaging-jdbc:0.1.0-SNAPSHOT` | The SQL message store: the same stores in `kraken_*` tables of the service's PostgreSQL (13+) or MySQL (8.0+) through plain JDBC, joining its `DataSourceTransactionManager` or `JpaTransactionManager` transaction; schema files for Flyway or Liquibase. See [its README](kraken-messaging-jdbc/README.md). |
+| `kraken-messaging-jdbc` | `io.damoreira.kraken:kraken-messaging-jdbc:0.1.0-SNAPSHOT` | The SQL message store: the same stores in `kraken_*` tables of the service's PostgreSQL (13+) or MySQL (8.0.17+) through plain JDBC, joining its `DataSourceTransactionManager` or `JpaTransactionManager` transaction; versioned schema files (also for Flyway). See [its README](kraken-messaging-jdbc/README.md). |
 | `kraken-messaging-test` | `io.damoreira.kraken:kraken-messaging-test:0.1.0-SNAPSHOT` | The zero-infrastructure mode `@KrakenInMemory` with `InMemoryEvents`, the conformance kits of the event store and the message store (`EventStoreConformanceTest`, `MessageStoreConformanceTest`), `InMemoryBuses`, `InProcessHub`, `KrakenContainers`, `KrakenTestKafka`, `SagaTestFixture`. |
 | `examples/examples-api`, `examples/service-a`, `examples/service-b`, `examples/orders-sql` | not published | Sample services talking through the hub; see [Examples](#examples). |
 
@@ -189,7 +189,7 @@ All keys (`kraken.messaging.*`; durations accept `200ms`, `5s`, `7d`; relaxed bi
 | `hub.retry.multiplier` | `2` | Growth of the wait per further attempt. |
 | `hub.retry.max-backoff` | `2s` | Upper bound of a single wait. |
 | `event-store` | the only one | The event store's name (`kafka`, `rabbitmq-streams`, `memory`) when two event-store add-ons are on the classpath; two without it, or a name no add-on provides, fail the startup. `memory` runs the in-memory event store, and is the only way to run it (an add-on on the classpath then steps back). |
-| `store.type` | the only one | The message store's name (`mongo`, `jdbc`, `memory`) when two are available; two without it, or a name the application lacks, fail the startup. `memory` runs the in-memory message store, and is the only way to run it (the MongoDB add-on then steps back). |
+| `store.type` | the only one | The message store's name (`mongo`, `jdbc`, `memory`) when two are available; two without it, or a name the application lacks, fail the startup. `memory` runs the in-memory message store, and is the only way to run it (the database add-ons then step back). |
 | `store.init-schema` | `true` | Apply the message store's schema (indexes, tables) at startup; `false` when the service applies it itself. |
 | `memory.segments` | `4` | The in-memory event store's segments per source (1 to 1024): a key always goes to one of them; the competing instances of a subscription share them. |
 | `events.source` | `kraken.events` | The source the service's events are published to and read from (the topic on Kafka). |
@@ -588,11 +588,12 @@ command, query and subscription-query handlers needs none.
 | Add-on | Name (`store.type`) | For | Transactions it joins |
 |---|---|---|---|
 | `kraken-messaging-mongo` | `mongo` | MongoDB (a replica set) | `MongoTransactionManager` |
-| `kraken-messaging-jdbc` | `jdbc` | PostgreSQL 13+, MySQL 8.0+ ([README](kraken-messaging-jdbc/README.md)) | `DataSourceTransactionManager`, `JpaTransactionManager` |
+| `kraken-messaging-jdbc` | `jdbc` | PostgreSQL 13+, MySQL 8.0.17+ ([README](kraken-messaging-jdbc/README.md)) | `DataSourceTransactionManager`, `JpaTransactionManager` |
 | the core | `memory` | tests, local runs, demos (not durable) | its own `MemoryTransactionManager` |
 
 The outbox entry and the processed marker commit in the same transaction as the service's own writes, whichever add-on. With
-two add-ons on the classpath, `kraken.messaging.store.type` chooses; `kraken.messaging.store.init-schema` (default `true`) creates
+two add-ons on the classpath, `kraken.messaging.store.type` chooses (without it the startup fails naming both; an add-on never
+wins silently, and an application's own `MessageStore` bean wins over every add-on); `kraken.messaging.store.init-schema` (default `true`) creates
 the add-on's indexes or tables at startup. Third parties add a database by implementing the store interfaces
 (`io.damoreira.kraken.messaging.store`) and passing `MessageStoreConformanceTest`.
 
