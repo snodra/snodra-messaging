@@ -76,17 +76,24 @@ internal class MemoryOutboxStore(private val store: MemoryMessageStore) : Outbox
 
     /**
      * Appends [entry] in the store's transaction bound to the calling thread, or at once without one. Inside a transaction of
-     * another manager (the application's own database), the entry is appended after that transaction committed and never when
-     * it rolled back: after the commit, not atomically with it (the in-memory store cannot join another database).
+     * another manager (the application's own database), the entry is appended once that transaction completed with a commit
+     * and never when it rolled back: after the commit, not atomically with it (the in-memory store cannot join another
+     * database). An exception of that deferred append (a duplicate id) is logged by Spring and cannot fail the transaction,
+     * which committed already. From a callback of this store's own transaction once it ended (its `afterCommit`, say), the entry
+     * is appended at once, as without a transaction.
      */
     override suspend fun append(entry: OutboxEntry) {
         JsonPayloads.requireObject(entry.payload, "outbox entry ${entry.id} (${entry.type})")
         val copy = OutboxEntry(entry.id, entry.type, entry.key, LinkedHashMap(entry.headers), entry.payload.copyOf(), entry.createdAt, entry.seq, entry.attempts)
-        if (store.bound() == null && TransactionSynchronizationManager.isSynchronizationActive() &&
+        if (store.bound() == null && !store.endedTransactionBound() && TransactionSynchronizationManager.isSynchronizationActive() &&
             TransactionSynchronizationManager.isActualTransactionActive()
         ) {
+            // afterCompletion, not afterCommit: a synchronization registered from another one's afterCommit misses that phase
+            // (Spring took its list already) but is part of the afterCompletion that follows.
             TransactionSynchronizationManager.registerSynchronization(object : TransactionSynchronization {
-                override fun afterCommit() = appendNow(copy)
+                override fun afterCompletion(status: Int) {
+                    if (status == TransactionSynchronization.STATUS_COMMITTED) appendNow(copy)
+                }
             })
             return
         }

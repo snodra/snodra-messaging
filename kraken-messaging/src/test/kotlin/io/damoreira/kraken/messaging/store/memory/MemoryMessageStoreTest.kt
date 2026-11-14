@@ -210,6 +210,44 @@ class MemoryMessageStoreTest {
         }
     }
 
+    /**
+     * Appends [id] from an afterCommit callback of the transaction [manager] runs, as an application listener would; returns how
+     * many entries were pending right after that append, still inside the callback.
+     */
+    private fun appendFromAfterCommit(manager: TransactionTemplate, id: String): Long {
+        var pendingThen = -1L
+        manager.executeWithoutResult {
+            TransactionSynchronizationManager.registerSynchronization(object : TransactionSynchronization {
+                override fun afterCommit() {
+                    runBlocking {
+                        store.outbox.append(entry(id))
+                        pendingThen = store.outbox.pending()
+                    }
+                }
+            })
+            runBlocking { store.processedEvents.record(marker("marker-$id")) }
+        }
+        return pendingThen
+    }
+
+    @Test
+    fun anAppendFromAnAfterCommitCallbackOfTheStoresOwnTransactionIsAppended() {
+        val woken = AtomicInteger()
+        store.outbox.onAppend { woken.incrementAndGet() }
+        assertEquals(1L, appendFromAfterCommit(tx, "after-own"), "appended at once: the store's own transaction has ended, nothing to wait for")
+        runBlocking { assertEquals(listOf("after-own"), store.outbox.claim("relay", Duration.ofSeconds(30), 10).map { it.id }) }
+        assertEquals(1, woken.get(), "the relay woken")
+    }
+
+    @Test
+    fun anAppendFromAnAfterCommitCallbackOfAnotherManagersTransactionIsAppended() {
+        val woken = AtomicInteger()
+        store.outbox.onAppend { woken.incrementAndGet() }
+        assertEquals(0L, appendFromAfterCommit(TransactionTemplate(OtherManager()), "after-other"), "deferred to the transaction's completion")
+        runBlocking { assertEquals(listOf("after-other"), store.outbox.claim("relay", Duration.ofSeconds(30), 10).map { it.id }) }
+        assertEquals(1, woken.get(), "the relay woken")
+    }
+
     @Test
     fun theRelayIsWokenWhenAnAppendCommitsNeverForARollback() {
         val woken = AtomicInteger()

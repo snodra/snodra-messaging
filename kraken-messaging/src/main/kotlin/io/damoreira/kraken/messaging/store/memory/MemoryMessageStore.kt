@@ -87,6 +87,10 @@ class MemoryMessageStore(internal val clock: Clock = Clock.systemUTC()) : Messag
     internal fun bound(): MemoryTransaction? =
         (TransactionSynchronizationManager.getResource(transactionKey) as? MemoryTransaction)?.takeIf { !it.ended }
 
+    /** Whether a transaction of this store that ended is still bound to the calling thread (its completion callbacks run). */
+    internal fun endedTransactionBound(): Boolean =
+        (TransactionSynchronizationManager.getResource(transactionKey) as? MemoryTransaction)?.ended == true
+
     /** [table] as the calling thread sees it: through its transaction when [joined] and one is bound, else as committed. */
     internal fun <V : Any> view(table: Table<V>, joined: Boolean): View<V> = View(table, if (joined) bound() else null, this)
 
