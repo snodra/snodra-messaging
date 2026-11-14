@@ -19,6 +19,12 @@ import kotlin.reflect.KClass
 /** Header of a `saga_dispatch` entry that carries the correlation id of the message that caused it. */
 internal const val DISPATCH_CORRELATION_HEADER = "correlation-id"
 
+/**
+ * The header of a `saga_dispatch` entry that keeps the handled event's W3C `traceparent` (the trace floor): the relay sends the
+ * command, or publishes the event, in that trace. Absent when the event had none (or an invalid one).
+ */
+internal const val DISPATCH_TRACEPARENT_HEADER = "traceparent"
+
 /** Entries of one saga handling take `seq = version * SEQ_STRIDE + index`, so the index must stay below it. */
 internal const val SEQ_STRIDE = 1000L
 
@@ -49,6 +55,8 @@ internal class RecordingSagaCommands(
     private val now: Instant,
     private val codec: JsonCodec,
     private val typeResolver: MessageTypeResolver,
+    /** The handled event's valid `traceparent`, kept with every entry ([DISPATCH_TRACEPARENT_HEADER]); null: none. */
+    private val traceparent: String? = null,
 ) : SagaCommands {
     val entries = mutableListOf<SagaDispatchDocument>()
 
@@ -67,7 +75,7 @@ internal class RecordingSagaCommands(
             kind = kind,
             type = typeResolver.typeNameOf(message::class),
             payload = String(codec.encode(message), Charsets.UTF_8),
-            headers = mapOf(DISPATCH_CORRELATION_HEADER to correlationId),
+            headers = mapOf(DISPATCH_CORRELATION_HEADER to correlationId) + (traceparent?.let { mapOf(DISPATCH_TRACEPARENT_HEADER to it) } ?: emptyMap()),
             routingKey = routingKey,
             createdAt = now,
         )

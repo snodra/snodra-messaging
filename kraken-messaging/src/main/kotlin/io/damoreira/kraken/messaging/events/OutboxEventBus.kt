@@ -42,8 +42,8 @@ class OutboxEventBus(
     override fun publishBlocking(event: Event, key: String?) = runBlocking { outbox.append(entry(event, key, null)) }
 
     /** A saga's recorded event: no caller (so an empty `userId` header) and the correlation id of the message that caused it. */
-    override fun publishRaw(type: String, key: String?, payload: ByteArray, correlationId: String) =
-        runBlocking { outbox.append(entry(type, key, payload, correlationId, userId = "")) }
+    override fun publishRaw(type: String, key: String?, payload: ByteArray, correlationId: String, traceparent: String?) =
+        runBlocking { outbox.append(entry(type, key, payload, correlationId, userId = "", context = CorrelationContext(correlationId, traceparent))) }
 
     /** The correlation id comes from [context]'s [CorrelationContext], else the MDC, else a fresh UUID. */
     private fun entry(event: Event, key: String?, context: CoroutineContext?) = entry(

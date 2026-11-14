@@ -189,7 +189,10 @@ class RlDeafSaga {
 
 /** A sender the test scripts: every call is recorded, the outcome comes from [script]. */
 private class ScriptedSender : RawCommandSender {
-    class Call(val type: String, val payload: String, val headers: Map<String, String>, val correlationId: String?, val retry: RetryPolicy? = null)
+    class Call(
+        val type: String, val payload: String, val headers: Map<String, String>, val correlationId: String?, val retry: RetryPolicy? = null,
+        val traceparent: String? = null,
+    )
 
     val calls = CopyOnWriteArrayList<Call>()
     @Volatile var script: (Call) -> RawOutcome = { RawOutcome.Success }
@@ -199,7 +202,10 @@ private class ScriptedSender : RawCommandSender {
     override fun sendTimeoutFor(type: String, sendTimeout: Duration): Duration = timeoutFor?.invoke(type) ?: sendTimeout
 
     override suspend fun sendRaw(type: String, payload: ByteArray, options: SendOptions): RawOutcome {
-        val call = Call(type, String(payload, Charsets.UTF_8), options.headers, currentCoroutineContext()[CorrelationContext]?.correlationId, options.retry)
+        val call = Call(
+            type, String(payload, Charsets.UTF_8), options.headers, currentCoroutineContext()[CorrelationContext]?.correlationId, options.retry,
+            CorrelationContext.currentTraceparent(currentCoroutineContext()),
+        )
         calls += call
         return script(call)
     }
@@ -265,9 +271,10 @@ class SagaDispatchRelayTest {
         return SagaDispatchRelay(store.sagas.dispatch, tx, commands, events, dispatcher, codec, resolver, clock, settings, metrics).also { relays += it }
     }
 
-    private fun deliver(event: Event, id: String, correlationId: String = "corr-$id") {
+    private fun deliver(event: Event, id: String, correlationId: String = "corr-$id", traceparent: String? = null) {
         val type = resolver.typeNameOf(event::class)
-        runtime.process(type, codec.encode(event), MessageContext(id, type, correlationId, null, emptySet(), null, mapOf("id" to id, "type" to type)))
+        val headers = mapOf("id" to id, "type" to type) + (traceparent?.let { mapOf("traceparent" to it) } ?: emptyMap())
+        runtime.process(type, codec.encode(event), MessageContext(id, type, correlationId, null, emptySet(), null, headers))
     }
 
     private fun sagaOf(orderId: String) = memory.sagas().single { it.stateDoc.getString("orderId") == orderId }
@@ -278,10 +285,11 @@ class SagaDispatchRelayTest {
     /** Records an entry as a saga transaction would have; [seq] decides its place in the saga's order. */
     private fun record(
         sagaId: String, seq: Long, type: String = "rl.Charge", payload: String = """{"ref":"r$seq"}""",
-        kind: DispatchKind = DispatchKind.COMMAND, routingKey: String? = null,
+        kind: DispatchKind = DispatchKind.COMMAND, routingKey: String? = null, traceparent: String? = null,
     ): SagaDispatchDocument = SagaDispatchDocument(
         id = "$sagaId:$seq", sagaId = sagaId, seq = seq, kind = kind, type = type, payload = payload,
-        headers = mapOf("correlation-id" to "corr-$sagaId"), routingKey = routingKey, createdAt = clock.now,
+        headers = mapOf("correlation-id" to "corr-$sagaId") + (traceparent?.let { mapOf("traceparent" to it) } ?: emptyMap()),
+        routingKey = routingKey, createdAt = clock.now,
     ).also { memory.insertDispatchBehindTheStoresBack(it) }
 
     @Test
@@ -536,6 +544,28 @@ class SagaDispatchRelayTest {
         assertEquals("${saga.id}:${entries(saga.id).single().seq}", call.headers["idempotency-key"])
         assertEquals(saga.id, call.headers["saga-id"])
         assertEquals("corr-cause", call.correlationId)
+    }
+
+    @Test
+    fun `a command a saga dispatches carries the traceparent of the event it handled, a valid one only`() {
+        val traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+        deliver(RlStart("o1"), "e-1", traceparent = traceparent)
+        deliver(RlStart("o2"), "e-2", traceparent = "not-a-traceparent")
+
+        relay().pollOnce()
+
+        val byRef = sender.calls.associateBy { codec.decodeTree(it.payload.toByteArray()).get("ref").asString() }
+        assertEquals(traceparent, byRef.getValue("o1").traceparent, "sent in the trace of its cause")
+        assertEquals(null, byRef.getValue("o2").traceparent)
+        assertTrue(sender.calls.none { "traceparent" in it.headers }, "never as a SendOptions header (reserved)")
+    }
+
+    @Test
+    fun `an event a saga publishes carries the traceparent recorded with it`() {
+        val traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+        record("s1", 1000, type = "rl.Announced", payload = """{"orderId":"o1"}""", kind = DispatchKind.EVENT, traceparent = traceparent)
+        relay().pollOnce()
+        assertEquals(traceparent, memory.outboxEntries().single().headers["traceparent"])
     }
 
     @Test

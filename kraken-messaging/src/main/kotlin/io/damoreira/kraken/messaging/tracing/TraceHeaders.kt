@@ -9,7 +9,8 @@ import kotlin.coroutines.CoroutineContext
  * headers. [propagator] and [tracer] are typed `Any?` so the starter has no hard dependency on micrometer-tracing.
  *
  * Without tracing (either is null, or micrometer-tracing is not on the classpath) it keeps the trace floor: a message sent
- * while handling one carries the handled message's `traceparent` unchanged ([CorrelationContext.currentTraceparent]), so a trace
+ * while handling one carries the handled message's `traceparent` unchanged ([CorrelationContext.currentTraceparent]; a valid W3C one
+ * only, [Traceparents]), so a trace
  * still follows the message across services; outside handling it writes nothing. With tracing the propagator alone decides.
  */
 class TraceHeaders(
@@ -19,7 +20,7 @@ class TraceHeaders(
     /** Writes the trace headers of a message sent now; [context] is the sender's coroutine context (null: the thread's). */
     fun inject(into: MutableMap<String, String>, context: CoroutineContext? = null) {
         if (propagator == null || tracer == null || !MicrometerTracing.available) {
-            CorrelationContext.currentTraceparent(context)?.let { into[TRACEPARENT] = it }
+            Traceparents.valid(CorrelationContext.currentTraceparent(context))?.let { into[TRACEPARENT] = it }
             return
         }
         MicrometerTracing.inject(propagator, tracer, into)

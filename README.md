@@ -1830,7 +1830,11 @@ hub image).
   subscriber that must hear every instance resubscribes itself (opt-in auto-resubscribe is future work).
 - Library metrics are limited to the credential counters of P5b and the saga toolkit's (see [Sagas](#sagas)), both Micrometer and optional; there are no metrics for the buses, the outbox or the consumer yet. OpenTelemetry comes from the application.
 - Configuration metadata is hand-maintained in `META-INF/spring-configuration-metadata.json`.
-- `TraceHeaders` is only active with Micrometer Tracing on the classpath.
+- With Micrometer Tracing on the classpath its propagator writes the trace headers of outbound messages. Without it, the trace
+  floor: a request or an event sent while handling a message carries the handled message's `traceparent` unchanged (only a valid
+  W3C one: `00-<32 hex>-<16 hex>-<2 hex>`, lower case, ids not all zeros), and so does a command or an event a saga records while
+  handling an event, when its dispatch relay sends it later. Commands a deadline handler sends do not carry the trace of the event
+  that scheduled the deadline (a deadline record keeps no headers).
 - Trace context is injected on outbound messages (hub requests, outbox events) but not yet extracted on inbound hub
   requests or Kafka records, so a handler's spans do not join the caller's trace.
 - No service-to-service identity yet: commands sent from event handlers, sagas or scheduled jobs carry no token, so they can

@@ -1,5 +1,9 @@
 package io.damoreira.kraken.messaging.saga
 
+import io.damoreira.kraken.messaging.eventstore.EventHeaders
+
+import io.damoreira.kraken.messaging.tracing.Traceparents
+
 import io.damoreira.kraken.messaging.MessageContext
 import io.damoreira.kraken.messaging.codec.JsonCodec
 import io.damoreira.kraken.messaging.codec.MessageTypeResolver
@@ -302,7 +306,9 @@ class SagaRuntime(
         val sagaType: SagaType, val sagaId: String, val version: Long, val ctx: MessageContext, val now: Instant, associations: List<Association>,
     ) {
         val lifecycle = RecordingSagaLifecycle(sagaId, associations)
-        val commands = RecordingSagaCommands(sagaId, version, ctx.correlationId, now, codec, typeResolver)
+        val commands = RecordingSagaCommands(
+            sagaId, version, ctx.correlationId, now, codec, typeResolver, Traceparents.valid(ctx.headers[EventHeaders.TRACEPARENT]),
+        )
         val deadlines = RecordingDeadlineManager(sagaType.name, sagaId, now, codec, ctx.correlationId)
 
         /** The handler's arguments: [first] is the event or the deadline payload. */

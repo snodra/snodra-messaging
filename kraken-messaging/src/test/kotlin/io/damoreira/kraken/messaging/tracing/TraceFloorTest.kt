@@ -121,6 +121,26 @@ class TraceFloorTest {
         assertEquals(traceparent, store.outboxEntries().single().headers["traceparent"])
     }
 
+    @Test fun `only a valid W3C traceparent is forwarded`() = runBlocking {
+        val invalid = listOf(
+            "00-4BF92F3577B34DA6A3CE929D0E0E4736-00F067AA0BA902B7-01", // upper case
+            "00-00000000000000000000000000000000-00f067aa0ba902b7-01", // trace id all zeros
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-0000000000000000-01", // parent id all zeros
+            "01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01", // another version
+            "00-4bf92f3577b34da6a3ce929d0e0e473-00f067aa0ba902b7-01", // short trace id
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01-extra",
+            "garbage",
+        )
+        for (value in invalid) {
+            val headers = mutableMapOf<String, String>()
+            kotlinx.coroutines.withContext(CorrelationContext("corr-1", value)) { TraceHeaders(null, null).inject(headers, coroutineContext) }
+            assertNull(headers["traceparent"], value)
+        }
+        val headers = mutableMapOf<String, String>()
+        kotlinx.coroutines.withContext(CorrelationContext("corr-1", traceparent)) { TraceHeaders(null, null).inject(headers, coroutineContext) }
+        assertEquals(traceparent, headers["traceparent"])
+    }
+
     @Test fun `with tracing present the propagator decides, as before`() = runBlocking {
         val current = mockk<CurrentTraceContext> { every { context() } returns null }
         val tracer = mockk<Tracer> { every { currentTraceContext() } returns current }

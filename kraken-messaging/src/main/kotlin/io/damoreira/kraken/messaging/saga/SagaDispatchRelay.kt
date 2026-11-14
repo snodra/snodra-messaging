@@ -178,7 +178,10 @@ class SagaDispatchRelay(
         DispatchKind.EVENT -> {
             try {
                 tx.executeWithoutResult {
-                    events.publishRaw(entry.type, entry.routingKey, entry.payload.toByteArray(Charsets.UTF_8), entry.headers[DISPATCH_CORRELATION_HEADER] ?: entry.id)
+                    events.publishRaw(
+                        entry.type, entry.routingKey, entry.payload.toByteArray(Charsets.UTF_8), entry.headers[DISPATCH_CORRELATION_HEADER] ?: entry.id,
+                        entry.headers[DISPATCH_TRACEPARENT_HEADER],
+                    )
                     markDispatched(entry)
                 }
             } catch (e: IllegalArgumentException) {
@@ -204,12 +207,14 @@ class SagaDispatchRelay(
 
     private fun sendCommand(entry: SagaDispatchDocument): Boolean {
         val correlationId = entry.headers[DISPATCH_CORRELATION_HEADER] ?: entry.id
-        val headers = entry.headers.filterKeys { it != DISPATCH_CORRELATION_HEADER } + mapOf("idempotency-key" to entry.id, "saga-id" to entry.sagaId)
+        val traceparent = entry.headers[DISPATCH_TRACEPARENT_HEADER]
+        val headers = entry.headers.filterKeys { it != DISPATCH_CORRELATION_HEADER && it != DISPATCH_TRACEPARENT_HEADER } +
+            mapOf("idempotency-key" to entry.id, "saga-id" to entry.sagaId)
         val period = maxOf(settings.lease.toMillis() / 3, MIN_RENEW_PERIOD_MS)
         val beat = leaseRenewer().scheduleAtFixedRate({ keepLease(entry.sagaId) }, period, period, TimeUnit.MILLISECONDS)
         // On a thread of its own, so a call that never returns can be abandoned after the send timeout.
         val send = sendExecutor().submit(Callable {
-            runBlocking(CorrelationContext(correlationId)) {
+            runBlocking(CorrelationContext(correlationId, traceparent)) { // sent in the trace of the event that caused it
                 commands.sendRaw(entry.type, entry.payload.toByteArray(Charsets.UTF_8), SendOptions(routingKey = entry.routingKey, retry = RetryPolicy.NONE, headers = headers))
             }
         })
