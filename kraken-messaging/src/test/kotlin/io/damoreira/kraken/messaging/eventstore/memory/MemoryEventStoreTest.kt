@@ -93,6 +93,43 @@ class MemoryEventStoreTest {
     }
 
     @Test
+    fun whatADeliveryOrAReadHandsOutCannotChangeTheLog() = runBlocking {
+        val events = MemoryEventStore(MemoryEventStoreSettings(segments = 1), clock)
+        val published = event("e-1", "k")
+        events.publish(published)
+        published.payload.fill(0) // the publisher's own array, changed after the publish
+        val spec = SubscriptionSpec("svc.default", "kraken.events")
+        val sub = events.subscribe(spec)
+        sub.nextWithin()
+        val delivered = sub.nextWithin() as Delivery
+        delivered.payload.fill(0)
+        runCatching { @Suppress("UNCHECKED_CAST") (delivered.headers as MutableMap<String, String>)[EventHeaders.ID] = "changed" }
+        val read = events.events("kraken.events").single()
+        read.payload.fill(0)
+        runCatching { @Suppress("UNCHECKED_CAST") (read.headers as MutableMap<String, String>)[EventHeaders.ID] = "changed" }
+
+        sub.redeliver(delivered.segment, delivered.position)
+        val again = sub.nextWithin() as Delivery
+        assertEquals("""{"id":"e-1"}""", String(again.payload), "the log's payload is the one published")
+        assertEquals("e-1", again.headers[EventHeaders.ID])
+        assertEquals("""{"id":"e-1"}""", String(events.events("kraken.events").single().payload))
+        assertEquals("e-1", events.events("kraken.events").single().id)
+        sub.close()
+    }
+
+    @Test
+    fun sourcesListsTheSourcesWithEvents() = runBlocking {
+        val events = MemoryEventStore(MemoryEventStoreSettings(segments = 1), clock)
+        val sub = events.subscribe(SubscriptionSpec("svc.default", "never.published"))
+        sub.nextWithin()
+        sub.nextWithin(100)
+        assertEquals(emptyList(), events.sources(), "a subscription alone makes no source")
+        events.publish(event("e-1", "k"))
+        assertEquals(listOf("kraken.events"), events.sources())
+        sub.close()
+    }
+
+    @Test
     fun theSegmentsSettingIsBounded() {
         assertFailsWith<IllegalArgumentException> { MemoryEventStoreSettings(segments = 0) }
         assertFailsWith<IllegalArgumentException> { MemoryEventStoreSettings(segments = 1025) }

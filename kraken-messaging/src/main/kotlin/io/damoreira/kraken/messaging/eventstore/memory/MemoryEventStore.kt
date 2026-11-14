@@ -17,6 +17,7 @@ import io.damoreira.kraken.messaging.eventstore.SubscriptionSpec
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import java.time.Clock
+import java.util.Collections
 
 /** Settings of the [MemoryEventStore] (`kraken.messaging.memory.*`). */
 data class MemoryEventStoreSettings(
@@ -38,19 +39,26 @@ data class MemoryEventStoreSettings(
 
 /**
  * One event the [MemoryEventStore] keeps: what was published to [source], where it went ([segment], [position]) and when
- * ([timestampMs], the store's clock, epoch milliseconds). [payload] is the JSON bytes as published.
+ * ([timestampMs], the store's clock, epoch milliseconds). [headers] cannot be changed, and [payload] (the JSON bytes as
+ * published) is a copy each time: nothing a reader does changes the log.
  */
 class StoredEvent internal constructor(
     val source: String,
     val segment: String,
     val position: String,
     val key: String?,
-    val headers: Map<String, String>,
-    val payload: ByteArray,
+    headers: Map<String, String>,
+    /** The log's own copy of the payload: never handed out. */
+    internal val bytes: ByteArray,
     val timestampMs: Long,
     /** The store-wide append order. */
     internal val sequence: Long,
 ) {
+    val headers: Map<String, String> = Collections.unmodifiableMap(LinkedHashMap(headers))
+
+    /** The payload, a fresh copy on every call. */
+    val payload: ByteArray get() = bytes.copyOf()
+
     /** The `type` header. */
     val type: String? get() = headers[EventHeaders.TYPE]
 
@@ -58,7 +66,7 @@ class StoredEvent internal constructor(
     val id: String? get() = headers[EventHeaders.ID]
 
     override fun toString(): String =
-        "StoredEvent(source=$source, segment=$segment, position=$position, key=$key, headers=$headers, payload=${payload.size} bytes, timestampMs=$timestampMs)"
+        "StoredEvent(source=$source, segment=$segment, position=$position, key=$key, headers=$headers, payload=${bytes.size} bytes, timestampMs=$timestampMs)"
 }
 
 /**
@@ -106,7 +114,7 @@ class MemoryEventStore(
             val segment = event.key?.let { segmentOf(it, segmentCount) } ?: Math.floorMod(spread++, segmentCount)
             val events = log.segments[segment]
             events += StoredEvent(
-                event.source, segment.toString(), events.size.toString(), event.key, LinkedHashMap(event.headers), event.payload.copyOf(),
+                event.source, segment.toString(), events.size.toString(), event.key, event.headers, event.payload.copyOf(),
                 clock.millis(), appended++,
             )
             changed()
@@ -126,8 +134,8 @@ class MemoryEventStore(
 
     // ------------------------------------------------------------------------------------------------------------- browse
 
-    /** The sources that have events or subscriptions, by name. */
-    fun sources(): List<String> = locked { sources.keys.sorted() }
+    /** The sources that have at least one event, by name. */
+    fun sources(): List<String> = locked { sources.filterValues { log -> log.segments.any { it.isNotEmpty() } }.keys.sorted() }
 
     /**
      * The events of [source] in the order they were appended, those of [type] (header `type`) and [key] only when given.
@@ -232,7 +240,7 @@ class MemoryEventStore(
                 val event = segments[s].getOrNull(at.toInt()) ?: continue
                 cursor[s] = at + 1
                 turn = (turn + i + 1) % order.size
-                return@locked Delivery(event.segment, event.position, event.key, event.headers, event.payload, event.timestampMs)
+                return@locked Delivery(event.segment, event.position, event.key, event.headers, event.bytes.copyOf(), event.timestampMs)
             }
             null
         }
@@ -257,7 +265,8 @@ class MemoryEventStore(
             }
         }
 
-        override fun pause() {
+        /** Under the store's lock: once it returned, no delivery leaves (a [next] that took one before returned it already). */
+        override fun pause() = locked {
             paused = true
         }
 
