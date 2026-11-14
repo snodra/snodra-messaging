@@ -37,7 +37,7 @@ transaction takes a second one; with one it would wait for itself).
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `kraken.messaging.store.type` | the only one | `jdbc` chooses this store when another store add-on is on the classpath too (the MongoDB one, say); naming another store (`mongo`, `memory`) makes this one step back. Two store add-ons without the setting fail the startup, naming both. An application's own `MessageStore` bean wins over the add-on. |
+| `kraken.messaging.store.type` | the only one | `jdbc` chooses this store when another store add-on is on the classpath too (the MongoDB one, say); naming another store (`mongo`, `memory`) makes this one step back. Two store add-ons without the setting fail the startup, naming both. A `MessageStore` bean the application defines itself, of any type (a `JdbcMessageStore` of its own included), wins over every add-on. |
 | `kraken.messaging.store.init-schema` | `true` | Apply the schema at startup (see [Schema](#schema)); `false` when the service runs the migration itself: then the startup checks the schema is there (version 1 or later). |
 | `kraken.messaging.store.jdbc.dialect` | detected | `postgresql` or `mysql`; unset, the dialect is the DataSource's database product. Set, it is used whatever the product name (a compatible database), and the server version is checked only when the product is the dialect's own. Another value fails the startup naming the supported ones. |
 | `kraken.messaging.store.jdbc.notify` | `true` | PostgreSQL: appends wake the outbox relays up at once (`LISTEN`/`NOTIFY`, [Relay wake-up](#relay-wake-up)); `false`: the relays poll. |
@@ -64,9 +64,12 @@ without any transaction manager gets one from this add-on, a `DataSourceTransact
 - A transaction of **another** manager active on the thread (a second DataSource's, a MongoDB one, JTA) does not hold this
   DataSource's connection: a joined write then fails with `IllegalStateException` ("A transaction is active, but not on the
   message store's DataSource") instead of committing beside it.
-- A write from a transaction's `afterCommit` callback runs on the connection of the transaction that committed. With a pool in
-  auto-commit (the default) it commits on its own; with a pool configured `auto-commit=false` it is rolled back when the connection
-  returns: run such a write in a new transaction (`Propagation.REQUIRES_NEW`).
+- A write made once the service's transaction ended (its after-completion phase, where a
+  `@TransactionalEventListener(phase = AFTER_COMMIT)` runs) runs in a transaction of its own and commits, whatever the pool.
+- A write from a raw `TransactionSynchronization.afterCommit()` callback runs on the connection of the transaction that committed
+  (Spring gives no sign that it ended): with a pool in auto-commit (the default) it commits on its own; with a pool configured
+  `auto-commit=false` it is rolled back when the connection returns. Run such a write in a new transaction
+  (`Propagation.REQUIRES_NEW`), or from a `@TransactionalEventListener(AFTER_COMMIT)`.
 - What must commit on its own whatever the caller has (dead letters but their deletion in a retry, processor control, the
   relays' and schedulers' claims, the purge) runs in a transaction of its own, at READ COMMITTED, on a second connection from the
   same pool.
@@ -77,7 +80,9 @@ available, a deadlock or a serialization failure as a `TransientDataAccessExcept
 saga's row with `FOR UPDATE NOWAIT`; the start of a saga with a live start key takes, on PostgreSQL, the transaction-scoped
 advisory lock `pg_try_advisory_xact_lock(1263684430, hashtext(start_key_hash))` (another transaction's uncommitted insert is
 invisible there), and on MySQL inserts at once and waits at most 1 s (`innodb_lock_wait_timeout` for that statement) for another
-transaction's uncommitted start of the same key. The loser fails with `CannotAcquireLockException` and the runtime retries it.
+transaction's uncommitted start of the same key. The loser fails with `CannotAcquireLockException` and the runtime retries it. On
+MySQL that timeout rolls back the statement only (`innodb_rollback_on_timeout` OFF, the default); with it ON MySQL rolls the whole
+transaction back, which the runtime retries the same way.
 No locking read ever looks for a row that is not there, so starts of different keys never deadlock on MySQL's gap locks.
 Error messages name a saga's type and a key's hash, never a start key or an association (they may be personal data).
 
@@ -138,18 +143,28 @@ the service's Flyway (whose `V1` would otherwise clash with kraken's `V1`: "more
 init-schema off. Kraken's later versions (`V2__kraken.sql`, ...) land in that same separate history. Flyway is the service's
 dependency (`org.flywaydb:flyway-core`, plus `flyway-database-postgresql` or `flyway-mysql`); this module does not depend on it.
 
+Declare it as a bean of its own type, **never a `Flyway` bean**: a `Flyway` bean turns Spring Boot's Flyway auto-configuration
+off, and the service's own migrations would stop running. Run it after the service's own migrations (they find the database
+without kraken's tables), as this bean does by asking for Boot's `FlywayMigrationInitializer` first:
+
 ```kotlin
-@Configuration
-class KrakenSchemaConfiguration {
-    /** Kraken's schema files under their own history table, applied before the application uses the store. */
-    @Bean(initMethod = "migrate")
-    fun krakenFlyway(dataSource: DataSource): Flyway = Flyway.configure()
-        .dataSource(dataSource)
-        .locations("classpath:db/kraken/postgresql") // or classpath:db/kraken/mysql
-        .table("kraken_schema_history")
-        .baselineOnMigrate(true) // the database already holds the service's tables
-        .baselineVersion("0")
-        .load()
+/** Kraken's schema files under a Flyway history of their own, after the application's own migrations. */
+@Component
+class KrakenSchemaMigration(
+    private val dataSource: DataSource,
+    private val applicationMigrations: ObjectProvider<FlywayMigrationInitializer>, // org.springframework.boot.flyway.autoconfigure
+) : InitializingBean {
+    override fun afterPropertiesSet() {
+        applicationMigrations.ifAvailable { } // the application's own migrations run first
+        Flyway.configure()
+            .dataSource(dataSource)
+            .locations("classpath:db/kraken/postgresql") // or classpath:db/kraken/mysql
+            .table("kraken_schema_history")
+            .baselineOnMigrate(true) // the database already holds the service's tables
+            .baselineVersion("0")
+            .load()
+            .migrate()
+    }
 }
 ```
 
@@ -157,8 +172,11 @@ class KrakenSchemaConfiguration {
 kraken:
   messaging:
     store:
-      init-schema: false   # the startup then checks the schema is there
+      init-schema: false   # the startup then checks the schema is there, once every bean exists (after this one)
 ```
+
+With init-schema off the store's schema check runs once every bean exists, never while the store bean is created, so a bean that
+migrates while it is created (this one, or any other) always comes first.
 
 Liquibase is not covered: use Flyway as above, or keep init-schema on.
 
@@ -290,8 +308,8 @@ it; concurrent purges delete disjoint rows or nothing.
 
 ## Limits
 
-- PostgreSQL's `jsonb` refuses the character `\u0000` in a string, and PostgreSQL text cannot hold it at all: such a value cannot
-  be stored there.
+- The character U+0000 is refused in every value the store writes (text, JSON strings, header maps), with the same
+  `IllegalArgumentException` on both databases: PostgreSQL cannot store it in text or `jsonb`.
 - The listening connection of the PostgreSQL wake-up is one per store; without a HikariCP DataSource or `JdbcConnectionDetails`
   it is one of the pool's connections most of the time while a relay runs.
 
