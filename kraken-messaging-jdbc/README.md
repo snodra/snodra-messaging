@@ -44,6 +44,10 @@ transaction takes a second one; with one it would wait for itself).
 | `kraken.messaging.store.jdbc.purge-interval` | `1m` | How often the retention runs ([Retention](#retention)); `0` turns it off (the service purges itself). |
 | `kraken.messaging.outbox.retention`, `idempotency.retention`, `external.calls.retention`, `sagas.ended-retention`, `sagas.dispatch-retention`, `sagas.failed-retention`, `deadlines.retention`, `events.dead-letter.retention` | the core's | What the purge keeps, as the MongoDB add-on's TTL indexes. |
 
+A third-party store add-on follows the same convention: declare its `MessageStore` `@Bean` on its `@AutoConfiguration` class (or a
+class nested in it), annotated `@ConditionalOnNoApplicationMessageStore`. A store declared elsewhere (a class the auto-configuration
+`@Import`s, say) counts as the application's own: the other add-ons step back for it, and the two-add-ons check does not see it.
+
 ## Transactions
 
 The store **joins the service's transaction**. Its writes that belong with the service's (an outbox entry, a processed marker,
@@ -141,7 +145,13 @@ next time. Without the right to create tables the startup fails saying to apply 
 **Running the migration yourself with Flyway**: give kraken's files a Flyway of their own, with its own history table, next to
 the service's Flyway (whose `V1` would otherwise clash with kraken's `V1`: "more than one migration with version 1"), and turn
 init-schema off. Kraken's later versions (`V2__kraken.sql`, ...) land in that same separate history. Flyway is the service's
-dependency (`org.flywaydb:flyway-core`, plus `flyway-database-postgresql` or `flyway-mysql`); this module does not depend on it.
+dependency, through Spring Boot's Flyway starter (which also provides the `FlywayMigrationInitializer` the bean below waits for);
+this module does not depend on it:
+
+```kotlin
+implementation("org.springframework.boot:spring-boot-starter-flyway")
+implementation("org.flywaydb:flyway-database-postgresql") // or org.flywaydb:flyway-mysql
+```
 
 Declare it as a bean of its own type, **never a `Flyway` bean**: a `Flyway` bean turns Spring Boot's Flyway auto-configuration
 off, and the service's own migrations would stop running. Run it after the service's own migrations (they find the database

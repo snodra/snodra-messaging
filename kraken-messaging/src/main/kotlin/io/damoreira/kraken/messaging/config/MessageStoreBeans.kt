@@ -17,6 +17,12 @@ import org.springframework.util.ClassUtils
  * class included) or an auto-configuration (a store add-on's, the in-memory one's). An add-on's store steps back for the
  * application's ([ConditionalOnNoApplicationMessageStore]), never for another add-on's: two add-ons without
  * `kraken.messaging.store.type` fail the startup ([MessageStoreAddOnsCheck]).
+ *
+ * **The convention for a store add-on** (a third party's included): declare the store's `@Bean` on the add-on's
+ * `@AutoConfiguration` class or on a class nested in it, annotated [ConditionalOnNoApplicationMessageStore]. A store declared
+ * elsewhere, in a class the auto-configuration `@Import`s say, counts as the application's own: the other add-ons step back for it
+ * and the two-add-ons check does not see it. (Imports are not followed: which class imported which is not known yet when the
+ * add-ons' conditions run.)
  */
 internal object MessageStoreBeans {
     /** Every bean defined as a [MessageStore], without creating any. */
