@@ -8,7 +8,6 @@ import org.springframework.jdbc.datasource.DataSourceTransactionManager
 import org.springframework.jdbc.datasource.DelegatingDataSource
 import org.springframework.jdbc.support.SQLErrorCodeSQLExceptionTranslator
 import org.springframework.jdbc.support.SQLExceptionTranslator
-import org.springframework.transaction.PlatformTransactionManager
 import org.springframework.transaction.TransactionDefinition
 import org.springframework.transaction.support.TransactionSynchronizationManager
 import org.springframework.transaction.support.TransactionTemplate
@@ -22,26 +21,29 @@ import java.time.Instant
 import javax.sql.DataSource
 
 /**
- * How the stores reach the database. Three ways, by what a write must commit with:
+ * How the stores reach the database. Two ways, by what a write must commit with:
  *
- * - [joined]: the connection of the transaction active on the calling thread (the service's: a `DataSourceTransactionManager`
- *   or a `JpaTransactionManager` over the same DataSource bind it), or a connection in auto-commit without one.
- * - [atomic]: several statements that must apply together: in the caller's transaction when there is one, else in one of
- *   their own, through the application's transaction manager ([transactions]).
- * - [own]: in a transaction of their own, on a connection of their own, whatever the caller has: what commits on its own
- *   (dead letters, processor control, the relays' and schedulers' claims, the purge). The connection comes from the same
- *   DataSource through a distinct key, so Spring never hands it the caller's.
+ * - [tx]: with the service's writes. In the transaction active on the calling thread (the service's: a
+ *   `DataSourceTransactionManager` or a `JpaTransactionManager` over the same DataSource bind its connection), else in a short
+ *   transaction of its own: never on a bare connection, whose auto-commit the pool decides (a pool configured
+ *   `auto-commit=false` would roll the write back when the connection returns). A transaction of another manager active on the
+ *   thread (one that does not hold this DataSource's connection) is refused.
+ * - [own]: in a transaction of its own, on a connection of its own, whatever the caller has: what commits on its own (dead
+ *   letters, processor control, the relays' and schedulers' claims, the purge). The connection comes from the same DataSource
+ *   through a distinct key, so Spring never hands it the caller's. These transactions run at READ COMMITTED: on MySQL, a
+ *   locking read at REPEATABLE READ keeps every row it scanned locked, so one relay's claim would hide the rows another relay
+ *   holds from that relay's own `SKIP LOCKED` claim.
  */
 internal class Db(
     val dataSource: DataSource,
     val dialect: SqlDialect,
-    val transactions: PlatformTransactionManager,
     private val clock: Clock,
 ) {
     private val translator = DialectTranslator(dialect, SQLErrorCodeSQLExceptionTranslator(dataSource))
 
     private val joinedTemplate = JdbcTemplate(dataSource).also { it.exceptionTranslator = translator }
     private val joinedClient = JdbcClient.create(joinedTemplate)
+    private val localTransactions = TransactionTemplate(DataSourceTransactionManager(dataSource))
 
     /** The same pool behind a key of its own: a transaction bound to [dataSource] is never this one's. */
     private val ownDataSource: DataSource = object : DelegatingDataSource(dataSource) {}
@@ -49,22 +51,23 @@ internal class Db(
     private val ownClient = JdbcClient.create(ownTemplate)
     private val ownTransactions = TransactionTemplate(DataSourceTransactionManager(ownDataSource)).also {
         it.propagationBehavior = TransactionDefinition.PROPAGATION_REQUIRES_NEW
+        it.isolationLevel = TransactionDefinition.ISOLATION_READ_COMMITTED
     }
 
-    private val atomicTransactions = TransactionTemplate(transactions)
+    /** The template of [tx], for batches: only inside a [tx] block. */
+    val batch: JdbcTemplate get() = joinedTemplate
 
-    /** The joined client; refuses to run when a transaction is active on the thread but does not hold this DataSource's connection. */
-    val joined: JdbcClient get() = joinedClient.also { checkJoinable() }
-
-    /** The joined template, for batches. */
-    val joinedBatch: JdbcTemplate get() = joinedTemplate.also { checkJoinable() }
-
-    fun <T> atomic(block: (JdbcClient) -> T): T {
-        checkJoinable()
-        return atomicTransactions.execute { block(joined) } as T
+    /** Runs [block] with the service's writes: in the caller's transaction, else in a short one of its own. */
+    fun <T> tx(block: (JdbcClient) -> T): T {
+        if (TransactionSynchronizationManager.isActualTransactionActive()) {
+            checkJoinable()
+            return block(joinedClient)
+        }
+        return localTransactions.execute { block(joinedClient) }
     }
 
-    fun <T> own(block: (JdbcClient) -> T): T = ownTransactions.execute { block(ownClient) } as T
+    /** Runs [block] in a transaction of its own (READ COMMITTED), committed whatever the caller's does. */
+    fun <T> own(block: (JdbcClient) -> T): T = ownTransactions.execute { block(ownClient) }
 
     /** The application clock's now, at millisecond precision. */
     fun now(): Instant = SqlDialect.millis(clock.instant())
@@ -75,8 +78,7 @@ internal class Db(
     fun instant(rs: ResultSet, column: String): Instant? = dialect.instant(rs, column)
 
     /**
-     * Inserts a row unless one with its key exists, in the joined context ([client] is [joined] or [own]'s); false when it
-     * existed. On PostgreSQL without an error (a duplicate key would abort the caller's transaction), on MySQL by the error.
+     * Inserts a row unless one with its key exists, through [client] (a [tx] or [own] one); false when it existed. On PostgreSQL without an error (a duplicate key would abort the caller's transaction), on MySQL by the error.
      */
     fun insertOnce(client: JdbcClient, table: String, columns: String, values: String, key: String, params: Map<String, Any?>): Boolean =
         if (dialect.duplicateAbortsTransaction) {

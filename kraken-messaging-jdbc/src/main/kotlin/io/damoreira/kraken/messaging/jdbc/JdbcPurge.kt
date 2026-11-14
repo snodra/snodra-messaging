@@ -12,14 +12,14 @@ internal object JdbcPurge {
         val now = db.now()
         fun before(retention: java.time.Duration) = mapOf("before" to db.ts(now.minus(retention)))
         return db.purge("kraken_outbox", "id", "sent_at < :before", before(s.outboxRetention)) +
-            db.purge("kraken_processed_events", "id", "processed_at < :before", before(s.idempotencyRetention)) +
-            db.purge("kraken_external_calls", "id", "updated_at < :before", before(s.externalCallRetention)) +
+            db.purge("kraken_processed_events", "id_hash", "processed_at < :before", before(s.idempotencyRetention)) +
+            db.purge("kraken_external_calls", "id_hash", "updated_at < :before", before(s.externalCallRetention)) +
             db.purge("kraken_sagas", "id", "ended = TRUE AND ended_at < :before", before(s.sagaEndedRetention)) +
             db.purge("kraken_saga_dispatch", "id", "dispatched_at < :before", before(s.sagaDispatchRetention)) +
             db.purge("kraken_saga_dispatch", "id", "failed_at < :before", before(s.failedRetention)) +
             db.purge("kraken_saga_dispatch_leases", "saga_id", "lease_until < :before", mapOf("before" to db.ts(now))) +
             db.purge("kraken_deadlines", "id", "finished_at < :before", before(s.deadlineRetention)) +
-            db.purge("kraken_saga_failures", "id", "last_failed_at < :before", before(s.failedRetention)) +
+            db.purge("kraken_saga_failures", "id_hash", "last_failed_at < :before", before(s.failedRetention)) +
             db.purge("kraken_dead_letters", "id", "expire_at <= :before", mapOf("before" to db.ts(now)))
     }
 }

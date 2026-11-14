@@ -3,7 +3,13 @@ package io.damoreira.kraken.messaging.jdbc
 import io.damoreira.kraken.messaging.deadletter.DeadLetter
 import io.damoreira.kraken.messaging.deadletter.DeadLetterError
 import io.damoreira.kraken.messaging.deadletter.DeadLetterReason
+import io.damoreira.kraken.messaging.external.ExternalCallStatus
 import io.damoreira.kraken.messaging.saga.Association
+import io.damoreira.kraken.messaging.saga.DispatchKind
+import io.damoreira.kraken.messaging.saga.SagaCommandFailed
+import io.damoreira.kraken.messaging.saga.SagaDispatchDocument
+import io.damoreira.kraken.messaging.saga.SagaFailureDocument
+import io.damoreira.kraken.messaging.store.ExternalCallRecord
 import io.damoreira.kraken.messaging.saga.DeadlineDocument
 import io.damoreira.kraken.messaging.saga.SagaDocument
 import io.damoreira.kraken.messaging.store.OutboxEntry
@@ -42,10 +48,18 @@ abstract class JdbcPurgeTest(private val database: TestDatabase) {
             store.deadLetters.park(letter("expiring", t0, expireAt = t0.plus(Duration.ofDays(1))))
             store.deadLetters.park(letter("kept", t0, expireAt = t0.plus(Duration.ofDays(60))))
             store.sagas.dispatch.claimLease("s1", "relay", until = t0.plusSeconds(30), now = t0)
+            store.externalCalls.insert(ExternalCallRecord("print:old", ExternalCallStatus.SUCCEEDED, updatedAt = t0))
+            store.externalCalls.insert(ExternalCallRecord("print:new", ExternalCallStatus.SUCCEEDED, updatedAt = t0.plus(Duration.ofDays(29))))
+            fun entry(id: String) = SagaDispatchDocument(id, "live", id.length.toLong(), DispatchKind.COMMAND, "t.Charge", "{}", createdAt = t0)
+            store.sagas.dispatch.record(listOf(entry("dispatched"), entry("given-up"), entry("pending")))
+            store.sagas.dispatch.markDispatched("dispatched", t0)
+            store.sagas.dispatch.markFailed("given-up", 3, SagaCommandFailed.Reason.EXHAUSTED, "gave up", t0, t0)
+            store.sagas.failures.save(SagaFailureDocument("t.Order:e1", "t.Order", "e1", "t.Paid", "{}", emptyMap(), "boom", 3, t0, t0))
 
             val later = JdbcMessageStore(ds, database.dialect, clock = Clock.fixed(t0.plus(Duration.ofDays(31)), ZoneOffset.UTC))
-            // The sent entry, the old marker, the ended saga (its association goes with it), the fired deadline, the expired letter, the lease.
-            assertEquals(6L, later.purgeExpired())
+            // The sent entry, the old marker, the old external call, the ended saga (its association goes with it), the dispatched
+            // and the given-up dispatch entries, the passed lease, the fired deadline, the saga failure, the expired letter.
+            assertEquals(10L, later.purgeExpired())
             assertEquals(listOf("unsent"), JdbcClient.create(ds).sql("SELECT id FROM kraken_outbox").query(String::class.java).list())
             assertFalse(later.processedEvents.exists("processor:default:old"))
             assertTrue(later.processedEvents.exists("processor:default:new"))
@@ -57,6 +71,10 @@ abstract class JdbcPurgeTest(private val database: TestDatabase) {
             assertFalse(later.deadLetters.exists("billing:t:0:1"))
             assertTrue(later.deadLetters.exists("billing:t:0:2"))
             assertTrue(later.sagas.dispatch.claimLease("s1", "other", until = t0.plus(Duration.ofDays(32)), now = t0.plus(Duration.ofDays(31))))
+            assertNull(later.externalCalls.find("print:old"))
+            assertEquals("print:new", later.externalCalls.find("print:new")?.id)
+            assertEquals(listOf("pending"), JdbcClient.create(ds).sql("SELECT id FROM kraken_saga_dispatch").query(String::class.java).list())
+            assertEquals(emptyList<Any>(), later.sagas.failures.list(null))
             assertEquals(0L, later.purgeExpired(), "nothing left to purge")
         }
     }

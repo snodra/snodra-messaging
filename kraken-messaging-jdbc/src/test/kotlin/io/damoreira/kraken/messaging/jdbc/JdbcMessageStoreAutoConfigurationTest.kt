@@ -24,6 +24,8 @@ import org.springframework.transaction.PlatformTransactionManager
 import org.springframework.transaction.support.TransactionTemplate
 import java.sql.Connection
 import java.sql.DatabaseMetaData
+import java.sql.ResultSet
+import java.sql.Statement
 import java.time.Duration
 import java.time.Instant
 import javax.sql.DataSource
@@ -40,14 +42,29 @@ class JdbcMessageStoreAutoConfigurationTest {
         )
         .withPropertyValues("kraken.messaging.service-name=orders", "kraken.messaging.type-prefix=test", "kraken.messaging.store.init-schema=false")
 
-    private fun database(product: String, version: String): DataSource {
+    private fun database(product: String, version: String, schemaVersion: Int = 1): DataSource {
         val meta = mockk<DatabaseMetaData>(relaxed = true) {
             every { databaseProductName } returns product
             every { databaseProductVersion } returns version
             every { databaseMajorVersion } returns version.substringBefore('.').toInt()
             every { databaseMinorVersion } returns version.substringAfter('.').substringBefore('.').toInt()
         }
-        val connection = mockk<Connection>(relaxed = true) { every { metaData } returns meta }
+        val mode = mockk<ResultSet>(relaxed = true) {
+            every { next() } returns true
+            every { getString(1) } returns "ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION"
+        }
+        val schema = mockk<ResultSet>(relaxed = true) {
+            every { next() } returns true
+            every { getInt(1) } returns schemaVersion
+        }
+        val statement = mockk<Statement>(relaxed = true) {
+            every { executeQuery("SELECT @@SESSION.sql_mode") } returns mode
+            every { executeQuery("SELECT MAX(version) FROM kraken_schema") } returns schema
+        }
+        val connection = mockk<Connection>(relaxed = true) {
+            every { metaData } returns meta
+            every { createStatement() } returns statement
+        }
         return mockk(relaxed = true) { every { this@mockk.connection } returns connection }
     }
 
@@ -103,7 +120,7 @@ class JdbcMessageStoreAutoConfigurationTest {
     fun anUnsupportedDatabaseFailsNamingTheSupportedOnes() {
         with(database("H2", "2.3.232")).run { context ->
             val failure = context.startupFailure!!.stackTraceToString()
-            assertTrue(failure.contains("supports PostgreSQL 13 or later and MySQL 8.0 or later; the DataSource's database is H2"), failure)
+            assertTrue(failure.contains("supports PostgreSQL 13 or later and MySQL 8.0.17 or later; the DataSource's database is H2"), failure)
         }
     }
 
@@ -114,7 +131,10 @@ class JdbcMessageStoreAutoConfigurationTest {
             assertTrue(failure.contains("needs PostgreSQL 13.0 or later; this server is PostgreSQL 12.22"), failure)
         }
         with(database("MySQL", "5.7.44")).run { context ->
-            assertTrue(context.startupFailure!!.stackTraceToString().contains("needs MySQL 8.0 or later"))
+            assertTrue(context.startupFailure!!.stackTraceToString().contains("needs MySQL 8.0.17 or later"))
+        }
+        with(database("MySQL", "8.0.16")).run { context ->
+            assertTrue(context.startupFailure!!.stackTraceToString().contains("needs MySQL 8.0.17 or later; this server is MySQL 8.0.16"))
         }
         with(database("MySQL", "11.4.2-MariaDB")).run { context ->
             assertTrue(context.startupFailure!!.stackTraceToString().contains("does not support MariaDB yet"))
@@ -161,6 +181,71 @@ class JdbcMessageStoreAutoConfigurationTest {
             assertEquals(JdbcStoreSettings(days(1), days(2), days(3), days(4), days(5), days(6), days(8)), context.getBean(JdbcMessageStore::class.java).settings)
             assertFalse(context.getBean(JdbcStorePurger::class.java).isRunning)
         }
+    }
+
+    /** Two store add-ons on one classpath: without the setting the startup fails naming both; each value runs that one. */
+    @Test
+    fun twoStoreAddOnsNeedTheSetting() {
+        val both = with(database("PostgreSQL", "17.7"))
+            .withConfiguration(AutoConfigurations.of(io.damoreira.kraken.messaging.mongo.MongoMessageStoreAutoConfiguration::class.java))
+            .withBean(org.springframework.data.mongodb.MongoDatabaseFactory::class.java, { mockk(relaxed = true) })
+            .withBean(org.springframework.data.mongodb.core.MongoTemplate::class.java, { mockk(relaxed = true) })
+        both.run { context ->
+            val failure = context.startupFailure!!.stackTraceToString()
+            assertTrue(failure.contains("2 message store add-ons are configured"), failure)
+            assertTrue(failure.contains("JdbcMessageStore: jdbc") && failure.contains("MongoMessageStore: mongo"), failure)
+            assertTrue(failure.contains("set kraken.messaging.store.type to the one this service uses"), failure)
+        }
+        both.withPropertyValues("kraken.messaging.store.type=jdbc").run { context ->
+            assertNull(context.startupFailure)
+            assertTrue(context.getBean(MessageStore::class.java) is JdbcMessageStore)
+        }
+        both.withPropertyValues("kraken.messaging.store.type=mongo").run { context ->
+            assertNull(context.startupFailure)
+            assertTrue(context.getBean(MessageStore::class.java) is io.damoreira.kraken.messaging.mongo.MongoMessageStore)
+        }
+    }
+
+    /** The dialect setting overrides detection: a compatible database of another product name runs. */
+    @Test
+    fun theDialectSettingAcceptsACompatibleDatabase() {
+        with(database("CockroachDB", "23.1.0")).run { context ->
+            assertTrue(context.startupFailure!!.stackTraceToString().contains("the DataSource's database is CockroachDB"))
+        }
+        with(database("CockroachDB", "23.1.0")).withPropertyValues("kraken.messaging.store.jdbc.dialect=postgresql").run { context ->
+            assertNull(context.startupFailure)
+            assertEquals(PostgresDialect, (context.getBean(MessageStore::class.java) as JdbcMessageStore).dialect)
+        }
+    }
+
+    @Test
+    fun theWakeUpCanBeTurnedOff() {
+        with(database("PostgreSQL", "17.7")).run { context ->
+            assertNotNull(((context.getBean(MessageStore::class.java) as JdbcMessageStore).outbox as JdbcOutboxStore).notifications)
+        }
+        with(database("PostgreSQL", "17.7")).withPropertyValues("kraken.messaging.store.jdbc.notify=false").run { context ->
+            assertNull(context.startupFailure)
+            assertNull(((context.getBean(MessageStore::class.java) as JdbcMessageStore).outbox as JdbcOutboxStore).notifications, "the relays poll")
+        }
+    }
+
+    @Test
+    fun withInitSchemaOffTheSchemaMustBeThere() {
+        with(database("PostgreSQL", "17.7", schemaVersion = 0)).run { context ->
+            val failure = context.startupFailure!!.stackTraceToString()
+            assertTrue(failure.contains("schema is at version 0, it needs 1 or later: apply db/kraken/postgresql/V1__kraken.sql"), failure)
+        }
+    }
+
+    /** A pool of one would wait for itself (the store's own-commit writes take a second connection): refused at once. */
+    @Test
+    fun aPoolOfOneIsRefused() {
+        val pool = mockk<com.zaxxer.hikari.HikariDataSource>(relaxed = true) {
+            every { maximumPoolSize } returns 1
+            every { poolName } returns "tiny"
+        }
+        val e = org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException::class.java) { JdbcMessageStore(pool, PostgresDialect) }
+        assertTrue(e.message!!.contains("needs a connection pool of at least 2 (the pool 'tiny' has 1)"), e.message)
     }
 
     /**

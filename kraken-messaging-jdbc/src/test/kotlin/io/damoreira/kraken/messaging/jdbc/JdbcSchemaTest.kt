@@ -56,13 +56,49 @@ abstract class JdbcSchemaTest(private val database: TestDatabase) {
 
     @Test
     fun theWrongDialectFailsNamingTheSupportedDatabases() {
-        database.dataSource(poolSize = 1).use { ds ->
+        database.dataSource(poolSize = 2).use { ds ->
             val other = if (database.dialect == PostgresDialect) MySqlDialect else PostgresDialect
             val e = assertThrows(IllegalStateException::class.java) { JdbcMessageStore(ds, other).initSchema() }
-            assertTrue(e.message!!.contains("PostgreSQL 13 or later, MySQL 8.0 or later"), e.message)
+            assertTrue(e.message!!.contains("PostgreSQL 13 or later, MySQL 8.0.17 or later"), e.message)
             assertEquals(database.dialect, JdbcDialects.detect(ds, null), "detected from the product name")
             assertEquals(database.dialect, JdbcDialects.detect(ds, database.dialect.name.uppercase()))
             assertThrows(IllegalStateException::class.java) { JdbcDialects.detect(ds, "oracle") }
+        }
+    }
+
+    /** Version rule: a database at a later version (a newer library applied V2) is accepted as it is. */
+    @Test
+    fun aDatabaseAtALaterVersionIsAccepted() {
+        database.dataSource().use { ds ->
+            val store = JdbcMessageStore(ds, database.dialect)
+            val e = assertThrows(IllegalStateException::class.java) { store.requireSchema() }
+            assertTrue(e.message!!.contains("schema is at version 0, it needs 1 or later"), e.message)
+            store.initSchema()
+            JdbcClient.create(ds).sql("INSERT INTO kraken_schema (version) VALUES (2)").update()
+            store.initSchema()
+            store.requireSchema()
+        }
+    }
+
+    /** Without the right to create tables, init-schema says what to do. */
+    @Test
+    fun missingRightsToCreateTablesSayWhatToDo() {
+        val db = database.create()
+        val user = "kraken_ro_" + db.name.takeLast(8)
+        try {
+            if (database == TestDatabase.POSTGRES) {
+                database.admin("CREATE ROLE $user LOGIN PASSWORD 'test'") // PostgreSQL 15+: no CREATE on schema public for it
+            } else {
+                database.admin("CREATE USER '$user'@'%' IDENTIFIED BY 'test'")
+                database.admin("GRANT SELECT ON ${db.name}.* TO '$user'@'%'")
+            }
+            TestDatabase.Connection(database, db.name, db.url, user, "test").dataSource(poolSize = 2).use { ds ->
+                val e = assertThrows(IllegalStateException::class.java) { JdbcMessageStore(ds, database.dialect).initSchema() }
+                assertTrue(e.message!!.contains("apply that file yourself and set kraken.messaging.store.init-schema=false, or grant"), e.message)
+            }
+        } finally {
+            db.drop()
+            database.admin(if (database == TestDatabase.POSTGRES) "DROP ROLE IF EXISTS $user" else "DROP USER IF EXISTS '$user'@'%'")
         }
     }
 

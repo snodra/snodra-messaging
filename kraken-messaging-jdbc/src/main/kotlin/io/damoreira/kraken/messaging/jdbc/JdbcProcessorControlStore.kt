@@ -38,8 +38,9 @@ internal class JdbcProcessorControlStore(private val db: Db) : ProcessorControlS
 
     override suspend fun lock(processor: String, op: String, lease: Duration): Lock = db.own { jdbc ->
         val now = db.now()
-        if (renew(jdbc, processor, op, lease)) return@own Lock.Taken
+        // The row first: on MySQL an UPDATE that finds no row takes a gap lock, and two of those followed by inserts deadlock.
         ensure(jdbc, processor)
+        if (renew(jdbc, processor, op, lease)) return@own Lock.Taken
         val taken = jdbc.sql(
             "UPDATE kraken_processor_control SET op_id = :op, op_kind = :kind, op_lease_until = :until, op_prepared_at = :now, updated_at = :now " +
                 "WHERE processor = :processor AND (op_id IS NULL OR op_lease_until <= :now)",
@@ -58,6 +59,7 @@ internal class JdbcProcessorControlStore(private val db: Db) : ProcessorControlS
     }
 
     override suspend fun setReplay(processor: String, ranges: List<ReplayRange>) {
+        Limits.check("a processor's name", processor, Limits.PROCESSOR)
         db.own { jdbc -> writeReplay(jdbc, processor, ranges) }
     }
 
@@ -102,6 +104,7 @@ internal class JdbcProcessorControlStore(private val db: Db) : ProcessorControlS
 
     /** Creates [processor]'s row (not paused, no operation, no replay) unless it exists. */
     private fun ensure(jdbc: JdbcClient, processor: String) {
+        Limits.check("a processor's name", processor, Limits.PROCESSOR)
         jdbc.sql(db.dialect.insertUnlessExists("kraken_processor_control", "processor, paused, replay", ":processor, FALSE, ${db.dialect.json(":replay")}", "processor"))
             .param("processor", processor).param("replay", "[]").update()
     }

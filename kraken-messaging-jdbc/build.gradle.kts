@@ -25,6 +25,12 @@ dependencies {
     testImplementation(libs.mysql.connector.j)
     // joins_jpa_transaction: a JPA entity write and the outbox append under JpaTransactionManager (test only).
     testImplementation(libs.spring.boot.starter.data.jpa)
+    // The README's separate Flyway history for kraken's schema files (test only: the module does not depend on Flyway).
+    testImplementation("org.flywaydb:flyway-core")
+    testImplementation("org.flywaydb:flyway-database-postgresql")
+    testImplementation("org.flywaydb:flyway-mysql")
+    // Two store add-ons on one classpath: neither wins silently.
+    testImplementation(project(":kraken-messaging-mongo"))
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 

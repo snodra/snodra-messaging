@@ -17,21 +17,27 @@ internal class JdbcDeadLetterStore(private val db: Db) : DeadLetterStore {
     private val live = "expire_at > :now"
 
     override suspend fun park(letter: DeadLetter): Boolean = db.own { jdbc ->
+        Limits.check("a dead letter's id", letter.id, Limits.DEAD_LETTER_ID)
+        Limits.check("a dead letter's processor", letter.processor, Limits.PROCESSOR)
+        Limits.check("a dead letter's source", letter.source, Limits.SOURCE)
+        Limits.check("a dead letter's segment", letter.segment, Limits.SEGMENT)
+        Limits.check("a dead letter's position", letter.position, Limits.POSITION)
         val now = db.ts(db.now())
         jdbc.sql("DELETE FROM kraken_dead_letters WHERE id = :id AND expire_at <= :now").param("id", letter.id).param("now", now).update()
         db.insertOnce(
             jdbc, "kraken_dead_letters",
-            "id, processor, source, segment, position, position_num, event_key, event_id, event_type, headers, payload, payload_binary, " +
+            "id, processor, source, segment, position, position_num, event_key, event_key_hash, event_id, event_type, headers, payload, payload_binary, " +
                 "reason, error_type, error_message, blocked_by, attempts, parked_at, last_attempt_at, expire_at, replay",
-            ":id, :processor, :source, :segment, :position, :positionNum, :key, :eventId, :eventType, ${db.dialect.json(":headers")}, " +
+            ":id, :processor, :source, :segment, :position, :positionNum, :key, :keyHash, :eventId, :eventType, ${db.dialect.json(":headers")}, " +
                 ":payload, :payloadBinary, :reason, :errorType, :errorMessage, :blockedBy, :attempts, :parkedAt, :lastAttemptAt, :expireAt, :replay",
             "id",
             mapOf(
                 "id" to letter.id, "processor" to letter.processor, "source" to letter.source, "segment" to letter.segment,
                 "position" to letter.position, "positionNum" to positionNumber(letter.position), "key" to letter.key,
+                "keyHash" to letter.key?.let(Limits::sha256),
                 "eventId" to letter.eventId, "eventType" to letter.eventType, "headers" to Json.write(letter.headers),
                 "payload" to letter.payload, "payloadBinary" to letter.payloadBinary, "reason" to letter.reason.name,
-                "errorType" to letter.error.type, "errorMessage" to letter.error.message, "blockedBy" to letter.blockedBy,
+                "errorType" to Limits.cut(letter.error.type), "errorMessage" to Limits.cut(letter.error.message), "blockedBy" to letter.blockedBy,
                 "attempts" to letter.attempts, "parkedAt" to db.ts(letter.parkedAt), "lastAttemptAt" to db.ts(letter.lastAttemptAt),
                 "expireAt" to db.ts(letter.expireAt), "replay" to letter.replay,
             ),
@@ -39,15 +45,15 @@ internal class JdbcDeadLetterStore(private val db: Db) : DeadLetterStore {
     }
 
     override suspend fun head(processor: String, key: String): String? = db.own { jdbc ->
-        firstId(jdbc, "", mapOf("processor" to processor, "key" to key))
+        firstId(jdbc, "", mapOf("processor" to processor, "keyHash" to Limits.sha256(key)))
     }
 
     override suspend fun earlier(processor: String, key: String, position: String): String? = db.own { jdbc ->
         val number = positionNumber(position)
         if (number != null) {
-            firstId(jdbc, "AND position_num < :bound", mapOf("processor" to processor, "key" to key, "bound" to number))
+            firstId(jdbc, "AND position_num < :bound", mapOf("processor" to processor, "keyHash" to Limits.sha256(key), "bound" to number))
         } else {
-            firstId(jdbc, "AND position_num IS NULL AND position < :bound", mapOf("processor" to processor, "key" to key, "bound" to position))
+            firstId(jdbc, "AND position_num IS NULL AND position < :bound", mapOf("processor" to processor, "keyHash" to Limits.sha256(key), "bound" to position))
         }
     }
 
@@ -100,14 +106,14 @@ internal class JdbcDeadLetterStore(private val db: Db) : DeadLetterStore {
 
     override suspend fun delete(id: String): Boolean = db.own { jdbc -> deleteLive(jdbc, id) }
 
-    override suspend fun deleteInTransaction(id: String): Boolean = deleteLive(db.joined, id)
+    override suspend fun deleteInTransaction(id: String): Boolean = db.tx { jdbc -> deleteLive(jdbc, id) }
 
     override suspend fun recordFailure(id: String, error: DeadLetterError): Boolean = db.own { jdbc ->
         val now = db.ts(db.now())
         jdbc.sql(
             "UPDATE kraken_dead_letters SET attempts = attempts + 1, error_type = :type, error_message = :message, last_attempt_at = :now, " +
                 "reason = 'HANDLER_FAILED', blocked_by = NULL WHERE id = :id AND $live",
-        ).param("type", error.type).param("message", error.message).param("now", now).param("id", id).update() > 0
+        ).param("type", Limits.cut(error.type)).param("message", Limits.cut(error.message)).param("now", now).param("id", id).update() > 0
     }
 
     private fun deleteLive(jdbc: JdbcClient, id: String): Boolean =
@@ -116,7 +122,7 @@ internal class JdbcDeadLetterStore(private val db: Db) : DeadLetterStore {
     /** The head among the blocking letters of (processor, key) matching [condition]. */
     private fun firstId(jdbc: JdbcClient, condition: String, params: Map<String, Any?>): String? =
         jdbc.sql(
-            "SELECT id FROM kraken_dead_letters WHERE processor = :processor AND event_key = :key AND reason <> 'INVALID' AND $live " +
+            "SELECT id FROM kraken_dead_letters WHERE processor = :processor AND event_key_hash = :keyHash AND reason <> 'INVALID' AND $live " +
                 "$condition ORDER BY $POSITION_ORDER, id LIMIT 1",
         ).params(params).param("now", db.ts(db.now())).query(String::class.java).optional().orElse(null)
 

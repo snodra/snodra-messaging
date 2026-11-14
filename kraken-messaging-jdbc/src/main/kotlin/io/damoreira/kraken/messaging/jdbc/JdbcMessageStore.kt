@@ -1,5 +1,6 @@
 package io.damoreira.kraken.messaging.jdbc
 
+import io.damoreira.kraken.messaging.store.AddOnMessageStore
 import io.damoreira.kraken.messaging.store.DeadLetterStore
 import io.damoreira.kraken.messaging.store.ExternalCallStore
 import io.damoreira.kraken.messaging.store.MessageStore
@@ -7,6 +8,7 @@ import io.damoreira.kraken.messaging.store.OutboxStore
 import io.damoreira.kraken.messaging.store.ProcessedEventStore
 import io.damoreira.kraken.messaging.store.ProcessorControlStore
 import io.damoreira.kraken.messaging.store.SagaStores
+import com.zaxxer.hikari.HikariDataSource
 import org.springframework.jdbc.datasource.DataSourceTransactionManager
 import org.springframework.transaction.PlatformTransactionManager
 import java.sql.Connection
@@ -33,7 +35,7 @@ data class JdbcStoreSettings(
 )
 
 /**
- * The [MessageStore] on a SQL database through plain JDBC (ADR 0028): PostgreSQL 13+ or MySQL 8.0+ ([dialect]), the tables
+ * The [MessageStore] on a SQL database through plain JDBC (ADR 0028): PostgreSQL 13+ or MySQL 8.0.17+ ([dialect]), the tables
  * `kraken_outbox`, `kraken_processed_events`, `kraken_dead_letters`, `kraken_processor_control`, `kraken_external_calls`,
  * `kraken_sagas`, `kraken_saga_associations`, `kraken_saga_dispatch`, `kraken_saga_dispatch_leases`, `kraken_deadlines` and
  * `kraken_saga_failures` (schema `db/kraken/<dialect>/V1__kraken.sql`, applied by [initSchema]).
@@ -60,15 +62,30 @@ class JdbcMessageStore(
     clock: Clock = Clock.systemUTC(),
     /** A connection only the relay wake-up uses (PostgreSQL): opened outside the pool, kept as long as a relay runs. */
     listenConnection: (() -> Connection)? = null,
-) : MessageStore {
+    /** Whether appends wake the relays up (PostgreSQL `NOTIFY`; `kraken.messaging.store.jdbc.notify`): off, the relays poll. */
+    notify: Boolean = true,
+) : AddOnMessageStore {
     override val name: String = NAME
 
-    internal val db = Db(dataSource, dialect, transactions, clock)
+    init {
+        // A write that commits on its own inside the service's transaction needs a second connection: a pool of one would wait
+        // for itself until its connection timeout.
+        (dataSource as? HikariDataSource)?.maximumPoolSize?.let { size ->
+            require(size >= MIN_POOL_SIZE) {
+                "The kraken message store needs a connection pool of at least $MIN_POOL_SIZE (the pool '${dataSource.poolName}' has $size): " +
+                    "a write that commits on its own inside the service's transaction takes a second connection"
+            }
+        }
+    }
+
+    internal val db = Db(dataSource, dialect, clock)
+
+    private val notifies = notify && dialect.notifies
 
     private val notifications: PostgresNotifications? =
-        if (dialect.notifies) PostgresNotifications(listenConnection ?: dataSource::getConnection, dedicated = listenConnection != null) else null
+        if (notifies) PostgresNotifications(listenConnection ?: dataSource::getConnection, dedicated = listenConnection != null) else null
 
-    override val outbox: OutboxStore = JdbcOutboxStore(db, notifications)
+    override val outbox: OutboxStore = JdbcOutboxStore(db, notifications, notifies)
 
     override val processedEvents: ProcessedEventStore = JdbcProcessedEventStore(db)
 
@@ -87,11 +104,17 @@ class JdbcMessageStore(
      */
     override fun initSchema() = JdbcSchema.apply(dataSource, dialect)
 
+    /** For a service that applies the schema itself: fails unless the database has the schema version this library needs, or later. */
+    fun requireSchema() = JdbcSchema.require(dataSource, dialect)
+
     /** Deletes what the retentions let go and the expired dead letters and leases; returns how many rows went. */
     fun purgeExpired(): Long = JdbcPurge.run(db, settings)
 
     companion object {
         /** The message store's name (`kraken.messaging.store.type=jdbc`). */
         const val NAME = "jdbc"
+
+        /** The smallest connection pool the store runs on. */
+        const val MIN_POOL_SIZE = 2
     }
 }

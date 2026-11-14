@@ -34,7 +34,10 @@ class PostgresNotifyTest {
     }
 
     @AfterAll
-    fun stop() = dataSource.close()
+    fun stop() {
+        dataSource.close()
+        connection.drop()
+    }
 
     @Test
     fun notify_wakes_relay_before_poll() {
@@ -43,6 +46,9 @@ class PostgresNotifyTest {
         val relay = OutboxPublisher(store.outbox, events, "kraken.events", "orders", pollInterval = Duration.ofMinutes(10), batchSize = 100)
         relay.start()
         try {
+            // LISTEN is in place (and its start-up wake-up spent) before anything is appended: only a NOTIFY wakes the relay later.
+            val notifications = (store.outbox as JdbcOutboxStore).notifications!!
+            await().atMost(Duration.ofSeconds(10)).until { notifications.listens > 0 }
             append(store, "e-1")
             // Relayed by the first poll or by the wake-up; either way the relay now waits ten minutes for its next poll.
             await().atMost(Duration.ofSeconds(10)).until { events.events("kraken.events").map { it.id } == listOf("e-1") }
@@ -58,7 +64,8 @@ class PostgresNotifyTest {
         val store = JdbcMessageStore(dataSource, PostgresDialect) // the wake-up borrows its connection from the pool
         val wakes = AtomicInteger()
         val handle = store.outbox.onAppend { wakes.incrementAndGet() }
-        await().atMost(Duration.ofSeconds(10)).until { wakes.get() >= 1 } // listening started (it wakes the relay once)
+        val notifications = (store.outbox as JdbcOutboxStore).notifications!!
+        await().atMost(Duration.ofSeconds(10)).until { notifications.listens > 0 && wakes.get() >= 1 } // listening, its start-up wake-up spent
         val listening = wakes.get()
 
         TransactionTemplate(store.transactions).executeWithoutResult { status ->
@@ -71,7 +78,6 @@ class PostgresNotifyTest {
         append(store, "committed")
         await().atMost(Duration.ofSeconds(5)).until { wakes.get() > listening }
 
-        val notifications = (store.outbox as JdbcOutboxStore).notifications!!
         assertTrue(notifications.listening)
         handle.close()
         assertFalse(notifications.listening, "no listening thread outlives the last relay")

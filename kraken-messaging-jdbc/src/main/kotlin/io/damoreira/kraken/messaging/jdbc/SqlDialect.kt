@@ -22,8 +22,11 @@ sealed interface SqlDialect {
     /** `postgresql` or `mysql` (`kraken.messaging.store.jdbc.dialect`). */
     val name: String
 
-    /** The oldest server version this dialect supports, as `major.minor`. */
-    val minimumVersion: Pair<Int, Int>
+    /** The oldest server version this dialect supports: major, minor, patch. */
+    val minimumVersion: Triple<Int, Int, Int>
+
+    /** [minimumVersion] as people write it. */
+    val minimumText: String
 
     /** The classpath location of schema version 1 (`db/kraken/<name>/V1__kraken.sql`). */
     val schemaV1: String get() = "db/kraken/$name/V1__kraken.sql"
@@ -50,7 +53,7 @@ sealed interface SqlDialect {
     /** [e] as the Spring exception the store reports, or null for the default translation. */
     fun translate(e: SQLException): DataAccessException?
 
-    /** Whether appends notify listening relays (PostgreSQL `NOTIFY kraken_outbox`). */
+    /** Whether appends can notify listening relays (PostgreSQL `NOTIFY kraken_outbox`). */
     val notifies: Boolean get() = false
 
     companion object {
@@ -77,7 +80,8 @@ sealed interface SqlDialect {
  */
 data object PostgresDialect : SqlDialect {
     override val name = "postgresql"
-    override val minimumVersion = 13 to 0
+    override val minimumVersion = Triple(13, 0, 0)
+    override val minimumText = "13.0"
     override val duplicateAbortsTransaction = true
     override val notifies = true
 
@@ -105,12 +109,13 @@ data object PostgresDialect : SqlDialect {
 }
 
 /**
- * MySQL 8.0 or later (InnoDB): `DATETIME(3)` holding UTC, `JSON`, `INSERT ... ON DUPLICATE KEY UPDATE`, errors by vendor code.
+ * MySQL 8.0.17 or later (InnoDB, `utf8mb4_0900_bin`, a STRICT `sql_mode`): `DATETIME(3)` holding UTC, `JSON`, `INSERT ... ON DUPLICATE KEY UPDATE`, errors by vendor code.
  * No notification: the relays poll.
  */
 data object MySqlDialect : SqlDialect {
     override val name = "mysql"
-    override val minimumVersion = 8 to 0
+    override val minimumVersion = Triple(8, 0, 17)
+    override val minimumText = "8.0.17"
     override val duplicateAbortsTransaction = false
 
     override fun timestamp(instant: Instant): Any = LocalDateTime.ofInstant(SqlDialect.millis(instant), ZoneOffset.UTC)

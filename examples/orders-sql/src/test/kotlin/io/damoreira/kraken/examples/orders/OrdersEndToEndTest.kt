@@ -57,12 +57,12 @@ class OrdersEndToEndTest {
 
     /** Sends [command] once the service's types are registered with the hub. */
     private fun send(command: PlaceOrder): OrderAccepted {
-        var reply: Result<OrderAccepted>? = null
+        var reply: Result<OrderAccepted> = Result.failure(IllegalStateException("not sent"))
         await().atMost(Duration.ofSeconds(15)).until {
             reply = runCatching { runBlocking { commands.send(command) } }
-            reply!!.exceptionOrNull().let { it !is NoHandlerException && it !is HubUnavailableException }
+            reply.exceptionOrNull().let { it !is NoHandlerException && it !is HubUnavailableException }
         }
-        return reply!!.getOrThrow()
+        return reply.getOrThrow()
     }
 
     private fun status(id: String): String? =

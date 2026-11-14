@@ -53,7 +53,7 @@ class Orders(private val jdbc: JdbcClient, private val events: EventBus, transac
         require(command.item.isNotBlank()) { "an order needs an item" }
         log.info("Placed order {} (correlationId {})", command.orderId, ctx.correlationId)
         OrderAccepted(command.orderId)
-    }!!
+    }
 
     /** Confirms a placed order: the update and the processed marker of the event commit together (the library's transaction). */
     @EventHandler
