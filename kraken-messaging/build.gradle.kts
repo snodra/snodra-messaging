@@ -44,6 +44,7 @@ dependencies {
     testImplementation(libs.spring.boot.starter.test)
     testImplementation("org.springframework.boot:spring-boot-actuator")
     testImplementation("io.micrometer:micrometer-core")
+    testImplementation(libs.micrometer.tracing) // TraceFloorTest: with tracing present the propagator decides
     testImplementation("org.springframework.boot:spring-boot-micrometer-metrics") // Boot's registry in the end-to-end applications
     testImplementation(libs.kotlin.test.junit5)
     testImplementation(libs.mockk)

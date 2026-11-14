@@ -47,15 +47,15 @@ class OutboxEventBus(
 
     /** The correlation id comes from [context]'s [CorrelationContext], else the MDC, else a fresh UUID. */
     private fun entry(event: Event, key: String?, context: CoroutineContext?) = entry(
-        typeResolver.typeNameOf(event::class), key, codec.encode(event), CorrelationContext.resolve(context), CallerContext.currentUserId() ?: "",
+        typeResolver.typeNameOf(event::class), key, codec.encode(event), CorrelationContext.resolve(context), CallerContext.currentUserId() ?: "", context,
     )
 
-    private fun entry(type: String, key: String?, payload: ByteArray, correlationId: String, userId: String): OutboxEntry {
+    private fun entry(type: String, key: String?, payload: ByteArray, correlationId: String, userId: String, context: CoroutineContext? = null): OutboxEntry {
         val headers = linkedMapOf(
             EventHeaders.CORRELATION_ID to correlationId,
             EventHeaders.USER_ID to userId,
         )
-        traceHeaders.inject(headers)
+        traceHeaders.inject(headers, context)
         return OutboxEntry(
             id = UUID.randomUUID().toString(),
             type = type,

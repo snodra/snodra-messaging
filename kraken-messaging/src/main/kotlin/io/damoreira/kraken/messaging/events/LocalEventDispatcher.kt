@@ -9,6 +9,7 @@ import io.damoreira.kraken.messaging.metrics.NoopMessagingMetrics
 import io.damoreira.kraken.messaging.saga.SagaStage
 import io.damoreira.kraken.messaging.store.MessageStore
 import io.damoreira.kraken.messaging.store.ProcessedMarker
+import io.damoreira.kraken.messaging.eventstore.EventHeaders
 import io.damoreira.kraken.messaging.tracing.CorrelationContext
 import kotlinx.coroutines.runBlocking
 import org.slf4j.LoggerFactory
@@ -178,7 +179,7 @@ class LocalEventDispatcher(
         val marker = Processors.markerId(processor, dedupeId)
         return try {
             tx.executeWithoutResult {
-                runBlocking(CorrelationContext(ctx.correlationId)) {
+                runBlocking(CorrelationContext(ctx.correlationId, ctx.headers[EventHeaders.TRACEPARENT])) {
                     val recorded = store.processedEvents.record(
                         ProcessedMarker(
                             marker, type, Instant.now(),

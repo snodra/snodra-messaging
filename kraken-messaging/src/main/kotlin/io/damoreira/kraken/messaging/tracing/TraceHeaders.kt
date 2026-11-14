@@ -2,19 +2,31 @@ package io.damoreira.kraken.messaging.tracing
 
 import io.micrometer.tracing.Tracer
 import io.micrometer.tracing.propagation.Propagator
+import kotlin.coroutines.CoroutineContext
 
 /**
  * Writes the current trace context (W3C `traceparent`/`tracestate`, or whatever the propagator emits) into request
- * headers. [propagator] and [tracer] are typed `Any?` so the starter has no hard dependency on micrometer-tracing: it is
- * a no-op when either is null or when micrometer-tracing is not on the classpath.
+ * headers. [propagator] and [tracer] are typed `Any?` so the starter has no hard dependency on micrometer-tracing.
+ *
+ * Without tracing (either is null, or micrometer-tracing is not on the classpath) it keeps the trace floor: a message sent
+ * while handling one carries the handled message's `traceparent` unchanged ([CorrelationContext.currentTraceparent]), so a trace
+ * still follows the message across services; outside handling it writes nothing. With tracing the propagator alone decides.
  */
 class TraceHeaders(
     private val propagator: Any? /* io.micrometer.tracing.propagation.Propagator */,
     private val tracer: Any? /* io.micrometer.tracing.Tracer */,
 ) {
-    fun inject(into: MutableMap<String, String>) {
-        if (propagator == null || tracer == null || !MicrometerTracing.available) return
+    /** Writes the trace headers of a message sent now; [context] is the sender's coroutine context (null: the thread's). */
+    fun inject(into: MutableMap<String, String>, context: CoroutineContext? = null) {
+        if (propagator == null || tracer == null || !MicrometerTracing.available) {
+            CorrelationContext.currentTraceparent(context)?.let { into[TRACEPARENT] = it }
+            return
+        }
         MicrometerTracing.inject(propagator, tracer, into)
+    }
+
+    private companion object {
+        const val TRACEPARENT = "traceparent"
     }
 }
 
