@@ -66,7 +66,9 @@ enum class Capability(
  * the service's events source, or its dead-letter source ([deadLetterSource]). [id] and [typeName] are also in headers
  * [EventHeaders.ID] and [EventHeaders.TYPE]. [key] is the order key: events with one key reach a processor in publish order;
  * null spreads them as the event store does. [headers] are carried as given, as the event store's native metadata: the seven
- * [EventHeaders] and any other (a dead letter's `kraken-dlt-*`). [payload] is JSON bytes, carried as given.
+ * [EventHeaders] and any other (a dead letter's `kraken-dlt-*`). Headers are UTF-8 text, one value per name: a record read with
+ * a header that is not UTF-8, or with a name repeated, is not carried byte for byte (a dead letter sent to the event store
+ * carries its text, the last value of a name). [payload] is JSON bytes, carried as given.
  */
 class OutgoingEvent(
     val source: String,
@@ -100,7 +102,8 @@ sealed interface SubscriptionEvent {
 /**
  * One event a subscription delivers, read from [segment] (a segment of the source: a unit of order per key) at [position]
  * (which [Subscription.ack] takes). [headers], [key] and [payload] are as published; [timestampMs] is when the event store
- * appended it, epoch milliseconds (its own clock).
+ * appended it, epoch milliseconds (its own clock). Headers are UTF-8 text, one value per name: a header value that is not UTF-8
+ * is read lossily and a repeated name keeps its last value, so such a record is not byte-preserved when it is dead-lettered.
  *
  * [segment] and [position] are opaque strings of at most [MAX_SEGMENT_BYTES] and [MAX_POSITION_BYTES] bytes that only the event
  * store reads (decimal numbers for the first-wave stores); the core orders two positions of one segment
@@ -163,6 +166,12 @@ sealed class EventStoreException(message: String, cause: Throwable? = null) : Ru
     /** The event store lacks [capability] (`CONTROL_REFUSAL_UNSUPPORTED`). */
     class Unsupported(val capability: Capability) : EventStoreException("the event store lacks the capability $capability")
 
-    /** The event store failed or cannot be reached. */
+    /**
+     * The event store refused the event for good (too large, not authorized, a destination it cannot have): publishing it again
+     * cannot succeed, so the outbox relay gives it up at once.
+     */
+    class Rejected(why: String, cause: Throwable? = null) : EventStoreException("rejected by the event store: $why", cause)
+
+    /** The event store failed or cannot be reached; trying again may succeed. */
     class Failed(why: String, cause: Throwable? = null) : EventStoreException("event store: $why", cause)
 }

@@ -15,6 +15,11 @@ import org.apache.kafka.clients.consumer.ConsumerConfig
 import org.apache.kafka.clients.producer.KafkaProducer
 import org.apache.kafka.clients.producer.ProducerConfig
 import org.apache.kafka.clients.producer.ProducerRecord
+import org.apache.kafka.common.InvalidRecordException
+import org.apache.kafka.common.errors.AuthorizationException
+import org.apache.kafka.common.errors.InvalidTopicException
+import org.apache.kafka.common.errors.RecordTooLargeException
+import org.apache.kafka.common.errors.SerializationException
 import org.apache.kafka.common.header.internals.RecordHeader
 import org.apache.kafka.common.serialization.ByteArrayDeserializer
 import org.apache.kafka.common.serialization.ByteArraySerializer
@@ -39,7 +44,8 @@ import kotlin.coroutines.resumeWithException
  *   subscription's.
  * - **Publish.** A record per event, keyed by the event's key (a keyless event is spread by Kafka), with every header as a
  *   record header (UTF-8) and the payload as the value; [publish] returns when the brokers acknowledged it (`acks=all`,
- *   idempotent producer).
+ *   idempotent producer). A failure no retry can fix ([NON_RETRIABLE]: too large, not authorized, an invalid topic or record)
+ *   is [EventStoreException.Rejected], any other [EventStoreException.Failed].
  * - **Capabilities.** All four: [Capability.REPLAY] (consumer group offsets moved by an `Admin` client), [Capability.LAG]
  *   (end offsets against committed offsets), [Capability.NATIVE_DEAD_LETTER] (the `.dlt` topic) and [Capability.BROWSE] (the
  *   event browser can read the topics; it is a separate program).
@@ -76,7 +82,8 @@ class KafkaEventStore(private val settings: KafkaEventStoreSettings) : EventStor
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            throw EventStoreException.Failed("publishing ${event.id} to ${event.source}: ${e.message ?: e::class.java.simpleName}", e)
+            val why = "publishing ${event.id} to ${event.source}: ${e.message ?: e::class.java.simpleName}"
+            throw if (rejected(e)) EventStoreException.Rejected(why, e) else EventStoreException.Failed(why, e)
         }
     }
 
@@ -107,6 +114,19 @@ class KafkaEventStore(private val settings: KafkaEventStoreSettings) : EventStor
     companion object {
         /** The name this event store reports to the hub. */
         const val NAME = "kafka"
+
+        /** Send failures that sending the same record again cannot fix: the event is [EventStoreException.Rejected]. */
+        val NON_RETRIABLE: List<Class<out Throwable>> = listOf(
+            RecordTooLargeException::class.java,
+            SerializationException::class.java,
+            InvalidTopicException::class.java,
+            InvalidRecordException::class.java,
+            AuthorizationException::class.java,
+        )
+
+        /** Whether [e] (or a cause of it) is one of [NON_RETRIABLE]. */
+        internal fun rejected(e: Throwable): Boolean =
+            generateSequence(e) { it.cause.takeIf { c -> c !== it } }.take(16).any { c -> NON_RETRIABLE.any { it.isInstance(c) } }
     }
 }
 

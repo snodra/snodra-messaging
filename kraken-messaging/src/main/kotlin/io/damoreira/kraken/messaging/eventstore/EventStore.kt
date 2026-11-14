@@ -37,7 +37,8 @@ interface EventStore {
 
     /**
      * Appends [event] to [OutgoingEvent.source]; returns once the event store accepted it. Two publishes of one key, the second
-     * called after the first returned, are delivered in that order.
+     * called after the first returned, are delivered in that order. Throws [EventStoreException.Rejected] when the event store
+     * will never take this event (the relay gives it up at once), [EventStoreException.Failed] when another try may succeed.
      */
     suspend fun publish(event: OutgoingEvent)
 

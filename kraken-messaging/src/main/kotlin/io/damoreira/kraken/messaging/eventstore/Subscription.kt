@@ -12,7 +12,9 @@ package io.damoreira.kraken.messaging.eventstore
  *   the next subscription of the same name that gets its segment (after a [close], a crash or a reassignment), or to this one
  *   after [redeliver].
  * - **Failure.** A [EventStoreException.Failed] thrown by [next] ends the subscription: it delivers nothing more. The caller [closes][close]
- *   it and subscribes again, with a backoff of its own (what it had not acknowledged comes again, as after a crash).
+ *   it and subscribes again, with a backoff of its own (what it had not acknowledged comes again, as after a crash). The failure is
+ *   never lost to a cancelled [next]: every later call throws it at once. What the subscription recovers from by itself (it retries
+ *   inside [next]) it reports through [takeError].
  * - **Threads.** [next], [ack], [redeliver] and [close] are called by one coroutine at a time (the processor's loop); [pause],
  *   [resume] and [segments] may be called from any thread at any time (the control plane, the status report).
  */
@@ -50,6 +52,13 @@ interface Subscription {
      * bytes), with their positions and lag as last known (refreshed by the subscription itself; never a blocking call).
      */
     fun segments(): List<SegmentStatus>
+
+    /**
+     * The latest trouble the subscription recovered from by itself since the last call (a lost connection, a failed reassignment,
+     * an error it retried), as text for the processor's status (`last_error`); null when there was none. Never blocking; may be
+     * called from any thread.
+     */
+    fun takeError(): String? = null
 
     /** Leaves the subscription after flushing the acknowledgements: its segments go to the other subscriptions of the name. */
     suspend fun close()

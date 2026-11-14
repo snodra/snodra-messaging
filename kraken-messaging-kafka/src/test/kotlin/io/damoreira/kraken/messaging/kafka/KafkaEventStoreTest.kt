@@ -83,4 +83,17 @@ class KafkaEventStoreTest {
         closed.close()
         assertTrue(!closed.producerBuilt, "close() built the producer only to close it")
     }
+
+    @Test
+    fun `a failure no retry can fix is rejected, others failed`() {
+        for (e in listOf(
+            org.apache.kafka.common.errors.RecordTooLargeException("too large"),
+            org.apache.kafka.common.errors.TopicAuthorizationException("not allowed"),
+            org.apache.kafka.common.errors.InvalidTopicException("bad name"),
+            RuntimeException("wrapped", org.apache.kafka.common.errors.SerializationException("bad")),
+        )) assertTrue(KafkaEventStore.rejected(e), e.toString())
+        for (e in listOf(org.apache.kafka.common.errors.TimeoutException("broker down"), IllegalStateException("closed"))) {
+            assertTrue(!KafkaEventStore.rejected(e), e.toString())
+        }
+    }
 }

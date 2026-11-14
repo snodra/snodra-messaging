@@ -84,6 +84,9 @@ internal class KafkaSubscription private constructor(
     @Volatile private var closing = false
 
     @Volatile private var failure: Throwable? = null
+
+    /** The latest trouble recovered from since the last [takeError] (a commit or a committed-offset read that failed). */
+    private val recovered = java.util.concurrent.atomic.AtomicReference<String?>(null)
     private val finished = CompletableDeferred<Unit>()
     private lateinit var thread: Thread
     private var nextRefresh = 0L
@@ -156,6 +159,8 @@ internal class KafkaSubscription private constructor(
         )
     }.sortedWith(compareBy(SegmentOrder) { it.segment })
 
+    override fun takeError(): String? = recovered.getAndSet(null)
+
     override suspend fun close() {
         closing = true
         signal.trySend(Unit)
@@ -199,6 +204,7 @@ internal class KafkaSubscription private constructor(
                 commit()
                 refreshStatus()
             }
+            // Not redundant: an ack recorded while close() raced the last iteration (after its commit) is flushed here.
             commit()
         } catch (e: Throwable) {
             failure = e
@@ -246,6 +252,7 @@ internal class KafkaSubscription private constructor(
         } catch (e: Exception) {
             // The partition moved to another instance or the brokers are away: what was not committed comes again.
             log.warn("Subscription {} of {} could not commit {}: {}", spec.name, topic, offsets.mapKeys { it.key.partition() }.mapValues { it.value.offset() }, e.toString())
+            recovered.set("kafka commit: $e")
         }
     }
 
@@ -326,13 +333,19 @@ internal class KafkaSubscription private constructor(
     /** Runs on the poll thread, inside `poll`. */
     private inner class Rebalances : ConsumerRebalanceListener {
         override fun onPartitionsAssigned(partitions: Collection<TopicPartition>) {
-            if (partitions.isEmpty()) return
+            if (partitions.isEmpty()) {
+                // An assignment of nothing (more instances than partitions) is announced too: the instance is a member, idle.
+                lock.withLock { queue.addLast(SubscriptionEvent.Assigned(emptyList())) }
+                signal.trySend(Unit)
+                return
+            }
             // A broker that does not answer here must not fail the subscription (an exception from a listener ends the poll): what
             // cannot be read now is unknown and read again by the poll thread; the assignment itself is always taken.
             val committed = try {
                 consumer.committed(partitions.toSet(), settings.adminTimeout)
             } catch (e: Exception) {
                 log.warn("Subscription {} could not read the committed offsets of {}, retrying: {}", spec.name, topic, e.toString())
+                recovered.set("rebalance: could not read the committed offsets: $e")
                 null
             }
             for (tp in partitions) {

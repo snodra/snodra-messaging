@@ -128,7 +128,8 @@ class KafkaSubscriptionMockTest {
         subscription.ack("0", "1")
         until("the commit") { mock.commits.isNotEmpty() }
         assertEquals(mapOf(tp0 to 2L), mock.commits.first())
-        assertNull(subscription.segments().first().committed?.takeIf { it != "2" }, "the offset it committed is the one it reports")
+        until("the committed offset reported") { subscription.segments().first { it.segment == "0" }.committed != null }
+        assertEquals("2", subscription.segments().first { it.segment == "0" }.committed, "the offset it committed is the one it reports")
         subscription.close()
     }
 
@@ -159,5 +160,60 @@ class KafkaSubscriptionMockTest {
         subscription.ack("1", "7") // not a partition it has delivered from, but it holds it
         subscription.close()
         assertTrue(mock.commits.any { it == mapOf(tp1 to 8L) }, "close flushed the pending ack: ${mock.commits}")
+    }
+
+    @Test
+    fun `a failed commit is reported once through takeError, and the subscription goes on`() = runBlocking {
+        val mock = object : MockConsumer<String, ByteArray>("earliest") {
+            val fail = AtomicBoolean(true)
+            override fun commitSync(offsets: Map<TopicPartition, OffsetAndMetadata>, timeout: Duration) {
+                if (fail.getAndSet(false)) throw TimeoutException("the coordinator did not answer")
+                super.commitSync(offsets, timeout)
+            }
+        }
+        mock.schedulePollTask {
+            mock.updateBeginningOffsets(mapOf(tp0 to 0L))
+            mock.updateEndOffsets(mapOf(tp0 to 10L))
+            mock.rebalance(listOf(tp0))
+            mock.seek(tp0, 0)
+            mock.addRecord(record(tp0, 0))
+        }
+        val subscription = KafkaSubscription.start(spec, settings, mock)
+        assertEquals(SubscriptionEvent.Assigned(listOf("0")), withTimeout(10_000) { subscription.next() })
+        withTimeout(10_000) { subscription.next() }
+        assertNull(subscription.takeError(), "nothing went wrong yet")
+        subscription.ack("0", "0")
+        var error: String? = null
+        until("the failed commit reported") { subscription.takeError()?.also { error = it } != null }
+        assertTrue(error!!.startsWith("kafka commit: "), error)
+        assertNull(subscription.takeError(), "reported once")
+        subscription.ack("0", "0")
+        until("the commit went through on the next try") { mock.committed(setOf(tp0))[tp0]?.offset() == 1L }
+        subscription.close()
+    }
+
+    @Test
+    fun `a fatal poll error is never lost to a cancelled next, every later call throws it`() = runBlocking {
+        val mock = Mock(timeouts = 0)
+        val subscription = KafkaSubscription.start(spec, settings, mock)
+        // A next() racing with the caller's timers, cancelled before or after the failure arrived.
+        assertNull(withTimeoutOrNull(50) { subscription.next() })
+        mock.setPollException(org.apache.kafka.common.KafkaException("fatal: the consumer cannot go on"))
+        assertNull(withTimeoutOrNull(1) { runCatching { subscription.next() }.getOrNull() })
+        repeat(2) {
+            val thrown = runCatching { withTimeout(10_000) { subscription.next() } }.exceptionOrNull()
+            assertTrue(thrown is io.damoreira.kraken.messaging.eventstore.EventStoreException.Failed, "call ${it + 1}: $thrown")
+        }
+        subscription.close()
+    }
+
+    @Test
+    fun `an assignment of no partition is announced, the instance is an idle member`() = runBlocking {
+        val mock = Mock(timeouts = 0)
+        mock.schedulePollTask { mock.rebalance(emptyList()) }
+        val subscription = KafkaSubscription.start(spec, settings, mock)
+        assertEquals(SubscriptionEvent.Assigned(emptyList()), withTimeout(10_000) { subscription.next() })
+        assertTrue(subscription.segments().isEmpty())
+        subscription.close()
     }
 }
