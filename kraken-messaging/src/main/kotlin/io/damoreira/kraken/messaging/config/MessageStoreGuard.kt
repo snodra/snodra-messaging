@@ -5,7 +5,6 @@ import io.damoreira.kraken.messaging.eventstore.EventStore
 import io.damoreira.kraken.messaging.handler.HandlerRegistry
 import io.damoreira.kraken.messaging.saga.Saga
 import io.damoreira.kraken.messaging.saga.RawEventPublisher
-import io.damoreira.kraken.messaging.store.AddOnMessageStore
 import io.damoreira.kraken.messaging.store.MessageStore
 import org.springframework.beans.factory.config.BeanFactoryPostProcessor
 import org.springframework.beans.factory.config.ConfigurableListableBeanFactory
@@ -76,20 +75,21 @@ class MessageStoreGuard(
 }
 
 /**
- * Fails the startup, before any bean is created, when two message store add-ons ([AddOnMessageStore]) are configured and
- * `kraken.messaging.store.type` does not choose one: every add-on's store steps back for the application's own store, never for
- * another add-on's, so without this check the service would need the setting only to find out which one it got.
+ * Fails the startup, before any bean is created, when two message stores are defined by auto-configurations (two store
+ * add-ons) and `kraken.messaging.store.type` does not choose one: every add-on's store steps back for the application's own
+ * store ([ConditionalOnNoApplicationMessageStore]), never for another add-on's, so without this check one of them would win
+ * silently. Stores the application defines itself are [MessageStoreGuard]'s.
  */
 class MessageStoreAddOnsCheck(private val environment: Environment) : BeanFactoryPostProcessor {
     override fun postProcessBeanFactory(beanFactory: ConfigurableListableBeanFactory) {
         if (!environment.getProperty(MessageStoreGuard.STORE).isNullOrBlank()) return
-        val addOns = beanFactory.getBeanNamesForType(AddOnMessageStore::class.java, true, false)
-            .mapNotNull { beanFactory.getType(it, false) }.distinct()
+        val addOns = MessageStoreBeans.names(beanFactory).filter { MessageStoreBeans.autoConfigured(beanFactory, it) }
+            .mapNotNull { name -> beanFactory.getType(name, false)?.let { name to it } }
         if (addOns.size < 2) return
-        val names = addOns.map(::storeName)
         throw IllegalStateException(
-            "${addOns.size} message store add-ons are configured (${addOns.joinToString { "${it.simpleName}: ${storeName(it)}" }}): set " +
-                "${MessageStoreGuard.STORE} to the one this service uses (${names.joinToString(", ")}), or remove the others from the dependencies",
+            "${addOns.size} message store add-ons are configured (${addOns.joinToString { (_, type) -> "${type.simpleName}: ${storeName(type)}" }}): " +
+                "set ${MessageStoreGuard.STORE} to the one this service uses (${addOns.joinToString(", ") { storeName(it.second) }}), or remove the " +
+                "others from the dependencies",
         )
     }
 
@@ -155,14 +155,14 @@ class EventStoreGuard(
 }
 
 /**
- * Applies the message store's schema at startup ([MessageStore.initSchema]: its indexes or tables) unless
- * `kraken.messaging.store.init-schema` is false, whichever store the application has (an add-on's or its own). Runs once
- * every singleton exists and before any lifecycle (the outbox relay, the consumers) starts.
+ * Applies the message store's schema at startup ([MessageStore.initSchema]: its indexes or tables), or, when
+ * `kraken.messaging.store.init-schema` is false (the service applies it itself), checks it is there ([MessageStore.checkSchema]),
+ * whichever store the application has (an add-on's or its own). Runs once every singleton exists (after any bean that migrates
+ * the schema while it is created) and before any lifecycle (the outbox relay, the consumers) starts.
  */
 class MessageStoreSchema(private val store: ObjectProvider<MessageStore>, private val properties: KrakenMessagingProperties) : SmartInitializingSingleton {
     override fun afterSingletonsInstantiated() {
-        if (!properties.store.initSchema) return // on by default: false when the service applies the schema itself
-        store.ifAvailable { it.initSchema() }
+        store.ifAvailable { if (properties.store.initSchema) it.initSchema() else it.checkSchema() }
     }
 }
 

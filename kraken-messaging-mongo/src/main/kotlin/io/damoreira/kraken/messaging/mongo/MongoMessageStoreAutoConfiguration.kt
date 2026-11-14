@@ -3,7 +3,7 @@ package io.damoreira.kraken.messaging.mongo
 import io.damoreira.kraken.messaging.config.EventsAutoConfiguration
 import io.damoreira.kraken.messaging.config.KrakenMessagingAutoConfiguration
 import io.damoreira.kraken.messaging.config.KrakenMessagingProperties
-import io.damoreira.kraken.messaging.store.AddOnMessageStore
+import io.damoreira.kraken.messaging.config.ConditionalOnNoApplicationMessageStore
 import io.damoreira.kraken.messaging.store.MessageStore
 import org.springframework.beans.factory.ObjectProvider
 import org.springframework.boot.autoconfigure.AutoConfiguration
@@ -41,9 +41,9 @@ class MongoMessageStoreAutoConfiguration {
     @ConditionalOnMissingBean
     fun mongoTransactionManager(databaseFactory: MongoDatabaseFactory): MongoTransactionManager = MongoStoreTransactionManager(databaseFactory)
 
-    /** Steps back for the application's own store, not for another add-on's: two add-ons need the setting (MessageStoreAddOnsCheck). */
+    /** Steps back for any store the application defines, not for another add-on's: two add-ons need the setting (MessageStoreAddOnsCheck). */
     @Bean
-    @ConditionalOnMissingBean(value = [MessageStore::class], ignored = [AddOnMessageStore::class])
+    @ConditionalOnNoApplicationMessageStore
     fun mongoMessageStore(
         mongo: MongoTemplate,
         transactionManager: ObjectProvider<MongoTransactionManager>,

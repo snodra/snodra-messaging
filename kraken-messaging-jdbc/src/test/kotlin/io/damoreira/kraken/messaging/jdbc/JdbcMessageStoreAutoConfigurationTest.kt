@@ -164,6 +164,47 @@ class JdbcMessageStoreAutoConfigurationTest {
         }
     }
 
+    /** The application's own store of an add-on's class (a bean method or a registered bean): the add-ons step back for it. */
+    @Test
+    fun anApplicationsOwnAddOnStoreWins() {
+        val ds = database("PostgreSQL", "17.7")
+        with(ds).withUserConfiguration(OwnJdbcStore::class.java).run { context ->
+            assertNull(context.startupFailure) // the SQL add-on alone: it steps back for the application's JdbcMessageStore
+            assertEquals(1, context.getBeansOfType(MessageStore::class.java).size)
+        }
+        val both = withBothAddOns(ds)
+        both.withUserConfiguration(OwnJdbcStore::class.java).run { context ->
+            assertNull(context.startupFailure)
+            assertEquals(1, context.getBeansOfType(MessageStore::class.java).size)
+            assertSame(context.getBean("myStore"), context.getBean(MessageStore::class.java))
+        }
+        val mongo = io.damoreira.kraken.messaging.mongo.MongoMessageStore(mockk(relaxed = true), mockk(relaxed = true))
+        both.withBean("myMongoStore", io.damoreira.kraken.messaging.mongo.MongoMessageStore::class.java, { mongo }).run { context ->
+            assertNull(context.startupFailure)
+            assertSame(mongo, context.getBean(MessageStore::class.java))
+        }
+        val mine: MessageStore = mockk(relaxed = true)
+        both.withBean(MessageStore::class.java, { mine }).run { context ->
+            assertNull(context.startupFailure)
+            assertSame(mine, context.getBean(MessageStore::class.java))
+        }
+        both.withUserConfiguration(OwnJdbcStore::class.java).withPropertyValues("kraken.messaging.store.type=jdbc").run { context ->
+            assertNull(context.startupFailure)
+            assertSame(context.getBean("myStore"), context.getBean(MessageStore::class.java), "the setting names its type: still the application's")
+        }
+    }
+
+    @org.springframework.context.annotation.Configuration(proxyBeanMethods = false)
+    class OwnJdbcStore {
+        @org.springframework.context.annotation.Bean
+        fun myStore(dataSource: DataSource) = JdbcMessageStore(dataSource, PostgresDialect)
+    }
+
+    private fun withBothAddOns(ds: DataSource) = with(ds)
+        .withConfiguration(AutoConfigurations.of(io.damoreira.kraken.messaging.mongo.MongoMessageStoreAutoConfiguration::class.java))
+        .withBean(org.springframework.data.mongodb.MongoDatabaseFactory::class.java, { mockk(relaxed = true) })
+        .withBean(org.springframework.data.mongodb.core.MongoTemplate::class.java, { mockk(relaxed = true) })
+
     @Test
     fun retentionsComeFromThePropertiesAndThePurgeCanBeTurnedOff() {
         with(database("PostgreSQL", "17.7")).withPropertyValues(
@@ -186,10 +227,7 @@ class JdbcMessageStoreAutoConfigurationTest {
     /** Two store add-ons on one classpath: without the setting the startup fails naming both; each value runs that one. */
     @Test
     fun twoStoreAddOnsNeedTheSetting() {
-        val both = with(database("PostgreSQL", "17.7"))
-            .withConfiguration(AutoConfigurations.of(io.damoreira.kraken.messaging.mongo.MongoMessageStoreAutoConfiguration::class.java))
-            .withBean(org.springframework.data.mongodb.MongoDatabaseFactory::class.java, { mockk(relaxed = true) })
-            .withBean(org.springframework.data.mongodb.core.MongoTemplate::class.java, { mockk(relaxed = true) })
+        val both = withBothAddOns(database("PostgreSQL", "17.7"))
         both.run { context ->
             val failure = context.startupFailure!!.stackTraceToString()
             assertTrue(failure.contains("2 message store add-ons are configured"), failure)

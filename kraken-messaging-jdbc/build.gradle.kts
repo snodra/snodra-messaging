@@ -27,6 +27,7 @@ dependencies {
     testImplementation(libs.spring.boot.starter.data.jpa)
     // The README's separate Flyway history for kraken's schema files (test only: the module does not depend on Flyway).
     testImplementation("org.flywaydb:flyway-core")
+    testImplementation("org.springframework.boot:spring-boot-flyway") // the application's own Flyway (Boot's auto-configuration)
     testImplementation("org.flywaydb:flyway-database-postgresql")
     testImplementation("org.flywaydb:flyway-mysql")
     // Two store add-ons on one classpath: neither wins silently.

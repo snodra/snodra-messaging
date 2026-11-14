@@ -5,7 +5,7 @@ import io.damoreira.kraken.messaging.config.KrakenMessagingAutoConfiguration
 import io.damoreira.kraken.messaging.config.KrakenMessagingProperties
 import io.damoreira.kraken.messaging.config.MessageStoreGuard
 import com.zaxxer.hikari.HikariDataSource
-import io.damoreira.kraken.messaging.store.AddOnMessageStore
+import io.damoreira.kraken.messaging.config.ConditionalOnNoApplicationMessageStore
 import io.damoreira.kraken.messaging.store.MessageStore
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.ObjectProvider
@@ -52,8 +52,8 @@ data class JdbcStoreProperties(
  * The SQL [MessageStore] (ADR 0028) on the application's [DataSource], unless `kraken.messaging.store.type` names another
  * store (then nothing here is created), or the application declares a [MessageStore] of its own. Another add-on does not make it
  * step back: two of them without the setting fail the startup. The dialect is the database's (`kraken.messaging.store.jdbc.dialect`
- * overrides it); a database other than PostgreSQL 13+ or MySQL 8.0.17+ fails the startup naming the supported ones. With
- * `kraken.messaging.store.init-schema=false` the startup checks the schema is there.
+ * overrides it); a database other than PostgreSQL 13+ or MySQL 8.0.17+ fails the startup naming the supported ones. The core
+ * applies the schema once every bean exists, or with `kraken.messaging.store.init-schema=false` checks it is there.
  *
  * **Transactions:** the store's transaction manager is the application's (Boot's `DataSourceTransactionManager`, or the
  * `JpaTransactionManager` of a JPA application: both bind the DataSource's connection, which the store joins). Only an
@@ -84,9 +84,9 @@ class JdbcMessageStoreAutoConfiguration {
     @ConditionalOnMissingBean(TransactionManager::class)
     fun jdbcStoreTransactionManager(dataSource: DataSource): DataSourceTransactionManager = DataSourceTransactionManager(dataSource)
 
-    /** Steps back for the application's own store, not for another add-on's: two add-ons need the setting (MessageStoreAddOnsCheck). */
+    /** Steps back for any store the application defines, not for another add-on's: two add-ons need the setting (MessageStoreAddOnsCheck). */
     @Bean
-    @ConditionalOnMissingBean(value = [MessageStore::class], ignored = [AddOnMessageStore::class])
+    @ConditionalOnNoApplicationMessageStore
     fun jdbcMessageStore(
         dataSource: DataSource,
         transactionManagers: ObjectProvider<PlatformTransactionManager>,
@@ -98,7 +98,7 @@ class JdbcMessageStoreAutoConfiguration {
         val dialect = JdbcDialects.detect(dataSource, jdbc.dialect)
         val listen = if (dialect.notifies && jdbc.notify) listenConnection(dataSource, connectionDetails.ifAvailable) else null
         log.info("SQL message store: {}", dialect.name)
-        val store = JdbcMessageStore(
+        return JdbcMessageStore(
             dataSource,
             dialect,
             transactionManagers.getIfUnique { DataSourceTransactionManager(dataSource) },
@@ -107,9 +107,6 @@ class JdbcMessageStoreAutoConfiguration {
             listen,
             jdbc.notify,
         )
-        // With init-schema on, the core applies it once every bean exists; off, the schema must be there already.
-        if (properties.getIfAvailable()?.store?.initSchema == false) store.requireSchema()
-        return store
     }
 
     /**

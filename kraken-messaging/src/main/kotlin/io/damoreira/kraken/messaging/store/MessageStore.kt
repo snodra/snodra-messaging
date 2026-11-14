@@ -45,4 +45,11 @@ interface MessageStore {
      * service applies the schema itself). A store without a schema keeps the default, which does nothing.
      */
     fun initSchema() = Unit
+
+    /**
+     * With `kraken.messaging.store.init-schema` false: fails (an [IllegalStateException] saying what to apply) unless the database
+     * has what the stores need. The core calls it once at startup, after every bean exists (so a bean that migrates the schema
+     * while it is created always comes first) and before any lifecycle starts. A store without a schema keeps the default.
+     */
+    fun checkSchema() = Unit
 }

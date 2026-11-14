@@ -1,6 +1,5 @@
 package io.damoreira.kraken.messaging.jdbc
 
-import io.damoreira.kraken.messaging.store.AddOnMessageStore
 import io.damoreira.kraken.messaging.store.DeadLetterStore
 import io.damoreira.kraken.messaging.store.ExternalCallStore
 import io.damoreira.kraken.messaging.store.MessageStore
@@ -64,7 +63,7 @@ class JdbcMessageStore(
     listenConnection: (() -> Connection)? = null,
     /** Whether appends wake the relays up (PostgreSQL `NOTIFY`; `kraken.messaging.store.jdbc.notify`): off, the relays poll. */
     notify: Boolean = true,
-) : AddOnMessageStore {
+) : MessageStore {
     override val name: String = NAME
 
     init {
@@ -106,6 +105,9 @@ class JdbcMessageStore(
 
     /** For a service that applies the schema itself: fails unless the database has the schema version this library needs, or later. */
     fun requireSchema() = JdbcSchema.require(dataSource, dialect)
+
+    /** With init-schema off, at startup (after every bean, a migrating one included): the schema must be there ([requireSchema]). */
+    override fun checkSchema() = requireSchema()
 
     /** Deletes what the retentions let go and the expired dead letters and leases; returns how many rows went. */
     fun purgeExpired(): Long = JdbcPurge.run(db, settings)
