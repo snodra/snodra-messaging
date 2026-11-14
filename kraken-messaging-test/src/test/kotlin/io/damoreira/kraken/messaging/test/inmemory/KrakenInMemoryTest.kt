@@ -12,6 +12,7 @@ import io.damoreira.kraken.messaging.store.MessageStore
 import io.damoreira.kraken.messaging.store.memory.MemoryMessageStore
 import io.damoreira.kraken.messaging.test.InMemoryEvents
 import io.damoreira.kraken.messaging.test.KrakenInMemory
+import io.damoreira.kraken.messaging.test.KrakenInMemoryExclusions
 import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.SpringBootConfiguration
@@ -87,6 +88,13 @@ class KrakenInMemoryTest {
     fun theApplicationsOwnAutoConfigurationExclusionsAreKept() {
         assertTrue(context.getBeanNamesForType(ExcludedProbe::class.java).isEmpty(), "the application's spring.autoconfigure.exclude still applies")
         assertTrue(context.getBeanNamesForType(KeptProbe::class.java).isNotEmpty(), "the other auto-configurations run")
+    }
+
+    @Test
+    fun theDefaultExclusionsAreKrakenInMemoryExclusionsDefault() {
+        @Suppress("UNCHECKED_CAST")
+        val default = KrakenInMemory::class.java.getMethod("exclude").defaultValue as Array<String>
+        assertEquals(KrakenInMemoryExclusions.DEFAULT, default.toList())
     }
 
     @Test

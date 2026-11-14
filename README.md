@@ -1683,6 +1683,17 @@ class ShippingInMemoryTest(@Autowired val events: InMemoryEvents) {
 }
 ```
 
+A service that keeps MongoDB for its own data (its repositories) leaves out only the Kafka add-on, and its test provides that
+database (a container, for example) or replaces those beans; the library's state stays in memory:
+
+```kotlin
+@SpringBootTest
+@KrakenInMemory(exclude = [KrakenInMemoryExclusions.KAFKA])
+class OrdersInMemoryTest(@Autowired val events: InMemoryEvents, @Autowired val orders: OrderRepository) {
+    // ...
+}
+```
+
 - `EventStoreConformanceTest` and `MessageStoreConformanceTest`: the behaviour every event-store and message-store add-on owes the
   core, as JUnit classes an add-on subclasses in its own tests (the in-memory stores run them in the core's tests, with no
   container).

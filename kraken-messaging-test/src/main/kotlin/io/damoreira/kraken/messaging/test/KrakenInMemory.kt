@@ -43,7 +43,10 @@ import java.time.Clock
  * replaces those beans. Other infrastructure the application uses itself is the test's to replace.
  *
  * For a full application test (`@SpringBootTest`): the annotation enables auto-configuration on the test class (that is how its
- * exclusions merge with the application's), so it does not belong on a slice test (`@WebMvcTest` and the like).
+ * exclusions, by class name, merge with the application's: `@ImportAutoConfiguration` excludes by class only, which would need
+ * every excluded class on the classpath), so it does not belong on a slice test (`@WebMvcTest` and the like). As any
+ * `@EnableAutoConfiguration` it also adds the test class's package to the auto-configuration packages (entity and repository
+ * scanning): usually a package of the application already.
  */
 @Target(AnnotationTarget.CLASS)
 @Retention(AnnotationRetention.RUNTIME)

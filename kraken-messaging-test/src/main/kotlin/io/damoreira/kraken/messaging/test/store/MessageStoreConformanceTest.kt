@@ -858,6 +858,7 @@ abstract class MessageStoreConformanceTest {
         val bothWrote = java.util.concurrent.CountDownLatch(2)
         return race { owner ->
             var applied = false
+            val wrote = java.util.concurrent.atomic.AtomicBoolean() // this owner counts down once, whichever way it ends
             try {
                 TransactionTemplate(store.transactions).executeWithoutResult { status ->
                     read()
@@ -865,14 +866,15 @@ abstract class MessageStoreConformanceTest {
                     try {
                         applied = write(owner)
                     } finally {
-                        bothWrote.countDown()
+                        if (wrote.compareAndSet(false, true)) bothWrote.countDown()
                     }
                     assertTrue(bothWrote.await(10, TimeUnit.SECONDS), "both transactions wrote before either committed")
                     if (!applied) status.setRollbackOnly()
                 }
                 if (applied) Outcome(won = true, lost = null) else Outcome(won = false, lost = "the write did not apply")
             } catch (e: Exception) {
-                bothWrote.countDown() // a write that threw before counting down cannot hold the other one back
+                // Failed before its write (the read, the barrier): count down so the other one is not held back.
+                if (wrote.compareAndSet(false, true)) bothWrote.countDown()
                 Outcome(won = false, lost = e)
             }
         }

@@ -238,7 +238,6 @@ data class KrakenMessagingProperties(
         val max: Duration = Duration.ofSeconds(5),
     )
 
-    /** `events.*`: the service's events on the event store (ADR 0027), whichever add-on provides it. */
     /** `kraken.messaging.store.*`. */
     data class Store(
         /**
@@ -262,6 +261,7 @@ data class KrakenMessagingProperties(
         }
     }
 
+    /** `events.*`: the service's events on the event store (ADR 0027), whichever add-on provides it. */
     data class Events(
         /** The source events are published to and read from (a topic on Kafka). */
         val source: String = "kraken.events",

@@ -61,7 +61,7 @@ class KrakenMessagingAutoConfiguration {
 
     /** Applies the message store's schema at startup (`kraken.messaging.store.init-schema`, on by default). */
     @Bean
-    fun krakenMessageStoreSchema(store: ObjectProvider<MessageStore>, environment: Environment) = MessageStoreSchema(store, environment)
+    fun krakenMessageStoreSchema(store: ObjectProvider<MessageStore>, properties: KrakenMessagingProperties) = MessageStoreSchema(store, properties)
 
     @Bean
     @ConditionalOnMissingBean

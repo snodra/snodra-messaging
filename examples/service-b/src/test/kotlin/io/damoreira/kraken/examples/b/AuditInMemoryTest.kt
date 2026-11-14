@@ -39,10 +39,10 @@ class AuditInMemoryTest {
     @Autowired lateinit var context: ApplicationContext
 
     @Test fun `nothing reaches for a broker or a database`(output: CapturedOutput) {
+        // No client exists, so nothing can connect later: the log of the startup is the whole story.
         assertTrue(context.getBeanNamesForType(MongoClient::class.java).isEmpty(), "no MongoDB client is built")
         assertTrue(context.getBeanNamesForType(KafkaEventStore::class.java).isEmpty(), "no Kafka event store")
         assertTrue(context.getBeanNamesForType(ExternalSourceProviders::class.java).isEmpty(), "no partner topic is read")
-        Thread.sleep(500) // a client's monitor thread would have logged its first connection attempt by now
         for (trace in listOf("27017", "MongoSocket", "Exception in monitor thread", "9092", "bootstrap")) {
             assertTrue(trace !in output.out, "no \"$trace\" in the log:\n${output.out}")
         }

@@ -133,15 +133,10 @@ class EventStoreGuard(
  * `kraken.messaging.store.init-schema` is false, whichever store the application has (an add-on's or its own). Runs once
  * every singleton exists and before any lifecycle (the outbox relay, the consumers) starts.
  */
-class MessageStoreSchema(private val store: ObjectProvider<MessageStore>, private val environment: Environment) : SmartInitializingSingleton {
+class MessageStoreSchema(private val store: ObjectProvider<MessageStore>, private val properties: KrakenMessagingProperties) : SmartInitializingSingleton {
     override fun afterSingletonsInstantiated() {
-        if (!environment.getProperty(INIT_SCHEMA, Boolean::class.java, true)) return
+        if (!properties.store.initSchema) return // on by default: false when the service applies the schema itself
         store.ifAvailable { it.initSchema() }
-    }
-
-    companion object {
-        /** On by default: false when the service applies the store's schema itself (a migration tool, a DBA). */
-        const val INIT_SCHEMA = "kraken.messaging.store.init-schema"
     }
 }
 
