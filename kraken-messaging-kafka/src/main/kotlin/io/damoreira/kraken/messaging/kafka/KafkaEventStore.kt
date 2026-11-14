@@ -10,6 +10,7 @@ import io.damoreira.kraken.messaging.eventstore.SubscriptionSpec
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import org.apache.kafka.clients.admin.AdminClientConfig
 import org.apache.kafka.clients.consumer.ConsumerConfig
 import org.apache.kafka.clients.producer.KafkaProducer
 import org.apache.kafka.clients.producer.ProducerConfig
@@ -21,6 +22,7 @@ import org.apache.kafka.common.serialization.StringDeserializer
 import org.apache.kafka.common.serialization.StringSerializer
 import java.time.Duration
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -49,7 +51,9 @@ import kotlin.coroutines.resumeWithException
  */
 class KafkaEventStore(private val settings: KafkaEventStoreSettings) : EventStore, AutoCloseable {
     private val closed = AtomicBoolean(false)
-    private val producer: KafkaProducer<String, ByteArray> by lazy { KafkaProducer(settings.producerProperties()) }
+    private val producerHolder = lazy { KafkaProducer<String, ByteArray>(settings.producerProperties()) }
+    private val producer: KafkaProducer<String, ByteArray> get() = producerHolder.value
+    private val consumers = AtomicInteger()
 
     override val name: String = NAME
 
@@ -77,7 +81,7 @@ class KafkaEventStore(private val settings: KafkaEventStoreSettings) : EventStor
         if (spec.name.isBlank() || spec.source.isBlank()) throw EventStoreException.Invalid("a subscription needs a name and a source")
         return withContext(Dispatchers.IO) {
             try {
-                KafkaSubscription.start(spec, settings)
+                KafkaSubscription.start(spec, settings, consumers.incrementAndGet())
             } catch (e: Exception) {
                 throw EventStoreException.Failed("subscribing ${spec.name} to ${spec.source}: ${e.message ?: e::class.java.simpleName}", e)
             }
@@ -94,7 +98,7 @@ class KafkaEventStore(private val settings: KafkaEventStoreSettings) : EventStor
     }
 
     override fun close() {
-        if (closed.compareAndSet(false, true)) runCatching { producer.close(Duration.ofSeconds(5)) }
+        if (closed.compareAndSet(false, true) && producerHolder.isInitialized()) runCatching { producer.close(Duration.ofSeconds(5)) }
     }
 
     companion object {
@@ -126,6 +130,13 @@ data class KafkaEventStoreSettings(
         require(maxPollRecords >= 1) { "the Kafka max poll records must be at least 1, was $maxPollRecords" }
     }
 
+    /** Never prints [clientProperties]' values (a `sasl.jaas.config` holds a secret): only their names. */
+    override fun toString(): String =
+        "KafkaEventStoreSettings(bootstrapServers=$bootstrapServers, clientProperties=${clientProperties.keys}, adminTimeout=$adminTimeout, " +
+            "statusRefresh=$statusRefresh, maxPollRecords=$maxPollRecords)"
+
+    // The client properties go to every client whole (a plugin's own options, such as an interceptor's or a partitioner's, are
+    // not in a client's list of known keys); a client only warns about a key it does not use.
     internal fun producerProperties(): Map<String, Any> = clientProperties + mapOf(
         ProducerConfig.BOOTSTRAP_SERVERS_CONFIG to bootstrapServers,
         ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG to StringSerializer::class.java,
@@ -137,9 +148,10 @@ data class KafkaEventStoreSettings(
         ProducerConfig.MAX_BLOCK_MS_CONFIG to 10_000,
         ProducerConfig.DELIVERY_TIMEOUT_MS_CONFIG to 30_000,
         ProducerConfig.REQUEST_TIMEOUT_MS_CONFIG to 20_000,
-    ).filterKeys { it in ProducerConfig.configNames() }
+    )
 
-    internal fun consumerProperties(group: String): Map<String, Any> = clientProperties + mapOf(
+    /** The consumer's configuration; its `client.id` (when [clientProperties] has one) gets `-<group>-<number>` so the clients tell apart. */
+    internal fun consumerProperties(group: String, number: Int = 1): Map<String, Any> = clientProperties + mapOf(
         ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG to bootstrapServers,
         ConsumerConfig.GROUP_ID_CONFIG to group,
         ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG to false,
@@ -147,9 +159,8 @@ data class KafkaEventStoreSettings(
         ConsumerConfig.MAX_POLL_RECORDS_CONFIG to maxPollRecords,
         ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG to StringDeserializer::class.java,
         ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG to ByteArrayDeserializer::class.java,
-    ).filterKeys { it in ConsumerConfig.configNames() }
+    ) + (clientProperties["client.id"]?.let { mapOf<String, Any>("client.id" to "$it-$group-$number") } ?: emptyMap())
 
     internal fun adminProperties(): Map<String, Any> =
-        (clientProperties + mapOf(org.apache.kafka.clients.admin.AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG to bootstrapServers))
-            .filterKeys { it in org.apache.kafka.clients.admin.AdminClientConfig.configNames() }
+        clientProperties + mapOf(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG to bootstrapServers)
 }

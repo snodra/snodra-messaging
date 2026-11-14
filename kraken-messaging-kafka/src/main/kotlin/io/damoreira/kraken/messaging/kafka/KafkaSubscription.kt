@@ -12,12 +12,12 @@ import org.apache.kafka.clients.consumer.ConsumerRebalanceListener
 import org.apache.kafka.clients.consumer.KafkaConsumer
 import org.apache.kafka.clients.consumer.OffsetAndMetadata
 import org.apache.kafka.common.TopicPartition
-import org.apache.kafka.common.errors.WakeupException
 import org.slf4j.LoggerFactory
 import java.time.Duration
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.ConcurrentSkipListMap
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
@@ -30,9 +30,11 @@ import kotlin.concurrent.withLock
  * consumer through that thread.
  *
  * **Queue.** The poll thread fills it with the assignment changes (from the rebalance listener, on that thread) and the
- * records of one poll, and polls again only once the queue holds no record: while records wait, the consumer's partitions are
- * paused (a paused poll still keeps the group membership alive), so the records of a partition never queue behind a revoke.
- * [next] takes the first event the pause allows, so cancelling it loses nothing: the event stays in the queue.
+ * records of each poll. It keeps fetching while the queue holds fewer than a batch of records (`maxPollRecords`): at that
+ * mark the partitions are paused (flow control; a paused poll still keeps the group membership alive) and they resume as [next]
+ * drains the queue below the low mark (half a batch), so the queue is refilled before it is empty. The records of a partition
+ * that is revoked are dropped from the queue with it. [next] takes the first event the pause allows, so cancelling it loses
+ * nothing: the event stays in the queue.
  *
  * **Eager rebalances** (the default `range` assignor): all partitions are revoked, then the new assignment is made, so a
  * subscription sees [SubscriptionEvent.Revoked] of what it held, then [SubscriptionEvent.Assigned] of what it holds now. The
@@ -47,13 +49,17 @@ internal class KafkaSubscription private constructor(
     private val topic = spec.source
 
     /** What the poll thread tracks of one assigned partition. */
-    private class Track(position: Long, committed: Long, head: Long) {
-        /** The next offset [next] delivers. */
-        val position = AtomicLong(position)
+    private class Track(committed: Long) {
+        /** The next offset [next] delivers; -1 until known (the first delivery or the poll thread's look at the consumer). */
+        val position = AtomicLong(-1)
 
+        /** The group's committed offset; -1 when none or not known yet. */
         @Volatile var committed = committed
 
-        @Volatile var head = head
+        /** Whether [committed] was read from the group (false: the read failed in the rebalance listener and is retried). */
+        @Volatile var committedKnown = true
+
+        @Volatile var head = -1L
     }
 
     private val tracks = ConcurrentSkipListMap<Int, Track>()
@@ -62,6 +68,9 @@ internal class KafkaSubscription private constructor(
     private val lock = ReentrantLock()
     private val queue = ArrayDeque<SubscriptionEvent>()
     private var queuedRecords = 0
+    private val drained = lock.newCondition()
+    private val high = settings.maxPollRecords
+    private val low = maxOf(1, settings.maxPollRecords / 2)
     private val signal = Channel<Unit>(Channel.CONFLATED)
 
     /** The offset after the last acknowledged one, per partition. */
@@ -79,9 +88,9 @@ internal class KafkaSubscription private constructor(
 
     override suspend fun next(): SubscriptionEvent {
         while (true) {
-            take()?.let { return it }
-            failure?.let { throw EventStoreException.Failed("the subscription ${spec.name} failed: ${it.message ?: it::class.java.simpleName}", it) }
             if (closing) throw EventStoreException.Failed("the subscription ${spec.name} is closed")
+            failure?.let { throw EventStoreException.Failed("the subscription ${spec.name} failed: ${it.message ?: it::class.java.simpleName}", it) }
+            take()?.let { return it }
             signal.receive() // only a hint: the queue is checked first, so a cancelled receive loses nothing
         }
     }
@@ -93,7 +102,7 @@ internal class KafkaSubscription private constructor(
             if (event is Delivery) {
                 if (paused) continue
                 it.remove()
-                queuedRecords--
+                if (--queuedRecords <= low) drained.signalAll()
                 tracks[event.segment.toInt()]?.position?.set(event.position.toLong() + 1)
             } else {
                 it.remove()
@@ -114,7 +123,9 @@ internal class KafkaSubscription private constructor(
         val offset = position.toLongOrNull() ?: throw EventStoreException.Invalid("position \"$position\" is not an offset")
         lock.withLock {
             seeks.add(partition to offset)
-            queue.removeAll { it is Delivery && it.segment == segment }.also { queuedRecords = queue.count { e -> e is Delivery } }
+            queue.removeAll { it is Delivery && it.segment == segment }
+            queuedRecords = queue.count { e -> e is Delivery }
+            drained.signalAll()
             tracks[partition]?.position?.set(offset)
         }
     }
@@ -126,6 +137,7 @@ internal class KafkaSubscription private constructor(
     override fun resume() {
         paused = false
         signal.trySend(Unit)
+        lock.withLock { drained.signalAll() }
     }
 
     override fun segments(): List<SegmentStatus> = tracks.entries.map { (partition, t) ->
@@ -140,7 +152,7 @@ internal class KafkaSubscription private constructor(
             head = head?.toString(),
             lag = if (head != null && from != null) maxOf(0L, head - from) else null,
         )
-    }.sortedBy { it.segment }
+    }.sortedWith(compareBy(SegmentOrder) { it.segment })
 
     override suspend fun close() {
         closing = true
@@ -154,11 +166,14 @@ internal class KafkaSubscription private constructor(
         try {
             consumer.subscribe(listOf(topic), Rebalances())
             while (!closing) {
-                val records = try {
-                    consumer.poll(POLL)
-                } catch (_: WakeupException) {
-                    continue
+                // Flow control, decided before each poll: hold (paused partitions, a poll that only keeps the membership alive)
+                // while the user paused or a batch waits in the queue; fetch again once the queue is below the low mark.
+                val hold = holding()
+                applyPause(hold)
+                if (hold) {
+                    lock.withLock { if (holding() && !closing) drained.await(HOLD_MS, TimeUnit.MILLISECONDS) }
                 }
+                val records = consumer.poll(if (hold) Duration.ZERO else POLL)
                 var queued = false
                 lock.withLock {
                     val moved = HashSet<Int>()
@@ -180,7 +195,6 @@ internal class KafkaSubscription private constructor(
                 }
                 if (queued) signal.trySend(Unit)
                 commit()
-                applyPause()
                 refreshStatus()
             }
             commit()
@@ -194,13 +208,19 @@ internal class KafkaSubscription private constructor(
         }
     }
 
-    /** Records are polled only while none waits in the queue (and the subscription is not paused): the others are paused. */
-    private fun applyPause() {
-        val hold = paused || lock.withLock { queuedRecords > 0 }
-        val assignment = consumer.assignment()
+    /** Whether fetching is held: the user paused, or the queue holds a batch (until it drains to the low mark; between the marks it stays as it was). */
+    private fun holding(): Boolean = paused || lock.withLock {
+        if (queuedRecords >= high) flowHeld = true else if (queuedRecords <= low) flowHeld = false
+        flowHeld
+    }
+
+    private var flowHeld = false
+
+    /** Pauses every assigned partition when [hold], else resumes the paused ones. */
+    private fun applyPause(hold: Boolean) {
         val already = consumer.paused()
         if (hold) {
-            val toPause = assignment - already
+            val toPause = consumer.assignment() - already
             if (toPause.isNotEmpty()) consumer.pause(toPause)
         } else if (already.isNotEmpty()) {
             consumer.resume(already)
@@ -225,16 +245,39 @@ internal class KafkaSubscription private constructor(
         }
     }
 
+    /**
+     * Refreshes what [segments] reports, without a request that could hold the fetching up: the head is the consumer's position
+     * plus its current lag (`currentLag` reads what the fetch responses reported; it is not updated while the partition is paused),
+     * and a committed offset the rebalance listener could not read is looked up again with a short timeout.
+     */
     private fun refreshStatus() {
         val now = System.nanoTime()
         if (now - nextRefresh < 0) return
         nextRefresh = now + settings.statusRefresh.toNanos()
         val assignment = consumer.assignment()
         if (assignment.isEmpty()) return
-        try {
-            for ((tp, end) in consumer.endOffsets(assignment, settings.adminTimeout)) tracks[tp.partition()]?.head = end
-        } catch (e: Exception) {
-            log.debug("Subscription {} could not read the end offsets of {}: {}", spec.name, topic, e.toString())
+        for (tp in assignment) {
+            val track = tracks[tp.partition()] ?: continue
+            val position = try {
+                consumer.position(tp, Duration.ZERO)
+            } catch (_: Exception) {
+                continue // not known yet
+            }
+            if (track.position.get() < 0) track.position.compareAndSet(-1, position)
+            val lag = consumer.currentLag(tp)
+            if (lag.isPresent) track.head = position + lag.asLong
+        }
+        val unknown = assignment.filter { tracks[it.partition()]?.committedKnown == false }.toSet()
+        if (unknown.isNotEmpty()) {
+            try {
+                for ((tp, committed) in consumer.committed(unknown, COMMITTED_LOOKUP)) {
+                    val track = tracks[tp.partition()] ?: continue
+                    track.committed = committed?.offset() ?: -1
+                    track.committedKnown = true
+                }
+            } catch (e: Exception) {
+                log.debug("Subscription {} could not read the committed offsets of {}: {}", spec.name, topic, e.toString())
+            }
         }
     }
 
@@ -255,18 +298,22 @@ internal class KafkaSubscription private constructor(
     private inner class Rebalances : ConsumerRebalanceListener {
         override fun onPartitionsAssigned(partitions: Collection<TopicPartition>) {
             if (partitions.isEmpty()) return
-            val committed = consumer.committed(partitions.toSet(), settings.adminTimeout)
-            val head = runCatching { consumer.endOffsets(partitions, settings.adminTimeout) }.getOrDefault(emptyMap())
+            // A broker that does not answer here must not fail the subscription (an exception from a listener ends the poll): what
+            // cannot be read now is unknown and read again by the poll thread; the assignment itself is always taken.
+            val committed = try {
+                consumer.committed(partitions.toSet(), settings.adminTimeout)
+            } catch (e: Exception) {
+                log.warn("Subscription {} could not read the committed offsets of {}, retrying: {}", spec.name, topic, e.toString())
+                null
+            }
             for (tp in partitions) {
                 acked.remove(tp.partition())
-                tracks[tp.partition()] = Track(
-                    position = consumer.position(tp, settings.adminTimeout),
-                    committed = committed[tp]?.offset() ?: -1,
-                    head = head[tp] ?: -1,
-                )
+                val track = Track(committed = committed?.get(tp)?.offset() ?: -1)
+                track.committedKnown = committed != null
+                tracks[tp.partition()] = track
             }
-            if (paused || lock.withLock { queuedRecords > 0 }) consumer.pause(partitions)
-            lock.withLock { queue.addLast(SubscriptionEvent.Assigned(partitions.map { it.partition().toString() }.sorted())) }
+            if (holding()) consumer.pause(partitions)
+            lock.withLock { queue.addLast(SubscriptionEvent.Assigned(partitions.map { it.partition().toString() }.sortedWith(SegmentOrder))) }
             signal.trySend(Unit)
         }
 
@@ -283,10 +330,13 @@ internal class KafkaSubscription private constructor(
 
         private fun giveUp(partitions: Collection<TopicPartition>) {
             val segments = partitions.map { it.partition().toString() }
+            val numbers = partitions.map { it.partition() }.toSet()
             lock.withLock {
+                seeks.removeIf { it.first in numbers }
                 queue.removeAll { it is Delivery && it.segment in segments }
                 queuedRecords = queue.count { it is Delivery }
-                queue.addLast(SubscriptionEvent.Revoked(segments.sorted()))
+                drained.signalAll()
+                queue.addLast(SubscriptionEvent.Revoked(segments.sortedWith(SegmentOrder)))
             }
             for (tp in partitions) {
                 tracks.remove(tp.partition())
@@ -299,9 +349,13 @@ internal class KafkaSubscription private constructor(
     companion object {
         private val POLL: Duration = Duration.ofMillis(100)
 
+        /** The longest a poll thread waits for the queue to drain while it holds the partitions paused. */
+        private const val HOLD_MS = 20L
+        private val COMMITTED_LOOKUP: Duration = Duration.ofMillis(200)
+
         /** Creates the consumer of [spec] and starts its thread; the group is joined by the first polls. */
-        fun start(spec: SubscriptionSpec, settings: KafkaEventStoreSettings): KafkaSubscription {
-            val consumer = KafkaConsumer<String, ByteArray>(settings.consumerProperties(spec.name))
+        fun start(spec: SubscriptionSpec, settings: KafkaEventStoreSettings, number: Int): KafkaSubscription {
+            val consumer = KafkaConsumer<String, ByteArray>(settings.consumerProperties(spec.name, number))
             val subscription = KafkaSubscription(spec, settings, consumer)
             subscription.thread = Thread(subscription::run, "kraken-kafka-${spec.name}").apply { isDaemon = true }
             subscription.thread.start()

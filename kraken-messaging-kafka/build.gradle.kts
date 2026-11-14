@@ -16,7 +16,6 @@ dependencies {
     testImplementation(project(":kraken-messaging-test"))
     testImplementation(libs.spring.boot.starter.test)
     testImplementation(libs.kotlin.test.junit5)
-    testImplementation(libs.mockk)
     testImplementation(libs.testcontainers.kafka)
     testImplementation(libs.testcontainers.mongodb)
     // The conformance kit's at-least-once check needs a message store: the MongoDB add-on's.

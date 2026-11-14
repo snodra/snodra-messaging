@@ -11,6 +11,8 @@ package io.damoreira.kraken.messaging.eventstore
  * - **At-least-once.** An event is acknowledged with [ack] after its handling committed; one not acknowledged comes again to
  *   the next subscription of the same name that gets its segment (after a [close], a crash or a reassignment), or to this one
  *   after [redeliver].
+ * - **Failure.** A [EventStoreException.Failed] thrown by [next] ends the subscription: it delivers nothing more. The caller [closes][close]
+ *   it and subscribes again, with a backoff of its own (what it had not acknowledged comes again, as after a crash).
  * - **Threads.** [next], [ack], [redeliver] and [close] are called by one coroutine at a time (the processor's loop); [pause],
  *   [resume] and [segments] may be called from any thread at any time (the control plane, the status report).
  */

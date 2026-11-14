@@ -1,6 +1,8 @@
 package io.damoreira.kraken.messaging.kafka
 
+import io.damoreira.kraken.messaging.config.KrakenMessagingAutoConfiguration
 import io.damoreira.kraken.messaging.eventstore.Capability
+import io.damoreira.kraken.messaging.eventstore.EventStore
 import io.damoreira.kraken.messaging.eventstore.EventStoreException
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertThrows
@@ -8,8 +10,6 @@ import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.springframework.boot.autoconfigure.AutoConfigurations
 import org.springframework.boot.test.context.runner.ApplicationContextRunner
-import io.damoreira.kraken.messaging.eventstore.EventStore
-import io.damoreira.kraken.messaging.config.KrakenMessagingAutoConfiguration
 
 class KafkaEventStoreTest {
     private val store = KafkaEventStore(KafkaEventStoreSettings(bootstrapServers = "localhost:1"))
@@ -36,7 +36,7 @@ class KafkaEventStoreTest {
         val consumer = settings.consumerProperties("svc.default")
         assertEquals("svc.default", consumer["group.id"])
         assertEquals(false, consumer["enable.auto.commit"])
-        assertEquals("x", consumer["client.id"])
+        assertEquals("x-svc.default-1", consumer["client.id"])
         assertEquals("all", settings.producerProperties()["acks"])
         assertEquals("b:9092", settings.adminProperties()["bootstrap.servers"])
     }
@@ -51,5 +51,35 @@ class KafkaEventStoreTest {
         runner.withBean("ownEventStore", EventStore::class.java, { own }).run { ctx ->
             assertEquals(listOf("ownEventStore"), ctx.getBeanNamesForType(EventStore::class.java).toList())
         }
+    }
+
+    @Test
+    fun `segments are listed as the hub lists them, partition 10 after 9`() {
+        val names = listOf("10", "9", "x", "2", "007", "99999999999999999999", "b", "A", "1")
+        assertEquals(listOf("1", "2", "007", "9", "10", "99999999999999999999", "A", "b", "x"), names.sortedWith(SegmentOrder))
+    }
+
+    @Test
+    fun `the settings never print the client properties values, and a consumer client id carries the group and a number`() {
+        val settings = KafkaEventStoreSettings("b:9092", clientProperties = mapOf("sasl.jaas.config" to "secret-value", "client.id" to "svc"))
+        assertTrue(!settings.toString().contains("secret-value"), settings.toString())
+        assertTrue(settings.toString().contains("sasl.jaas.config"))
+        assertEquals("svc-g-3", settings.consumerProperties("g", 3)["client.id"])
+    }
+
+    @Test
+    fun `a plugin's own option reaches the clients, not only the keys a client lists`() {
+        val settings = KafkaEventStoreSettings("b:9092", clientProperties = mapOf("my.partitioner.option" to "x"))
+        assertEquals("x", settings.producerProperties()["my.partitioner.option"])
+        assertEquals("x", settings.consumerProperties("g")["my.partitioner.option"])
+        assertEquals("x", settings.adminProperties()["my.partitioner.option"])
+    }
+
+    @Test
+    fun `closing a store that never published builds no producer`() {
+        // The producer is lazy; an unreachable broker would make building it log and wait, and close() must not do either.
+        val started = System.nanoTime()
+        KafkaEventStore(KafkaEventStoreSettings(bootstrapServers = "localhost:1")).close()
+        assertTrue(System.nanoTime() - started < 1_000_000_000L)
     }
 }

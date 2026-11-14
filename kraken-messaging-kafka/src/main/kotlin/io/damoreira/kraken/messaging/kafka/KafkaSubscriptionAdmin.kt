@@ -34,6 +34,10 @@ internal class KafkaSubscriptionAdmin(
     private val group = spec.name
     private val timeout = settings.adminTimeout.toMillis()
 
+    private companion object {
+        val CLOSE_TIMEOUT: java.time.Duration = java.time.Duration.ofSeconds(1)
+    }
+
     override suspend fun members(): List<String> = admin { a -> membersOf(a) }
 
     override suspend fun plan(target: ResetTarget): List<ReplayRange> = admin { a ->
@@ -53,22 +57,26 @@ internal class KafkaSubscriptionAdmin(
                 if (target.positions.isEmpty()) throw EventStoreException.Invalid("the target lists no segment")
                 val high = offsets(OffsetSpec.latest())
                 val known = partitions.associateBy { it.partition() }
-                target.positions.entries.associate { (segment, position) ->
+                val wanted = LinkedHashMap<TopicPartition, Long>()
+                for ((segment, position) in target.positions) {
                     val tp = segment.toIntOrNull()?.let(known::get) ?: throw EventStoreException.Invalid("$topic has no segment $segment")
                     val offset = position.toLongOrNull() ?: throw EventStoreException.Invalid("position $position of segment $segment is not an offset")
                     if (offset < 0) throw EventStoreException.Invalid("position $offset of segment $segment is negative")
                     if (offset > high.getValue(tp)) throw EventStoreException.Invalid("position $offset of segment $segment is past its head ${high.getValue(tp)}")
-                    tp to offset
+                    // "1" and "01" are one partition: a partition named twice, as the core refuses it.
+                    if (wanted.put(tp, offset) != null) throw EventStoreException.Invalid("the target names segment ${tp.partition()} twice")
                 }
+                wanted
             }
         }
         val before = committedOf(a)
-        targets.entries.sortedBy { it.key.partition().toString() }.map { (tp, to) ->
+        targets.entries.sortedWith(compareBy(SegmentOrder) { it.key.partition().toString() }).map { (tp, to) ->
             ReplayRange(topic, tp.partition().toString(), to.toString(), before[tp]?.offset()?.toString().orEmpty())
         }
     }
 
     override suspend fun apply(ranges: List<ReplayRange>): Unit = admin { a ->
+        if (ranges.isEmpty()) return@admin
         val partitions = partitionsOf(a).associateBy { it.partition() }
         val moves = LinkedHashMap<TopicPartition, OffsetAndMetadata>()
         for (range in ranges) {
@@ -119,7 +127,12 @@ internal class KafkaSubscriptionAdmin(
     /** One call's `Admin` client, run off the caller's thread; the client's failures are the event store's. */
     private suspend fun <T> admin(call: (Admin) -> T): T = withContext(Dispatchers.IO) {
         try {
-            Admin.create(settings.adminProperties()).use(call)
+            val client = Admin.create(settings.adminProperties())
+            try {
+                call(client)
+            } finally {
+                client.close(CLOSE_TIMEOUT) // bounded: a failing broker does not hold the call up
+            }
         } catch (e: EventStoreException) {
             throw e
         } catch (e: ExecutionException) {
