@@ -9,13 +9,13 @@ import io.damoreira.kraken.messaging.handler.EventHandler
 import io.damoreira.kraken.messaging.handler.HandlerInvoker
 import io.damoreira.kraken.messaging.handler.HandlerRegistry
 import io.damoreira.kraken.messaging.handler.ProcessingGroup
-import io.damoreira.kraken.messaging.kafka.LocalEventDispatcher
+import io.damoreira.kraken.messaging.events.LocalEventDispatcher
 import io.damoreira.kraken.messaging.DEAD_LETTERS
 import io.damoreira.kraken.messaging.mongo.MongoMessageStore
 import io.damoreira.kraken.messaging.store.DeadLetterStore
 import io.damoreira.kraken.messaging.test.KrakenContainers
 import kotlinx.coroutines.runBlocking
-import org.apache.kafka.clients.consumer.ConsumerRecord
+import io.damoreira.kraken.messaging.eventstore.Delivery
 import org.bson.Document
 import org.junit.jupiter.api.AfterAll
 import org.junit.jupiter.api.BeforeAll
@@ -95,27 +95,27 @@ class DeadLettersTest {
         deadLetters = DeadLetters(DeadLetterMode.COLLECTION, store, dispatcher)
     }
 
-    private fun record(offset: Long, key: String?, eventId: String?, type: String? = "test.Happened", partition: Int = 0): ConsumerRecord<String, ByteArray> {
-        val r = ConsumerRecord<String, ByteArray>(topic, partition, offset, key, codec.encode(Happened(eventId ?: "fallback-$offset", Instant.EPOCH)))
-        type?.let { r.headers().add("type", it.toByteArray()) }
-        eventId?.let { r.headers().add("id", it.toByteArray()) }
-        return r
+    private fun record(offset: Long, key: String?, eventId: String?, type: String? = "test.Happened", partition: Int = 0): Delivery {
+        val headers = LinkedHashMap<String, String>()
+        type?.let { headers["type"] = it }
+        eventId?.let { headers["id"] = it }
+        return Delivery(partition.toString(), offset.toString(), key, headers, codec.encode(Happened(eventId ?: "fallback-$offset", Instant.EPOCH)), 0L)
     }
 
     private fun failed(offset: Long, key: String?, eventId: String?, processor: String = "orders", type: String = "test.Happened"): String {
-        val letter = letters.letter(processor, record(offset, key, eventId, type), DeadLetterReason.HANDLER_FAILED, DeadLetterError("IllegalStateException", "boom"), attempts = 5)
+        val letter = letters.letter(processor, topic, record(offset, key, eventId, type), DeadLetterReason.HANDLER_FAILED, DeadLetterError("IllegalStateException", "boom"), attempts = 5)
         runBlocking { store.park(letter) }
         return letter.id
     }
 
     private fun sequenced(offset: Long, key: String, eventId: String, head: String): String {
-        val letter = letters.sequenced("orders", record(offset, key, eventId), head)
+        val letter = letters.sequenced("orders", topic, record(offset, key, eventId), head)
         runBlocking { store.park(letter) }
         return letter.id
     }
 
     private fun invalid(offset: Long, key: String?): String {
-        val letter = letters.letter("orders", record(offset, key, null, type = null), DeadLetterReason.INVALID, DeadLetterError.invalid("record without type header"), 0)
+        val letter = letters.letter("orders", topic, record(offset, key, null, type = null), DeadLetterReason.INVALID, DeadLetterError.invalid("record without type header"), 0)
         runBlocking { store.park(letter) }
         return letter.id
     }
@@ -239,8 +239,8 @@ class DeadLettersTest {
         assertEquals(1, deadLetters.count(null), "no processor: no check")
     }
 
-    @Test fun `in modes topic and log every call is an error naming the mode`() {
-        for (mode in listOf(DeadLetterMode.TOPIC, DeadLetterMode.LOG)) {
+    @Test fun `in modes event-store and log every call is an error naming the mode`() {
+        for (mode in listOf(DeadLetterMode.EVENT_STORE, DeadLetterMode.LOG)) {
             val off = DeadLetters(mode, null, dispatcher)
             for (call in listOf<() -> Any?>(
                 { off.list(null) }, { off.get("x") }, { off.count(null) }, { off.retry("x") }, { off.retryAll("orders") }, { off.discard("x") },

@@ -5,18 +5,18 @@ import java.time.Instant
 /**
  * The idempotency marker of a handled event (`processed_events`): [id] is the marker id (`processor:<name>:<eventId>`,
  * `saga:<type>:<eventId>`, `ingress:<source>:<key>`, ...), [type] the event's type, [processedAt] when it was handled (the
- * retention counts from it). A stage-1 marker of a consumed record also carries the record's [processor], [topic],
- * [partition] and [offset] (P6b, ADR 0023), so a reset deletes exactly the markers of its replay range
- * ([ProcessorControlStore.deleteMarkers]); every other marker leaves them null.
+ * retention counts from it). A stage-1 marker of a delivered event also carries its [processor], [source], [segment] and
+ * [position] (P6b, ADR 0023: the event store's opaque strings), so a reset deletes exactly the markers of its replay range
+ * ([ProcessorControlStore.deleteMarkers]); every other marker leaves them null and is never deleted by a reset.
  */
 data class ProcessedMarker(
     val id: String,
     val type: String,
     val processedAt: Instant,
     val processor: String? = null,
-    val topic: String? = null,
-    val partition: Int? = null,
-    val offset: Long? = null,
+    val source: String? = null,
+    val segment: String? = null,
+    val position: String? = null,
 )
 
 /** The processed-event markers: what makes at-least-once delivery apply an event once. */

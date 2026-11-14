@@ -19,8 +19,9 @@ import java.util.Date
 
 /**
  * The `dead_letters` collection (ADR 0022). The documents are written field by field, so their shape is exactly the ADR's
- * table: no `_class`, an absent field instead of null, Int32 `partition`, Int64 `offset`, dates and BinData. Every write
- * but [deleteInTransaction] commits on its own, whatever transaction the caller has.
+ * table: no `_class`, an absent field instead of null, `topic` (the source), `partition` (the segment) and `offset` (the
+ * position) as [Positions] says (Int32 and Int64 for decimal ones, as always), dates and BinData. Every write but
+ * [deleteInTransaction] commits on its own, whatever transaction the caller has.
  */
 internal class MongoDeadLetterStore(private val mongo: MongoTemplate, private val clock: Clock) : DeadLetterStore {
     private val own get() = mongo.independent(COLLECTION)
@@ -34,20 +35,22 @@ internal class MongoDeadLetterStore(private val mongo: MongoTemplate, private va
 
     override suspend fun head(processor: String, key: String): String? = firstId(blocking(processor, key))
 
-    override suspend fun earlier(processor: String, key: String, offset: Long): String? =
-        firstId(Filters.and(blocking(processor, key), Filters.lt("offset", offset)))
+    override suspend fun earlier(processor: String, key: String, position: String): String? =
+        firstId(Filters.and(blocking(processor, key), Filters.lt("offset", Positions.position(position))))
 
     override suspend fun exists(id: String): Boolean = own.find(Filters.eq("_id", id)).projection(Projections.include("_id")).first() != null
 
-    override suspend fun keys(processor: String, topic: String, partitions: Collection<Int>): Map<Int, Set<String>> {
-        if (partitions.isEmpty()) return emptyMap()
+    override suspend fun keys(processor: String, source: String, segments: Collection<String>): Map<String, Set<String>> {
+        if (segments.isEmpty()) return emptyMap()
         val filter = Filters.and(
-            Filters.eq("processor", processor), Filters.eq("topic", topic), Filters.`in`("partition", partitions),
+            Filters.eq("processor", processor), Filters.eq("topic", source), Filters.`in`("partition", segments.map(Positions::segment)),
             Filters.exists("key"), Filters.ne("reason", DeadLetterReason.INVALID.name),
         )
-        val out = HashMap<Int, MutableSet<String>>()
-        own.find(filter).projection(Projections.include("partition", "key"))
-            .forEach { out.getOrPut(it.getInteger("partition")) { HashSet() } += it.getString("key") }
+        val out = HashMap<String, MutableSet<String>>()
+        own.find(filter).projection(Projections.include("partition", "key")).forEach { doc ->
+            val segment = Positions.text(doc["partition"]) ?: return@forEach
+            out.getOrPut(segment) { HashSet() } += doc.getString("key")
+        }
         return out
     }
 
@@ -59,9 +62,10 @@ internal class MongoDeadLetterStore(private val mongo: MongoTemplate, private va
 
     override suspend fun summaries(processor: String): List<DeadLetterStore.Summary> =
         own.find(Filters.eq("processor", processor)).projection(Projections.include("key", "offset", "reason", "parkedAt"))
+            .sort(Sorts.ascending("offset", "_id"))
             .map {
                 DeadLetterStore.Summary(
-                    it.getString("_id"), it.getString("key"), (it["offset"] as Number).toLong(),
+                    it.getString("_id"), it.getString("key"), Positions.text(it["offset"]) ?: "",
                     DeadLetterReason.valueOf(it.getString("reason")), it.getDate("parkedAt").toInstant(),
                 )
             }.toList()
@@ -92,9 +96,9 @@ internal class MongoDeadLetterStore(private val mongo: MongoTemplate, private va
     private fun document(l: DeadLetter): Document {
         val doc = Document("_id", l.id)
             .append("processor", l.processor)
-            .append("topic", l.topic)
-            .append("partition", l.partition)
-            .append("offset", l.offset)
+            .append("topic", l.source)
+            .append("partition", Positions.segment(l.segment))
+            .append("offset", Positions.position(l.position))
         l.key?.let { doc["key"] = it }
         l.eventId?.let { doc["eventId"] = it }
         l.eventType?.let { doc["eventType"] = it }
@@ -117,9 +121,9 @@ internal class MongoDeadLetterStore(private val mongo: MongoTemplate, private va
         return DeadLetter(
             id = d.getString("_id"),
             processor = d.getString("processor"),
-            topic = d.getString("topic"),
-            partition = (d["partition"] as Number).toInt(),
-            offset = (d["offset"] as Number).toLong(),
+            source = d.getString("topic"),
+            segment = Positions.text(d["partition"]) ?: "",
+            position = Positions.text(d["offset"]) ?: "",
             key = d.getString("key"),
             eventId = d.getString("eventId"),
             eventType = d.getString("eventType"),

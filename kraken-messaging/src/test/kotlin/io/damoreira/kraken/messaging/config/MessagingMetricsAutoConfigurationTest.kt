@@ -3,8 +3,8 @@ package io.damoreira.kraken.messaging.config
 import io.damoreira.kraken.messaging.hub.HubBus
 import io.damoreira.kraken.messaging.hub.HubChannelFactory
 import io.damoreira.kraken.messaging.hub.HubConnections
-import io.damoreira.kraken.messaging.kafka.LocalEventDispatcher
-import io.damoreira.kraken.messaging.kafka.OutboxPublisher
+import io.damoreira.kraken.messaging.events.LocalEventDispatcher
+import io.damoreira.kraken.messaging.events.OutboxPublisher
 import io.damoreira.kraken.messaging.metrics.MessagingMetrics
 import io.damoreira.kraken.messaging.metrics.MicrometerMessagingMetrics
 import io.damoreira.kraken.messaging.metrics.NoopMessagingMetrics
@@ -32,9 +32,10 @@ class MessagingMetricsAutoConfigurationTest {
             AutoConfigurations.of(
                 KrakenMessagingAutoConfiguration::class.java,
                 HubAutoConfiguration::class.java,
-                KafkaEventsAutoConfiguration::class.java,
+                EventsAutoConfiguration::class.java,
                 MessagingMetricsAutoConfiguration::class.java,
                 TransactionAutoConfiguration::class.java,
+                io.damoreira.kraken.messaging.kafka.KafkaEventStoreAutoConfiguration::class.java,
             ),
         )
         .withUserConfiguration(MessageStoreMockConfig::class.java)
@@ -62,7 +63,7 @@ class MessagingMetricsAutoConfigurationTest {
 
     @Test fun `the relay reports to them too`() {
         runner.withBean(SimpleMeterRegistry::class.java, { SimpleMeterRegistry() })
-            .withPropertyValues("kraken.messaging.outbox.enabled=true", "kraken.messaging.kafka.consumer.enabled=false")
+            .withPropertyValues("kraken.messaging.outbox.enabled=true", "kraken.messaging.events.consumer.enabled=false")
             .run { context ->
                 assertEquals(null, context.startupFailure)
                 assertSame(context.getBean(MessagingMetrics::class.java), field(context.getBean(OutboxPublisher::class.java), "metrics"))

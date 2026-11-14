@@ -2,7 +2,8 @@ package io.damoreira.kraken.messaging.control
 
 import io.damoreira.kraken.messaging.deadletter.DeadLetters
 import io.damoreira.kraken.messaging.handler.HandlerRegistry
-import io.damoreira.kraken.messaging.kafka.EventConsumer
+import io.damoreira.kraken.messaging.events.EventConsumer
+import io.damoreira.kraken.messaging.eventstore.EventStore
 import io.damoreira.kraken.messaging.store.ProcessorControlStore
 import io.mockk.coEvery
 import io.mockk.every
@@ -24,7 +25,7 @@ class ProcessorControlStartTest {
         every { consumer.paused } returns false
         every { consumer.isRunning } answers { running.get() }
         every { consumer.start() } answers { running.set(true) }
-        val control = ProcessorControl(store, mockk<HandlerRegistry>(), mockk<DeadLetters>(), emptyMap(), pollInterval = Duration.ofMillis(100))
+        val control = ProcessorControl(store, mockk<HandlerRegistry>(), mockk<DeadLetters>(), mockk<EventStore>(relaxed = true), pollInterval = Duration.ofMillis(100))
         try {
             control.attach(listOf(consumer)) // does not throw: the service starts
             Thread.sleep(400)

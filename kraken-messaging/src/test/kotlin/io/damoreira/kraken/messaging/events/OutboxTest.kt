@@ -1,4 +1,4 @@
-package io.damoreira.kraken.messaging.kafka
+package io.damoreira.kraken.messaging.events
 
 import com.mongodb.client.MongoClients
 import io.damoreira.kraken.messaging.codec.JsonCodec
@@ -13,13 +13,13 @@ import org.apache.kafka.clients.admin.AdminClient
 import org.apache.kafka.clients.admin.NewTopic
 import org.apache.kafka.clients.consumer.ConsumerConfig
 import org.apache.kafka.clients.consumer.KafkaConsumer
-import org.apache.kafka.clients.producer.ProducerConfig
-import org.apache.kafka.clients.producer.ProducerRecord
-import org.apache.kafka.common.errors.RecordTooLargeException
+import io.damoreira.kraken.messaging.eventstore.EventStore
+import io.damoreira.kraken.messaging.eventstore.EventStoreException
+import io.damoreira.kraken.messaging.eventstore.OutgoingEvent
+import io.damoreira.kraken.messaging.kafka.KafkaEventStore
+import io.damoreira.kraken.messaging.kafka.KafkaEventStoreSettings
 import org.apache.kafka.common.serialization.ByteArrayDeserializer
-import org.apache.kafka.common.serialization.ByteArraySerializer
 import org.apache.kafka.common.serialization.StringDeserializer
-import org.apache.kafka.common.serialization.StringSerializer
 import org.awaitility.kotlin.atMost
 import org.awaitility.kotlin.await
 import org.awaitility.kotlin.until
@@ -33,16 +33,11 @@ import org.springframework.data.mongodb.core.MongoTemplate
 import org.springframework.data.mongodb.core.SimpleMongoClientDatabaseFactory
 import org.springframework.data.mongodb.core.query.Criteria
 import org.springframework.data.mongodb.core.query.Query
-import org.springframework.kafka.core.DefaultKafkaProducerFactory
-import org.springframework.kafka.core.KafkaProducerException
-import org.springframework.kafka.core.KafkaTemplate
-import org.springframework.kafka.support.SendResult
 import org.springframework.transaction.support.TransactionTemplate
 import org.bson.Document
 import java.time.Duration
 import java.time.Instant
 import java.util.Date
-import java.util.concurrent.CompletableFuture
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
@@ -56,8 +51,7 @@ class OutboxTest {
     private lateinit var mongo: MongoTemplate
     private lateinit var txManager: MongoTransactionManager
     private lateinit var store: MongoMessageStore
-    private lateinit var producerFactory: DefaultKafkaProducerFactory<String, ByteArray>
-    private lateinit var kafka: KafkaTemplate<String, ByteArray>
+    private lateinit var kafka: KafkaEventStore
     private val codec = JsonCodec()
     private val resolver = MessageTypeResolver("test")
     private lateinit var bus: OutboxEventBus
@@ -71,16 +65,7 @@ class OutboxTest {
         mongo = MongoTemplate(factory)
         txManager = MongoTransactionManager(factory)
         store = MongoMessageStore(mongo, txManager)
-        producerFactory = DefaultKafkaProducerFactory(
-            mapOf<String, Any>(
-                ProducerConfig.BOOTSTRAP_SERVERS_CONFIG to kafkaContainer.bootstrapServers,
-                ProducerConfig.ACKS_CONFIG to "all",
-                ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG to true,
-            ),
-            StringSerializer(),
-            ByteArraySerializer(),
-        )
-        kafka = KafkaTemplate(producerFactory)
+        kafka = KafkaEventStore(KafkaEventStoreSettings(kafkaContainer.bootstrapServers))
         AdminClient.create(mapOf<String, Any>("bootstrap.servers" to kafkaContainer.bootstrapServers)).use {
             try {
                 it.createTopics(listOf(NewTopic(topic, 6, 1.toShort()))).all().get()
@@ -93,7 +78,7 @@ class OutboxTest {
 
     @AfterAll
     fun stop() {
-        producerFactory.destroy()
+        kafka.close()
         kafkaContainer.stop()
         mongoContainer.stop()
     }
@@ -105,13 +90,17 @@ class OutboxTest {
 
     private fun publisher() = OutboxPublisher(store.outbox, kafka, topic, "orders", Duration.ofMillis(100), 100)
 
-    /** A real template that fails records whose key is in [failing] with [failure]. */
-    private fun failingTemplate(failing: Set<String>, failure: () -> Throwable) =
-        object : KafkaTemplate<String, ByteArray>(producerFactory) {
-            override fun send(record: ProducerRecord<String, ByteArray>): CompletableFuture<SendResult<String, ByteArray>> =
-                if (record.key() in failing) CompletableFuture.failedFuture(KafkaProducerException(record, "Failed to send", failure()))
-                else super.send(record)
+    /** The real event store, but a publish of [onPublish] runs first (it may throw: the publish then fails with it). */
+    private class Wrapped(private val inner: EventStore, private val onPublish: (OutgoingEvent) -> Unit) : EventStore by inner {
+        override suspend fun publish(event: OutgoingEvent) {
+            onPublish(event)
+            inner.publish(event)
         }
+    }
+
+    /** The real event store, failing events whose key is in [failing] with [failure]. */
+    private fun failingTemplate(failing: Set<String>, failure: () -> Throwable): EventStore =
+        Wrapped(kafka) { if (it.key in failing) throw failure() }
 
     /** An `outbox` document as stored. */
     private class Doc(d: Document) {
@@ -133,12 +122,7 @@ class OutboxTest {
         val ids = (1..30).map { "two-%02d".format(it) }
         ids.forEach { bus.publishBlocking(Happened(it, Instant.now()), key = it) }
         val sent = java.util.concurrent.ConcurrentLinkedQueue<String>()
-        val counting = object : KafkaTemplate<String, ByteArray>(producerFactory) {
-            override fun send(record: ProducerRecord<String, ByteArray>): CompletableFuture<SendResult<String, ByteArray>> {
-                sent += record.key()
-                return super.send(record)
-            }
-        }
+        val counting = Wrapped(kafka) { sent += it.key!! }
         val a = OutboxPublisher(store.outbox, counting, topic, "orders", Duration.ofMillis(100), batchSize = 7)
         val b = OutboxPublisher(store.outbox, counting, topic, "orders", Duration.ofMillis(100), batchSize = 7)
         do {
@@ -156,11 +140,11 @@ class OutboxTest {
     }
 
     @Test
-    fun `non retriable send failure marks document failed and continues`() {
+    fun `a rejected event is given up at once, and the batch continues`() {
         bus.publishBlocking(Happened("nr-1", Instant.now()), key = "nr-1")
         bus.publishBlocking(Happened("nr-poison", Instant.now()), key = "nr-poison")
         bus.publishBlocking(Happened("nr-2", Instant.now()), key = "nr-2")
-        val template = failingTemplate(setOf("nr-poison")) { RecordTooLargeException("record too large") }
+        val template = failingTemplate(setOf("nr-poison")) { EventStoreException.Rejected("record too large") }
         val publisher = OutboxPublisher(store.outbox, template, topic, "orders", Duration.ofMillis(100), 100, maxAttempts = 10)
 
         assertEquals(2, publisher.publishPendingNow()) // the poison document did not stop the batch
@@ -179,7 +163,7 @@ class OutboxTest {
     fun `retriable send failure stops the batch until max attempts then marks failed`() {
         bus.publishBlocking(Happened("r-poison", Instant.now()), key = "r-poison")
         bus.publishBlocking(Happened("r-1", Instant.now()), key = "r-1")
-        val template = failingTemplate(setOf("r-poison")) { org.apache.kafka.common.errors.TimeoutException("broker down") }
+        val template = failingTemplate(setOf("r-poison")) { EventStoreException.Failed("broker down") }
         val publisher = OutboxPublisher(store.outbox, template, topic, "orders", Duration.ofMillis(100), 100, maxAttempts = 2)
 
         assertEquals(0, publisher.publishPendingNow()) // retriable: attempts 1, batch stopped to keep order
@@ -199,7 +183,7 @@ class OutboxTest {
         bus.publishBlocking(Happened("m-dead", Instant.now()), key = "m-dead")
         mongo.updateFirst(Query(Criteria.where("key").`is`("m-dead")), org.springframework.data.mongodb.core.query.Update().set("failedAt", Date()), "outbox")
         val metrics = RecordingMessagingMetrics()
-        val template = failingTemplate(setOf("m-poison")) { org.apache.kafka.common.errors.TimeoutException("broker down") }
+        val template = failingTemplate(setOf("m-poison")) { EventStoreException.Failed("broker down") }
         val publisher = OutboxPublisher(store.outbox, template, topic, "orders", Duration.ofMillis(100), 100, maxAttempts = 2, metrics = metrics)
 
         publisher.samplePending()

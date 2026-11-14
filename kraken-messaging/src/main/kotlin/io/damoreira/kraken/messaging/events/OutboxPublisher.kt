@@ -1,37 +1,37 @@
-package io.damoreira.kraken.messaging.kafka
+package io.damoreira.kraken.messaging.events
 
 import io.damoreira.kraken.messaging.eventstore.EventHeaders
+import io.damoreira.kraken.messaging.eventstore.EventStore
+import io.damoreira.kraken.messaging.eventstore.EventStoreException
+import io.damoreira.kraken.messaging.eventstore.OutgoingEvent
 import io.damoreira.kraken.messaging.metrics.MessagingMetrics
 import io.damoreira.kraken.messaging.metrics.NoopMessagingMetrics
 import io.damoreira.kraken.messaging.store.OutboxEntry
 import io.damoreira.kraken.messaging.store.OutboxStore
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.runBlocking
-import org.apache.kafka.clients.producer.ProducerRecord
-import org.apache.kafka.common.errors.AuthorizationException
-import org.apache.kafka.common.errors.InvalidTopicException
-import org.apache.kafka.common.errors.RecordTooLargeException
-import org.apache.kafka.common.errors.SerializationException
-import org.apache.kafka.common.header.internals.RecordHeader
+import kotlinx.coroutines.withTimeout
 import org.slf4j.LoggerFactory
 import org.springframework.context.SmartLifecycle
-import org.springframework.kafka.core.KafkaTemplate
 import java.time.Duration
 import java.util.UUID
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
 /**
- * Relays the [outbox] entries to Kafka in creation order, on a single daemon thread.
+ * Relays the [outbox] entries to the event store ([events], ADR 0027) in creation order, on a single daemon thread: each entry
+ * becomes an [OutgoingEvent] of the service's events [source], with the entry's headers and then `type`, `id`, `timestamp`
+ * (its creation) and `source` ([service]).
  *
  * Every poll [claims][OutboxStore.claim] a batch of up to [batchSize] entries for this relay under a [lease] and sends them one
  * after the other: several instances relay one outbox at once, never the same entry while its lease holds, and the entries a
  * crashed instance held are relayed by the others once its lease passed. A batch stops before its lease could run out under
  * a send ([SEND_TIMEOUT] before its end); the next poll claims again, which renews the lease of what this relay holds.
  *
- * A retriable send failure counts an attempt ([OutboxStore.markAttemptFailed]) and ends the batch (so per-key order holds): the
- * entry stays this relay's and the next poll retries it first. A non-retriable failure ([NON_RETRIABLE] in the cause chain) or
- * the [maxAttempts]-th failed attempt gives the entry up ([OutboxStore.markFailed]), logs it once at error (never the payload)
+ * A retriable send failure ([EventStoreException.Failed], or no answer within [SEND_TIMEOUT]) counts an attempt
+ * ([OutboxStore.markAttemptFailed]) and ends the batch (so per-key order holds): the entry stays this relay's and the next poll
+ * retries it first. A failure retrying cannot fix ([EventStoreException.Rejected], [EventStoreException.Invalid]) or the
+ * [maxAttempts]-th failed attempt gives the entry up ([OutboxStore.markFailed]), logs it once at error (never the payload)
  * and moves on to the next entry: one poison entry does not block the outbox. Failed entries stay in the store for inspection.
  *
  * Reports to [metrics] (P9) every send attempt. When the metrics want it ([MessagingMetrics.countsOutbox]) the relay thread
@@ -40,9 +40,11 @@ import kotlin.concurrent.withLock
  */
 class OutboxPublisher(
     private val outbox: OutboxStore,
-    private val kafka: KafkaTemplate<String, ByteArray>,
-    private val topic: String,
+    private val events: EventStore,
+    /** The service's events source (`kraken.messaging.events.source`). */
     private val source: String,
+    /** The service's name: every event's `source` header. */
+    private val service: String,
     private val pollInterval: Duration,
     private val batchSize: Int,
     private val maxAttempts: Int = 10,
@@ -77,25 +79,22 @@ class OutboxPublisher(
         for (entry in batch) {
             if (stopRequested || System.nanoTime() - sendUntil >= 0) return sent
             try {
-                // Bounded by the producer's max.block.ms + delivery.timeout.ms (10 s + 30 s in the auto-configuration).
-                kafka.send(toRecord(entry)).get(SEND_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS)
+                runBlocking { withTimeout(SEND_TIMEOUT.toMillis()) { events.publish(toEvent(entry)) } }
             } catch (e: Exception) {
                 metrics.outboxPublished(ok = false)
                 if (e is InterruptedException) Thread.currentThread().interrupt()
                 val attempt = entry.attempts + 1
-                val nonRetriable = nonRetriableCause(e)
-                if (e !is InterruptedException && (nonRetriable != null || attempt >= maxAttempts)) {
-                    val cause = nonRetriable ?: rootCause(e)
+                val hopeless = e is EventStoreException.Rejected || e is EventStoreException.Invalid
+                if (e !is InterruptedException && (hopeless || attempt >= maxAttempts)) {
                     log.error(
-                        "Outbox entry {} of type {} marked failed after {} attempt(s){}: {}: {}",
-                        entry.id, entry.type, attempt, if (nonRetriable != null) " (not retriable)" else "",
-                        cause::class.java.name, cause.message,
+                        "Outbox entry {} of type {} marked failed after {} attempt(s){}: {}",
+                        entry.id, entry.type, attempt, if (hopeless) " (not retriable)" else "", describe(e),
                     )
-                    runBlocking { outbox.markFailed(entry.id, "${cause::class.java.name}: ${cause.message}") }
+                    runBlocking { outbox.markFailed(entry.id, describe(e)) }
                     continue
                 }
-                log.warn("Outbox send failed for {} ({}), attempt {}", entry.id, entry.type, attempt, e)
-                runBlocking { outbox.markAttemptFailed(entry.id, e.toString()) }
+                log.warn("Outbox send failed for {} ({}), attempt {}: {}", entry.id, entry.type, attempt, describe(e))
+                runBlocking { outbox.markAttemptFailed(entry.id, describe(e)) }
                 return sent
             }
             metrics.outboxPublished(ok = true)
@@ -111,21 +110,20 @@ class OutboxPublisher(
         metrics.outboxOldest(runBlocking { outbox.oldestPending() })
     }
 
-    private fun causes(e: Throwable) = generateSequence(e) { it.cause.takeIf { c -> c !== it } }.take(16)
+    /** What a failed send says: the event store's message, or the timeout. */
+    private fun describe(e: Exception): String = when (e) {
+        is TimeoutCancellationException -> "no answer from the event store within $SEND_TIMEOUT"
+        is EventStoreException -> e.message ?: e::class.java.simpleName
+        else -> "${e::class.java.name}: ${e.message}"
+    }
 
-    private fun nonRetriableCause(e: Throwable): Throwable? = causes(e).firstOrNull { c -> NON_RETRIABLE.any { it.isInstance(c) } }
-
-    private fun rootCause(e: Throwable): Throwable = causes(e).last()
-
-    private fun toRecord(entry: OutboxEntry): ProducerRecord<String, ByteArray> {
-        val record = ProducerRecord<String, ByteArray>(topic, null, entry.key, entry.payload)
-        val all = LinkedHashMap(entry.headers)
-        all[EventHeaders.TYPE] = entry.type
-        all[EventHeaders.ID] = entry.id
-        all[EventHeaders.TIMESTAMP] = entry.createdAt.toString()
-        all[EventHeaders.SOURCE] = source
-        all.forEach { (k, v) -> record.headers().add(RecordHeader(k, v.toByteArray(Charsets.UTF_8))) }
-        return record
+    private fun toEvent(entry: OutboxEntry): OutgoingEvent {
+        val headers = LinkedHashMap(entry.headers)
+        headers[EventHeaders.TYPE] = entry.type
+        headers[EventHeaders.ID] = entry.id
+        headers[EventHeaders.TIMESTAMP] = entry.createdAt.toString()
+        headers[EventHeaders.SOURCE] = service
+        return OutgoingEvent(source, entry.id, entry.type, entry.key, headers, entry.payload)
     }
 
     override fun start() {
@@ -178,16 +176,8 @@ class OutboxPublisher(
 
     companion object {
         const val PHASE = SmartLifecycle.DEFAULT_PHASE - 1950
-        /** The longest one send to Kafka may take (the producer's max.block.ms + delivery.timeout.ms, with a margin). */
+        /** The longest one publish may take: a publish without an answer by then counts as a retriable failure. */
         val SEND_TIMEOUT: Duration = Duration.ofSeconds(45)
         private const val STOP_JOIN_MS = 15_000L
-
-        /** Send failures that retrying the same record cannot fix. */
-        val NON_RETRIABLE: List<Class<out Throwable>> = listOf(
-            RecordTooLargeException::class.java,
-            SerializationException::class.java,
-            InvalidTopicException::class.java,
-            AuthorizationException::class.java,
-        )
     }
 }

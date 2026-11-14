@@ -1,4 +1,4 @@
-package io.damoreira.kraken.messaging.kafka
+package io.damoreira.kraken.messaging.events
 
 import io.damoreira.kraken.messaging.mongo.MongoMessageStore
 import com.mongodb.client.MongoClients
@@ -11,7 +11,7 @@ import io.damoreira.kraken.messaging.handler.EventHandler
 import io.damoreira.kraken.messaging.handler.HandlerInvoker
 import io.damoreira.kraken.messaging.handler.HandlerRegistry
 import io.damoreira.kraken.messaging.handler.ProcessingGroup
-import io.damoreira.kraken.messaging.kafka.LocalEventDispatcher.Outcome
+import io.damoreira.kraken.messaging.events.LocalEventDispatcher.Outcome
 import io.damoreira.kraken.messaging.saga.SagaStage
 import io.damoreira.kraken.messaging.test.KrakenContainers
 import org.bson.Document
@@ -209,16 +209,16 @@ class ProcessorDispatchTest {
 
     private fun marker(id: String) = mongo.findById(id, Document::class.java, "processed_events")!!
 
-    @Test fun `a Kafka record's marker carries its position, the local dispatch's markers none (P6b)`() {
+    @Test fun `a delivered event's marker carries its position, the local dispatch's markers none (P6b)`() {
         val d = dispatcher(CountingStage())
-        d.dispatchIn("orders", "p-1", "test.Happened", payload("p-1"), ctx("p-1"), RecordPosition("kraken.events", 2, 41L))
+        d.dispatchIn("orders", "p-1", "test.Happened", payload("p-1"), ctx("p-1"), RecordPosition("kraken.events", "2", "41"))
         val m = marker("processor:orders:p-1")
-        assertEquals(listOf<Any?>("orders", "kraken.events", 2, 41L), listOf(m["processor"], m["topic"], m["partition"], m["offset"]))
+        assertEquals(listOf<Any?>("orders", "kraken.events", 2, 41L), listOf(m["processor"], m["topic"], m["partition"], m["offset"]), "decimal: Int32 and Int64 as always")
         d.dispatch("printer:k-9", "test.Happened", payload("x-9"), ctx("printer:k-9"))
         for (id in listOf("processor:default:printer:k-9", "processor:orders:printer:k-9")) {
             assertEquals(setOf("_id", "type", "processedAt"), marker(id).keys - "_class", "$id has no position")
         }
-        d.runStage1("orders", "r-9", "test.Happened", payload("r-9"), ctx("r-9"), RecordPosition("kraken.events", 0, 7L)) {}
+        d.runStage1("orders", "r-9", "test.Happened", payload("r-9"), ctx("r-9"), RecordPosition("kraken.events", "0", "7")) {}
         assertEquals(7L, marker("processor:orders:r-9")["offset"], "a dead-letter retry's marker carries the letter's position")
     }
 
@@ -229,7 +229,7 @@ class ProcessorDispatchTest {
         registry.register(klass)
         val stage = CountingStage()
         val d = dispatcher(stage)
-        val at = RecordPosition("kraken.events", 0, 3L)
+        val at = RecordPosition("kraken.events", "0", "3")
         assertEquals(Outcome.HANDLED, d.dispatchIn("default", "y-1", "test.Happened", payload("y-1"), ctx("y-1"), at, replay = true))
         assertEquals(listOf("y-1"), plain.seen.toList())
         assertEquals(emptyList(), method.seen.toList(), "@DisallowReplay on the method")
@@ -238,7 +238,7 @@ class ProcessorDispatchTest {
         assertEquals(listOf("y-1"), orders.seen.toList())
         assertEquals(emptyList(), klass.seen.toList(), "@DisallowReplay on the class")
 
-        d.dispatchIn("default", "y-2", "test.Happened", payload("y-2"), ctx("y-2"), at.copy(offset = 4L))
+        d.dispatchIn("default", "y-2", "test.Happened", payload("y-2"), ctx("y-2"), at.copy(position = "4"))
         assertEquals(listOf("y-2"), method.seen.toList(), "outside a replay every handler runs")
         assertEquals(listOf("y-2"), stage.calls.toList())
     }

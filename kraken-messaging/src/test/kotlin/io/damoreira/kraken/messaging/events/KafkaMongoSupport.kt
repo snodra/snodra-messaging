@@ -1,8 +1,10 @@
-package io.damoreira.kraken.messaging.kafka
+package io.damoreira.kraken.messaging.events
 
 import com.mongodb.client.MongoClients
 import io.damoreira.kraken.messaging.codec.JsonCodec
 import io.damoreira.kraken.messaging.fixtures.Happened
+import io.damoreira.kraken.messaging.kafka.KafkaEventStore
+import io.damoreira.kraken.messaging.kafka.KafkaEventStoreSettings
 import io.damoreira.kraken.messaging.mongo.MongoMessageStore
 import io.damoreira.kraken.messaging.test.KrakenContainers
 import org.apache.kafka.clients.admin.AdminClient
@@ -10,6 +12,7 @@ import org.apache.kafka.clients.admin.NewTopic
 import org.apache.kafka.clients.consumer.ConsumerConfig
 import org.apache.kafka.clients.consumer.ConsumerRecord
 import org.apache.kafka.clients.consumer.KafkaConsumer
+import org.apache.kafka.clients.producer.KafkaProducer
 import org.apache.kafka.clients.producer.ProducerConfig
 import org.apache.kafka.clients.producer.ProducerRecord
 import org.apache.kafka.common.TopicPartition
@@ -21,15 +24,15 @@ import org.apache.kafka.common.serialization.StringSerializer
 import org.springframework.data.mongodb.MongoTransactionManager
 import org.springframework.data.mongodb.core.MongoTemplate
 import org.springframework.data.mongodb.core.SimpleMongoClientDatabaseFactory
-import org.springframework.kafka.core.DefaultKafkaConsumerFactory
-import org.springframework.kafka.core.DefaultKafkaProducerFactory
-import org.springframework.kafka.core.KafkaTemplate
 import org.springframework.transaction.support.TransactionTemplate
 import java.time.Duration
 import java.time.Instant
 import java.util.UUID
 
-/** Kafka and MongoDB (Testcontainers, reused) for the event-processor tests: topics, producing, committed offsets. */
+/**
+ * Kafka and MongoDB (Testcontainers, reused) for the event-processor tests: the Kafka event store (the add-on), topics,
+ * producing, committed offsets.
+ */
 class KafkaMongoSupport(database: String) {
     val kafkaContainer: org.testcontainers.kafka.KafkaContainer = KrakenContainers.kafka().also { it.start() }
     val mongoContainer: org.testcontainers.mongodb.MongoDBContainer = KrakenContainers.mongo().also { it.start() }
@@ -46,7 +49,7 @@ class KafkaMongoSupport(database: String) {
     }
     val codec = JsonCodec()
     val bootstrapServers: String = kafkaContainer.getBootstrapServers()
-    private val producerFactory = DefaultKafkaProducerFactory(
+    val kafka = KafkaProducer(
         mapOf<String, Any>(
             ProducerConfig.BOOTSTRAP_SERVERS_CONFIG to bootstrapServers,
             ProducerConfig.ACKS_CONFIG to "all",
@@ -54,17 +57,9 @@ class KafkaMongoSupport(database: String) {
         ),
         StringSerializer(), ByteArraySerializer(),
     )
-    val kafka = KafkaTemplate(producerFactory)
 
-
-    fun consumerFactory() = DefaultKafkaConsumerFactory(
-        mapOf<String, Any>(
-            ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG to bootstrapServers,
-            ConsumerConfig.AUTO_OFFSET_RESET_CONFIG to "earliest",
-            ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG to false,
-        ),
-        StringDeserializer(), ByteArrayDeserializer(),
-    )
+    /** The Kafka event store over the container (one per test class; its consumers start with each subscription). */
+    val events = KafkaEventStore(KafkaEventStoreSettings(bootstrapServers))
 
     fun admin(): AdminClient = AdminClient.create(mapOf<String, Any>("bootstrap.servers" to bootstrapServers))
 
@@ -93,7 +88,7 @@ class KafkaMongoSupport(database: String) {
         if (type != null) record.headers().add(RecordHeader("type", type.toByteArray()))
         if (id != null) record.headers().add(RecordHeader("id", id.toByteArray()))
         extra.forEach { (k, v) -> record.headers().add(RecordHeader(k, v.toByteArray())) }
-        return kafka.send(record).get().recordMetadata.offset()
+        return kafka.send(record).get().offset()
     }
 
     /** The committed offsets of [group] by partition. */
@@ -120,7 +115,8 @@ class KafkaMongoSupport(database: String) {
     }
 
     fun close() {
-        producerFactory.destroy()
+        events.close()
+        kafka.close()
         kafkaContainer.stop()
         mongoContainer.stop()
     }

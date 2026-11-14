@@ -11,7 +11,7 @@ import io.damoreira.kraken.messaging.config.e2escan.E2eCounter
 import io.damoreira.kraken.messaging.config.e2escan.E2ePrintAdapter
 import io.damoreira.kraken.messaging.config.e2escan.E2eScanConfig
 import io.damoreira.kraken.messaging.config.e2escan.E2eStarted
-import io.damoreira.kraken.messaging.kafka.LocalEventDispatcher
+import io.damoreira.kraken.messaging.events.LocalEventDispatcher
 import io.damoreira.kraken.messaging.saga.SagaDispatchDocument
 import io.damoreira.kraken.messaging.saga.SagaDocument
 import io.damoreira.kraken.messaging.test.KrakenContainers
@@ -60,9 +60,10 @@ class SagaAutoConfigurationMongoTest {
         ApplicationContextRunner()
             .withConfiguration(
                 AutoConfigurations.of(
-                    KrakenMessagingAutoConfiguration::class.java, HubAutoConfiguration::class.java, KafkaEventsAutoConfiguration::class.java,
+                    KrakenMessagingAutoConfiguration::class.java, HubAutoConfiguration::class.java, EventsAutoConfiguration::class.java,
                     SagaAutoConfiguration::class.java, ExternalAutoConfiguration::class.java, SagaMetricsAutoConfiguration::class.java,
                     MongoMessageStoreAutoConfiguration::class.java, TransactionAutoConfiguration::class.java,
+                    io.damoreira.kraken.messaging.kafka.KafkaEventStoreAutoConfiguration::class.java, // sagas need an event store
                 ),
             )
             .withUserConfiguration(E2eScanConfig::class.java)
@@ -75,7 +76,7 @@ class SagaAutoConfigurationMongoTest {
                 "kraken.messaging.type-prefix=e2e",
                 "kraken.messaging.hub.enabled=false",
                 "kraken.messaging.kafka.bootstrap-servers=localhost:9",
-                "kraken.messaging.kafka.consumer.enabled=false",
+                "kraken.messaging.events.consumer.enabled=false",
                 "kraken.messaging.outbox.enabled=false",
                 "kraken.messaging.sagas.relay.poll-interval=50ms",
                 "kraken.messaging.deadlines.poll-interval=50ms",

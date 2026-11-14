@@ -1,4 +1,4 @@
-package io.damoreira.kraken.messaging.kafka
+package io.damoreira.kraken.messaging.events
 
 import io.damoreira.kraken.messaging.DEAD_LETTERS
 import io.damoreira.kraken.messaging.metrics.MessagingMetrics
@@ -14,6 +14,8 @@ import kotlinx.coroutines.runBlocking
 import io.damoreira.kraken.messaging.handler.HandlerInvoker
 import io.damoreira.kraken.messaging.handler.HandlerRegistry
 import io.damoreira.kraken.messaging.saga.SagaStage
+import io.damoreira.kraken.messaging.eventstore.Delivery
+import io.damoreira.kraken.messaging.eventstore.SubscriptionSpec
 import org.apache.kafka.clients.consumer.ConsumerRecord
 import org.awaitility.Awaitility.await
 import org.bson.Document
@@ -83,11 +85,11 @@ class DeadLetterConsumerTest {
         val invoker = HandlerInvoker(registry, support.codec)
         val sink = when (mode) {
             DeadLetterMode.COLLECTION -> DeadLetterSink.Collection(store, factory)
-            DeadLetterMode.TOPIC -> DeadLetterSink.Topic(support.kafka)
+            DeadLetterMode.EVENT_STORE -> DeadLetterSink.EventStore(support.events)
             DeadLetterMode.LOG -> DeadLetterSink.Log
         }
         return EventConsumer(
-            support.consumerFactory(), topic, group, LocalEventDispatcher(registry, invoker, support.store, stage, metrics), maxAttempts, backOffMs = 50,
+            support.events, SubscriptionSpec(group, topic), LocalEventDispatcher(registry, invoker, support.store, stage, metrics), maxAttempts, backOffMs = 50,
             codec = support.codec, deadLetters = sink,
             metrics = metrics,
         ).also { consumer = it; it.start() }
@@ -199,9 +201,8 @@ class DeadLetterConsumerTest {
 
     @Test fun `a record parked before a crash is acknowledged on redelivery without running its handler again`() {
         // The letter of offset 0 exists (parked, then the instance died before the commit): the redelivery must not park twice.
-        val r0 = ConsumerRecord<String, ByteArray>(topic, 0, 0L, "k1", ByteArray(0))
-        r0.headers().add("type", "test.Happened".toByteArray())
-        runBlocking { store.park(factory.letter("default", r0, DeadLetterReason.HANDLER_FAILED, io.damoreira.kraken.messaging.deadletter.DeadLetterError("X", "first"), 3)) }
+        val r0 = Delivery("0", "0", "k1", mapOf("type" to "test.Happened"), ByteArray(0), 0L)
+        runBlocking { store.park(factory.letter("default", topic, r0, DeadLetterReason.HANDLER_FAILED, io.damoreira.kraken.messaging.deadletter.DeadLetterError("X", "first"), 3)) }
         start()
         support.send(topic, "r-1", key = "k1")
         support.send(topic, "r-2", key = "k2")
@@ -215,8 +216,8 @@ class DeadLetterConsumerTest {
     @Test fun `an invalid record whose letter exists already is counted duplicate, as the Rust library`() {
         // Its INVALID letter exists (parked, then the instance died before the commit); INVALID letters block no key, so
         // the redelivery parks again and the store reports the letter there.
-        val r0 = ConsumerRecord<String, ByteArray>(topic, 0, 0L, null, ByteArray(0))
-        runBlocking { store.park(factory.letter("default", r0, DeadLetterReason.INVALID, io.damoreira.kraken.messaging.deadletter.DeadLetterError("Invalid", "first"), 0)) }
+        val r0 = Delivery("0", "0", null, emptyMap(), ByteArray(0), 0L)
+        runBlocking { store.park(factory.letter("default", topic, r0, DeadLetterReason.INVALID, io.damoreira.kraken.messaging.deadletter.DeadLetterError("Invalid", "first"), 0)) }
         start()
         support.send(topic, null, type = null, key = null)
         support.send(topic, "i-2", key = "k2")
@@ -256,10 +257,10 @@ class DeadLetterConsumerTest {
         assertEquals(2, metrics.handled.size, "both stage-1 runs are timed (the second found its marker), the saga stage is not")
     }
 
-    @Test fun `mode topic produces the failed and the INVALID record to the DLT with kraken-dlt headers`() {
+    @Test fun `mode event-store publishes the failed and the INVALID record to the dead-letter source with kraken-dlt headers`() {
         handlers.failAlways.set("t-1")
         support.ensureTopic("$topic.dlt")
-        start(mode = DeadLetterMode.TOPIC, maxAttempts = 2)
+        start(mode = DeadLetterMode.EVENT_STORE, maxAttempts = 2)
         support.send(topic, "t-1", key = "k1", extra = mapOf("kraken-dlt-reason" to "stale"))
         support.send(topic, "t-2", key = "k1")
         support.send(topic, null, type = null, key = null)
@@ -280,7 +281,7 @@ class DeadLetterConsumerTest {
         assertNull(dlt[1].key())
         assertEquals(listOf("INVALID"), h(dlt[1], "kraken-dlt-reason"))
         assertEquals(listOf("2"), h(dlt[1], "kraken-dlt-original-offset"))
-        assertEquals(emptyList(), letters(), "mode topic writes no letter")
+        assertEquals(emptyList(), letters(), "mode event-store writes no letter")
         assertEquals(listOf("t-1", "t-1", "t-2"), handlers.seen.toList(), "not sequenced")
         assertEquals(listOf(HAPPENED to PARKED, HAPPENED to HANDLED, OTHER to PARKED), metrics.outcomes("default"))
     }

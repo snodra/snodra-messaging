@@ -18,6 +18,8 @@ dependencies {
     implementation(project(":kraken-messaging"))
     // The message store: the outbox, the processed events, the dead letters and the sagas in the service's MongoDB (ADR 0028).
     implementation(project(":kraken-messaging-mongo"))
+    // The event store: the service's events on Kafka (ADR 0027).
+    implementation(project(":kraken-messaging-kafka"))
     implementation(project(":examples:examples-api"))
     implementation(libs.spring.boot.starter.webmvc)
     implementation(libs.spring.boot.starter.actuator)

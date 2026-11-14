@@ -4,11 +4,12 @@ import io.damoreira.kraken.messaging.codec.JsonCodec
 import io.damoreira.kraken.messaging.codec.MessageTypeResolver
 import io.damoreira.kraken.messaging.external.ExternalCallSettings
 import io.damoreira.kraken.messaging.external.ExternalEventIngress
-import io.damoreira.kraken.messaging.external.ExternalKafkaSources
 import io.damoreira.kraken.messaging.external.ExternalRecordTranslator
+import io.damoreira.kraken.messaging.external.ExternalSourceProviders
+import io.damoreira.kraken.messaging.external.ExternalSources
 import io.damoreira.kraken.messaging.external.IdempotencyInterceptor
 import io.damoreira.kraken.messaging.external.WebhookSignatureVerifier
-import io.damoreira.kraken.messaging.kafka.LocalEventDispatcher
+import io.damoreira.kraken.messaging.events.LocalEventDispatcher
 import io.damoreira.kraken.messaging.saga.NoopSagaMetrics
 import io.damoreira.kraken.messaging.saga.SagaMetrics
 import io.damoreira.kraken.messaging.store.MessageStore
@@ -24,18 +25,19 @@ import org.springframework.context.annotation.Import
 import java.time.Clock
 
 /**
- * The integration toolkit's edges (S1 plan, Task 13), on top of [KafkaEventsAutoConfiguration]'s local dispatcher:
+ * The integration toolkit's edges (S1 plan, Task 13), on top of [EventsAutoConfiguration]'s local dispatcher:
  *
  * - the [WebhookSignatureVerifier] and the [ExternalEventIngress], always (they are passive: a service uses them from its own endpoint);
- * - [ExternalKafkaSources], only when `kraken.messaging.external.kafka.sources.<name>` is configured; each source needs an
- *   [ExternalRecordTranslator] bean named `<name>`, else the startup fails naming the source;
+ * - [ExternalSources], only when an event-store add-on provides partner sources ([ExternalSourceProviders]: with
+ *   `kraken-messaging-kafka`, `kraken.messaging.external.kafka.sources.<name>`); each source needs an [ExternalRecordTranslator]
+ *   bean named `<name>`, else the startup fails naming the source;
  * - the [IdempotencyInterceptor] over the message store's external calls (which `HandlerInvoker` then uses for
  *   `@IdempotentHandler` methods), only when the application has an `@IdempotentHandler` method (scanned from its packages)
  *   or `kraken.messaging.external.calls.enabled=true`.
  *
  * All of it needs a [MessageStore] (and the local dispatcher over it).
  */
-@AutoConfiguration(after = [KrakenMessagingAutoConfiguration::class, KafkaEventsAutoConfiguration::class])
+@AutoConfiguration(after = [KrakenMessagingAutoConfiguration::class, EventsAutoConfiguration::class])
 @ConditionalOnBean(MessageStore::class, LocalEventDispatcher::class)
 class ExternalAutoConfiguration {
 
@@ -55,23 +57,28 @@ class ExternalAutoConfiguration {
 
     @Bean
     @ConditionalOnMissingBean
-    @Conditional(OnExternalKafkaSources::class)
-    fun externalKafkaSources(
+    @ConditionalOnBean(ExternalSourceProviders::class)
+    fun externalSources(
+        providers: List<ExternalSourceProviders>,
         properties: KrakenMessagingProperties,
         beans: ListableBeanFactory,
         dispatcher: LocalEventDispatcher,
         codec: JsonCodec,
         typeResolver: MessageTypeResolver,
-    ) = ExternalKafkaSources(
-        sources = properties.external.kafka.sources,
-        translators = beans.getBeansOfType(ExternalRecordTranslator::class.java), // bean name -> translator: a source `printer` needs the bean named `printer`
-        dispatcher = dispatcher,
-        codec = codec,
-        typeResolver = typeResolver,
-        serviceName = properties.serviceName,
-        defaultBootstrapServers = properties.kafka.bootstrapServers,
-        maxAttempts = properties.kafka.consumer.maxAttempts,
-    )
+    ): ExternalSources {
+        val sources = LinkedHashMap<String, io.damoreira.kraken.messaging.external.ExternalSourceProvider>()
+        for ((name, provider) in providers.flatMap { it.providers().entries }) {
+            check(sources.put(name, provider) == null) { "external source '$name' is configured twice: source names must be unique" }
+        }
+        return ExternalSources(
+            sources = sources,
+            translators = beans.getBeansOfType(ExternalRecordTranslator::class.java), // bean name -> translator: a source `printer` needs the bean named `printer`
+            dispatcher = dispatcher,
+            codec = codec,
+            typeResolver = typeResolver,
+            maxAttempts = properties.events.consumer.maxAttempts,
+        )
+    }
 
     @Configuration(proxyBeanMethods = false)
     @Conditional(OnIdempotentHandlers::class)

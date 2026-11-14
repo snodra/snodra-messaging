@@ -6,7 +6,7 @@ import io.damoreira.kraken.messaging.codec.JsonCodec
 import io.damoreira.kraken.messaging.codec.MessageTypeResolver
 import io.damoreira.kraken.messaging.eventstore.EventHeaders
 import io.damoreira.kraken.messaging.handler.Processors
-import io.damoreira.kraken.messaging.kafka.LocalEventDispatcher
+import io.damoreira.kraken.messaging.events.LocalEventDispatcher
 import io.damoreira.kraken.messaging.store.ProcessedEventStore
 import io.damoreira.kraken.messaging.store.ProcessedMarker
 import kotlinx.coroutines.runBlocking
@@ -17,7 +17,7 @@ import java.time.Clock
  * The webhook side of the integration toolkit (spec "Inbound 2"): a service exposes its own endpoint, verifies the request
  * with [WebhookSignatureVerifier], turns the body into an [Event] and calls [accept].
  *
- * [accept] runs the local dispatch **synchronously** on the calling thread, as `ExternalKafkaSources` does for a record: the
+ * [accept] runs the local dispatch **synchronously** on the calling thread, as `ExternalSources` does for a record: the
  * ordinary `@EventHandler`s of this service, then its sagas, each in the transactions of the [LocalEventDispatcher]; when it
  * returns they have committed. The dedupe id is `"<source>:<dedupeKey>"` and keys the dispatcher's markers, so the same event
  * is applied once however often the partner sends it. A handler failure is thrown (answer 5xx: the partner retries and the

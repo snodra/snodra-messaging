@@ -88,27 +88,24 @@ internal class MongoProcessorControlStore(private val mongo: MongoTemplate, priv
     override suspend fun setReplay(processor: String, ranges: List<ReplayRange>) {
         collection.updateOne(
             Filters.eq("_id", processor),
-            Updates.combine(Updates.set("replay", ranges.map { rangeDocument(stored(it)) }), Updates.set("updatedAt", now())),
+            Updates.combine(Updates.set("replay", ranges.map(::rangeDocument)), Updates.set("updatedAt", now())),
         )
     }
 
-    /** A range whose segment or positions are not decimal cannot have been stored: false. */
-    override suspend fun removeReplay(processor: String, range: ReplayRange): Boolean {
-        val stored = runCatching { stored(range) }.getOrNull() ?: return false
-        return collection.updateOne(
-            Filters.and(Filters.eq("_id", processor), Filters.elemMatch("replay", rangeFilter(stored))),
-            Updates.combine(Updates.pull("replay", rangeDocument(stored)), Updates.set("updatedAt", now())),
+    override suspend fun removeReplay(processor: String, range: ReplayRange): Boolean =
+        collection.updateOne(
+            Filters.and(Filters.eq("_id", processor), Filters.elemMatch("replay", rangeFilter(range))),
+            Updates.combine(Updates.pull("replay", rangeDocument(range)), Updates.set("updatedAt", now())),
         ).modifiedCount == 1L
-    }
 
     override suspend fun deleteMarkers(processor: String, ranges: List<ReplayRange>): Long {
         val markers = mongo.independent(MongoProcessedEventStore.COLLECTION)
         var deleted = 0L
-        for (range in ranges.map(::stored)) {
+        for (range in ranges) {
             deleted += markers.deleteMany(
                 Filters.and(
-                    Filters.eq("processor", processor), Filters.eq("topic", range.topic), Filters.eq("partition", range.partition),
-                    Filters.gte("offset", range.from), Filters.lt("offset", range.until),
+                    Filters.eq("processor", processor), Filters.eq("topic", range.source), Filters.eq("partition", Positions.segment(range.segment)),
+                    Filters.gte("offset", Positions.position(range.from)), Filters.lt("offset", Positions.position(range.until)),
                 ),
             ).deletedCount
         }
@@ -120,24 +117,17 @@ internal class MongoProcessorControlStore(private val mongo: MongoTemplate, priv
     private fun now(): Date = Date.from(clock.instant())
 
     /**
-     * A range as `processor_control.replay` and the markers keep it: the source as `topic`, the segment as an int `partition`,
-     * the positions as long offsets (the layout before neutral positions, kept so stored data stays readable). Anything else
-     * is refused with an [IllegalArgumentException].
+     * A range as `processor_control.replay` and the markers keep it: the source as `topic`, the segment as `partition` and the
+     * positions as `from` and `until`, stored as [Positions] says (decimal ones as the Int32 and Int64 they always were).
      */
-    private class StoredRange(val topic: String, val partition: Int, val from: Long, val until: Long)
+    private fun rangeDocument(range: ReplayRange) = Document("topic", range.source)
+        .append("partition", Positions.segment(range.segment))
+        .append("from", Positions.position(range.from))
+        .append("until", Positions.position(range.until))
 
-    private fun stored(range: ReplayRange): StoredRange {
-        fun bad(): Nothing = throw IllegalArgumentException("This store keeps replay ranges as a partition and offsets in decimal: $range")
-        return StoredRange(
-            range.source, range.segment.toIntOrNull() ?: bad(), range.from.toLongOrNull() ?: bad(), range.until.toLongOrNull() ?: bad(),
-        )
-    }
-
-    private fun rangeDocument(range: StoredRange) =
-        Document("topic", range.topic).append("partition", range.partition).append("from", range.from).append("until", range.until)
-
-    private fun rangeFilter(range: StoredRange): Bson = Filters.and(
-        Filters.eq("topic", range.topic), Filters.eq("partition", range.partition), Filters.eq("from", range.from), Filters.eq("until", range.until),
+    private fun rangeFilter(range: ReplayRange): Bson = Filters.and(
+        Filters.eq("topic", range.source), Filters.eq("partition", Positions.segment(range.segment)),
+        Filters.eq("from", Positions.position(range.from)), Filters.eq("until", Positions.position(range.until)),
     )
 
     private fun parse(doc: Document): Control {
@@ -151,10 +141,10 @@ internal class MongoProcessorControlStore(private val mongo: MongoTemplate, priv
         }
         val replay = (doc["replay"] as? List<*>).orEmpty().filterIsInstance<Document>().mapNotNull { r ->
             val topic = r.getString("topic") ?: return@mapNotNull null
-            val partition = (r["partition"] as? Number)?.toInt() ?: return@mapNotNull null
-            val from = (r["from"] as? Number)?.toLong() ?: return@mapNotNull null
-            val until = (r["until"] as? Number)?.toLong() ?: return@mapNotNull null
-            ReplayRange(topic, partition.toString(), from.toString(), until.toString())
+            val segment = Positions.text(r["partition"]) ?: return@mapNotNull null
+            val from = Positions.text(r["from"]) ?: return@mapNotNull null
+            val until = Positions.text(r["until"]) ?: return@mapNotNull null
+            ReplayRange(topic, segment, from, until)
         }
         return Control(
             processor = doc.getString("_id"),

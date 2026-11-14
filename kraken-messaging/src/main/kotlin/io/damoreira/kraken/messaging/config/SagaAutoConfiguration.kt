@@ -6,8 +6,8 @@ import io.damoreira.kraken.messaging.codec.MessageTypeResolver
 import io.damoreira.kraken.messaging.deadline.DeadlineScheduler
 import io.damoreira.kraken.messaging.handler.HandlerInvoker
 import io.damoreira.kraken.messaging.hub.HubBus
-import io.damoreira.kraken.messaging.kafka.LocalEventDispatcher
-import io.damoreira.kraken.messaging.kafka.OutboxEventBus
+import io.damoreira.kraken.messaging.events.LocalEventDispatcher
+import io.damoreira.kraken.messaging.events.OutboxEventBus
 import io.damoreira.kraken.messaging.saga.LocalRawCommandSender
 import io.damoreira.kraken.messaging.saga.NoopSagaMetrics
 import io.damoreira.kraken.messaging.saga.RawEventPublisher
@@ -50,10 +50,10 @@ class SagaCatalog(val types: List<SagaType>)
  * Everything here exists only when a class in the application's packages is annotated `@Saga` and
  * `kraken.messaging.sagas.enabled` is not false; a service without sagas gets none of it. A saga that violates the model's
  * rules fails the startup (see the `SagaModelScanner`); without a message store a saga fails the startup naming the missing
- * store ([MessageStoreGuard]). Needs what [KafkaEventsAutoConfiguration] provides (the store, the local dispatcher). Commands
+ * store ([MessageStoreGuard]). Needs what [EventsAutoConfiguration] provides (the store, the local dispatcher). Commands
  * go through the [HubBus] when the hub is enabled, else to this service's own handlers; events go through the outbox.
  */
-@AutoConfiguration(after = [KrakenMessagingAutoConfiguration::class, HubAutoConfiguration::class, KafkaEventsAutoConfiguration::class])
+@AutoConfiguration(after = [KrakenMessagingAutoConfiguration::class, HubAutoConfiguration::class, EventsAutoConfiguration::class])
 @ConditionalOnBean(MessageStore::class, LocalEventDispatcher::class)
 @ConditionalOnProperty(prefix = "kraken.messaging.sagas", name = ["enabled"], havingValue = "true", matchIfMissing = true)
 @Conditional(OnSagaClasses::class)

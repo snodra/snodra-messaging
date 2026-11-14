@@ -30,7 +30,7 @@ import io.damoreira.kraken.messaging.HubUnavailableException
 import io.damoreira.kraken.messaging.InvalidMessageException
 import io.damoreira.kraken.messaging.MessageTimeoutException
 import io.damoreira.kraken.messaging.MessagingException
-import io.damoreira.kraken.messaging.kafka.EventConsumer
+import io.damoreira.kraken.messaging.events.EventConsumer
 import io.grpc.ManagedChannel
 import io.grpc.Status
 import kotlinx.coroutines.CancellationException

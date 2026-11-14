@@ -13,33 +13,25 @@ import io.damoreira.kraken.hub.v1.ResetOutcome
 import io.damoreira.kraken.messaging.deadletter.DeadLetter
 import io.damoreira.kraken.messaging.deadletter.DeadLetters
 import io.damoreira.kraken.messaging.deadletter.RetryResult
+import io.damoreira.kraken.messaging.events.EventConsumer
+import io.damoreira.kraken.messaging.eventstore.Capability
+import io.damoreira.kraken.messaging.eventstore.EventStore
+import io.damoreira.kraken.messaging.eventstore.EventStoreException
 import io.damoreira.kraken.messaging.eventstore.ReplayRange
 import io.damoreira.kraken.messaging.eventstore.ResetTarget
 import io.damoreira.kraken.messaging.handler.HandlerRegistry
 import io.damoreira.kraken.messaging.hub.ControlInbound
-import io.damoreira.kraken.messaging.kafka.EventConsumer
-import io.damoreira.kraken.messaging.kafka.KafkaRange
 import io.damoreira.kraken.messaging.store.ProcessorControlStore
 import io.damoreira.kraken.messaging.store.ProcessorControlStore.Control
 import io.damoreira.kraken.messaging.store.ProcessorControlStore.Lock
 import kotlinx.coroutines.runBlocking
-import org.apache.kafka.clients.admin.Admin
-import org.apache.kafka.clients.admin.AdminClientConfig
-import org.apache.kafka.clients.admin.OffsetSpec
-import org.apache.kafka.clients.consumer.OffsetAndMetadata
-import org.apache.kafka.common.TopicPartition
-import org.apache.kafka.common.errors.GroupIdNotFoundException
-import org.apache.kafka.common.errors.GroupNotEmptyException
-import org.apache.kafka.common.errors.RebalanceInProgressException
-import org.apache.kafka.common.errors.UnknownMemberIdException
-import io.damoreira.kraken.hub.v1.ResetTarget as WireTarget
 import io.damoreira.kraken.hub.v1.ReplayRange as WireRange
+import io.damoreira.kraken.hub.v1.ResetTarget as WireTarget
 import org.slf4j.LoggerFactory
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.ExecutionException
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
@@ -50,21 +42,22 @@ import java.util.concurrent.TimeUnit
  * The control of this instance's event processors (P6b, ADR 0023): the hub's `ControlRequest`s ([handle]), the local
  * [pause] and [resume], and the convergence of every processor on its `processor_control` document ([ProcessorControlStore]).
  *
- * [io.damoreira.kraken.messaging.kafka.EventProcessors] hands its consumers to [attach] at start: the documents are read
+ * [io.damoreira.kraken.messaging.events.EventProcessors] hands its consumers to [attach] at start: the documents are read
  * before any consumer polls, and each consumer starts paused, with its open replay ranges, or not at all while an unexpired
  * reset operation holds its lock. Then every [pollInterval] the documents are read again and applied: a pause or resume made
- * through another instance, a lock taken (the consumer leaves the group) or cleared (it joins again), a lease that passed
+ * through another instance, a lock taken (the consumer leaves its subscription) or cleared (it subscribes again), a lease that passed
  * (the instance clears the operation it held and resumes), and the replay ranges this instance consumed past (removed).
  *
  * Requests run off the hub stream, one at a time per processor (a single thread each), except the renewal of the operation
  * this instance holds, which is answered at once, and the dead-letter requests while a reset of the processor executes here:
  * the list is read beside it, a retry, retry-all or discard is refused LOCKED at once (H1, as the Rust library). A prepare or
- * renewal with a lease under [MIN_RESET_LEASE_MS] is INVALID. A reset executes here only for an operation this instance holds:
- * 1. the target becomes per-partition offsets (`Admin.listOffsets`: earliest, latest, for a timestamp; explicit offsets are
- *    checked against the partitions and watermarks), 2. the group's committed offsets are read, a range `[target, before)`
- *    per partition where the target is lower, 3. the group must be empty (`describeConsumerGroups`), 4. the processor's
- *    `@ResetHandler`s run (any range only), 5. the markers in the ranges are deleted, the
- *    ranges written, then the offsets committed (`alterConsumerGroupOffsets`). While it runs the executor extends its own
+ * renewal with a lease under [MIN_RESET_LEASE_MS] is INVALID. A reset needs the event store's capability `replay`: without it a
+ * prepare or an execute is refused UNSUPPORTED before anything changes (the processor keeps its subscription). A reset executes
+ * here only for an operation this instance holds, through the event store's [io.damoreira.kraken.messaging.eventstore.SubscriptionAdmin]:
+ * 1. the event store plans where the target moves each segment (positions it does not have are INVALID), 2. nobody may read
+ *    the subscription (SUBSCRIBERS_ACTIVE otherwise), 3. a range `[target, before)` per segment the plan moves back (by the
+ *    event store's order), extended by a still-open range of the segment, 4. the processor's `@ResetHandler`s run (any range
+ *    only), 5. the markers in the ranges are deleted, the ranges written, then the positions moved. While it runs the executor extends its own
  *    lease; right after the reset handlers and again before the commit that extension must succeed (and the execute be within
  *    [executeLeaseLimit]), otherwise it stops with FAILED "lease lost". A refusal after the reset handlers ran says what
  *    changed. Every action is logged at INFO with the control id, processor, action and result.
@@ -77,9 +70,8 @@ class ProcessorControl(
     private val store: ProcessorControlStore,
     private val registry: HandlerRegistry,
     private val deadLetters: DeadLetters,
-    private val adminConfig: Map<String, Any>,
+    private val events: EventStore,
     private val pollInterval: Duration = POLL_INTERVAL,
-    private val adminTimeout: Duration = Duration.ofSeconds(10),
     /**
      * How long the executor of a reset extends its own lease (the hub's default `KRAKEN_HUB_RESET_TIMEOUT`): an execute that
      * hangs longer lets the lease lapse, so the other instances resume (the hub has given up and its finish waits behind it).
@@ -147,10 +139,13 @@ class ProcessorControl(
     fun detach() {
         val gone = slots.values
         slots = emptyMap()
+        val polling = poller
         poller?.shutdownNow()
         leases?.shutdownNow()
         poller = null
         leases = null
+        // A poll in flight must not start a consumer again after its owner stopped it (it checks the slots, emptied above).
+        polling?.awaitTermination(5, TimeUnit.SECONDS)
         gone.forEach { it.queue.shutdown() }
         gone.forEach { if (!it.queue.awaitTermination(2, TimeUnit.SECONDS)) it.queue.shutdownNow() }
     }
@@ -224,6 +219,12 @@ class ProcessorControl(
         else -> refused(request, ControlRefusal.CONTROL_REFUSAL_INVALID, "the control request has no action this instance knows")
     }
 
+    /** The refusal of an action the event store cannot do (ADR 0027). */
+    private fun unsupported(request: ControlRequest, capability: Capability): ControlReply = refused(
+        request, ControlRefusal.CONTROL_REFUSAL_UNSUPPORTED,
+        "the event store ${events.name} lacks the capability $capability: processor ${request.processor} cannot be reset",
+    )
+
     private fun setPaused(slot: Slot, paused: Boolean, by: String) {
         runBlocking { store.setPaused(slot.consumer.processor, paused, by) }
         synchronized(slot) { if (paused) slot.consumer.pause() else slot.consumer.resume() }
@@ -247,6 +248,7 @@ class ProcessorControl(
         val op = request.resetPrepare.operationId
         val leaseMs = request.resetPrepare.leaseMs
         if (op.isBlank() || leaseMs < MIN_RESET_LEASE_MS) return refused(request, ControlRefusal.CONTROL_REFUSAL_INVALID, BAD_PREPARE)
+        if (!events.supports(Capability.REPLAY)) return unsupported(request, Capability.REPLAY)
         if (hasEnded(slot, op)) return refused(request, ControlRefusal.CONTROL_REFUSAL_NOT_PREPARED, "operation $op already finished on this instance")
         val lease = Duration.ofMillis(leaseMs)
         val processor = slot.consumer.processor
@@ -259,15 +261,16 @@ class ProcessorControl(
                 synchronized(slot) {
                     slot.held = Held(op, lease)
                     slot.consumer.operationId = op
-                    if (slot.consumer.isRunning) slot.consumer.stop() // finishes the record in hand, commits it, leaves the group
+                    if (slot.consumer.isRunning) slot.consumer.stop() // finishes the record in hand, acknowledges it, leaves the subscription
                 }
-                ok(request, "stopped, left consumer group ${slot.consumer.group}")
+                ok(request, "stopped, left the subscription ${slot.consumer.subscription}")
             }
         }
     }
 
     private fun execute(slot: Slot, request: ControlRequest): ControlReply {
         val op = request.resetExecute.operationId
+        if (!events.supports(Capability.REPLAY)) return unsupported(request, Capability.REPLAY)
         val held = slot.held
         if (held == null || held.id != op) return notPrepared(slot, request, op)
         slot.executing = op
@@ -313,7 +316,7 @@ class ProcessorControl(
             if (!reply.hasRefused() || (handlers == 0 && markers == 0L && !ranges)) return reply
             val deleted = if (markers == 0L) "no markers deleted" else "$markers markers deleted"
             val written = if (ranges) ", replay ranges written" else ""
-            val message = "${EventConsumer.utf8Cut(reply.refused.message, MAX_CAUSE_BYTES)}; reset handlers ran ($handlers), $deleted$written, offsets not moved: retry the reset"
+            val message = "${EventConsumer.utf8Cut(reply.refused.message, MAX_CAUSE_BYTES)}; reset handlers ran ($handlers), $deleted$written, positions not moved: retry the reset"
             return reply.toBuilder().setRefused(reply.refused.toBuilder().setMessage(EventConsumer.utf8Cut(message, MAX_TEXT_BYTES))).build()
         }
     }
@@ -322,140 +325,101 @@ class ProcessorControl(
         val op = held.id
         val consumer = slot.consumer
         val processor = consumer.processor
-        val topic = consumer.topic
-        val group = consumer.group
+        val spec = consumer.spec
         val wire = request.resetExecute.target
         val target = when (wire.toCase) {
             WireTarget.ToCase.EARLIEST -> ResetTarget.Earliest
             WireTarget.ToCase.LATEST -> ResetTarget.Latest
             WireTarget.ToCase.TIMESTAMP_MS -> ResetTarget.Timestamp(wire.timestampMs)
-            WireTarget.ToCase.OFFSETS -> ResetTarget.Positions(wire.offsets.offsetsList.associate { it.partition.toString() to it.offset.toString() })
+            WireTarget.ToCase.POSITIONS -> {
+                val listed = wire.positions.positionsList
+                if (listed.isEmpty()) return refused(request, ControlRefusal.CONTROL_REFUSAL_INVALID, "the positions target lists no segment")
+                val positions = listed.associate { it.segment to it.position }
+                if (positions.size != listed.size) return refused(request, ControlRefusal.CONTROL_REFUSAL_INVALID, "the positions target names a segment twice")
+                ResetTarget.Positions(positions)
+            }
             else -> return refused(request, ControlRefusal.CONTROL_REFUSAL_INVALID, "the reset has no target")
         }
-        val timeout = adminTimeout.toMillis()
-        Admin.create(adminConfig.filterKeys { it in AdminClientConfig.configNames() }).use { admin ->
-            val partitions = admin.describeTopics(listOf(topic)).allTopicNames().get(timeout, TimeUnit.MILLISECONDS).getValue(topic)
-                .partitions().map { TopicPartition(topic, it.partition()) }.sortedBy { it.partition() }
-            fun offsets(spec: (TopicPartition) -> OffsetSpec): Map<TopicPartition, Long> =
-                admin.listOffsets(partitions.associateWith(spec)).all().get(timeout, TimeUnit.MILLISECONDS).mapValues { it.value.offset() }
-            // 1. The target per partition.
-            val targets: Map<TopicPartition, Long> = when (target) {
-                ResetTarget.Earliest -> offsets { OffsetSpec.earliest() }
-                ResetTarget.Latest -> offsets { OffsetSpec.latest() }
-                is ResetTarget.Timestamp -> {
-                    val high = offsets { OffsetSpec.latest() }
-                    val found = offsets { OffsetSpec.forTimestamp(target.timestampMs) }
-                    partitions.associateWith { tp -> found[tp]?.takeIf { it >= 0 } ?: high.getValue(tp) } // no record that late: the end
-                }
-                is ResetTarget.Positions -> {
-                    if (wire.offsets.offsetsCount == 0) return refused(request, ControlRefusal.CONTROL_REFUSAL_INVALID, "the offsets target lists no partition")
-                    if (target.positions.size != wire.offsets.offsetsCount) {
-                        return refused(request, ControlRefusal.CONTROL_REFUSAL_INVALID, "the offsets target names a partition twice")
-                    }
-                    // Segments and positions of this event store: partitions and offsets in decimal.
-                    val wanted = target.positions.entries.associate { (segment, position) ->
-                        val p = segment.toIntOrNull()
-                            ?: return refused(request, ControlRefusal.CONTROL_REFUSAL_INVALID, "topic $topic has no partition $segment")
-                        val o = position.toLongOrNull()
-                            ?: return refused(request, ControlRefusal.CONTROL_REFUSAL_INVALID, "offset $position of partition $p is not a number")
-                        p to o
-                    }
-                    val high = offsets { OffsetSpec.latest() }
-                    val known = partitions.associateBy { it.partition() }
-                    for ((p, o) in wanted) {
-                        val tp = known[p] ?: return refused(request, ControlRefusal.CONTROL_REFUSAL_INVALID, "topic $topic has no partition $p")
-                        if (o < 0) return refused(request, ControlRefusal.CONTROL_REFUSAL_INVALID, "offset $o of partition $p is negative")
-                        if (o > high.getValue(tp)) {
-                            return refused(request, ControlRefusal.CONTROL_REFUSAL_INVALID, "offset $o of partition $p is past its high watermark ${high.getValue(tp)}")
-                        }
-                    }
-                    wanted.mapKeys { known.getValue(it.key) }
-                }
-            }
-            // 2. Where the group is (a group that never existed has no offsets and no members).
-            val before = orNoGroup(emptyMap()) {
-                admin.listConsumerGroupOffsets(group).partitionsToOffsetAndMetadata().get(timeout, TimeUnit.MILLISECONDS)
-            }
-            // 3. Nobody consumes.
-            val members = orNoGroup(emptyList()) {
-                admin.describeConsumerGroups(listOf(group)).all().get(timeout, TimeUnit.MILLISECONDS)[group]?.members().orEmpty().toList()
-            }
-            if (members.isNotEmpty()) {
-                return refused(
-                    request, ControlRefusal.CONTROL_REFUSAL_GROUP_NOT_EMPTY,
-                    "consumer group $group has ${members.size} active member(s): ${members.joinToString { it.clientId() }}",
-                )
-            }
-            val doc = runBlocking { store.get(processor) }
-            val open = doc?.replay.orEmpty()
-            val kafkaRanges = if (target == ResetTarget.Latest) emptyList() else targets.mapNotNull { (tp, to) ->
-                val from = before[tp]?.offset() ?: return@mapNotNull null // nothing known handled there
-                if (to >= from) return@mapNotNull null
-                // An open range of the partition is not replayed past `before` yet (its markers are gone): it is kept in.
-                val still = open.mapNotNull { KafkaRange.of(it, topic) }.filter { it.partition == tp.partition() }.maxOfOrNull { it.until } ?: 0L
-                KafkaRange(topic, tp.partition(), to, maxOf(from, still))
-            }.sortedBy { it.partition }
-            val ranges = kafkaRanges.map { it.range }
-            // 4. The reset handlers, before any marker or offset changes.
-            val done = Changed()
-            if (ranges.isNotEmpty()) {
-                val ctx = ResetContext(processor, op, target, ranges)
-                for (handler in registry.resetHandlers(processor)) {
-                    done.handlers++
-                    try {
-                        runBlocking { handler.invoke(ctx) }
-                    } catch (e: VirtualMachineError) {
-                        throw e
-                    } catch (e: Throwable) {
-                        log.warn("Reset handler {} of processor {} failed, the reset {} stops before the markers: {}", handler.label, processor, op, e.toString())
-                        return done.told(refused(request, ControlRefusal.CONTROL_REFUSAL_RESET_HANDLER_FAILED, "${handler.label} failed: ${e::class.java.simpleName}: ${e.message ?: ""}"))
-                    }
-                }
-            }
-            // 5. Markers and ranges first, then the offsets: a crash in between only re-runs what the next attempt re-runs. The
-            //    lease is checked before each: lost, another instance may consume or reset already.
-            val replay: List<ReplayRange>
-            try {
-                leaseLost(slot, held, until)?.let { return done.told(refused(request, ControlRefusal.CONTROL_REFUSAL_FAILED, it)) }
-                if (ranges.isNotEmpty()) done.markers = runBlocking { store.deleteMarkers(processor, ranges) }
-                replay = open.filter { o -> ranges.none { it.source == o.source && it.segment == o.segment } } + ranges
-                if (ranges.isNotEmpty()) runBlocking { store.setReplay(processor, replay) }
-                done.ranges = ranges.isNotEmpty()
-                leaseLost(slot, held, until)?.let { return done.told(refused(request, ControlRefusal.CONTROL_REFUSAL_FAILED, it)) }
-                try {
-                    admin.alterConsumerGroupOffsets(group, targets.mapValues { OffsetAndMetadata(it.value) }).all().get(timeout, TimeUnit.MILLISECONDS)
-                } catch (e: ExecutionException) {
-                    val cause = e.cause
-                    if (cause is UnknownMemberIdException || cause is GroupNotEmptyException || cause is RebalanceInProgressException) {
-                        return done.told(refused(request, ControlRefusal.CONTROL_REFUSAL_GROUP_NOT_EMPTY, "Kafka refused to move the offsets of group $group: ${cause.message}"))
-                    }
-                    throw e
-                }
-            } catch (e: Exception) {
-                log.warn("Reset {} of processor {} failed after its reset handlers: {}", op, processor, e.toString())
-                return done.told(failed(request, e))
-            }
-            val deleted = done.markers
-            val handlers = done.handlers
-            consumer.replay(replay)
-            log.info(
-                "Processor {} reset to {} by operation {}: offsets {}, replay {}, {} markers deleted, {} reset handlers",
-                processor, target, op, targets.mapKeys { it.key.partition() }, ranges, deleted, handlers,
-            )
-            return reply(request).setReset(
-                ResetOutcome.newBuilder()
-                    .addAllRanges(kafkaRanges.map { WireRange.newBuilder().setPartition(it.partition).setFrom(it.from).setUntil(it.until).build() })
-                    .setMarkersDeleted(deleted)
-                    .setResetHandlers(handlers),
-            ).build()
+        val compare = Comparator<String> { a, b -> events.compare(a, b) }
+        val admin = try {
+            events.admin(spec)
+        } catch (e: EventStoreException) {
+            return storeRefusal(request, e)
         }
+        // 1. Where the target moves each segment, and 2. nobody reads the subscription.
+        val (plan, members) = try {
+            runBlocking { admin.plan(target) to admin.members() }
+        } catch (e: EventStoreException) {
+            return storeRefusal(request, e)
+        }
+        if (members.isNotEmpty()) {
+            return refused(
+                request, ControlRefusal.CONTROL_REFUSAL_SUBSCRIBERS_ACTIVE,
+                "subscription ${spec.name} still has ${members.size} subscriber(s): ${members.joinToString()}",
+            )
+        }
+        // 3. The ranges that replay, extended by the still-open ones of their segments (their markers are gone).
+        val open = runBlocking { store.get(processor) }?.replay.orEmpty()
+        val ranges = ResetRanges.replaying(plan, target, open, compare)
+        // 4. The reset handlers, before any marker or position changes.
+        val done = Changed()
+        if (ranges.isNotEmpty()) {
+            val ctx = ResetContext(processor, op, target, ranges)
+            for (handler in registry.resetHandlers(processor)) {
+                done.handlers++
+                try {
+                    runBlocking { handler.invoke(ctx) }
+                } catch (e: VirtualMachineError) {
+                    throw e
+                } catch (e: Throwable) {
+                    log.warn("Reset handler {} of processor {} failed, the reset {} stops before the markers: {}", handler.label, processor, op, e.toString())
+                    return done.told(refused(request, ControlRefusal.CONTROL_REFUSAL_RESET_HANDLER_FAILED, "${handler.label} failed: ${e::class.java.simpleName}: ${e.message ?: ""}"))
+                }
+            }
+        }
+        // 5. Markers and ranges first, then the positions: a crash in between only re-runs what the next attempt re-runs. The
+        //    lease is checked before each: lost, another instance may consume or reset already.
+        val replay: List<ReplayRange>
+        try {
+            leaseLost(slot, held, until)?.let { return done.told(refused(request, ControlRefusal.CONTROL_REFUSAL_FAILED, it)) }
+            if (ranges.isNotEmpty()) done.markers = runBlocking { store.deleteMarkers(processor, ranges) }
+            replay = ResetRanges.merged(open, ranges, compare)
+            if (ranges.isNotEmpty()) runBlocking { store.setReplay(processor, replay) }
+            done.ranges = ranges.isNotEmpty()
+            leaseLost(slot, held, until)?.let { return done.told(refused(request, ControlRefusal.CONTROL_REFUSAL_FAILED, it)) }
+            try {
+                runBlocking { admin.apply(plan) }
+            } catch (e: EventStoreException) {
+                return done.told(storeRefusal(request, e))
+            }
+        } catch (e: Exception) {
+            log.warn("Reset {} of processor {} failed after its reset handlers: {}", op, processor, e.toString())
+            return done.told(failed(request, e))
+        }
+        val deleted = done.markers
+        val handlers = done.handlers
+        consumer.replay(replay)
+        log.info(
+            "Processor {} reset to {} by operation {}: positions {}, replay {}, {} markers deleted, {} reset handlers",
+            processor, target, op, plan.map { "${it.segment}@${it.from}" }, ranges, deleted, handlers,
+        )
+        return reply(request).setReset(
+            ResetOutcome.newBuilder()
+                .addAllRanges(ranges.map { WireRange.newBuilder().setSegment(it.segment).setFrom(it.from).setUntil(it.until).build() })
+                .setMarkersDeleted(deleted)
+                .setResetHandlers(handlers),
+        ).build()
     }
 
-    private fun <T> orNoGroup(none: T, read: () -> T): T = try {
-        read()
-    } catch (e: ExecutionException) {
-        if (e.cause !is GroupIdNotFoundException) throw e
-        none
+    /** The refusal of what the event store refused or failed at. */
+    private fun storeRefusal(request: ControlRequest, e: EventStoreException): ControlReply = when (e) {
+        is EventStoreException.Invalid -> refused(request, ControlRefusal.CONTROL_REFUSAL_INVALID, e.message ?: "invalid")
+        is EventStoreException.SubscribersActive -> refused(request, ControlRefusal.CONTROL_REFUSAL_SUBSCRIBERS_ACTIVE, e.message ?: "subscribers active")
+        is EventStoreException.Unsupported -> unsupported(request, e.capability)
+        is EventStoreException.Rejected, is EventStoreException.Failed -> {
+            log.warn("Reset of processor {}: the event store failed: {}", request.processor, e.toString())
+            refused(request, ControlRefusal.CONTROL_REFUSAL_FAILED, e.message ?: e::class.java.simpleName)
+        }
     }
 
     private fun finish(slot: Slot, request: ControlRequest): ControlReply {
@@ -514,6 +478,7 @@ class ProcessorControl(
     private fun converge(slot: Slot, doc: Control?, now: Instant, failFast: Boolean = false) = synchronized(slot) {
         val consumer = slot.consumer
         val processor = consumer.processor
+        if (slots[processor] !== slot) return@synchronized // detached: the consumer is its owner's to stop, never to start again
         var operation = doc?.operation
         val held = slot.held
         if (held != null) {
@@ -553,12 +518,12 @@ class ProcessorControl(
         }
     }
 
-    /** Removes the replay ranges this instance (or the group) consumed past from the document. */
+    /** Removes the replay ranges this instance's subscription is past the end of from the document. */
     private fun removePassed(slot: Slot) {
         val consumer = slot.consumer
         for (range in consumer.passedRanges()) {
             if (runBlocking { store.removeReplay(consumer.processor, range) }) {
-                log.info("Processor {} replayed partition {} of {} up to offset {}", consumer.processor, range.segment, range.source, range.until)
+                log.info("Processor {} replayed segment {} of {} up to position {}", consumer.processor, range.segment, range.source, range.until)
             }
             consumer.replay(consumer.replayRanges() - range)
         }
@@ -618,9 +583,9 @@ class ProcessorControl(
     private fun summary(letter: DeadLetter): DeadLetterSummary = DeadLetterSummary.newBuilder()
         .setId(letter.id)
         .setProcessor(letter.processor)
-        .setTopic(letter.topic)
-        .setPartition(letter.partition)
-        .setOffset(letter.offset)
+        .setSource(letter.source)
+        .setSegment(letter.segment)
+        .setPosition(letter.position)
         .setKey(letter.key.orEmpty())
         .setEventId(letter.eventId.orEmpty())
         .setEventType(letter.eventType.orEmpty())
@@ -646,7 +611,7 @@ class ProcessorControl(
     }
 
     private fun failed(request: ControlRequest, e: Throwable): ControlReply {
-        val cause = if (e is ExecutionException) e.cause ?: e else e
+        val cause = if (e is java.util.concurrent.ExecutionException) e.cause ?: e else e
         return refused(request, ControlRefusal.CONTROL_REFUSAL_FAILED, "${cause::class.java.simpleName}: ${cause.message ?: ""}")
     }
 

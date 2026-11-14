@@ -224,7 +224,7 @@ class TwoServicesEndToEndTest {
                     "kraken.messaging.hub.address=static://${hub!!.host}:${hub!!.getMappedPort(7000)}",
                     "kraken.messaging.hub.request-timeout=10s",
                     "kraken.messaging.kafka.bootstrap-servers=${kafka!!.bootstrapServers}",
-                    "kraken.messaging.kafka.topic=$TOPIC",
+                    "kraken.messaging.events.source=$TOPIC",
                     "kraken.messaging.outbox.poll-interval=100ms",
                     "spring.mongodb.uri=$mongoUri", // Boot 4 key; spring.data.mongodb.uri is no longer bound
                     "spring.main.banner-mode=off",

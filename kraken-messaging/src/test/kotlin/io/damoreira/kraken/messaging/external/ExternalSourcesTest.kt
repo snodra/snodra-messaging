@@ -12,11 +12,11 @@ import io.damoreira.kraken.messaging.api.Event
 import io.damoreira.kraken.messaging.api.MessageType
 import io.damoreira.kraken.messaging.codec.JsonCodec
 import io.damoreira.kraken.messaging.codec.MessageTypeResolver
-import io.damoreira.kraken.messaging.config.KrakenMessagingProperties
 import io.damoreira.kraken.messaging.handler.EventHandler
 import io.damoreira.kraken.messaging.handler.HandlerInvoker
 import io.damoreira.kraken.messaging.handler.HandlerRegistry
-import io.damoreira.kraken.messaging.kafka.LocalEventDispatcher
+import io.damoreira.kraken.messaging.events.LocalEventDispatcher
+import io.damoreira.kraken.messaging.kafka.KafkaExternalSource
 import io.damoreira.kraken.messaging.saga.Saga
 import io.damoreira.kraken.messaging.saga.SagaDocument
 import io.damoreira.kraken.messaging.saga.SagaEventHandler
@@ -27,6 +27,7 @@ import io.damoreira.kraken.messaging.saga.StartSaga
 import io.damoreira.kraken.messaging.test.KrakenContainers
 import org.apache.kafka.clients.admin.AdminClient
 import org.apache.kafka.clients.admin.NewTopic
+import org.apache.kafka.clients.producer.KafkaProducer
 import org.apache.kafka.clients.producer.ProducerConfig
 import org.apache.kafka.clients.producer.ProducerRecord
 import org.apache.kafka.common.header.internals.RecordHeader
@@ -44,8 +45,6 @@ import org.springframework.data.mongodb.core.MongoTemplate
 import org.springframework.data.mongodb.core.SimpleMongoClientDatabaseFactory
 import org.springframework.data.mongodb.core.query.Criteria
 import org.springframework.data.mongodb.core.query.Query
-import org.springframework.kafka.core.DefaultKafkaProducerFactory
-import org.springframework.kafka.core.KafkaTemplate
 import org.springframework.transaction.support.TransactionTemplate
 import java.time.Duration
 import java.util.UUID
@@ -87,9 +86,9 @@ class EkSaga {
 private class EkTranslator(private val codec: JsonCodec) : ExternalRecordTranslator {
     val calls = AtomicInteger()
 
-    override fun translate(record: org.apache.kafka.clients.consumer.ConsumerRecord<String, ByteArray>): TranslatedEvent? {
+    override fun translate(record: ExternalRecord): TranslatedEvent? {
         calls.incrementAndGet()
-        val tree = codec.decodeTree(record.value())
+        val tree = codec.decodeTree(record.payload)
         val status = tree["status"].asString()
         if (status == "ignore") return null
         if (status == "boom") throw IllegalStateException("cannot translate")
@@ -98,21 +97,21 @@ private class EkTranslator(private val codec: JsonCodec) : ExternalRecordTransla
 }
 
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
-class ExternalKafkaSourcesTest {
+/** Partner sources read through the core's [ExternalSources] from the Kafka add-on's [KafkaExternalSource] (ADR 0027). */
+class ExternalSourcesTest {
     private val kafkaContainer = KrakenContainers.kafka()
     private val mongoContainer = KrakenContainers.mongo()
     private lateinit var mongo: MongoTemplate
     private lateinit var store: MessageStore
     private lateinit var tx: TransactionTemplate
-    private lateinit var producerFactory: DefaultKafkaProducerFactory<String, ByteArray>
-    private lateinit var kafka: KafkaTemplate<String, ByteArray>
+    private lateinit var kafka: KafkaProducer<String, ByteArray>
     private val codec = JsonCodec()
     private val resolver = MessageTypeResolver("ek")
     private lateinit var topic: String
     private lateinit var handlers: EkHandlers
     private lateinit var translator: EkTranslator
     private lateinit var dispatcher: LocalEventDispatcher
-    private var sources: ExternalKafkaSources? = null
+    private var sources: ExternalSources? = null
 
     @BeforeAll
     fun start() {
@@ -123,17 +122,16 @@ class ExternalKafkaSourcesTest {
         tx = TransactionTemplate(MongoTransactionManager(factory))
         store = mongoStore(mongo)
         listOf("processed_events", "saga_failures", "outbox").forEach { if (!mongo.collectionExists(it)) mongo.createCollection(it) }
-        producerFactory = DefaultKafkaProducerFactory(
+        kafka = KafkaProducer(
             mapOf<String, Any>(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG to kafkaContainer.bootstrapServers, ProducerConfig.ACKS_CONFIG to "all"),
             StringSerializer(),
             ByteArraySerializer(),
         )
-        kafka = KafkaTemplate(producerFactory)
     }
 
     @AfterAll
     fun stop() {
-        producerFactory.destroy()
+        kafka.close()
         kafkaContainer.stop()
         mongoContainer.stop()
     }
@@ -162,14 +160,16 @@ class ExternalKafkaSourcesTest {
         sources = null
     }
 
+    /** The source `printer` on the test topic, in the default group `service-b.external.printer`. */
+    private fun printer(properties: Map<String, String> = emptyMap()) =
+        KafkaExternalSource("printer", topic, "service-b.external.printer", kafkaContainer.bootstrapServers, properties)
+
     private fun sources(
-        source: KrakenMessagingProperties.Source = KrakenMessagingProperties.Source(topic = topic),
+        source: ExternalSourceProvider = printer(),
         translators: Map<String, ExternalRecordTranslator> = mapOf("printer" to translator),
         maxAttempts: Int = 3,
-    ) = ExternalKafkaSources(
-        mapOf("printer" to source), translators, dispatcher, codec, resolver,
-        serviceName = "service-b", defaultBootstrapServers = kafkaContainer.bootstrapServers, maxAttempts = maxAttempts, backOffMs = 50,
-    ).also { sources = it }
+    ) = ExternalSources(mapOf("printer" to source), translators, dispatcher, codec, resolver, maxAttempts = maxAttempts, backOffMs = 50)
+        .also { sources = it }
 
     private fun startSources(maxAttempts: Int = 3) = sources(maxAttempts = maxAttempts).start()
 
@@ -190,13 +190,13 @@ class ExternalKafkaSourcesTest {
             "bootstrap.servers", "group.id", "key.deserializer", "value.deserializer", "enable.auto.commit",
         )
         for (key in fixed) {
-            val e = assertFailsWith<IllegalStateException>(key) {
-                sources(source = KrakenMessagingProperties.Source(topic = topic, properties = mapOf(key to "x")))
-            }
+            val e = assertFailsWith<IllegalStateException>(key) { printer(mapOf(key to "x")) }
             assertTrue("printer" in e.message!! && key in e.message!!, "$key: ${e.message}")
         }
         // the keys the library does not fix still pass through
-        sources(source = KrakenMessagingProperties.Source(topic = topic, properties = mapOf("security.protocol" to "PLAINTEXT", "auto.offset.reset" to "latest")))
+        val passing = printer(mapOf("security.protocol" to "PLAINTEXT", "auto.offset.reset" to "latest")).consumerProperties()
+        assertEquals("latest", passing["auto.offset.reset"])
+        assertEquals(false, passing["allow.auto.create.topics"], "a partner's topic is never created")
     }
 
     @Test
@@ -206,7 +206,7 @@ class ExternalKafkaSourcesTest {
 
         awaitSaga("j1")
         assertEquals(listOf("j1"), handlers.seen.toList(), "the ordinary handler saw it too")
-        // The dedupe id is the source, the partition and the offset; both stages' markers carry it.
+        // The dedupe id is the source, the segment and the position (the partition and the offset); both stages' markers carry it.
         assertTrue(mongo.exists(Query(Criteria.where("_id").`is`("processor:default:printer:0:0")), "processed_events"))
         assertTrue(mongo.exists(Query(Criteria.where("_id").`is`("saga:ek.Job:printer:0:0")), "processed_events"))
     }
@@ -267,7 +267,7 @@ class ExternalKafkaSourcesTest {
     @Test
     fun `the handlers see the dedupe id, the source and the record's headers, and the group id defaults to the service and source`() {
         val s = sources()
-        assertEquals("service-b.external.printer", s.groupIdFor("printer"))
+        assertEquals("service-b.external.printer", printer().subscription)
         s.start()
         send("""{"jobId":"j6","status":"done"}""", headers = mapOf("x-partner" to "acme"))
 

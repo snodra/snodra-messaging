@@ -1,4 +1,4 @@
-package io.damoreira.kraken.messaging.kafka
+package io.damoreira.kraken.messaging.events
 
 import io.damoreira.kraken.messaging.tracing.TraceHeaders
 import io.damoreira.kraken.messaging.handler.EventHandler
@@ -11,7 +11,7 @@ import io.damoreira.kraken.messaging.codec.MessageTypeResolver
 import io.damoreira.kraken.messaging.fixtures.Happened
 import io.damoreira.kraken.messaging.handler.HandlerInvoker
 import io.damoreira.kraken.messaging.handler.HandlerRegistry
-import io.damoreira.kraken.messaging.kafka.LocalEventDispatcher.Outcome
+import io.damoreira.kraken.messaging.events.LocalEventDispatcher.Outcome
 import io.damoreira.kraken.messaging.saga.SagaStage
 import io.damoreira.kraken.messaging.test.KrakenContainers
 import org.junit.jupiter.api.AfterAll

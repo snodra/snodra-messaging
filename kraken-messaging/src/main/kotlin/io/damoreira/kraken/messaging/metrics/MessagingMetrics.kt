@@ -37,7 +37,7 @@ interface MessagingMetrics {
         /** Given up without a dead letter: mode `log`, or only the saga stage failed. */
         FAILED,
 
-        /** Handed to the dead letters (mode `collection` or `topic`). */
+        /** Handed to the dead letters (mode `collection` or `event-store`). */
         PARKED,
         ;
 

@@ -80,8 +80,8 @@ class ProcessorControlEndToEndTest {
                 "kraken.messaging.hub.address=static://${hub.host}:${hub.getMappedPort(7000)}",
                 "kraken.messaging.hub.status-interval=500ms",
                 "kraken.messaging.kafka.bootstrap-servers=${kafka.bootstrapServers}",
-                "kraken.messaging.kafka.topic=$topic",
-                "kraken.messaging.kafka.consumer.max-attempts=2",
+                "kraken.messaging.events.source=$topic",
+                "kraken.messaging.events.consumer.max-attempts=2",
                 "kraken.messaging.outbox.enabled=false",
                 "spring.mongodb.uri=mongodb://${mongo.host}:${mongo.firstMappedPort}/svc-p6b?directConnection=true",
                 "spring.main.banner-mode=off",
@@ -157,7 +157,7 @@ class ProcessorControlEndToEndTest {
         assertEquals("ok", reset.body["outcome"].asString())
         assertEquals(1, reset.body["resetHandlers"].asInt())
         assertEquals(5, reset.body["markersDeleted"].asInt())
-        assertEquals(listOf(0 to 3L, 1 to 2L), reset.body["ranges"].nodes().map { it["partition"].asInt() to it["until"].asLong() })
+        assertEquals(listOf("0" to "3", "1" to "2"), reset.body["ranges"].nodes().map { it["segment"].asString() to it["until"].asString() })
         assertEquals(ResetTarget.Earliest, catalog.resets.single().target)
         await().atMost(Duration.ofSeconds(30)).until { catalog.seen.size == 10 }
         assertEquals(setOf(2), catalog.seen.groupingBy { it }.eachCount().values.toSet(), "every record of the range once more")
@@ -173,6 +173,8 @@ class ProcessorControlEndToEndTest {
         val letter = letters.body["letters"].nodes().single()
         assertEquals("evt-bad-1", letter["eventId"].asString())
         assertEquals("HANDLER_FAILED", letter["reason"].asString())
+        assertEquals(topic, letter["source"].asString())
+        assertEquals("1", letter["segment"].asString())
         assertFalse(letter.has("payload"), "no payload leaves the instance")
         val id = letter["id"].asString()
         val retried = call("POST", "$base/default/dead-letters/$id/retry", WRITE_TOKEN)

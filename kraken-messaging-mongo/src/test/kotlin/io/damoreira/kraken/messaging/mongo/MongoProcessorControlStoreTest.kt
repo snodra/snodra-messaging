@@ -21,7 +21,6 @@ import java.time.Instant
 import java.time.ZoneOffset
 import java.util.Date
 import kotlin.test.assertEquals
-import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNull
@@ -122,16 +121,56 @@ class MongoProcessorControlStoreTest {
         assertEquals(setOf("default"), store.read(listOf("default", "audit")).keys, "a missing document is absent")
     }
 
-    @Test fun `a range whose segment or positions are not decimal is refused, and is never there to remove`() = runBlocking<Unit> {
+    @Test fun `a range whose segment or positions are not decimal is stored as text in the same fields, and read back and removed`() = runBlocking<Unit> {
         store.lock("default", "op-1", Duration.ofSeconds(30))
-        val ok = ReplayRange("kraken.events", "0", "0", "3")
-        store.setReplay("default", listOf(ok))
-        for (bad in listOf(ok.copy(segment = "kraken.events-0"), ok.copy(from = "a"), ok.copy(until = ""))) {
-            assertFailsWith<IllegalArgumentException> { store.setReplay("default", listOf(bad)) }
-            assertFailsWith<IllegalArgumentException> { store.deleteMarkers("default", listOf(bad)) }
-            assertFalse(store.removeReplay("default", bad))
-        }
-        assertEquals(listOf(ok), store.get("default")!!.replay, "nothing written")
+        val decimal = ReplayRange("kraken.events", "0", "0", "3")
+        val text = ReplayRange("orders-stream", "p-0", "a-5", "a-9")
+        val leadingZero = ReplayRange("kraken.events", "1", "007", "9") // not canonical: kept as written
+        store.setReplay("default", listOf(decimal, text, leadingZero))
+        val items = (raw("default")["replay"] as List<*>).map { it as Document }
+        assertEquals(listOf("topic", "partition", "from", "until"), items[1].keys.toList(), "the same fields, no new ones")
+        assertEquals(listOf<Any?>("p-0", "a-5", "a-9"), listOf(items[1]["partition"], items[1]["from"], items[1]["until"]))
+        assertEquals("007", items[2]["from"])
+        assertIs<Long>(items[2]["until"])
+        assertEquals(listOf(decimal, text, leadingZero), store.get("default")!!.replay)
+        assertTrue(store.removeReplay("default", text))
+        assertTrue(store.removeReplay("default", leadingZero))
+        assertEquals(listOf(decimal), store.get("default")!!.replay)
+    }
+
+    /**
+     * Markers written before the event store became an add-on (Int32 `partition`, Int64 `offset`) are found and deleted by a
+     * replay of their range as before; markers without a position (a saga's, an ingress') dedupe and survive any reset; a
+     * marker of a store with text positions is deleted by a range of text positions (ordered by bytes).
+     */
+    @Test fun markersWithoutPositionBehaveAsBefore() = runBlocking<Unit> {
+        val markers = MongoProcessedEventStore(mongo)
+        val collection = mongo.db.getCollection(MongoProcessedEventStore.COLLECTION)
+        collection.deleteMany(Document())
+        val at = Date.from(now)
+        // As the library wrote them before (P6b): Int32 partition, Int64 offset.
+        collection.insertOne(Document("_id", "processor:default:old-4").append("type", "t").append("processedAt", at)
+            .append("processor", "default").append("topic", "kraken.events").append("partition", 0).append("offset", 4L))
+        collection.insertOne(Document("_id", "processor:default:old-9").append("type", "t").append("processedAt", at)
+            .append("processor", "default").append("topic", "kraken.events").append("partition", 0).append("offset", 9L))
+        val saga = io.damoreira.kraken.messaging.store.ProcessedMarker("saga:Order:e-1", "t", now)
+        val ingress = io.damoreira.kraken.messaging.store.ProcessedMarker("ingress:printer:k-1", "t", now)
+        val textual = io.damoreira.kraken.messaging.store.ProcessedMarker("processor:default:s-1", "t", now, "default", "orders-stream", "p-0", "a-5")
+        val decimal = io.damoreira.kraken.messaging.store.ProcessedMarker("processor:default:new-5", "t", now, "default", "kraken.events", "0", "5")
+        for (m in listOf(saga, ingress, textual, decimal)) assertTrue(markers.record(m))
+        assertFalse(markers.record(saga), "a positionless marker dedupes")
+        assertFalse(markers.record(io.damoreira.kraken.messaging.store.ProcessedMarker("processor:default:old-4", "t", now)), "an old marker dedupes")
+
+        val new = collection.find(Document("_id", decimal.id)).first()!!
+        assertIs<Int>(new["partition"], "a decimal segment is written as before")
+        assertIs<Long>(new["offset"])
+        assertEquals("a-5", collection.find(Document("_id", textual.id)).first()!!["offset"], "a text position in the same field")
+
+        assertEquals(2L, store.deleteMarkers("default", listOf(ReplayRange("kraken.events", "0", "4", "6"))), "old-4 and new-5, by value")
+        assertTrue(markers.exists("processor:default:old-9"), "past the range")
+        assertEquals(1L, store.deleteMarkers("default", listOf(ReplayRange("orders-stream", "p-0", "a-0", "a-9"))), "a text range deletes a text marker")
+        assertEquals(1L, store.deleteMarkers("default", listOf(ReplayRange("kraken.events", "0", "0", "99999"))), "old-9 goes by a wider range")
+        for (m in listOf(saga, ingress)) assertTrue(markers.exists(m.id), "${m.id} survives every reset")
     }
 
     @Test fun `a document written with missing fields reads as not paused, no operation and no replay`() = runBlocking<Unit> {

@@ -1,6 +1,6 @@
 package io.damoreira.kraken.messaging.mongo
 
-import io.damoreira.kraken.messaging.config.KafkaEventsAutoConfiguration
+import io.damoreira.kraken.messaging.config.EventsAutoConfiguration
 import io.damoreira.kraken.messaging.config.KrakenMessagingAutoConfiguration
 import io.damoreira.kraken.messaging.config.KrakenMessagingProperties
 import io.damoreira.kraken.messaging.store.MessageStore
@@ -25,7 +25,7 @@ import java.time.Clock
  */
 @AutoConfiguration(
     after = [KrakenMessagingAutoConfiguration::class],
-    before = [KafkaEventsAutoConfiguration::class],
+    before = [EventsAutoConfiguration::class],
     afterName = ["org.springframework.boot.data.mongodb.autoconfigure.DataMongoAutoConfiguration"],
     beforeName = ["org.springframework.boot.transaction.autoconfigure.TransactionAutoConfiguration"],
 )

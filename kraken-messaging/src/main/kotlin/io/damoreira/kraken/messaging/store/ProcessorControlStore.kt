@@ -57,20 +57,16 @@ interface ProcessorControlStore {
     /** Clears [op]'s lock ([expiredOnly]: only when its lease passed); false when [op] does not hold it (then nothing changes). */
     suspend fun release(processor: String, op: String, expiredOnly: Boolean = false): Boolean
 
-    /**
-     * Replaces the open replay ranges of [processor] (it exists: its lock is held). A store that keeps a range's segment and
-     * positions as numbers (the stored layout before neutral positions) refuses one whose segment or positions are not decimal
-     * with an [IllegalArgumentException].
-     */
+    /** Replaces the open replay ranges of [processor] (it exists: its lock is held). */
     suspend fun setReplay(processor: String, ranges: List<ReplayRange>)
 
     /** Removes the open range [range] (exactly that item) of [processor]; false when it was not there any more. */
     suspend fun removeReplay(processor: String, range: ReplayRange): Boolean
 
     /**
-     * Deletes [processor]'s stage-1 markers ([ProcessedMarker] with that processor) in [ranges]: topic = the range's source,
-     * partition = its segment, offset in `[from, until)`. Returns how many were deleted. A store that keeps the marker's partition
-     * and offset as numbers refuses a range whose segment or positions are not decimal with an [IllegalArgumentException].
+     * Deletes [processor]'s stage-1 markers ([ProcessedMarker] with that processor) in [ranges]: the range's source and segment, a
+     * position in `[from, until)`. Positions are ordered as the store orders them: decimal ones (every first-wave event store's) by
+     * value. Markers without a position are never deleted. Returns how many were deleted.
      */
     suspend fun deleteMarkers(processor: String, ranges: List<ReplayRange>): Long
 

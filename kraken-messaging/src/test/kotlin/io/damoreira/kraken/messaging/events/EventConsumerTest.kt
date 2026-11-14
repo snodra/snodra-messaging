@@ -1,4 +1,4 @@
-package io.damoreira.kraken.messaging.kafka
+package io.damoreira.kraken.messaging.events
 
 import io.damoreira.kraken.messaging.mongoStore
 import io.damoreira.kraken.messaging.metrics.MessagingMetrics
@@ -15,13 +15,14 @@ import io.damoreira.kraken.messaging.handler.HandlerRegistry
 import io.damoreira.kraken.messaging.test.KrakenContainers
 import org.apache.kafka.clients.admin.AdminClient
 import org.apache.kafka.clients.admin.NewTopic
-import org.apache.kafka.clients.consumer.ConsumerConfig
+import io.damoreira.kraken.messaging.eventstore.SubscriptionSpec
+import io.damoreira.kraken.messaging.kafka.KafkaEventStore
+import io.damoreira.kraken.messaging.kafka.KafkaEventStoreSettings
+import org.apache.kafka.clients.producer.KafkaProducer
 import org.apache.kafka.clients.producer.ProducerConfig
 import org.apache.kafka.clients.producer.ProducerRecord
 import org.apache.kafka.common.header.internals.RecordHeader
-import org.apache.kafka.common.serialization.ByteArrayDeserializer
 import org.apache.kafka.common.serialization.ByteArraySerializer
-import org.apache.kafka.common.serialization.StringDeserializer
 import org.apache.kafka.common.serialization.StringSerializer
 import org.awaitility.Awaitility.await
 import org.junit.jupiter.api.AfterAll
@@ -34,9 +35,6 @@ import org.springframework.data.mongodb.MongoTransactionManager
 import org.springframework.data.mongodb.core.MongoTemplate
 import org.springframework.data.mongodb.core.SimpleMongoClientDatabaseFactory
 import org.springframework.data.mongodb.core.query.Query
-import org.springframework.kafka.core.DefaultKafkaConsumerFactory
-import org.springframework.kafka.core.DefaultKafkaProducerFactory
-import org.springframework.kafka.core.KafkaTemplate
 import org.springframework.transaction.support.TransactionTemplate
 import java.time.Duration
 import java.time.Instant
@@ -71,8 +69,8 @@ class EventConsumerTest {
     private val mongoContainer = KrakenContainers.mongo()
     private lateinit var mongo: MongoTemplate
     private lateinit var tx: TransactionTemplate
-    private lateinit var producerFactory: DefaultKafkaProducerFactory<String, ByteArray>
-    private lateinit var kafka: KafkaTemplate<String, ByteArray>
+    private lateinit var kafka: KafkaProducer<String, ByteArray>
+    private lateinit var events: KafkaEventStore
     private val codec = JsonCodec()
     private lateinit var topic: String
     private lateinit var handlers: RecordingHandlers
@@ -86,7 +84,7 @@ class EventConsumerTest {
         val factory = SimpleMongoClientDatabaseFactory(MongoClients.create(mongoContainer.connectionString + "/?directConnection=true"), "consumer_test")
         mongo = MongoTemplate(factory)
         tx = TransactionTemplate(MongoTransactionManager(factory))
-        producerFactory = DefaultKafkaProducerFactory(
+        kafka = KafkaProducer(
             mapOf<String, Any>(
                 ProducerConfig.BOOTSTRAP_SERVERS_CONFIG to kafkaContainer.bootstrapServers,
                 ProducerConfig.ACKS_CONFIG to "all",
@@ -95,12 +93,13 @@ class EventConsumerTest {
             StringSerializer(),
             ByteArraySerializer(),
         )
-        kafka = KafkaTemplate(producerFactory)
+        events = KafkaEventStore(KafkaEventStoreSettings(kafkaContainer.bootstrapServers))
     }
 
     @AfterAll
     fun stop() {
-        producerFactory.destroy()
+        events.close()
+        kafka.close()
         kafkaContainer.stop()
         mongoContainer.stop()
     }
@@ -128,18 +127,9 @@ class EventConsumerTest {
     }
 
     private fun startConsumer(maxAttempts: Int = 5, backOffMs: Long = 100, metrics: MessagingMetrics = NoopMessagingMetrics) {
-        val factory = DefaultKafkaConsumerFactory(
-            mapOf<String, Any>(
-                ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG to kafkaContainer.bootstrapServers,
-                ConsumerConfig.AUTO_OFFSET_RESET_CONFIG to "earliest",
-                ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG to false,
-            ),
-            StringDeserializer(),
-            ByteArrayDeserializer(),
-        )
         val invoker = HandlerInvoker(registry, codec)
         consumer = EventConsumer(
-            factory, topic, "group-" + UUID.randomUUID(), LocalEventDispatcher(registry, invoker, mongoStore(mongo), metrics = metrics),
+            events, SubscriptionSpec("group-" + UUID.randomUUID(), topic), LocalEventDispatcher(registry, invoker, mongoStore(mongo), metrics = metrics),
             maxAttempts, backOffMs = backOffMs, metrics = metrics,
         ).also { it.start() }
     }
@@ -154,7 +144,7 @@ class EventConsumerTest {
 
     private fun committedOffset(): Long? =
         AdminClient.create(mapOf<String, Any>("bootstrap.servers" to kafkaContainer.bootstrapServers)).use { admin ->
-            admin.listConsumerGroupOffsets(consumer!!.groupIdForTest()).partitionsToOffsetAndMetadata().get().values.singleOrNull()?.offset()
+            admin.listConsumerGroupOffsets(consumer!!.subscription).partitionsToOffsetAndMetadata().get().values.singleOrNull()?.offset()
         }
 
     private fun awaitSeen(vararg ids: String) =

@@ -281,27 +281,30 @@ abstract class MessageStoreConformanceTest {
         val noKey = letter(PROCESSOR, null, partition = 0, offset = 9, parkedAt = t.plusMillis(4), payload = null, payloadBinary = byteArrayOf(0xC3.toByte(), 0x28))
         val invalidOnly = letter(PROCESSOR, "k-invalid", partition = 1, offset = 2, parkedAt = t.plusMillis(5), reason = DeadLetterReason.INVALID)
         val otherProcessor = letter("audit", "k1", partition = 0, offset = 3, parkedAt = t, payload = null)
-        for (l in listOf(head, waiting5, waiting7, invalid, otherKey, noKey, invalidOnly, otherProcessor)) assertTrue(letters.park(l), "parked ${l.id}")
+        // Position 10: before 3 by its text, after it by value (decimal positions are ordered by value).
+        val waiting10 = letter(PROCESSOR, "k1", partition = 0, offset = 10, parkedAt = t.plusMillis(6), reason = DeadLetterReason.SEQUENCED, blockedBy = head.id)
+        for (l in listOf(head, waiting5, waiting7, invalid, otherKey, noKey, invalidOnly, otherProcessor, waiting10)) assertTrue(letters.park(l), "parked ${l.id}")
         assertFalse(letters.park(head.copy(attempts = 9)), "a letter is parked once")
 
-        assertEquals(head.id, letters.head(PROCESSOR, "k1"), "the lowest offset that is not INVALID")
+        assertEquals(head.id, letters.head(PROCESSOR, "k1"), "the earliest position that is not INVALID, decimal positions by value")
         assertEquals(otherKey.id, letters.head(PROCESSOR, "k2"))
         assertNull(letters.head(PROCESSOR, "k3"))
         assertEquals(otherProcessor.id, letters.head("audit", "k1"), "sequencing is per processor")
-        assertEquals(head.id, letters.earlier(PROCESSOR, "k1", 7))
-        assertNull(letters.earlier(PROCESSOR, "k1", 3), "the INVALID letter below never blocks")
+        assertEquals(head.id, letters.earlier(PROCESSOR, "k1", "7"))
+        assertEquals(head.id, letters.earlier(PROCESSOR, "k1", "10"), "decimal positions by value")
+        assertNull(letters.earlier(PROCESSOR, "k1", "3"), "the INVALID letter below never blocks")
         assertTrue(letters.exists(waiting5.id))
         assertFalse(letters.exists("$PROCESSOR:$TOPIC:0:99"))
 
-        assertEquals(mapOf(0 to setOf("k1"), 1 to setOf("k2")), letters.keys(PROCESSOR, TOPIC, listOf(0, 1)), "keys of blocking letters by partition, no INVALID-only key")
-        assertEquals(mapOf(1 to setOf("k2")), letters.keys(PROCESSOR, TOPIC, listOf(1)))
-        assertEquals(emptyMap<Int, Set<String>>(), letters.keys(PROCESSOR, TOPIC, emptyList()))
-        assertEquals(emptyMap<Int, Set<String>>(), letters.keys(PROCESSOR, "other.topic", listOf(0, 1)))
+        assertEquals(mapOf("0" to setOf("k1"), "1" to setOf("k2")), letters.keys(PROCESSOR, TOPIC, listOf("0", "1")), "keys of blocking letters by segment, no INVALID-only key")
+        assertEquals(mapOf("1" to setOf("k2")), letters.keys(PROCESSOR, TOPIC, listOf("1")))
+        assertEquals(emptyMap<String, Set<String>>(), letters.keys(PROCESSOR, TOPIC, emptyList()))
+        assertEquals(emptyMap<String, Set<String>>(), letters.keys(PROCESSOR, "other.topic", listOf("0", "1")))
 
-        assertEquals(7L, letters.count(PROCESSOR))
-        assertEquals(8L, letters.count(null))
+        assertEquals(8L, letters.count(PROCESSOR))
+        assertEquals(9L, letters.count(null))
         assertEquals(
-            listOf(invalid, head, waiting5, waiting7, otherKey, noKey, invalidOnly).map { it.id },
+            listOf(invalid, head, waiting5, waiting7, otherKey, noKey, invalidOnly, waiting10).map { it.id },
             letters.list(PROCESSOR, 100).map { it.id },
             "by parkedAt, then id",
         )
@@ -312,8 +315,9 @@ abstract class MessageStoreConformanceTest {
         assertEquals(otherProcessor, letters.get(otherProcessor.id), "an empty payload")
         assertNull(letters.get("$PROCESSOR:$TOPIC:0:99"))
         assertEquals(
-            listOf(head, waiting5, waiting7, invalid, otherKey, noKey, invalidOnly).map { DeadLetterStore.Summary(it.id, it.key, it.offset, it.reason, it.parkedAt) }.toSet(),
-            letters.summaries(PROCESSOR).toSet(),
+            listOf(invalid, invalidOnly, head, otherKey, waiting5, waiting7, noKey, waiting10).map { DeadLetterStore.Summary(it.id, it.key, it.position, it.reason, it.parkedAt) },
+            letters.summaries(PROCESSOR),
+            "by position (decimal ones by value), then id",
         )
 
         val before = Instant.now().truncatedTo(ChronoUnit.MILLIS)
@@ -334,7 +338,7 @@ abstract class MessageStoreConformanceTest {
         assertEquals(waiting5.id, letters.head(PROCESSOR, "k1"), "the next letter of the key is the head now")
         inTransaction { assertTrue(letters.deleteInTransaction(waiting5.id)) }
         assertEquals(waiting7.id, letters.head(PROCESSOR, "k1"))
-        assertEquals(5L, letters.count(PROCESSOR))
+        assertEquals(6L, letters.count(PROCESSOR))
     }
 
     // ----------------------------------------------------------------------------------------------------- processor control
@@ -431,7 +435,8 @@ abstract class MessageStoreConformanceTest {
             marker("processor:$processor:$topic:$partition:$offset", processor = processor, topic = topic, partition = partition, offset = offset)
         val inRange = (3L until 6L).map { stage1(PROCESSOR, TOPIC, 0, it) }
         val inSecondRange = listOf(stage1(PROCESSOR, TOPIC, 2, 7))
-        val kept = (0L until 3L).map { stage1(PROCESSOR, TOPIC, 0, it) } + stage1(PROCESSOR, TOPIC, 0, 6) + // the range is [3, 6)
+        // The range is [3, 6); 40 lies in it by its text but not by value (decimal positions are ordered by value).
+        val kept = (0L until 3L).map { stage1(PROCESSOR, TOPIC, 0, it) } + stage1(PROCESSOR, TOPIC, 0, 6) + stage1(PROCESSOR, TOPIC, 0, 40) +
             stage1(PROCESSOR, TOPIC, 1, 4) + stage1(PROCESSOR, "other.topic", 0, 4) + stage1("audit", TOPIC, 0, 4) +
             marker("saga:t.Order:evt-4") + marker("ingress:src:key-4")
         (inRange + inSecondRange + kept).forEach { assertTrue(markers.record(it), "recorded ${it.id}") }
@@ -837,7 +842,7 @@ abstract class MessageStoreConformanceTest {
 
     private fun marker(
         id: String, processedAt: Instant = now(), processor: String? = null, topic: String? = null, partition: Int? = null, offset: Long? = null,
-    ) = ProcessedMarker(id, "t.Happened", processedAt, processor, topic, partition, offset)
+    ) = ProcessedMarker(id, "t.Happened", processedAt, processor, topic, partition?.toString(), offset?.toString())
 
     private fun letter(
         processor: String, key: String?, partition: Int, offset: Long, parkedAt: Instant,
@@ -847,9 +852,9 @@ abstract class MessageStoreConformanceTest {
     ) = DeadLetter(
         id = "$processor:$TOPIC:$partition:$offset",
         processor = processor,
-        topic = TOPIC,
-        partition = partition,
-        offset = offset,
+        source = TOPIC,
+        segment = partition.toString(),
+        position = offset.toString(),
         key = key,
         eventId = headers["id"],
         eventType = headers["type"],

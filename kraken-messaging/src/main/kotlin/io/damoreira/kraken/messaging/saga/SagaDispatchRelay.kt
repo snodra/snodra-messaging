@@ -5,7 +5,7 @@ import io.damoreira.kraken.messaging.RetryPolicy
 import io.damoreira.kraken.messaging.SendOptions
 import io.damoreira.kraken.messaging.codec.JsonCodec
 import io.damoreira.kraken.messaging.codec.MessageTypeResolver
-import io.damoreira.kraken.messaging.kafka.LocalEventDispatcher
+import io.damoreira.kraken.messaging.events.LocalEventDispatcher
 import io.damoreira.kraken.messaging.store.SagaDispatchStore
 import io.damoreira.kraken.messaging.tracing.CorrelationContext
 import kotlinx.coroutines.runBlocking

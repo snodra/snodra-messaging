@@ -1,10 +1,12 @@
-package io.damoreira.kraken.messaging.kafka
+package io.damoreira.kraken.messaging.events
 
 import io.damoreira.kraken.hub.v1.ProcessorState
 import io.damoreira.kraken.hub.v1.ProcessorStatus
 import io.damoreira.kraken.messaging.codec.MessageTypeResolver
 import io.damoreira.kraken.messaging.DEAD_LETTERS
 import io.damoreira.kraken.messaging.deadletter.DeadLetterFactory
+import io.damoreira.kraken.messaging.eventstore.SubscriptionSpec
+import io.damoreira.kraken.messaging.handler.Processors
 import io.damoreira.kraken.messaging.fixtures.Happened
 import io.damoreira.kraken.messaging.handler.EventHandler
 import io.damoreira.kraken.messaging.handler.HandlerInvoker
@@ -43,7 +45,15 @@ class OrdersHandlers {
     }
 }
 
-/** Named processors against a real Kafka and MongoDB (ADR 0022): groups, markers, independence, and the status they report. */
+class CountingHandlers {
+    val count = java.util.concurrent.atomic.AtomicInteger()
+    @EventHandler fun on(event: Happened) { count.incrementAndGet() }
+}
+
+/**
+ * Named processors against a real Kafka (the event-store add-on) and MongoDB (ADR 0022, ADR 0027): subscriptions (today's consumer
+ * groups), markers, independence, and the status they report.
+ */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class EventProcessorsTest {
     private val support = KafkaMongoSupport("event_processors")
@@ -70,7 +80,7 @@ class EventProcessorsTest {
         started.clear()
     }
 
-    private fun processors(vararg beans: Any, adminServers: String = support.bootstrapServers): EventProcessors {
+    private fun processors(vararg beans: Any): EventProcessors {
         val registry = HandlerRegistry(MessageTypeResolver("test")).also { r -> beans.forEach { r.register(it) } }
         val invoker = HandlerInvoker(registry, support.codec)
         val dispatcher = LocalEventDispatcher(registry, invoker, support.store)
@@ -79,11 +89,10 @@ class EventProcessorsTest {
             dispatcher,
             consumerFor = { processor ->
                 EventConsumer(
-                    support.consumerFactory(), topic, io.damoreira.kraken.messaging.handler.Processors.groupId(group, processor), dispatcher,
+                    support.events, SubscriptionSpec(Processors.subscriptionName(group, processor), topic), dispatcher,
                     maxAttempts = 2, backOffMs = 50, codec = support.codec, processor = processor, deadLetters = sink,
                 )
             },
-            adminConfig = mapOf("bootstrap.servers" to adminServers, "request.timeout.ms" to 2000, "default.api.timeout.ms" to 2000),
         ).also { started += it }
     }
 
@@ -91,10 +100,10 @@ class EventProcessorsTest {
 
     private fun markers() = mongo.findAll(Document::class.java, "processed_events").map { it.getString("_id") }.toSet()
 
-    @Test fun `each processor has its own group and marker family, and both get the event`() {
+    @Test fun `each processor has its own subscription, today's consumer group, and marker family, and both get the event`() {
         val p = processors(plain, orders).also { it.start() }
         assertEquals(listOf("default", "orders"), p.consumers().map { it.processor })
-        assertEquals(listOf("$group.default", "$group.orders"), p.consumers().map { it.group })
+        assertEquals(listOf("$group.default", "$group.orders"), p.consumers().map { it.subscription }, "default included, as deployed")
         support.send(topic, "e-1", key = "k1", partition = 0)
         await().atMost(Duration.ofSeconds(20)).until { plain.seen.size == 1 && orders.seen.size == 1 }
         await().atMost(Duration.ofSeconds(10)).until { support.committed("$group.default")[0] == 1L && support.committed("$group.orders")[0] == 1L }
@@ -142,7 +151,7 @@ class EventProcessorsTest {
         }
     }
 
-    @Test fun `status reports the assignment, positions, committed offsets, high watermarks and lag`() {
+    @Test fun `status reports the event store, the assignment, positions, committed positions, heads and lag`() {
         val first = processors(orders).also { it.start() }
         assertEquals(ProcessorState.PROCESSOR_STARTING, first.named("orders").state, "no partition assigned yet")
         support.send(topic, "a-1", key = "k1", partition = 0)
@@ -151,19 +160,19 @@ class EventProcessorsTest {
         await().atMost(Duration.ofSeconds(15)).untilAsserted {
             val s = first.named("orders")
             assertEquals(ProcessorState.PROCESSOR_RUNNING, s.state)
-            assertEquals(listOf(0, 1), s.partitionsList.map { it.partition })
-            val p0 = s.partitionsList[0]
-            assertEquals(2, p0.position)
-            assertEquals(2, p0.committed)
-            assertEquals(2, p0.highWatermark)
+            assertEquals(listOf("0", "1"), s.segmentsList.map { it.segment })
+            val p0 = s.segmentsList[0]
+            assertEquals("2", p0.position)
+            assertEquals("2", p0.committed)
+            assertEquals("2", p0.head)
             assertEquals(0, p0.lag)
-            val p1 = s.partitionsList[1]
-            assertEquals(-1, p1.position, "nothing acknowledged on partition 1 yet")
-            assertEquals(-1, p1.committed)
-            assertEquals(0, p1.highWatermark)
-            assertEquals(-1, p1.lag, "no committed offset and no position: unknown")
-            assertEquals("$group.orders", s.groupId)
-            assertEquals(topic, s.topic)
+            val p1 = s.segmentsList[1]
+            assertEquals("", p1.committed, "nothing committed on segment 1")
+            assertEquals("0", p1.head)
+            assertEquals("$group.orders", s.subscription)
+            assertEquals(topic, s.source)
+            assertEquals("kafka", s.eventStore)
+            assertEquals(listOf("browse", "lag", "native-dead-letter", "replay"), s.capabilitiesList)
             assertEquals(listOf("test.Happened"), s.eventTypesList)
             assertEquals("collection", s.deadLetterMode)
             assertEquals(2, s.processedTotal)
@@ -177,36 +186,36 @@ class EventProcessorsTest {
         val second = processors(orders).also { it.start() }
         try {
             await().atMost(Duration.ofSeconds(20)).untilAsserted {
-                val p0 = second.named("orders").partitionsList.single { it.partition == 0 }
-                assertEquals(2, p0.committed)
-                assertEquals(5, p0.highWatermark)
-                assertEquals(3, p0.lag)
-                assertEquals(-1, p0.position)
+                val p0 = second.named("orders").segmentsList.single { it.segment == "0" }
+                assertEquals("2", p0.committed)
+                assertEquals("5", p0.head)
+                assertEquals(3, p0.lag, "the lag shows while the handler is busy")
+                assertEquals("3", p0.position, "the record in hand was delivered, not acknowledged")
             }
         } finally {
             orders.gate!!.countDown()
         }
     }
 
-    @Test fun `partitions follow a rebalance between two instances`() {
+    @Test fun `segments follow a rebalance between two instances`() {
         val one = processors(orders).also { it.start() }
-        await().atMost(Duration.ofSeconds(20)).until { one.named("orders").partitionsCount == 2 }
+        await().atMost(Duration.ofSeconds(20)).until { one.named("orders").segmentsCount == 2 }
         val two = processors(orders).also { it.start() }
         await().atMost(Duration.ofSeconds(30)).untilAsserted {
             val a = one.named("orders")
             val b = two.named("orders")
             assertEquals(ProcessorState.PROCESSOR_RUNNING, a.state)
             assertEquals(ProcessorState.PROCESSOR_RUNNING, b.state)
-            assertEquals(1, a.partitionsCount)
-            assertEquals(1, b.partitionsCount)
-            assertEquals(setOf(0, 1), (a.partitionsList + b.partitionsList).map { it.partition }.toSet())
+            assertEquals(1, a.segmentsCount)
+            assertEquals(1, b.segmentsCount)
+            assertEquals(setOf("0", "1"), (a.segmentsList + b.segmentsList).map { it.segment }.toSet())
         }
         two.stop()
-        await().atMost(Duration.ofSeconds(30)).until { one.named("orders").partitionsCount == 2 }
+        await().atMost(Duration.ofSeconds(30)).until { one.named("orders").segmentsCount == 2 }
     }
 
-    @Test fun `only processors with handlers start, and building the status never waits for Kafka`() {
-        val p = processors(orders, adminServers = "localhost:1").also { it.start() }
+    @Test fun `only processors with handlers start, and building the status never waits for the event store`() {
+        val p = processors(orders).also { it.start() }
         assertEquals(listOf("orders"), p.consumers().map { it.processor }, "default has no handler and no saga: not started")
         repeat(5) {
             val began = System.nanoTime()
@@ -215,6 +224,57 @@ class EventProcessorsTest {
             assertEquals(listOf("orders"), s.map { it.name })
             Thread.sleep(300)
         }
-        assertTrue(processors(adminServers = "localhost:1").also { it.start() }.processorStatuses().isEmpty())
+        assertTrue(processors().also { it.start() }.processorStatuses().isEmpty())
+    }
+
+    /**
+     * On Kafka the event store keeps today's names: the letter id `<processor>:<topic>:<partition>:<offset>` with an Int32
+     * `partition` and an Int64 `offset`, the commit in the consumer group `<service>.<processor>`, the status naming that group.
+     */
+    @Test fun deadLetterIdsUnchangedOnKafka() {
+        orders.failing = "bad-1"
+        val p = processors(orders).also { it.start() }
+        support.send(topic, "ok-1", key = "k9", partition = 1)
+        support.send(topic, "bad-1", key = "k1", partition = 1)
+        await().atMost(Duration.ofSeconds(30)).until { support.committed("$group.orders")[1] == 2L }
+        val letter = mongo.findById("orders:$topic:1:1", Document::class.java, DEAD_LETTERS)
+        assertTrue(letter != null, "the letter id is <processor>:<topic>:<partition>:<offset>")
+        assertEquals(1, letter["partition"], "Int32")
+        assertEquals(1L, letter["offset"], "Int64")
+        assertEquals(topic, letter["topic"])
+        assertEquals("$group.orders", p.named("orders").subscription)
+    }
+
+    /**
+     * Throughput of one processor end to end (subscription, marker transaction in MongoDB, acknowledgement), the shape of the
+     * add-on's 10 000 event test; the spring-kafka consumer it replaces read the same 10 000 events at about 575 a second here.
+     */
+    @Test fun `a processor reads thousands of events end to end without falling behind the old consumer`() {
+        val total = 10_000
+        org.apache.kafka.clients.producer.KafkaProducer(
+            mapOf<String, Any>("bootstrap.servers" to support.bootstrapServers, "linger.ms" to 5),
+            org.apache.kafka.common.serialization.StringSerializer(), org.apache.kafka.common.serialization.ByteArraySerializer(),
+        ).use { producer ->
+            repeat(total) { n ->
+                val record = org.apache.kafka.clients.producer.ProducerRecord<String, ByteArray>(
+                    topic, "k${n % 50}", support.codec.encode(Happened("t-$n", java.time.Instant.now())),
+                )
+                record.headers().add("type", "test.Happened".toByteArray())
+                record.headers().add("id", "t-$n".toByteArray())
+                producer.send(record)
+            }
+            producer.flush()
+        }
+        val counting = CountingHandlers()
+        val counter = counting.count
+        processors(counting).also { it.start() }
+        await().atMost(Duration.ofSeconds(60)).until { counter.get() > 0 }
+        val started = System.nanoTime()
+        await().atMost(Duration.ofSeconds(240)).until { counter.get() >= total }
+        val seconds = (System.nanoTime() - started) / 1e9
+        val rate = total / seconds
+        org.slf4j.LoggerFactory.getLogger(EventProcessorsTest::class.java)
+            .info("THROUGHPUT event-store path: {} events in {} s = {} events/s", total, "%.2f".format(seconds), rate.toLong())
+        assertTrue(rate > 200, "at least 200 events/s end to end (the old consumer: about 575), was ${rate.toLong()}")
     }
 }

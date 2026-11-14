@@ -8,7 +8,7 @@ import kotlin.coroutines.CoroutineContext
 
 /**
  * The correlation id of the message being handled, carried in the coroutine context from an incoming hub request or
- * Kafka record to every message sent while handling it. While the coroutine runs it is also mirrored into the SLF4J
+ * delivered event to every message sent while handling it. While the coroutine runs it is also mirrored into the SLF4J
  * [MDC] under [MDC_KEY] (and the thread's previous value restored when it suspends or completes), so log lines carry it
  * and blocking code on the same thread (`sendBlocking`, `publishBlocking`) still finds it.
  */

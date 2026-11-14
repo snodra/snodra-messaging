@@ -11,16 +11,19 @@ import org.springframework.data.mongodb.core.MongoTemplate
 import java.time.Instant
 import java.util.Date
 
-/** The `processed_events` collection: `{_id, type, processedAt}`, and `processor`, `topic`, `partition`, `offset` on a stage-1 marker. */
+/**
+ * The `processed_events` collection: `{_id, type, processedAt}`, and `processor`, `topic` (the source), `partition` (the segment)
+ * and `offset` (the position) on a stage-1 marker, stored as [Positions] says (decimal ones as the numbers they always were).
+ */
 internal class MongoProcessedEventStore(private val mongo: MongoTemplate) : ProcessedEventStore {
     private val collection get() = mongo.joined(COLLECTION)
 
     override suspend fun record(marker: ProcessedMarker): Boolean {
         val doc = Document("_id", marker.id).append("type", marker.type).append("processedAt", Date.from(marker.processedAt))
         marker.processor?.let { doc["processor"] = it }
-        marker.topic?.let { doc["topic"] = it }
-        marker.partition?.let { doc["partition"] = it }
-        marker.offset?.let { doc["offset"] = it }
+        marker.source?.let { doc["topic"] = it }
+        marker.segment?.let { doc["partition"] = Positions.segment(it) }
+        marker.position?.let { doc["offset"] = Positions.position(it) }
         return try {
             collection.insertOne(doc)
             true

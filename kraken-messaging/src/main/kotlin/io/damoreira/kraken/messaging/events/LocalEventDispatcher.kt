@@ -1,4 +1,4 @@
-package io.damoreira.kraken.messaging.kafka
+package io.damoreira.kraken.messaging.events
 
 import io.damoreira.kraken.messaging.MessageContext
 import io.damoreira.kraken.messaging.handler.HandlerInvoker
@@ -17,7 +17,7 @@ import java.time.Instant
 
 /**
  * Runs one event inside this service: first its ordinary `@EventHandler`s (stage 1), then the saga runtime ([SagaStage],
- * stage 2). Shared by the Kafka event processors ([EventConsumer], one per processor, [dispatchIn]), the external sources
+ * stage 2). Shared by the event processors ([EventConsumer], one per processor, [dispatchIn]), the external sources
  * and the webhook ingress ([dispatch]).
  *
  * Stage 1 runs per event processor (ADR 0022): the processor's idempotency marker ([ProcessedMarker], id
@@ -30,7 +30,7 @@ import java.time.Instant
  * thrown, so the caller redelivers, parks or skips the record by its own rules; a redelivery applies nothing twice because
  * the markers decide. Both stages finish before the caller acknowledges the record.
  *
- * Each stage-1 run of [dispatchIn] (a consumed Kafka record) is timed into [metrics] (P9), whether its handlers ran, failed
+ * Each stage-1 run of [dispatchIn] (a delivered event) is timed into [metrics] (P9), whether its handlers ran, failed
  * or found the marker; the saga stage and the other entry points are not.
  */
 class LocalEventDispatcher(
@@ -98,7 +98,7 @@ class LocalEventDispatcher(
     }
 
     /**
-     * Dispatches the event to [processor] only: its stage 1 (its marker carrying [position], the Kafka record's), then (only
+     * Dispatches the event to [processor] only: its stage 1 (its marker carrying [position], the delivered event's), then (only
      * for `default`) the sagas. In a [replay] (the record is in a replay range of a reset, P6b) the `@DisallowReplay`
      * handlers and the sagas are skipped. Throws stage 1's failure (stage 2's suppressed in it), or a [SagaStageException]
      * when only stage 2 failed.
@@ -182,7 +182,7 @@ class LocalEventDispatcher(
                     val recorded = store.processedEvents.record(
                         ProcessedMarker(
                             marker, type, Instant.now(),
-                            processor.takeIf { position != null }, position?.topic, position?.partition, position?.offset,
+                            processor.takeIf { position != null }, position?.source, position?.segment, position?.position,
                         ),
                     )
                     if (!recorded) throw AlreadyProcessed // only the marker's duplicate means "seen before"; a handler's is a failure

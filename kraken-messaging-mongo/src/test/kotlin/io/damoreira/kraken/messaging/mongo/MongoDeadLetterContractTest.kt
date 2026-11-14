@@ -7,14 +7,11 @@ import io.damoreira.kraken.messaging.deadletter.DeadLetterFactory
 import io.damoreira.kraken.messaging.deadletter.DeadLetterMode
 import io.damoreira.kraken.messaging.deadletter.DeadLetterReason
 import io.damoreira.kraken.messaging.deadletter.DeadLetters
-import io.damoreira.kraken.messaging.kafka.LocalEventDispatcher
+import io.damoreira.kraken.messaging.events.LocalEventDispatcher
 import io.damoreira.kraken.messaging.test.KrakenContainers
 import io.mockk.every
 import io.mockk.mockk
-import org.apache.kafka.clients.consumer.ConsumerRecord
-import org.apache.kafka.common.header.internals.RecordHeader
-import org.apache.kafka.common.header.internals.RecordHeaders
-import org.apache.kafka.common.record.TimestampType
+import io.damoreira.kraken.messaging.eventstore.Delivery
 import org.bson.BsonDocument
 import org.bson.Document
 import org.junit.jupiter.api.AfterAll
@@ -29,7 +26,6 @@ import java.time.Clock
 import java.time.Duration
 import java.time.Instant
 import java.time.ZoneOffset
-import java.util.Optional
 import kotlinx.coroutines.runBlocking
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -72,9 +68,15 @@ class MongoDeadLetterContractTest {
     /** Letters built with the clock at [at] (the fixture's `parkedAt`). */
     private fun storeAt(at: String) = DeadLetterFactory(Duration.ofDays(30), Clock.fixed(Instant.parse(at), ZoneOffset.UTC))
 
-    private fun record(partition: Int, offset: Long, key: String?, value: ByteArray?, vararg headers: Pair<String, ByteArray?>) =
-        ConsumerRecord("kraken.events", partition, offset, ConsumerRecord.NO_TIMESTAMP, TimestampType.NO_TIMESTAMP_TYPE,
-            -1, -1, key, value, RecordHeaders(headers.map { RecordHeader(it.first, it.second) }), Optional.empty())
+    /**
+     * A record of `kraken.events` as the Kafka event store delivers it: headers as lossy UTF-8 text, a repeated name keeping its
+     * last value at its first place (the event-store contract carries headers as text, one value per name).
+     */
+    private fun record(partition: Int, offset: Long, key: String?, value: ByteArray?, vararg headers: Pair<String, ByteArray?>): Delivery {
+        val text = LinkedHashMap<String, String>()
+        headers.forEach { (name, bytes) -> text[name] = String(bytes ?: ByteArray(0), Charsets.UTF_8) }
+        return Delivery(partition.toString(), offset.toString(), key, text, value ?: ByteArray(0), 0L)
+    }
 
     @Test fun `a HANDLER_FAILED letter is the fixture`() = runBlocking<Unit> {
         val r = record(1, 42, "order-7", """{"orderId":"o-7","amount":12.30}""".toByteArray(),
@@ -82,7 +84,7 @@ class MongoDeadLetterContractTest {
             "correlationId" to "corr-7".toByteArray(), // a repeated header keeps its last value
             "userId" to ByteArray(0))
         val at = storeAt("2026-11-04T10:00:05Z")
-        val letter = at.letter("orders", r, DeadLetterReason.HANDLER_FAILED, DeadLetterError("IllegalStateException", "boom"), attempts = 5)
+        val letter = at.letter("orders", "kraken.events", r, DeadLetterReason.HANDLER_FAILED, DeadLetterError("IllegalStateException", "boom"), attempts = 5)
         assertTrue(store.park(letter))
         assertEquals(fixture("handler_failed"), stored("orders:kraken.events:1:42"))
     }
@@ -91,26 +93,26 @@ class MongoDeadLetterContractTest {
         val r = record(1, 43, "order-7", """{"orderId":"o-7"}""".toByteArray(),
             "type" to "examples.OrderShipped".toByteArray(), "id" to "evt-8".toByteArray())
         val at = storeAt("2026-11-04T10:00:06.250Z")
-        assertTrue(store.park(at.sequenced("orders", r, headId = "orders:kraken.events:1:42")))
+        assertTrue(store.park(at.sequenced("orders", "kraken.events", r, headId = "orders:kraken.events:1:42")))
         assertEquals(fixture("sequenced"), stored("orders:kraken.events:1:43"))
     }
 
     @Test fun `INVALID letters with a binary or an empty value and no key are the fixtures`() = runBlocking<Unit> {
         val binary = record(0, 7, null, byteArrayOf(0xFF.toByte(), 0, 0xFE.toByte()), "source" to "legacy-".toByteArray() + 0xFF.toByte() + "tool".toByteArray())
         val at = storeAt("2026-11-04T10:01:00Z")
-        assertTrue(store.park(at.letter("default", binary, DeadLetterReason.INVALID, DeadLetterError.invalid("record without type header"), attempts = 0)))
+        assertTrue(store.park(at.letter("default", "kraken.events", binary, DeadLetterReason.INVALID, DeadLetterError.invalid("record without type header"), attempts = 0)))
         assertEquals(fixture("invalid_binary"), stored("default:kraken.events:0:7"))
 
         val empty = record(2, 9, "order-9", ByteArray(0), "type" to "examples.OrderPlaced".toByteArray())
         val later = storeAt("2026-11-04T10:02:00Z")
-        assertTrue(store.park(later.letter("orders", empty, DeadLetterReason.INVALID, DeadLetterError.invalid("payload is not a JSON object"), attempts = 0)))
+        assertTrue(store.park(later.letter("orders", "kraken.events", empty, DeadLetterReason.INVALID, DeadLetterError.invalid("payload is not a JSON object"), attempts = 0)))
         assertEquals(fixture("invalid_empty"), stored("orders:kraken.events:2:9"))
     }
 
     @Test fun `blank id and type headers are kept in headers and absent as eventId and eventType`() = runBlocking<Unit> {
         val r = record(0, 8, null, "{}".toByteArray(), "type" to "  ".toByteArray(), "id" to ByteArray(0))
         val at = storeAt("2026-11-04T10:03:00Z")
-        assertTrue(store.park(at.letter("default", r, DeadLetterReason.INVALID, DeadLetterError.invalid("record without type header"), attempts = 0)))
+        assertTrue(store.park(at.letter("default", "kraken.events", r, DeadLetterReason.INVALID, DeadLetterError.invalid("record without type header"), attempts = 0)))
         assertEquals(fixture("invalid_blank_headers"), stored("default:kraken.events:0:8"))
     }
 
@@ -118,15 +120,15 @@ class MongoDeadLetterContractTest {
         val r = record(1, 44, "order-8", """{"orderId":"o-8"}""".toByteArray(),
             "type" to "examples.OrderPlaced".toByteArray(), "id" to "evt-9".toByteArray())
         val at = storeAt("2026-11-04T10:04:00Z")
-        assertTrue(store.park(at.letter("orders", r, DeadLetterReason.HANDLER_FAILED, DeadLetterError("IllegalStateException", "boom"), attempts = 5, replay = true)))
+        assertTrue(store.park(at.letter("orders", "kraken.events", r, DeadLetterReason.HANDLER_FAILED, DeadLetterError("IllegalStateException", "boom"), attempts = 5, replay = true)))
         assertEquals(fixture("replayed"), stored("orders:kraken.events:1:44"))
         assertFalse("replay" in fixture("handler_failed"), "absent when false")
     }
 
     @Test fun `parking is idempotent - the same record parks once`() = runBlocking<Unit> {
         val r = record(2, 41, "order-7", "{}".toByteArray(), "type" to "t".toByteArray())
-        assertTrue(store.park(letters.letter("orders", r, DeadLetterReason.HANDLER_FAILED, DeadLetterError("X", "first"), attempts = 1)))
-        assertFalse(store.park(letters.letter("orders", r, DeadLetterReason.HANDLER_FAILED, DeadLetterError("X", "second"), attempts = 1)))
+        assertTrue(store.park(letters.letter("orders", "kraken.events", r, DeadLetterReason.HANDLER_FAILED, DeadLetterError("X", "first"), attempts = 1)))
+        assertFalse(store.park(letters.letter("orders", "kraken.events", r, DeadLetterReason.HANDLER_FAILED, DeadLetterError("X", "second"), attempts = 1)))
         assertEquals("first", stored("orders:kraken.events:2:41").getDocument("error").getString("message").value)
     }
 
@@ -136,7 +138,7 @@ class MongoDeadLetterContractTest {
 
         val failed = store.get("orders:kraken.events:1:42")!!
         assertEquals(DeadLetter(
-            id = "orders:kraken.events:1:42", processor = "orders", topic = "kraken.events", partition = 1, offset = 42, key = "order-7",
+            id = "orders:kraken.events:1:42", processor = "orders", source = "kraken.events", segment = "1", position = "42", key = "order-7",
             eventId = "evt-7", eventType = "examples.OrderPlaced",
             headers = mapOf("type" to "examples.OrderPlaced", "id" to "evt-7", "correlationId" to "corr-7", "userId" to ""),
             payload = """{"orderId":"o-7","amount":12.30}""", payloadBinary = null, reason = DeadLetterReason.HANDLER_FAILED,

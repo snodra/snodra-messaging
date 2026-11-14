@@ -4,7 +4,7 @@ import io.damoreira.kraken.messaging.RetryPolicy
 import io.damoreira.kraken.messaging.deadletter.DeadLetterMode
 import io.damoreira.kraken.messaging.deadline.DeadlineSettings
 import io.damoreira.kraken.messaging.hub.HubTargets
-import io.damoreira.kraken.messaging.kafka.OutboxPublisher
+import io.damoreira.kraken.messaging.events.OutboxPublisher
 import io.damoreira.kraken.messaging.saga.RelaySettings
 import org.springframework.boot.context.properties.ConfigurationProperties
 import java.net.URI
@@ -18,7 +18,7 @@ import java.util.UUID
  */
 @ConfigurationProperties("kraken.messaging")
 data class KrakenMessagingProperties(
-    /** Logical service name: Kafka consumer group, event `source` and hub `Register.service_name`. Required. */
+    /** Logical service name: the prefix of the processors' subscriptions, event `source` and hub `Register.service_name`. Required. */
     val serviceName: String,
     /** Prefix of the wire type name of message classes without `@MessageType`. Required. */
     val typePrefix: String,
@@ -28,7 +28,12 @@ data class KrakenMessagingProperties(
      */
     val instanceId: String = UUID.randomUUID().toString(),
     val hub: Hub = Hub(),
-    val kafka: Kafka = Kafka(),
+    /**
+     * The event store's name (`kafka`, `rabbitmq-streams`, `memory`): which one runs when two event-store add-ons are on the
+     * classpath (ADR 0027). Unset: the only one there is.
+     */
+    val eventStore: String? = null,
+    val events: Events = Events(),
     val outbox: Outbox = Outbox(),
     val idempotency: Idempotency = Idempotency(),
     val security: Security = Security(),
@@ -227,47 +232,52 @@ data class KrakenMessagingProperties(
         val max: Duration = Duration.ofSeconds(5),
     )
 
-    data class Kafka(
-        val bootstrapServers: String = "broker:19092",
-        /** Events topic. */
-        val topic: String = "kraken.events",
+    /** `events.*`: the service's events on the event store (ADR 0027), whichever add-on provides it. */
+    data class Events(
+        /** The source events are published to and read from (a topic on Kafka). */
+        val source: String = "kraken.events",
         /**
-         * The service's consumer group; unset: the service name. Every event processor, `default` included, uses
-         * `<this group>.<name>` (ADR 0022). Changing it on a running deployment starts the groups from the earliest offset.
+         * The prefix of every event processor's subscription name; unset: the service name. Every processor, `default` included,
+         * uses `<this prefix>.<name>` (ADR 0022): on Kafka the consumer group. Changing it on a running deployment starts the
+         * subscriptions from the earliest position.
          */
-        val groupId: String? = null,
+        val subscriptionPrefix: String? = null,
         val consumer: Consumer = Consumer(),
         val deadLetter: DeadLetter = DeadLetter(),
     ) {
         init {
-            require(groupId == null || groupId.isNotBlank()) { "kraken.messaging.kafka.group-id must not be blank" }
+            require(source.isNotBlank()) { "kraken.messaging.events.source must not be blank" }
+            require(subscriptionPrefix == null || subscriptionPrefix.isNotBlank()) { "kraken.messaging.events.subscription-prefix must not be blank" }
         }
 
-        /** The service's consumer group, the prefix of every processor's: [groupId], else [serviceName]. */
-        fun serviceGroupId(serviceName: String): String = groupId ?: serviceName
+        /** The prefix of every processor's subscription: [subscriptionPrefix], else [serviceName]. */
+        fun subscriptionPrefix(serviceName: String): String = subscriptionPrefix ?: serviceName
     }
 
-    /** `kafka.dead-letter.*` (P6a, ADR 0022): what an event processor does with a record it cannot handle. */
+    /** `events.dead-letter.*` (P6a, ADR 0022): what an event processor does with a record it cannot handle. */
     data class DeadLetter(
-        /** `collection` (park in `dead_letters`, the default), `topic` (produce to `<topic>.dlt`) or `log` (log and skip: nothing is parked). */
+        /**
+         * `collection` (park in the message store's dead letters, the default), `event-store` (publish to the event store's
+         * `<source>.dlt`; needs the capability `native-dead-letter`) or `log` (log and skip: nothing is parked).
+         */
         val mode: DeadLetterMode = DeadLetterMode.COLLECTION,
         /** A letter is deleted this long after it was parked (TTL index on `expireAt`), which also unblocks its key; at least 1 s. */
         val retention: Duration = Duration.ofDays(30),
     ) {
         init {
-            require(retention >= Duration.ofSeconds(1)) { "kraken.messaging.kafka.dead-letter.retention must be at least 1s, was $retention" }
+            require(retention >= Duration.ofSeconds(1)) { "kraken.messaging.events.dead-letter.retention must be at least 1s, was $retention" }
         }
     }
 
     data class Consumer(
         /** Set false in tools that only publish. */
         val enabled: Boolean = true,
-        /** Handler invocations per record (first try included) before the record goes to the dead letters (`kafka.dead-letter.mode`). */
+        /** Handler invocations per record (first try included) before the record goes to the dead letters (`events.dead-letter.mode`). */
         val maxAttempts: Int = 5,
     )
 
     data class Outbox(
-        /** Run the outbox publisher that relays `outbox` documents to Kafka. */
+        /** Run the outbox publisher that relays the outbox entries to the event store. */
         val enabled: Boolean = true,
         val pollInterval: Duration = Duration.ofMillis(200),
         /** Documents per poll. */
@@ -376,7 +386,6 @@ data class KrakenMessagingProperties(
     /** `external.*`: the integration toolkit (S1 plan, Tasks 9, 10 and 13). */
     data class External(
         val calls: ExternalCalls = ExternalCalls(),
-        val kafka: ExternalKafka = ExternalKafka(),
     )
 
     /** `external.calls.*`: the `external_calls` collection behind `@IdempotentHandler`. */
@@ -394,30 +403,6 @@ data class KrakenMessagingProperties(
         init {
             requirePositive("kraken.messaging.external.calls.lease", lease)
             requirePositive("kraken.messaging.external.calls.retention", retention)
-        }
-    }
-
-    data class ExternalKafka(
-        /**
-         * Partner Kafka topics consumed into local events, by source name. Each source needs an `ExternalRecordTranslator` bean
-         * named like it (a missing one fails the startup naming the source).
-         */
-        val sources: Map<String, Source> = emptyMap(),
-    )
-
-    /** One partner topic, `external.kafka.sources.<name>`. */
-    data class Source(
-        /** Bootstrap servers of the partner's cluster; defaults to `kafka.bootstrap-servers`. */
-        val bootstrapServers: String? = null,
-        /** The partner's topic. */
-        val topic: String,
-        /** Consumer group; defaults to `<service-name>.external.<name>`. */
-        val groupId: String? = null,
-        /** Extra consumer properties (for example `security.protocol`); bootstrap servers, group id, deserializers and auto-commit are not overridable. */
-        val properties: Map<String, String> = emptyMap(),
-    ) {
-        init {
-            require(topic.isNotBlank()) { "the topic of an external Kafka source must not be blank" }
         }
     }
 }

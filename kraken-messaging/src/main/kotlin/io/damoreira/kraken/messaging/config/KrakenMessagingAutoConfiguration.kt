@@ -15,6 +15,7 @@ import io.damoreira.kraken.messaging.tracing.TraceHeaders
 import io.micrometer.tracing.Tracer
 import io.micrometer.tracing.propagation.Propagator
 import org.springframework.beans.factory.BeanFactory
+import org.springframework.beans.factory.ListableBeanFactory
 import org.springframework.beans.factory.ObjectProvider
 import org.springframework.boot.actuate.endpoint.SanitizingFunction
 import org.springframework.boot.autoconfigure.AutoConfiguration
@@ -30,8 +31,8 @@ import org.springframework.security.oauth2.jwt.JwtDecoder
 
 /**
  * Transport-independent beans: type names, JSON codec, handler discovery and invocation, trace header injection and
- * forwarded-JWT validation. The hub and Kafka transports are wired by [HubAutoConfiguration] and
- * [KafkaEventsAutoConfiguration].
+ * forwarded-JWT validation. The hub transport and the events are wired by [HubAutoConfiguration] and
+ * [EventsAutoConfiguration].
  */
 @AutoConfiguration
 @EnableConfigurationProperties(KrakenMessagingProperties::class)
@@ -53,6 +54,11 @@ class KrakenMessagingAutoConfiguration {
     @Bean
     fun krakenMessageStoreGuard(beanFactory: BeanFactory, registry: HandlerRegistry, environment: Environment, resourceLoader: ResourceLoader) =
         MessageStoreGuard(beanFactory, registry, environment, resourceLoader)
+
+    /** Fails the startup when an event handler or a saga has no event store to read from, or two event stores compete (ADR 0027). */
+    @Bean
+    fun krakenEventStoreGuard(beanFactory: ListableBeanFactory, registry: HandlerRegistry, environment: Environment, resourceLoader: ResourceLoader) =
+        EventStoreGuard(beanFactory, registry, environment, resourceLoader)
 
     /** Applies the message store's schema at startup (`kraken.messaging.store.init-schema`, on by default). */
     @Bean

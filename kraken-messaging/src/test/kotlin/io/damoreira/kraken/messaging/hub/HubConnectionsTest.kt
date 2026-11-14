@@ -115,7 +115,7 @@ class HubConnectionsTest {
         val a = hub()
         val b = hub()
         val reports = java.util.concurrent.atomic.AtomicInteger()
-        val status = io.damoreira.kraken.hub.v1.ProcessorStatus.newBuilder().setName("orders").setGroupId("svc-x.orders")
+        val status = io.damoreira.kraken.hub.v1.ProcessorStatus.newBuilder().setName("orders").setSubscription("svc-x.orders")
             .setState(io.damoreira.kraken.hub.v1.ProcessorState.PROCESSOR_RUNNING).setDeadLetterMode("collection").build()
         val conns = client(listOf(a.name, b.name), "x", statusInterval = Duration.ofMillis(100), processors = {
             reports.incrementAndGet()

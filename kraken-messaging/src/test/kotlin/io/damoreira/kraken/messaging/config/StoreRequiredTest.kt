@@ -56,7 +56,7 @@ class PublisherConfig {
 
 /** A Spring Boot application that publishes events and has no message store: only the starter's own configurations. */
 @Configuration(proxyBeanMethods = false)
-@ImportAutoConfiguration(KrakenMessagingAutoConfiguration::class, HubAutoConfiguration::class, KafkaEventsAutoConfiguration::class)
+@ImportAutoConfiguration(KrakenMessagingAutoConfiguration::class, HubAutoConfiguration::class, EventsAutoConfiguration::class)
 @Import(PublisherConfig::class)
 class PublisherApp
 
@@ -75,7 +75,7 @@ class StoreRequiredTest {
             AutoConfigurations.of(
                 KrakenMessagingAutoConfiguration::class.java,
                 HubAutoConfiguration::class.java,
-                KafkaEventsAutoConfiguration::class.java,
+                EventsAutoConfiguration::class.java,
                 SagaAutoConfiguration::class.java,
                 ExternalAutoConfiguration::class.java,
             ),

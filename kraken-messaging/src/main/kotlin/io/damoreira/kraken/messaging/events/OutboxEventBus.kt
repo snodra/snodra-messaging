@@ -1,4 +1,4 @@
-package io.damoreira.kraken.messaging.kafka
+package io.damoreira.kraken.messaging.events
 
 import io.damoreira.kraken.messaging.EventBus
 import io.damoreira.kraken.messaging.api.Event
@@ -22,7 +22,7 @@ import kotlin.coroutines.CoroutineContext
  * Ordering per key is guaranteed for events published by one service instance (the per-process [seq] counter breaks
  * `createdAt` millisecond ties); across instances the outbox never promised it.
  *
- * Appends events to the message store's [outbox]; [OutboxPublisher] relays them to Kafka. The append joins the Spring
+ * Appends events to the message store's [outbox]; [OutboxPublisher] relays them to the event store. The append joins the Spring
  * transaction active on the calling thread (so the event commits or rolls back with the business write). The blocking
  * entry points ([publishBlocking], [publishRaw]) run the append on the calling thread too.
  */

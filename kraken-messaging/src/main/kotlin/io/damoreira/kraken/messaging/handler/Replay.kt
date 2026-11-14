@@ -14,7 +14,7 @@ annotation class DisallowReplay
 /**
  * Marks a method that prepares its processor for a replay (P6b, ADR 0023), typically by clearing a projection: a reset of the
  * processor that makes a replay range runs every reset handler of the processor once, on the instance that executes the
- * reset, before any marker or offset changes; one that throws fails the reset and changes nothing. The method takes no
+ * reset, before any marker or position changes; one that throws fails the reset and changes nothing. The method takes no
  * parameter or one [io.damoreira.kraken.messaging.control.ResetContext] (the target and the ranges) and may suspend. Its
  * processor is its class's `@ProcessingGroup`, `default` without one. A reset to `latest` replays nothing and runs none.
  */

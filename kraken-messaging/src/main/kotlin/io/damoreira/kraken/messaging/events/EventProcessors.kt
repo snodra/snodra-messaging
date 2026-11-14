@@ -1,9 +1,7 @@
-package io.damoreira.kraken.messaging.kafka
+package io.damoreira.kraken.messaging.events
 
 import io.damoreira.kraken.hub.v1.ProcessorStatus
 import io.damoreira.kraken.messaging.control.ProcessorControl
-import org.apache.kafka.clients.admin.Admin
-import org.apache.kafka.clients.admin.AdminClientConfig
 import org.slf4j.LoggerFactory
 import org.springframework.context.SmartLifecycle
 import java.time.Clock
@@ -21,13 +19,11 @@ fun interface ProcessorStatusSource {
 /**
  * The event processors of this service (ADR 0022): at start, one [EventConsumer] (from [consumerFor]) per processor that runs
  * here ([LocalEventDispatcher.processors]: every `@ProcessingGroup` with a handler, and `default` when it has a handler or
- * sagas run), each in its own consumer group; they start and stop together.
+ * sagas run), each in its own subscription of the event store; they start and stop together.
  *
- * [processorStatuses] builds the processors' status from their in-memory state only, so it never blocks the hub connection or
- * a consumer. Each call also asks, without waiting, a single background thread to refresh what needs Kafka or the store: the
- * committed offsets and high watermarks through one `Admin` client ([adminConfig]; at most every [offsetsRefresh], each call
- * bounded by [adminTimeout]) and the dead-letter counts (every [deadLetterSample], and after a park). So the values in a report
- * are at most one status interval older than the refresh; until the first refresh they read -1.
+ * [processorStatuses] builds the processors' status from their in-memory state and what their subscriptions report (never
+ * blocking), so it never blocks the hub connection or a consumer. Each call also asks, without waiting, a single background
+ * thread to refresh what needs the store: the dead-letter counts (every [deadLetterSample], and after a park).
  *
  * With a [control] (P6b, ADR 0023) the consumers are started by it, as their `processor_control` documents say (paused, with
  * their replay ranges, or not at all while a reset holds the lock), and follow the documents from then on.
@@ -35,10 +31,7 @@ fun interface ProcessorStatusSource {
 class EventProcessors(
     private val dispatcher: LocalEventDispatcher,
     private val consumerFor: (processor: String) -> EventConsumer,
-    private val adminConfig: Map<String, Any>,
-    private val offsetsRefresh: Duration = Duration.ofSeconds(5),
     private val deadLetterSample: Duration = Duration.ofSeconds(30),
-    private val adminTimeout: Duration = Duration.ofSeconds(4),
     private val clock: Clock = Clock.systemUTC(),
     private val control: ProcessorControl? = null,
 ) : SmartLifecycle, ProcessorStatusSource {
@@ -47,9 +40,7 @@ class EventProcessors(
     @Volatile private var running = false
     private var executor: ExecutorService? = null
     private val refreshing = AtomicBoolean(false)
-    @Volatile private var lastOffsetsAt = 0L
     @Volatile private var lastSampleAt = 0L
-    private var admin: Admin? = null // refresher thread only
 
     /** The consumers created at the last start, `default` first. */
     fun consumers(): List<EventConsumer> = consumers
@@ -67,7 +58,6 @@ class EventProcessors(
         }
         consumers = created
         executor = Executors.newSingleThreadExecutor { r -> Thread(r, "kraken-processor-status").apply { isDaemon = true } }
-        lastOffsetsAt = 0L
         lastSampleAt = 0L
         running = true
         if (created.isEmpty()) log.info("No event processor started: no @EventHandler and no saga in this service")
@@ -80,7 +70,6 @@ class EventProcessors(
         control?.detach()
         consumers.forEach { runCatching { it.stop() } }
         executor?.let { ex ->
-            ex.submit { runCatching { admin?.close(Duration.ofSeconds(1)) }; admin = null }
             ex.shutdown()
             if (!ex.awaitTermination(2, TimeUnit.SECONDS)) ex.shutdownNow()
         }
@@ -118,24 +107,6 @@ class EventProcessors(
     private fun refresh() {
         val now = clock.millis()
         val live = consumers.filter { it.isRunning }
-        if (now - lastOffsetsAt >= offsetsRefresh.toMillis()) {
-            lastOffsetsAt = now
-            val client = admin ?: try {
-                Admin.create(adminConfig.filterKeys { it in AdminClientConfig.configNames() }).also { admin = it }
-            } catch (e: Exception) {
-                log.debug("Could not create the Kafka admin client for the processor status: {}", e.message)
-                null
-            }
-            if (client != null) {
-                for (c in live) {
-                    try {
-                        c.refreshOffsets(client, adminTimeout.toMillis())
-                    } catch (e: Exception) {
-                        log.debug("Could not refresh the offsets of processor {}: {}", c.processor, e.message)
-                    }
-                }
-            }
-        }
         val force = now - lastSampleAt >= deadLetterSample.toMillis()
         if (force) lastSampleAt = now
         for (c in live) {

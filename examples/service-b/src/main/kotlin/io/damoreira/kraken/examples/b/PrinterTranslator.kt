@@ -2,9 +2,9 @@ package io.damoreira.kraken.examples.b
 
 import io.damoreira.kraken.examples.api.PostcardPrinted
 import io.damoreira.kraken.messaging.codec.JsonCodec
+import io.damoreira.kraken.messaging.external.ExternalRecord
 import io.damoreira.kraken.messaging.external.ExternalRecordTranslator
 import io.damoreira.kraken.messaging.external.TranslatedEvent
-import org.apache.kafka.clients.consumer.ConsumerRecord
 import org.springframework.stereotype.Component
 
 /**
@@ -13,8 +13,8 @@ import org.springframework.stereotype.Component
  */
 @Component("printer")
 class PrinterTranslator(private val codec: JsonCodec) : ExternalRecordTranslator {
-    override fun translate(record: ConsumerRecord<String, ByteArray>): TranslatedEvent {
-        val notification = codec.decode(record.value(), PrinterNotification::class)
+    override fun translate(record: ExternalRecord): TranslatedEvent {
+        val notification = codec.decode(record.payload, PrinterNotification::class)
         return TranslatedEvent(PostcardPrinted(notification.jobId, notification.name), dedupeKey = notification.deliveryId)
     }
 }

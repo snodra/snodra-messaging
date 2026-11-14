@@ -82,9 +82,9 @@ class HubOAuth2ConfigTest {
 
     private fun starter() = ApplicationContextRunner()
         .withConfiguration(
-            AutoConfigurations.of(KrakenMessagingAutoConfiguration::class.java, HubAutoConfiguration::class.java, KafkaEventsAutoConfiguration::class.java),
+            AutoConfigurations.of(KrakenMessagingAutoConfiguration::class.java, HubAutoConfiguration::class.java, EventsAutoConfiguration::class.java),
         )
-        .withPropertyValues(*required, "kraken.messaging.hub.enabled=true", "kraken.messaging.kafka.consumer.enabled=false", "kraken.messaging.outbox.enabled=false")
+        .withPropertyValues(*required, "kraken.messaging.hub.enabled=true", "kraken.messaging.events.consumer.enabled=false", "kraken.messaging.outbox.enabled=false")
         .withBean("krakenHubChannelFactory", HubChannelFactory::class.java, { HubChannelFactory { hub.channel() } })
 
     private fun failure(runner: ApplicationContextRunner): String {

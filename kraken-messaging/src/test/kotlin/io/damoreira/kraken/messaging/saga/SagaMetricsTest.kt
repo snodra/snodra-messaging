@@ -21,8 +21,8 @@ import io.damoreira.kraken.messaging.external.ExternalCallSettings
 import io.damoreira.kraken.messaging.external.IdempotencyInterceptor
 import io.damoreira.kraken.messaging.handler.HandlerInvoker
 import io.damoreira.kraken.messaging.handler.HandlerRegistry
-import io.damoreira.kraken.messaging.kafka.LocalEventDispatcher
-import io.damoreira.kraken.messaging.kafka.OutboxEventBus
+import io.damoreira.kraken.messaging.events.LocalEventDispatcher
+import io.damoreira.kraken.messaging.events.OutboxEventBus
 import io.damoreira.kraken.messaging.test.KrakenContainers
 import io.damoreira.kraken.messaging.tracing.TraceHeaders
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
