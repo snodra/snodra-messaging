@@ -34,6 +34,8 @@ import kotlin.concurrent.withLock
  * [maxAttempts]-th failed attempt gives the entry up ([OutboxStore.markFailed]), logs it once at error (never the payload)
  * and moves on to the next entry: one poison entry does not block the outbox. Failed entries stay in the store for inspection.
  *
+ * Between polls it waits [pollInterval], or less when the outbox tells it entries were appended ([OutboxStore.onAppend]).
+ *
  * Reports to [metrics] (P9) every send attempt. When the metrics want it ([MessagingMetrics.countsOutbox]) the relay thread
  * also samples the outbox ([samplePending]: the pending entries and the oldest of them, whichever instance holds it) at most
  * every [pendingSampleInterval], so the gauges never make the export thread touch the database.
@@ -66,6 +68,18 @@ class OutboxPublisher(
     @Volatile private var running = false
     @Volatile private var stopRequested = false
     private var thread: Thread? = null
+
+    /** Set by an append the outbox told of ([OutboxStore.onAppend]) while a poll ran: the next wait is skipped. */
+    private var woken = false
+
+    init {
+        outbox.onAppend {
+            lock.withLock {
+                woken = true
+                wake.signalAll()
+            }
+        }
+    }
 
     /**
      * Claims one batch and sends it sequentially; returns how many were sent. Stops at the first retriable failure, between
@@ -152,7 +166,8 @@ class OutboxPublisher(
                 }
             }
             lock.withLock {
-                if (running) wake.awaitNanos(pollInterval.toNanos())
+                if (running && !woken) wake.awaitNanos(pollInterval.toNanos())
+                woken = false
             }
         }
     }

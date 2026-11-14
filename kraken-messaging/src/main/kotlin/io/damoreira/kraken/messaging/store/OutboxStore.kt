@@ -73,4 +73,11 @@ interface OutboxStore {
 
     /** Deletes the entries sent before [sentBefore]; returns how many. Unsent and failed entries are never purged. */
     suspend fun purge(sentBefore: Instant): Long
+
+    /**
+     * Registers [wake], called (on any thread, without blocking) after appended entries committed, by a store that can tell (the
+     * in-memory store at once; a database with notifications): the relay then claims at once instead of at its next poll. A store
+     * that cannot tell keeps this default and never calls it; the relay polls.
+     */
+    fun onAppend(wake: () -> Unit) = Unit
 }
