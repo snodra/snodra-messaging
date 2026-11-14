@@ -30,7 +30,8 @@ import java.lang.annotation.Inherited
  * It sets `kraken.messaging.store=memory`, `kraken.messaging.event-store=memory` and `kraken.messaging.hub.enabled=false` (no
  * `CommandBus` or `QueryBus` then: a service that injects one declares [InMemoryBuses] or an [InProcessHub] connection), and
  * excludes the Kafka add-on's auto-configuration (its event store and its partner sources: feed a partner's events through
- * [InMemoryEvents.publish] or test the translator on its own). Other infrastructure the application uses itself (its own
+ * [InMemoryEvents.publish] or test the translator on its own) through `spring.autoconfigure.exclude`, which replaces the
+ * application's own list for the test (a test that needs both lists them in its properties). Other infrastructure the application uses itself (its own
  * MongoDB repositories, for example) is the test's to replace.
  */
 @Target(AnnotationTarget.CLASS)

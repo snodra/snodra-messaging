@@ -157,6 +157,23 @@ class MemoryMessageStoreTest {
     }
 
     @Test
+    fun aTransactionBegunFromAnAfterCompletionCallbackIsANewOne() {
+        tx.executeWithoutResult {
+            TransactionSynchronizationManager.registerSynchronization(object : TransactionSynchronization {
+                override fun afterCompletion(status: Int) {
+                    tx.executeWithoutResult { runBlocking { store.processedEvents.record(marker("next")) } }
+                }
+            })
+            runBlocking { store.processedEvents.record(marker("first")) }
+        }
+        runBlocking {
+            assertTrue(store.processedEvents.exists("first"))
+            assertTrue(store.processedEvents.exists("next"), "the second transaction began, joined nothing and committed")
+        }
+        tx.executeWithoutResult { runBlocking { assertTrue(store.processedEvents.record(marker("later")), "nothing left bound") } }
+    }
+
+    @Test
     fun theRelayIsWokenWhenAnAppendCommitsNeverForARollback() {
         val woken = AtomicInteger()
         store.outbox.onAppend { woken.incrementAndGet() }

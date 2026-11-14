@@ -26,6 +26,9 @@ class MemoryTransactionManager internal constructor(private val store: MemoryMes
     override fun doBegin(transaction: Any, definition: TransactionDefinition) {
         val tx = MemoryTransaction()
         (transaction as TransactionObject).tx = tx
+        // Still bound here: a transaction that ended, begun again from its after-completion callbacks (its own cleanup unbinds
+        // nothing then). Replaced for the new one, whose cleanup unbinds it.
+        if (TransactionSynchronizationManager.hasResource(store.transactionKey)) TransactionSynchronizationManager.unbindResource(store.transactionKey)
         TransactionSynchronizationManager.bindResource(store.transactionKey, tx)
     }
 
