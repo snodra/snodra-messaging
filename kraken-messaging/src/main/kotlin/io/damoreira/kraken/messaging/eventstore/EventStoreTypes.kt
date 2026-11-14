@@ -94,7 +94,7 @@ sealed interface SubscriptionEvent {
 
     /**
      * These segments are this subscription's no longer; what it delivered of them and did not acknowledge comes again to
-     * whichever subscription gets them.
+     * whichever subscription gets them. Always followed by an [Assigned] (possibly empty), which ends the change.
      */
     data class Revoked(val segments: List<String>) : SubscriptionEvent
 }

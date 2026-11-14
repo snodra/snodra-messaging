@@ -210,6 +210,20 @@ class KafkaSubscriptionMockTest {
     }
 
     @Test
+    fun `an instance left without partitions closes its revocation with an empty assignment`() = runBlocking {
+        val mock = Mock(timeouts = 0)
+        assignWithRecords(mock, LongRange.EMPTY)
+        val subscription = KafkaSubscription.start(spec, settings, mock)
+        assertEquals(SubscriptionEvent.Assigned(listOf("0", "1")), withTimeout(10_000) { subscription.next() })
+        // A rebalance that leaves this instance nothing (more instances than partitions).
+        mock.schedulePollTask { mock.rebalance(emptyList()) }
+        assertEquals(SubscriptionEvent.Revoked(listOf("0", "1")), withTimeout(10_000) { subscription.next() })
+        assertEquals(SubscriptionEvent.Assigned(emptyList()), withTimeout(10_000) { subscription.next() }, "every Revoked is followed by an Assigned")
+        assertTrue(subscription.segments().isEmpty())
+        subscription.close()
+    }
+
+    @Test
     fun `an assignment of no partition is announced, the instance is an idle member`() = runBlocking {
         val mock = Mock(timeouts = 0)
         mock.schedulePollTask { mock.rebalance(emptyList()) }

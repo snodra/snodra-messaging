@@ -181,7 +181,10 @@ abstract class EventStoreConformanceTest {
         b.close()
     }
 
-    /** Two instances of one subscription split its segments (adding the second spreads them) and share its events: each event goes to one of them, and both get some. */
+    /**
+     * Two instances of one subscription split its segments (adding the second spreads them, every revocation closed by an
+     * assignment, possibly empty) and share its events: each event goes to one of them, and both get some.
+     */
     @Test
     fun instancesShareAProcessor() = check("instancesShareAProcessor") {
         val first = newEventStore()
@@ -190,8 +193,8 @@ abstract class EventStoreConformanceTest {
         val a = join(first, spec)
         a.until("the first instance holds segments") { it.assigned.isNotEmpty() }
         val b = join(second, spec)
-        bothUntil(a, b, "both instances hold segments, none held by both") { x, y ->
-            x.assigned.isNotEmpty() && y.assigned.isNotEmpty() && x.assigned.none { it in y.assigned }
+        bothUntil(a, b, "both instances hold segments, none held by both, every revocation closed by an assignment") { x, y ->
+            x.assigned.isNotEmpty() && y.assigned.isNotEmpty() && x.assigned.none { it in y.assigned } && !x.changing && !y.changing
         }
         // What the second instance took over, the first was told to give up (whether the event store then assigns the rest
         // again or leaves it, the first's assignment ends as `assigned` says: Revoked, then Assigned, in the order given).
@@ -207,6 +210,36 @@ abstract class EventStoreConformanceTest {
         assertEquals(emptySet<String>(), toA intersect toB, "delivered to both instances")
         a.close()
         b.close()
+    }
+
+    /**
+     * More instances than segments: instances join one at a time; after each join the segments are spread with none held twice
+     * and every instance's last assignment change closed (a [SubscriptionEvent.Revoked] followed by an
+     * [SubscriptionEvent.Assigned], an empty one for an instance left without segments). The instances join until one that held
+     * segments holds none (or there are twice as many instances as segments, two more): that instance saw its revocation closed
+     * by an empty assignment, so the core reports it running, idle, never starting.
+     */
+    @Test
+    fun anInstanceLeftWithoutSegmentsClosesItsChange() = check("anInstanceLeftWithoutSegmentsClosesItsChange") {
+        val spec = spec()
+        val readers = mutableListOf(join(newEventStore(), spec))
+        readers[0].until("the first instance holds segments") { it.assigned.isNotEmpty() }
+        // Alone, it holds every segment (in time: an assignment may come in parts).
+        readers[0].pump(QUIET_MS)
+        val all = TreeSet(readers[0].assigned)
+        fun settled(): Boolean {
+            val held = readers.flatMap { it.assigned }
+            return held.size == held.toSet().size && held.toSet() == all && readers.none { it.changing }
+        }
+        var emptied = false
+        while (!emptied && readers.size < 2 * all.size + 2) {
+            readers += join(newEventStore(), spec)
+            allUntil(readers, "the segments spread, every revocation closed by an assignment") { settled() }
+            emptied = readers.any { it.assigned.isEmpty() && it.revocations > 0 }
+        }
+        allUntil(readers, "the segments spread, every revocation closed by an assignment") { settled() }
+        assertTrue(readers.any { it.assigned.isEmpty() }, "more instances than segments leave one without segments")
+        for (reader in readers) reader.close()
     }
 
     /**
@@ -533,6 +566,17 @@ abstract class EventStoreConformanceTest {
         }
     }
 
+    /** Reads all of [readers] until [done], at most a minute. */
+    private suspend fun allUntil(readers: List<Reader>, what: String, done: () -> Boolean) {
+        val deadline = System.nanoTime() + wait.toNanos()
+        while (!done()) {
+            if (System.nanoTime() > deadline) {
+                fail<Unit>("$what within ${wait.seconds} s (assigned ${readers.map { it.assigned }}, revocations ${readers.map { it.revocations }})")
+            }
+            coroutineScope { for (reader in readers) launch { reader.pump(SLICE_MS) } }
+        }
+    }
+
     /** One service instance of the event store under test, [eventStore] bounded like every call. */
     private suspend fun newEventStore(): EventStore = bounded("eventStore()") { eventStore() }
 
@@ -561,6 +605,12 @@ abstract class EventStoreConformanceTest {
 
         /** Every segment a [SubscriptionEvent.Revoked] named. */
         val revoked = TreeSet<String>()
+
+        /** How many [SubscriptionEvent.Revoked] came. */
+        var revocations = 0
+
+        /** A [SubscriptionEvent.Revoked] came and no [SubscriptionEvent.Assigned] after it yet (the contract closes every revocation with one). */
+        var changing = false
         val seen = mutableListOf<Delivery>()
         private val held = HashSet<String>()
 
@@ -616,14 +666,19 @@ abstract class EventStoreConformanceTest {
 
         private fun take(event: SubscriptionEvent) {
             when (event) {
-                is SubscriptionEvent.Assigned -> for (segment in event.segments) {
-                    assertTrue(
-                        segment.isNotEmpty() && segment.toByteArray(Charsets.UTF_8).size <= MAX_SEGMENT_BYTES,
-                        "$name: a segment name of 1 to $MAX_SEGMENT_BYTES bytes: \"$segment\"",
-                    )
-                    assigned += segment
+                is SubscriptionEvent.Assigned -> {
+                    changing = false
+                    for (segment in event.segments) {
+                        assertTrue(
+                            segment.isNotEmpty() && segment.toByteArray(Charsets.UTF_8).size <= MAX_SEGMENT_BYTES,
+                            "$name: a segment name of 1 to $MAX_SEGMENT_BYTES bytes: \"$segment\"",
+                        )
+                        assigned += segment
+                    }
                 }
                 is SubscriptionEvent.Revoked -> {
+                    revocations++
+                    changing = true
                     for (segment in event.segments) {
                         assertTrue(segment in assigned, "$name: a revoke of segment $segment it does not hold ($assigned)")
                     }

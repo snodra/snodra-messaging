@@ -197,6 +197,9 @@ class MemoryEventStore(
         private var closed = false
         private var turn = 0
 
+        /** A [SubscriptionEvent.Revoked] was given and no [SubscriptionEvent.Assigned] since: the next step closes the change. */
+        private var changing = false
+
         @Volatile private var paused = false
 
         override suspend fun next(): SubscriptionEvent {
@@ -219,6 +222,7 @@ class MemoryEventStore(
                     group.holders.remove(s)
                 }
                 changed() // the next holder may take them now
+                changing = true
                 return@locked SubscriptionEvent.Revoked(lost.map(Int::toString))
             }
             val gained = (0 until segmentCount).filter { group.target(it) === this && it !in held && group.holders[it] == null }
@@ -228,7 +232,13 @@ class MemoryEventStore(
                     cursor[s] = group.committed[s] ?: 0L
                     group.holders[s] = this
                 }
+                changing = false
                 return@locked SubscriptionEvent.Assigned(gained.map(Int::toString))
+            }
+            if (changing) {
+                // Every revocation is closed by an assignment, an empty one when nothing new came.
+                changing = false
+                return@locked SubscriptionEvent.Assigned(emptyList())
             }
             if (paused || held.isEmpty()) return@locked null
             val segments = log(spec.source).segments

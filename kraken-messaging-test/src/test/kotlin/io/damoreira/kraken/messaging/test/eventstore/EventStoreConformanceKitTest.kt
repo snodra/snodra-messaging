@@ -180,6 +180,9 @@ private class Member(private val log: Log, private val spec: SubscriptionSpec, p
     private val cursor = ConcurrentHashMap<Int, Long>()
     @Volatile private var paused = false
 
+    /** A Revoked was given and no Assigned since (the contract closes every revocation with one). */
+    private var changing = false
+
     /** What `next` gives now, if anything. */
     private fun step(): SubscriptionEvent? = log.locked {
         val now = assignment(spec, member)
@@ -187,6 +190,7 @@ private class Member(private val log: Log, private val spec: SubscriptionSpec, p
         if (revoked.isNotEmpty()) {
             assigned -= revoked.toSet()
             revoked.forEach { cursor.remove(it) }
+            changing = true
             return@locked SubscriptionEvent.Revoked(revoked.map { it.toString() })
         }
         val added = now.filter { it !in assigned }.sorted()
@@ -196,7 +200,12 @@ private class Member(private val log: Log, private val spec: SubscriptionSpec, p
                 assigned += s
                 cursor[s] = committed[s] ?: 0L
             }
+            changing = false
             return@locked SubscriptionEvent.Assigned(added.map { it.toString() })
+        }
+        if (changing) {
+            changing = false
+            return@locked SubscriptionEvent.Assigned(emptyList())
         }
         if (paused) return@locked null
         val segments = source(spec.source)
