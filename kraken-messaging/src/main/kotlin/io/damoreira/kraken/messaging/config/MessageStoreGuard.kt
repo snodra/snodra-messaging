@@ -6,7 +6,6 @@ import io.damoreira.kraken.messaging.handler.HandlerRegistry
 import io.damoreira.kraken.messaging.saga.Saga
 import io.damoreira.kraken.messaging.saga.RawEventPublisher
 import io.damoreira.kraken.messaging.store.MessageStore
-import org.springframework.beans.factory.BeanFactory
 import org.springframework.beans.factory.ListableBeanFactory
 import org.springframework.beans.factory.NoSuchBeanDefinitionException
 import org.springframework.beans.factory.ObjectProvider
@@ -20,21 +19,41 @@ import org.springframework.core.io.ResourceLoader
 
 /** What to do about a missing message store: the end of every message about one. */
 internal const val ADD_A_MESSAGE_STORE =
-    "add a message store add-on (kraken-messaging-mongo for MongoDB) to the dependencies, or declare a MessageStore bean"
+    "add a message store add-on (kraken-messaging-mongo for MongoDB) to the dependencies, or declare a MessageStore bean " +
+        "(kraken.messaging.store=memory runs the in-memory one, not durable: tests and local runs)"
 
 /**
- * Fails the startup when the application has no [MessageStore] (ADR 0028) but something needs one: an `@EventHandler`, a
- * `@Saga` (unless `kraken.messaging.sagas.enabled` is false) or an `@IdempotentHandler`. Command, query and subscription-query
- * handlers need none. Runs once every singleton exists, so the [registry] holds every handler.
+ * Fails the startup when the application's message store (ADR 0028) is missing but something needs one, or is ambiguous:
+ *
+ * - none, and there is an `@EventHandler`, a `@Saga` (unless `kraken.messaging.sagas.enabled` is false) or an
+ *   `@IdempotentHandler`. Command, query and subscription-query handlers need none.
+ * - two or more when `kraken.messaging.store` does not choose one;
+ * - `kraken.messaging.store` names one the application does not have.
+ *
+ * Runs once every singleton exists, so the [registry] holds every handler.
  */
 class MessageStoreGuard(
-    private val beanFactory: BeanFactory,
+    private val beanFactory: ListableBeanFactory,
     private val registry: HandlerRegistry,
     private val environment: Environment,
     private val resourceLoader: ResourceLoader,
 ) : SmartInitializingSingleton {
     override fun afterSingletonsInstantiated() {
-        if (beanFactory.getBeanProvider(MessageStore::class.java).iterator().hasNext()) return
+        val stores = beanFactory.getBeansOfType(MessageStore::class.java).values
+        val chosen = environment.getProperty(STORE)?.takeIf { it.isNotBlank() }
+        if (stores.size > 1) {
+            throw IllegalStateException(
+                "${stores.size} message stores are configured (${stores.joinToString { it.name }}): set $STORE to the one this service uses",
+            )
+        }
+        val store = stores.firstOrNull()
+        if (chosen != null && store?.name != chosen) {
+            throw IllegalStateException(
+                "$STORE is '$chosen', but " + (store?.let { "the message store is '${it.name}'" } ?: "no message store is configured") +
+                    ": $ADD_A_MESSAGE_STORE",
+            )
+        }
+        if (store != null) return
         val needs = buildList {
             registry.eventTypes().sorted().flatMap(registry::eventHandlers).forEach { add("@EventHandler ${it.label}") }
             if (environment.getProperty("kraken.messaging.sagas.enabled", Boolean::class.java, true)) {
@@ -46,11 +65,17 @@ class MessageStoreGuard(
         if (needs.isEmpty()) return
         throw IllegalStateException(needs.distinct().joinToString("; ") { "$it needs a message store" } + ": " + ADD_A_MESSAGE_STORE)
     }
+
+    companion object {
+        /** The message store's name, when two are available or to run the in-memory one. */
+        const val STORE = "kraken.messaging.store"
+    }
 }
 
 /** What to do about a missing event store: the end of every message about one. */
 internal const val ADD_AN_EVENT_STORE =
-    "add an event store add-on (kraken-messaging-kafka for Kafka) to the dependencies, or declare an EventStore bean"
+    "add an event store add-on (kraken-messaging-kafka for Kafka) to the dependencies, or declare an EventStore bean " +
+        "(kraken.messaging.event-store=memory runs the in-memory one, not durable: tests and local runs)"
 
 /**
  * Fails the startup when the application's event store (ADR 0027) is missing but something needs one, or is ambiguous:

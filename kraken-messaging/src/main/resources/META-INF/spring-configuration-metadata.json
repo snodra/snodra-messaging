@@ -36,6 +36,12 @@
       "sourceMethod": "getTls()"
     },
     {
+      "name": "kraken.messaging.memory",
+      "type": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Memory",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties",
+      "sourceMethod": "getMemory()"
+    },
+    {
       "name": "kraken.messaging.events",
       "type": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Events",
       "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties",
@@ -319,8 +325,21 @@
     {
       "name": "kraken.messaging.event-store",
       "type": "java.lang.String",
-      "description": "The event store's name (kafka, rabbitmq-streams, memory): which one runs when two event-store add-ons are on the classpath. Unset: the only one there is.",
+      "description": "The event store's name (kafka, rabbitmq-streams, memory): which one runs when two event-store add-ons are on the classpath, and the only way to run the in-memory one (memory: not durable, one JVM; tests, local runs, demos). Unset: the only one there is.",
       "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties"
+    },
+    {
+      "name": "kraken.messaging.store",
+      "type": "java.lang.String",
+      "description": "The message store's name (mongo, jdbc, memory): which one runs when two are available, and the only way to run the in-memory one (memory: not durable, one JVM; tests, local runs, demos). Unset: the only one there is.",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties"
+    },
+    {
+      "name": "kraken.messaging.memory.segments",
+      "type": "java.lang.Integer",
+      "description": "The in-memory event store's segments per source (1 to 1024): a key always goes to the same one; the competing instances of a subscription share them.",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Memory",
+      "defaultValue": 4
     },
     {
       "name": "kraken.messaging.events.source",

@@ -25,7 +25,6 @@ import io.damoreira.kraken.messaging.store.MessageStore
 import io.damoreira.kraken.messaging.tracing.TraceHeaders
 import org.springframework.beans.factory.ObjectProvider
 import org.springframework.boot.autoconfigure.AutoConfiguration
-import org.springframework.boot.autoconfigure.condition.ConditionalOnBean
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
 import org.springframework.boot.autoconfigure.condition.ConditionalOnSingleCandidate
@@ -51,7 +50,7 @@ import java.time.Clock
  * [MessagingMetricsAutoConfiguration] when a registry exists), else to [NoopMessagingMetrics].
  */
 @AutoConfiguration(after = [KrakenMessagingAutoConfiguration::class])
-@ConditionalOnBean(MessageStore::class)
+@ConditionalOnSingleCandidate(MessageStore::class) // two: the MessageStoreGuard asks for kraken.messaging.store
 class EventsAutoConfiguration {
 
     /** Runs an event's ordinary handlers, then the saga stage when the saga runtime provides one (none: [SagaStage.NONE]). */

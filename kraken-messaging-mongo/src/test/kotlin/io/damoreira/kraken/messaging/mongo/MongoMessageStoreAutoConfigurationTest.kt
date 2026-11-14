@@ -1,7 +1,9 @@
 package io.damoreira.kraken.messaging.mongo
 
 import io.damoreira.kraken.messaging.config.KrakenMessagingAutoConfiguration
+import io.damoreira.kraken.messaging.config.MemoryStoresAutoConfiguration
 import io.damoreira.kraken.messaging.store.MessageStore
+import io.damoreira.kraken.messaging.store.memory.MemoryMessageStore
 import io.mockk.mockk
 import io.mockk.verify
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -76,6 +78,23 @@ class MongoMessageStoreAutoConfigurationTest {
             assertNull(context.startupFailure)
             assertSame(mine, context.getBean(MessageStore::class.java))
             assertTrue(context.getBeansOfType(MongoMessageStore::class.java).isEmpty())
+        }
+    }
+
+    @Test
+    fun theStoreSettingMemoryRunsTheInMemoryStoreInsteadOfMongo() {
+        withMongo().withConfiguration(AutoConfigurations.of(MemoryStoresAutoConfiguration::class.java))
+            .withPropertyValues("kraken.messaging.store=memory", "kraken.messaging.store.init-schema=false")
+            .run { context ->
+                assertNull(context.startupFailure)
+                val store = context.getBean(MessageStore::class.java)
+                assertTrue(store is MemoryMessageStore, "the in-memory store, never MongoDB behind the setting's back: $store")
+                assertTrue(context.getBeansOfType(MongoTransactionManager::class.java).isEmpty(), "no MongoDB transaction manager either")
+                assertSame(store.transactions, context.getBean(PlatformTransactionManager::class.java))
+            }
+        withMongo().withPropertyValues("kraken.messaging.store=mongo").run { context ->
+            assertNull(context.startupFailure)
+            assertTrue(context.getBean(MessageStore::class.java) is MongoMessageStore, "named by the setting")
         }
     }
 

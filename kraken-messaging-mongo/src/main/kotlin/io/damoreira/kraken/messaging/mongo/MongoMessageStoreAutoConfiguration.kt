@@ -8,6 +8,7 @@ import org.springframework.beans.factory.ObjectProvider
 import org.springframework.boot.autoconfigure.AutoConfiguration
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
 import org.springframework.context.annotation.Bean
 import org.springframework.data.mongodb.MongoDatabaseFactory
 import org.springframework.data.mongodb.MongoTransactionManager
@@ -15,7 +16,9 @@ import org.springframework.data.mongodb.core.MongoTemplate
 import java.time.Clock
 
 /**
- * The MongoDB [MessageStore] (ADR 0028), when the application has a [MongoTemplate] and no store of its own. The retentions
+ * The MongoDB [MessageStore] (ADR 0028), when the application has a [MongoTemplate] and no store of its own, unless
+ * `kraken.messaging.store` names another one (`memory`, for example: then neither the store nor its transaction manager is
+ * created here). The retentions
  * come from `kraken.messaging.*.retention`; the core creates its indexes at startup ([MongoMessageStore.initSchema]) unless
  * `kraken.messaging.store.init-schema` is false.
  *
@@ -30,6 +33,7 @@ import java.time.Clock
     beforeName = ["org.springframework.boot.transaction.autoconfigure.TransactionAutoConfiguration"],
 )
 @ConditionalOnBean(MongoTemplate::class)
+@ConditionalOnProperty(name = ["kraken.messaging.store"], havingValue = MongoMessageStore.NAME, matchIfMissing = true)
 class MongoMessageStoreAutoConfiguration {
     /** The store's transaction manager, which reports a transient commit failure as such ([MongoStoreTransactionManager]). */
     @Bean

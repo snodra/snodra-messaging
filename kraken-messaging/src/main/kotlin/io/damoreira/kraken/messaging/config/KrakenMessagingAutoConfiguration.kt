@@ -14,7 +14,6 @@ import io.damoreira.kraken.messaging.store.MessageStore
 import io.damoreira.kraken.messaging.tracing.TraceHeaders
 import io.micrometer.tracing.Tracer
 import io.micrometer.tracing.propagation.Propagator
-import org.springframework.beans.factory.BeanFactory
 import org.springframework.beans.factory.ListableBeanFactory
 import org.springframework.beans.factory.ObjectProvider
 import org.springframework.boot.actuate.endpoint.SanitizingFunction
@@ -52,7 +51,7 @@ class KrakenMessagingAutoConfiguration {
 
     /** Fails the startup when an event handler, a saga or an idempotent handler has no message store to run on (ADR 0028). */
     @Bean
-    fun krakenMessageStoreGuard(beanFactory: BeanFactory, registry: HandlerRegistry, environment: Environment, resourceLoader: ResourceLoader) =
+    fun krakenMessageStoreGuard(beanFactory: ListableBeanFactory, registry: HandlerRegistry, environment: Environment, resourceLoader: ResourceLoader) =
         MessageStoreGuard(beanFactory, registry, environment, resourceLoader)
 
     /** Fails the startup when an event handler or a saga has no event store to read from, or two event stores compete (ADR 0027). */

@@ -5,6 +5,7 @@ import io.damoreira.kraken.messaging.deadletter.DeadLetterMode
 import io.damoreira.kraken.messaging.deadline.DeadlineSettings
 import io.damoreira.kraken.messaging.hub.HubTargets
 import io.damoreira.kraken.messaging.events.OutboxPublisher
+import io.damoreira.kraken.messaging.eventstore.memory.MemoryEventStoreSettings
 import io.damoreira.kraken.messaging.saga.RelaySettings
 import org.springframework.boot.context.properties.ConfigurationProperties
 import java.net.URI
@@ -30,9 +31,17 @@ data class KrakenMessagingProperties(
     val hub: Hub = Hub(),
     /**
      * The event store's name (`kafka`, `rabbitmq-streams`, `memory`): which one runs when two event-store add-ons are on the
-     * classpath (ADR 0027). Unset: the only one there is.
+     * classpath (ADR 0027), and the only way to run the in-memory one (`memory`, never chosen otherwise). Unset: the only one
+     * there is.
      */
     val eventStore: String? = null,
+    /**
+     * The message store's name (`mongo`, `jdbc`, `memory`): which one runs when two are available (ADR 0028), and the only way to
+     * run the in-memory one (`memory`, never chosen otherwise). Unset: the only one there is.
+     */
+    val store: String? = null,
+    /** The in-memory event store (`kraken.messaging.event-store=memory`). */
+    val memory: Memory = Memory(),
     val events: Events = Events(),
     val outbox: Outbox = Outbox(),
     val idempotency: Idempotency = Idempotency(),
@@ -233,6 +242,18 @@ data class KrakenMessagingProperties(
     )
 
     /** `events.*`: the service's events on the event store (ADR 0027), whichever add-on provides it. */
+    /** The in-memory event store's settings (`kraken.messaging.memory.*`). */
+    data class Memory(
+        /** How many segments every source has (1 to 1024): a key always goes to the same one; competing instances share them. */
+        val segments: Int = MemoryEventStoreSettings.DEFAULT_SEGMENTS,
+    ) {
+        init {
+            require(segments in 1..MemoryEventStoreSettings.MAX_SEGMENTS) {
+                "kraken.messaging.memory.segments must be between 1 and ${MemoryEventStoreSettings.MAX_SEGMENTS}, was $segments"
+            }
+        }
+    }
+
     data class Events(
         /** The source events are published to and read from (a topic on Kafka). */
         val source: String = "kraken.events",

@@ -50,7 +50,7 @@ class MongoMessageStore(
     internal val settings: MongoStoreSettings = MongoStoreSettings(),
     clock: Clock = Clock.systemUTC(),
 ) : MessageStore {
-    override val name: String = "mongo"
+    override val name: String = NAME
 
     override val outbox: OutboxStore = MongoOutboxStore(mongo, clock)
 
@@ -69,6 +69,11 @@ class MongoMessageStore(
 
     /** The store's schema is its indexes ([ensureIndexes]). */
     override fun initSchema() = ensureIndexes()
+
+    companion object {
+        /** The message store's name (`kraken.messaging.store=mongo`). */
+        const val NAME = "mongo"
+    }
 }
 
 /** The collection a write joining the caller's transaction goes to: the session-aware database of the template. */
