@@ -24,15 +24,17 @@ class ProcessorControlStartTest {
         every { consumer.processor } returns "audit"
         every { consumer.paused } returns false
         every { consumer.isRunning } answers { running.get() }
-        every { consumer.start() } answers { running.set(true) }
+        every { consumer.start(any()) } answers { running.set(true) }
         val control = ProcessorControl(store, mockk<HandlerRegistry>(), mockk<DeadLetters>(), mockk<EventStore>(relaxed = true), pollInterval = Duration.ofMillis(100))
         try {
             control.attach(listOf(consumer)) // does not throw: the service starts
             Thread.sleep(400)
-            verify(exactly = 0) { consumer.start() }
+            verify(exactly = 0) { consumer.start(any()) }
             readable.set(true)
             Thread.sleep(400)
-            verify(exactly = 1) { consumer.start() }
+            // The control plane never waits for a previous reader: it starts without waiting, and retries at its next poll.
+            verify(exactly = 1) { consumer.start(waitForPrevious = false) }
+            verify(exactly = 0) { consumer.start() }
         } finally {
             control.detach()
         }

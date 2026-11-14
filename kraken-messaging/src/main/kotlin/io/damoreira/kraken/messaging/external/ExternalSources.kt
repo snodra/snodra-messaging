@@ -45,6 +45,9 @@ import java.util.concurrent.ConcurrentHashMap
  * refused (construction fails naming the source; ADR 0021, ADR 0022): a dedupe id `failed:...` is the one of a failed notice,
  * and the other names stay free for the library's own marker families.
  *
+ * A source whose reader an [Error] (not an exception) ended stays stopped ([stoppedSources], logged at error) until the sources
+ * are stopped and started again (a restart): no automatic restart, which would retry a poison record without end.
+ *
  * Starts and stops with the event processors (same lifecycle phase).
  */
 class ExternalSources(

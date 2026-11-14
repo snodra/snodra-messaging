@@ -1000,7 +1000,7 @@ class Notifier {                         // no annotation: processor "default"
   only its handlers.
 - **Which processors start.** At startup, one consumer per processor that has a handler; `default` also when sagas run. A
   service with no `@EventHandler` and no saga starts no consumer.
-- **Attempts and back-off** (`kafka.consumer.max-attempts`, 1 s between attempts) are shared by all processors.
+- **Attempts and back-off** (`events.consumer.max-attempts`, 1 s between attempts) are shared by all processors.
 - **External sources and webhooks** dispatch locally to the handlers of every processor, each in its own transaction under its
   own marker (`processor:<name>:<dedupeId>`), and to the sagas once. Their records are never dead-lettered. The source names
   `processor`, `saga`, `ingress` and `failed` are refused (a partner source at startup, a webhook at the call): their markers

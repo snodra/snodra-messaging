@@ -3,7 +3,9 @@ package io.damoreira.kraken.messaging.events
 import io.damoreira.kraken.messaging.eventstore.Subscription
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import java.time.Duration
 
@@ -13,7 +15,7 @@ import java.time.Duration
  * ends a subscription), closes it, and subscribes again after a backoff: [min] doubling up to [max] while the subscriptions keep
  * failing before they delivered anything; it starts again from [min] after a subscription that delivered an event or lived
  * [stable] (an assignment alone does not count). Stops when the calling coroutine is cancelled; a subscribe in flight then
- * completes, and the subscription it returns is closed.
+ * completes, and the subscription it returns is closed without being read.
  */
 class Resubscribe(
     private val min: Duration = MIN,
@@ -46,6 +48,9 @@ class Resubscribe(
                 // Not cancellable: a subscription built while the reader was stopped is still closed below (the stop surfaces
                 // at the first next()), never left behind holding its segments.
                 withContext(NonCancellable) { subscription = subscribe() }
+                // A stop during the subscribe surfaces here, before the first next(): a next() with events ready would hand
+                // them out without suspending, so without this check the stopped reader would read them.
+                currentCoroutineContext().ensureActive()
                 when (val end = read(subscription!!)) {
                     Ended.Stopped -> return
                     is Ended.Failed -> end

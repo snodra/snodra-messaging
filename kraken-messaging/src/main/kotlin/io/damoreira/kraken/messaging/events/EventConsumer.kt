@@ -68,7 +68,9 @@ import java.util.concurrent.atomic.AtomicLong
  * **The subscription.** A thread of its own reads it (`kraken-processor-<name>`): handlers run there, so the thread-bound
  * store transaction wraps them (handlers that switch threads lose the transaction). A subscription that fails is closed and
  * subscribed again after a backoff ([Resubscribe]); the failure shows on the status (`subscription: ...`), as does what the
- * subscription recovered from by itself ([Subscription.takeError]).
+ * subscription recovered from by itself ([Subscription.takeError]). A reader ended by an [Error] (not an exception) stays stopped
+ * (STOPPED, `reader stopped: ...`) until the processor is stopped and started again (a reset, a restart): no automatic restart,
+ * which would retry a poison record without end.
  *
  * The record's correlation id is in the handlers' coroutine context ([io.damoreira.kraken.messaging.tracing.CorrelationContext])
  * and the MDC, so events they publish carry it.
@@ -148,14 +150,25 @@ class EventConsumer(
     private val store: DeadLetterStore? = (deadLetters as? DeadLetterSink.Collection)?.store
 
     /**
-     * Starts reading. A reader that outlived its [stop] (a handler still running after [stopTimeout]) is waited for up to
-     * [stopTimeout] more; while it runs no second reader starts beside it ([IllegalStateException]: the caller tries again).
+     * Starts reading (the Spring lifecycle): a reader that outlived its [stop] (a handler still running after [stopTimeout]) is
+     * waited for up to [stopTimeout] more; while it runs no second reader starts beside it ([IllegalStateException]).
+     */
+    override fun start() = start(waitForPrevious = true)
+
+    /**
+     * Starts reading. While a reader that outlived its [stop] (a handler still running after [stopTimeout]) runs, no second reader
+     * starts beside it ([IllegalStateException]: the caller tries again): [waitForPrevious] waits for it up to [stopTimeout]
+     * first (the Spring lifecycle), false refuses at once (the control plane, which tries again at its next poll and must not
+     * block its other processors meanwhile).
+     *
+     * A reader ended by an [Error] stays stopped (STOPPED, with why) until the processor is stopped and started again (a reset,
+     * a restart): there is no automatic restart, which would retry a poison record without end.
      */
     @Synchronized
-    override fun start() {
+    fun start(waitForPrevious: Boolean) {
         if (running.get()) return
         thread?.let { previous ->
-            previous.join(stopTimeout.toMillis())
+            if (waitForPrevious) previous.join(stopTimeout.toMillis())
             check(!previous.isAlive) {
                 "event processor $processor cannot start: its previous reader is still running a handler; not starting a second one beside it"
             }

@@ -506,7 +506,7 @@ class ProcessorControl(
         val run = slot.held == null && foreign == null
         if (run && !consumer.isRunning) {
             try {
-                consumer.start()
+                consumer.start(waitForPrevious = false) // never blocks the poll on a reader that outlived its stop
             } catch (e: Exception) {
                 if (failFast) throw e
                 log.warn("Could not start processor {}, retrying at the next poll: {}", processor, e.toString())

@@ -192,6 +192,23 @@ class EventConsumerSubscriptionTest {
     }
 
     @Test
+    fun aSubscriptionBuiltDuringAStopIsClosedWithoutReadingWhatItHasReady() {
+        val events = ScriptedEventStore()
+        events.subscribeGate = CompletableDeferred()
+        val c = start(events)
+        await().atMost(Duration.ofSeconds(10)).until { events.subscriptions.size == 1 } // built, subscribe() not returned yet
+        val built = events.subscriptions.single()
+        built.assign("0")
+        built.deliver("0", "0", "test.Other") // ready: next() would hand it out without suspending
+        val stopped = CompletableFuture.runAsync { c.stop() }
+        Thread.sleep(200) // the stop is waiting for the subscribe in flight
+        events.subscribeGate!!.complete(Unit)
+        stopped.get(5, TimeUnit.SECONDS)
+        assertTrue(built.closed, "the subscription built while the processor stopped is closed")
+        assertEquals(emptyList<Pair<String, String>>(), built.acks, "nothing of it was read: the stop surfaced before the first next()")
+    }
+
+    @Test
     fun aRecordWhoseDeadLetterCouldNotBeWrittenRunsItsHandlersAgainAfterAResubscribe() {
         val events = ScriptedEventStore(capabilities = setOf(Capability.LAG, Capability.NATIVE_DEAD_LETTER))
         val handlers = RecordingHandlers().also { it.failAlways.set("p-1") }
@@ -268,6 +285,34 @@ class EventConsumerSubscriptionTest {
         handlers.release.countDown()
         await().atMost(Duration.ofSeconds(10)).until { events.subscriptions[0].closed }
         c.start()
+        awaitSubscriptions(events, 2)
+    }
+
+    @Test
+    fun aStartFromTheControlPlaneIsRefusedAtOnceWhileThePreviousReaderRuns() {
+        val events = ScriptedEventStore()
+        val handlers = BlockingHandlers()
+        val registry = HandlerRegistry(MessageTypeResolver("test")).also { it.register(handlers) }
+        val dispatcher = LocalEventDispatcher(registry, HandlerInvoker(registry, JsonCodec()), markingStore())
+        val c = EventConsumer(
+            events, SubscriptionSpec("svc.default", "kraken.events"), dispatcher, maxAttempts = 1, stopTimeout = Duration.ofSeconds(2),
+        ).also { consumer = it; it.start() }
+        awaitSubscriptions(events, 1)
+        events.subscriptions[0].assign("0")
+        events.subscriptions[0].deliver("0", "0", "test.Happened", id = "b-1", payload = happened("b-1"))
+        await().atMost(Duration.ofSeconds(10)).until { handlers.seen.size == 1 }
+        c.stop() // gives up after its 2 s: the reader still runs the handler
+
+        val began = System.nanoTime()
+        val refused = runCatching { c.start(waitForPrevious = false) }.exceptionOrNull()
+        val took = Duration.ofNanos(System.nanoTime() - began)
+        assertTrue(refused is IllegalStateException, "no second reader while the first runs a handler: $refused")
+        assertTrue(took < Duration.ofMillis(500), "refused at once, without waiting for the previous reader: $took")
+        assertTrue(!c.isRunning)
+
+        handlers.release.countDown()
+        await().atMost(Duration.ofSeconds(10)).until { events.subscriptions[0].closed }
+        c.start(waitForPrevious = false)
         awaitSubscriptions(events, 2)
     }
 
