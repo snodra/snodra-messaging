@@ -124,6 +124,11 @@ class KrakenMessagingAutoConfiguration {
         @Bean
         fun krakenHandlerBeanPostProcessor(registry: ObjectProvider<HandlerRegistry>) =
             HandlerBeanPostProcessor { registry.getObject() }
+
+        /** Two message store add-ons without `kraken.messaging.store.type` fail the startup before any bean exists. */
+        @JvmStatic
+        @Bean
+        fun krakenMessageStoreAddOnsCheck(environment: Environment) = MessageStoreAddOnsCheck(environment)
     }
 }
 

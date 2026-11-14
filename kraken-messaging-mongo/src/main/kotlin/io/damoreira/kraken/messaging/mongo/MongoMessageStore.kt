@@ -2,6 +2,7 @@ package io.damoreira.kraken.messaging.mongo
 
 import com.mongodb.MongoException
 import com.mongodb.client.MongoCollection
+import io.damoreira.kraken.messaging.store.AddOnMessageStore
 import io.damoreira.kraken.messaging.store.DeadLetterStore
 import io.damoreira.kraken.messaging.store.ExternalCallStore
 import io.damoreira.kraken.messaging.store.MessageStore
@@ -49,7 +50,7 @@ class MongoMessageStore(
     override val transactions: PlatformTransactionManager = MongoStoreTransactionManager(mongo.mongoDatabaseFactory),
     internal val settings: MongoStoreSettings = MongoStoreSettings(),
     clock: Clock = Clock.systemUTC(),
-) : MessageStore {
+) : AddOnMessageStore {
     override val name: String = NAME
 
     override val outbox: OutboxStore = MongoOutboxStore(mongo, clock)

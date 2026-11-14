@@ -5,7 +5,10 @@ import io.damoreira.kraken.messaging.eventstore.EventStore
 import io.damoreira.kraken.messaging.handler.HandlerRegistry
 import io.damoreira.kraken.messaging.saga.Saga
 import io.damoreira.kraken.messaging.saga.RawEventPublisher
+import io.damoreira.kraken.messaging.store.AddOnMessageStore
 import io.damoreira.kraken.messaging.store.MessageStore
+import org.springframework.beans.factory.config.BeanFactoryPostProcessor
+import org.springframework.beans.factory.config.ConfigurableListableBeanFactory
 import org.springframework.beans.factory.ListableBeanFactory
 import org.springframework.beans.factory.NoSuchBeanDefinitionException
 import org.springframework.beans.factory.ObjectProvider
@@ -70,6 +73,29 @@ class MessageStoreGuard(
         /** The message store's name, when two are available or to run the in-memory one. */
         const val STORE = "kraken.messaging.store.type"
     }
+}
+
+/**
+ * Fails the startup, before any bean is created, when two message store add-ons ([AddOnMessageStore]) are configured and
+ * `kraken.messaging.store.type` does not choose one: every add-on's store steps back for the application's own store, never for
+ * another add-on's, so without this check the service would need the setting only to find out which one it got.
+ */
+class MessageStoreAddOnsCheck(private val environment: Environment) : BeanFactoryPostProcessor {
+    override fun postProcessBeanFactory(beanFactory: ConfigurableListableBeanFactory) {
+        if (!environment.getProperty(MessageStoreGuard.STORE).isNullOrBlank()) return
+        val addOns = beanFactory.getBeanNamesForType(AddOnMessageStore::class.java, true, false)
+            .mapNotNull { beanFactory.getType(it, false) }.distinct()
+        if (addOns.size < 2) return
+        val names = addOns.map(::storeName)
+        throw IllegalStateException(
+            "${addOns.size} message store add-ons are configured (${addOns.joinToString { "${it.simpleName}: ${storeName(it)}" }}): set " +
+                "${MessageStoreGuard.STORE} to the one this service uses (${names.joinToString(", ")}), or remove the others from the dependencies",
+        )
+    }
+
+    /** The store's name: the `NAME` constant of its class, else the class's simple name. */
+    private fun storeName(type: Class<*>): String =
+        runCatching { type.getField("NAME").get(null) as? String }.getOrNull() ?: type.simpleName
 }
 
 /** What to do about a missing event store: the end of every message about one. */
