@@ -19,7 +19,7 @@ import org.springframework.core.io.ResourceLoader
 
 /** What to do about a missing message store: the end of every message about one. */
 internal const val ADD_A_MESSAGE_STORE =
-    "add a message store add-on (kraken-messaging-mongo for MongoDB) to the dependencies, or declare a MessageStore bean " +
+    "add a message store add-on (kraken-messaging-mongo for MongoDB, kraken-messaging-jdbc for PostgreSQL or MySQL) to the dependencies, or declare a MessageStore bean " +
         "(kraken.messaging.store.type=memory runs the in-memory one, not durable: tests and local runs)"
 
 /**

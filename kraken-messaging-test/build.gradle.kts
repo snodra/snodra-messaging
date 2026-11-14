@@ -9,6 +9,8 @@ dependencies {
     api(libs.testcontainers.junit)
     api(libs.testcontainers.kafka)
     api(libs.testcontainers.mongodb)
+    api(libs.testcontainers.postgresql)
+    api(libs.testcontainers.mysql)
     implementation(platform("org.springframework.boot:spring-boot-dependencies:${libs.versions.spring.boot.get()}"))
     api("org.apache.kafka:kafka-clients")
     // InMemoryBuses synthesises a KrakenForwardedAuthentication (a Spring Security Authentication) for annotated handlers.
@@ -51,7 +53,7 @@ publishing {
             artifactId = "kraken-messaging-test"
             pom {
                 name.set("kraken-messaging-test")
-                description.set("Test helpers for kraken services: the conformance kits, the zero-infrastructure mode (@KrakenInMemory), Testcontainers (Kafka, MongoDB, hub)")
+                description.set("Test helpers for kraken services: the conformance kits, the zero-infrastructure mode (@KrakenInMemory), Testcontainers (Kafka, MongoDB, PostgreSQL, MySQL, hub)")
                 licenses { license { name.set("MIT") } }
             }
         }
