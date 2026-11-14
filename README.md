@@ -594,7 +594,7 @@ kraken:
       segments: 4           # segments per source (default 4)
 ```
 
-At startup each logs at `WARN`, naming the active Spring profiles (`default` when none), so a production profile that runs one
+At startup each logs at `WARN`, naming the active Spring profiles (the default ones when none: `default` unless `spring.profiles.default` says otherwise), so a production profile that runs one
 by mistake shows it: `in-memory event store: not durable (profile local)` and `in-memory message store: not durable (profile
 local)`. Nothing stops a profile from using them: the warning is the guard.
 
