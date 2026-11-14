@@ -19,11 +19,16 @@ dependencies {
     api(libs.grpc.inprocess)
     implementation(libs.grpc.stub)
     implementation(libs.grpc.protobuf)
+    // @KrakenInMemory is a Spring test annotation (TestPropertySource, Import) for a service's @SpringBootTest.
+    implementation("org.springframework:spring-test")
+    implementation("org.springframework:spring-context")
     // UnverifiedJwt reads the claims of a jwt credential.
     implementation("tools.jackson.core:jackson-databind")
     implementation(libs.grpc.kotlin.stub)
 
     testImplementation(libs.kotlin.test.junit5)
+    testImplementation(platform("org.springframework.boot:spring-boot-dependencies:${libs.versions.spring.boot.get()}"))
+    testImplementation(libs.spring.boot.starter.test)
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
     // The starter is a project dependency, so its BOM-managed (version-less) transitives need the BOM here too.
     testRuntimeOnly(platform("org.springframework.boot:spring-boot-dependencies:${libs.versions.spring.boot.get()}"))
@@ -45,7 +50,7 @@ publishing {
             artifactId = "kraken-messaging-test"
             pom {
                 name.set("kraken-messaging-test")
-                description.set("Testcontainers helpers for kraken services (Kafka, MongoDB, hub, RustFS)")
+                description.set("Test helpers for kraken services: the conformance kits, the zero-infrastructure mode (@KrakenInMemory), Testcontainers (Kafka, MongoDB, hub)")
                 licenses { license { name.set("MIT") } }
             }
         }

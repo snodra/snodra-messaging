@@ -30,7 +30,7 @@ import java.time.Clock
  * `in-memory event store: not durable (profile local)`, `in-memory message store: not durable (profile local)`. An event-store or
  * message-store add-on on the classpath steps back when its setting names `memory`.
  *
- * Ordered after the auto-configurations that create the application's own transaction manager (JDBC, JPA), so the in-memory one
+ * Ordered after the auto-configurations that create the application's own transaction manager (JDBC, JPA, JTA), so the in-memory one
  * never takes their place, and before Boot's transaction auto-configuration and the core's configurations that need a store.
  */
 @AutoConfiguration(
@@ -39,6 +39,7 @@ import java.time.Clock
     afterName = [
         "org.springframework.boot.jdbc.autoconfigure.DataSourceTransactionManagerAutoConfiguration",
         "org.springframework.boot.hibernate.autoconfigure.HibernateJpaAutoConfiguration",
+        "org.springframework.boot.transaction.jta.autoconfigure.JtaAutoConfiguration",
     ],
     beforeName = ["org.springframework.boot.transaction.autoconfigure.TransactionAutoConfiguration"],
 )
