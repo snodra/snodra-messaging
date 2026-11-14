@@ -1,35 +1,21 @@
 package io.damoreira.kraken.messaging.saga
 
-import com.mongodb.MongoException
-import com.mongodb.client.MongoClients
-import io.damoreira.kraken.messaging.DEADLINES
 import io.damoreira.kraken.messaging.MessageContext
 import io.damoreira.kraken.messaging.RetryPolicy
-import io.damoreira.kraken.messaging.SAGAS
-import io.damoreira.kraken.messaging.SAGA_DISPATCH
-import io.damoreira.kraken.messaging.SAGA_FAILURES
 import io.damoreira.kraken.messaging.api.Event
 import io.damoreira.kraken.messaging.codec.JsonCodec
 import io.damoreira.kraken.messaging.codec.MessageTypeResolver
-import io.damoreira.kraken.messaging.mongo.MongoMessageStore
-import io.damoreira.kraken.messaging.mongo.MongoStoreTransactionManager
-import io.damoreira.kraken.messaging.mongoStore
-import io.damoreira.kraken.messaging.store.MessageStore
-import io.damoreira.kraken.messaging.test.KrakenContainers
-import io.mockk.every
-import io.mockk.mockk
-import org.junit.jupiter.api.AfterAll
-import org.junit.jupiter.api.BeforeAll
+import io.damoreira.kraken.messaging.deadlines
+import io.damoreira.kraken.messaging.dispatchEntries
+import io.damoreira.kraken.messaging.markerIds
+import io.damoreira.kraken.messaging.sagaFailures
+import io.damoreira.kraken.messaging.sagas
+import io.damoreira.kraken.messaging.store.memory.MemoryMessageStore
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
-import org.junit.jupiter.api.TestInstance
-import org.springframework.data.domain.Sort
-import org.springframework.data.mongodb.MongoDatabaseFactory
-import org.springframework.data.mongodb.MongoTransactionManager
-import org.springframework.data.mongodb.core.MongoTemplate
-import org.springframework.data.mongodb.core.SimpleMongoClientDatabaseFactory
-import org.springframework.data.mongodb.core.query.Criteria
-import org.springframework.data.mongodb.core.query.Query
+import org.springframework.dao.ConcurrencyFailureException
+import org.springframework.transaction.PlatformTransactionManager
+import org.springframework.transaction.TransactionStatus
 import org.springframework.transaction.support.TransactionOperations
 import org.springframework.transaction.support.TransactionTemplate
 import java.math.BigDecimal
@@ -59,22 +45,22 @@ private class RecordingMetrics : SagaMetrics {
     fun count(type: String, outcome: SagaMetrics.Outcome) = events.count { it == type to outcome }
 }
 
-/** The store's transaction manager whose next commit fails with a transient error: the commit, not a write, conflicts. */
-private class CommitConflictsOnce(factory: MongoDatabaseFactory) : MongoStoreTransactionManager(factory) {
+/**
+ * The store's transaction manager whose next commit fails with a transient error (a write conflict found at the commit, as a
+ * database reports it): the commit, not a write, conflicts. The transaction is rolled back first, as a failed commit leaves it.
+ */
+private class CommitConflictsOnce(private val inner: PlatformTransactionManager) : PlatformTransactionManager by inner {
     val failNext = AtomicBoolean()
 
-    override fun doCommit(transactionObject: MongoTransactionObject) {
-        if (!failNext.getAndSet(false)) return super.doCommit(transactionObject)
-        val conflict = MongoException(112, "WriteConflict at commit").apply { addLabel(MongoException.TRANSIENT_TRANSACTION_ERROR_LABEL) }
-        // The failing commit goes through the store's mapping; Spring then rolls the real transaction back.
-        super.doCommit(mockk<MongoTransactionObject>(relaxed = true) { every { commitTransaction() } throws conflict })
+    override fun commit(status: TransactionStatus) {
+        if (!failNext.getAndSet(false)) return inner.commit(status)
+        inner.rollback(status)
+        throw ConcurrencyFailureException("write conflict at commit")
     }
 }
 
-@TestInstance(TestInstance.Lifecycle.PER_CLASS)
+/** The saga runtime over the in-memory message store (its transactions, its write conflicts; no container). */
 class SagaRuntimeTest {
-    private val mongoContainer = KrakenContainers.mongo()
-    private lateinit var mongo: MongoTemplate
     private lateinit var tx: TransactionTemplate
     private val codec = JsonCodec()
     private val resolver = MessageTypeResolver("rt")
@@ -82,24 +68,12 @@ class SagaRuntimeTest {
     private val clock = Clock.fixed(now, ZoneOffset.UTC)
     private lateinit var metrics: RecordingMetrics
     private lateinit var runtime: SagaRuntime
-    private lateinit var store: MessageStore
-
-    @BeforeAll
-    fun start() {
-        mongoContainer.start()
-        val factory = SimpleMongoClientDatabaseFactory(MongoClients.create(mongoContainer.connectionString + "/?directConnection=true"), "saga_runtime_test")
-        mongo = MongoTemplate(factory)
-        tx = TransactionTemplate(MongoTransactionManager(factory))
-        store = mongoStore(mongo)
-        listOf("processed_events", "saga_failures").forEach { if (!mongo.collectionExists(it)) mongo.createCollection(it) }
-    }
-
-    @AfterAll
-    fun stop() = mongoContainer.stop()
+    private lateinit var store: MemoryMessageStore
 
     @BeforeEach
     fun setUp() {
-        listOf("sagas", "saga_dispatch", "deadlines", "saga_failures", "processed_events").forEach { mongo.remove(Query(), it) }
+        store = MemoryMessageStore()
+        tx = TransactionTemplate(store.transactions)
         RtGate.reset()
         metrics = RecordingMetrics()
         runtime = runtime(RtOrderSaga::class, RtHeaderSaga::class)
@@ -124,13 +98,13 @@ class SagaRuntimeTest {
         on.process(type, codec.encode(event), ctx)
     }
 
-    private fun sagas(type: String = "rt.Order") = mongo.find(Query(Criteria.where("type").`is`(type)), SagaDocument::class.java, SAGAS)
+    private fun sagas(type: String = "rt.Order") = store.sagas().filter { it.type == type }
     private fun saga(orderId: String) = sagas().single { it.stateDoc.getString("orderId") == orderId }
     private fun dispatch(sagaId: String) =
-        mongo.find(Query(Criteria.where("sagaId").`is`(sagaId)).with(Sort.by("seq")), SagaDispatchDocument::class.java, SAGA_DISPATCH)
-    private fun deadlines() = mongo.findAll(DeadlineDocument::class.java, DEADLINES)
+        store.dispatchEntries().filter { it.sagaId == sagaId }.sortedBy { it.seq }
+    private fun deadlines() = store.deadlines()
     private fun log(doc: SagaDocument): List<String> = doc.stateDoc.getList("log", String::class.java) ?: emptyList()
-    private fun marker(id: String) = mongo.exists(Query(Criteria.where("_id").`is`(id)), "processed_events")
+    private fun marker(id: String) = id in store.markerIds()
 
     @Test
     fun `state and dispatched payloads keep BigDecimal scale and map keys with dots or a leading dollar exactly`() {
@@ -201,7 +175,7 @@ class SagaRuntimeTest {
 
     @Test
     fun `a transient error at commit is retried as a conflict, not parked as a handler failure`() {
-        val manager = CommitConflictsOnce(mongo.mongoDatabaseFactory)
+        val manager = CommitConflictsOnce(store.transactions)
         val conflicted = runtime(RtOrderSaga::class, tx = TransactionTemplate(manager))
         manager.failNext.set(true)
 
@@ -209,7 +183,7 @@ class SagaRuntimeTest {
 
         assertEquals(1, metrics.count("rt.Order", SagaMetrics.Outcome.CONFLICT), "the commit's conflict was counted and retried")
         assertEquals(1, saga("c1").stateDoc.getInteger("placed"), "applied once, by the retry")
-        assertEquals(0, mongo.count(Query(), "saga_failures"))
+        assertEquals(0, store.sagaFailures().size)
     }
 
     @Test
@@ -221,7 +195,7 @@ class SagaRuntimeTest {
         assertEquals(1, sagas().size)
         assertEquals(2, doc.stateDoc.getInteger("placed"))
         assertTrue(metrics.count("rt.Order", SagaMetrics.Outcome.CONFLICT) >= 1, "the loser conflicted and retried")
-        assertEquals(0, mongo.count(Query(), "saga_failures"))
+        assertEquals(0, store.sagaFailures().size)
         assertEquals(1, metrics.started.size)
     }
 
@@ -323,7 +297,7 @@ class SagaRuntimeTest {
         assertEquals(1, doc.stateDoc.getInteger("placed"))
         assertEquals(listOf("rt.DoIt", "rt.Done"), dispatch(doc.id).map { it.type }, "the failed attempt left no entries")
         assertEquals(2, deadlines().size, "nor deadlines")
-        assertEquals(0, mongo.count(Query(), "saga_failures"))
+        assertEquals(0, store.sagaFailures().size)
         assertEquals(1, metrics.count("rt.Order", SagaMetrics.Outcome.HANDLED))
         assertEquals(0, metrics.count("rt.Order", SagaMetrics.Outcome.PARKED))
     }
@@ -348,7 +322,7 @@ class SagaRuntimeTest {
 
         assertEquals(0, sagas().size)
         assertEquals(2, metrics.count("rt.Order", SagaMetrics.Outcome.NO_MATCH))
-        assertEquals(0, mongo.count(Query(), "saga_failures"))
+        assertEquals(0, store.sagaFailures().size)
         assertTrue(marker("saga:rt.Order:lost-1"), "a no-match event is final: its marker is written")
     }
 
@@ -360,7 +334,7 @@ class SagaRuntimeTest {
 
         assertEquals(1, sagas().size, "the healthy type handled it")
         assertEquals(0, sagas("rt.Broken").size)
-        val failure = assertNotNull(mongo.findById("rt.Broken:e-14", SagaFailureDocument::class.java, SAGA_FAILURES))
+        val failure = assertNotNull(store.sagaFailures().find { it.id == "rt.Broken:e-14" })
         assertEquals("rt.Broken", failure.sagaType)
         assertEquals("e-14", failure.eventId)
         assertEquals("rt.OrderPlaced", failure.eventType)
@@ -376,7 +350,7 @@ class SagaRuntimeTest {
         assertEquals(1, metrics.count("rt.Order", SagaMetrics.Outcome.HANDLED))
 
         deliver(RtOrderPlaced("o14"), id = "e-14", on = both) // redelivered: both markers hold
-        assertEquals(1, mongo.count(Query(), "saga_failures"))
+        assertEquals(1, store.sagaFailures().size)
         assertEquals(1, saga("o14").stateDoc.getInteger("placed"))
     }
 
@@ -392,7 +366,7 @@ class SagaRuntimeTest {
 
         assertEquals(2, sagas().size, "a second instance started under the freed key")
         assertEquals(1, sagas().count { it.startKey == "rt.Order|orderId=o31" })
-        assertEquals(0, mongo.count(Query(), "saga_failures"), "nothing was parked on a duplicate start key")
+        assertEquals(0, store.sagaFailures().size, "nothing was parked on a duplicate start key")
     }
 
     @Test
@@ -407,7 +381,7 @@ class SagaRuntimeTest {
         deliver(RtHandedOver("o32"), on = handover) // no live instance is associated with orderId=o32
 
         assertEquals(2, sagas("rt.Handover").size, "a second instance started under the same key")
-        assertEquals(0, mongo.count(Query(), "saga_failures"), "nothing was parked on a duplicate start key")
+        assertEquals(0, store.sagaFailures().size, "nothing was parked on a duplicate start key")
     }
 
     @Test
@@ -423,7 +397,7 @@ class SagaRuntimeTest {
 
         assertTrue(tookMs < 1000, "parking took $tookMs ms: a handler exception must not back off like a conflict")
         assertEquals(2, RtGate.brokenCalls.get())
-        assertNotNull(mongo.findById("rt.Broken:e-30", SagaFailureDocument::class.java, SAGA_FAILURES))
+        assertNotNull(store.sagaFailures().find { it.id == "rt.Broken:e-30" })
     }
 
     @Test
@@ -459,7 +433,7 @@ class SagaRuntimeTest {
         assertEquals(listOf("rt.Escape|k%3Dx=1", "rt.Escape|k=x%3D1"), docs.map { it.startKey }, "two instances, each with its own key")
         assertEquals(listOf(1, 1), docs.map { it.stateDoc.getInteger("starts") })
         assertEquals("rt.Escape%7Ca%25b|k=v", SagaRuntime.startKey("rt.Escape|a%b", "k", "v"), "the type name and a percent sign are escaped too")
-        assertEquals(0, mongo.count(Query(), "saga_failures"), "nothing was parked on a shared key")
+        assertEquals(0, store.sagaFailures().size, "nothing was parked on a shared key")
     }
 
     @Test

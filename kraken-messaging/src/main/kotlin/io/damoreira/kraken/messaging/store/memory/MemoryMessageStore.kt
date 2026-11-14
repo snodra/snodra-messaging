@@ -80,8 +80,12 @@ class MemoryMessageStore(internal val clock: Clock = Clock.systemUTC()) : Messag
 
     internal fun now(): Instant = clock.instant()
 
-    /** The transaction bound to the calling thread, if any. */
-    internal fun bound(): MemoryTransaction? = TransactionSynchronizationManager.getResource(transactionKey) as? MemoryTransaction
+    /**
+     * The live transaction bound to the calling thread, if any; one that ended (a call from its after-completion callbacks) is
+     * none: such a write commits on its own.
+     */
+    internal fun bound(): MemoryTransaction? =
+        (TransactionSynchronizationManager.getResource(transactionKey) as? MemoryTransaction)?.takeIf { !it.ended }
 
     /** [table] as the calling thread sees it: through its transaction when [joined] and one is bound, else as committed. */
     internal fun <V : Any> view(table: Table<V>, joined: Boolean): View<V> = View(table, if (joined) bound() else null, this)

@@ -1,10 +1,7 @@
 package io.damoreira.kraken.messaging.saga
 
-import io.damoreira.kraken.messaging.store.MessageStore
-import io.damoreira.kraken.messaging.mongoStore
-import io.damoreira.kraken.messaging.SAGA_DISPATCH
-import io.damoreira.kraken.messaging.mongo.MongoMessageStore
-import com.mongodb.client.MongoClients
+import io.damoreira.kraken.messaging.dispatchEntries
+import io.damoreira.kraken.messaging.store.memory.MemoryMessageStore
 import io.damoreira.kraken.messaging.MessageContext
 import io.damoreira.kraken.messaging.RetryPolicy
 import io.damoreira.kraken.messaging.api.Event
@@ -23,19 +20,11 @@ import io.damoreira.kraken.messaging.handler.HandlerInvoker
 import io.damoreira.kraken.messaging.handler.HandlerRegistry
 import io.damoreira.kraken.messaging.events.LocalEventDispatcher
 import io.damoreira.kraken.messaging.events.OutboxEventBus
-import io.damoreira.kraken.messaging.test.KrakenContainers
 import io.damoreira.kraken.messaging.tracing.TraceHeaders
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import kotlinx.coroutines.runBlocking
-import org.junit.jupiter.api.AfterAll
-import org.junit.jupiter.api.BeforeAll
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
-import org.junit.jupiter.api.TestInstance
-import org.springframework.data.mongodb.MongoTransactionManager
-import org.springframework.data.mongodb.core.MongoTemplate
-import org.springframework.data.mongodb.core.SimpleMongoClientDatabaseFactory
-import org.springframework.data.mongodb.core.query.Query
 import org.springframework.transaction.support.TransactionTemplate
 import java.time.Duration
 import java.time.Instant
@@ -48,39 +37,23 @@ import kotlin.test.assertNull
 
 /**
  * The Micrometer meters of the saga runtime, relay, deadline scheduler and idempotent adapters against a real runtime on
- * MongoDB: each meter of the spec's Observability list moves on the matching action. The first tests drive the hooks alone.
+ * the in-memory message store: each meter of the spec's Observability list moves on the matching action. The first tests drive
+ * the hooks alone.
  */
-@TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class SagaMetricsTest {
-    private val mongoContainer = KrakenContainers.mongo()
-    private lateinit var mongo: MongoTemplate
+    private lateinit var store: MemoryMessageStore
     private lateinit var tx: TransactionTemplate
-    private lateinit var txManager: MongoTransactionManager
     private val codec = JsonCodec()
     private val resolver = MessageTypeResolver("rt")
     private val start = Instant.parse("2026-11-03T10:00:00Z")
     private val clock = SettableClock(start)
     private lateinit var registry: SimpleMeterRegistry
-    private lateinit var store: MessageStore
     private lateinit var metrics: MicrometerSagaMetrics
-
-    @BeforeAll
-    fun start() {
-        mongoContainer.start()
-        val factory = SimpleMongoClientDatabaseFactory(MongoClients.create(mongoContainer.connectionString + "/?directConnection=true"), "saga_metrics_test")
-        mongo = MongoTemplate(factory)
-        txManager = MongoTransactionManager(factory)
-        tx = TransactionTemplate(txManager)
-        store = mongoStore(mongo)
-        listOf("processed_events", "saga_failures", "outbox", "external_calls").forEach { if (!mongo.collectionExists(it)) mongo.createCollection(it) }
-    }
-
-    @AfterAll
-    fun stop() = mongoContainer.stop()
 
     @BeforeEach
     fun setUp() {
-        listOf("sagas", "saga_dispatch", "saga_dispatch_leases", "deadlines", "saga_failures", "processed_events", "outbox", "external_calls").forEach { mongo.remove(Query(), it) }
+        store = MemoryMessageStore()
+        tx = TransactionTemplate(store.transactions)
         RtGate.reset()
         DlSwitch.broken.set(false)
         clock.now = start
@@ -169,7 +142,7 @@ class SagaMetricsTest {
         assertEquals(4.0, gauge("kraken.saga.dispatch.pending"))
 
         deliver(runtime, RtFinish("o4"))
-        mongo.updateMulti(Query(), org.springframework.data.mongodb.core.query.Update().set("dispatchedAt", start), SagaDispatchDocument::class.java, SAGA_DISPATCH)
+        store.dispatchEntries().forEach { store.sagas.dispatch.markDispatched(it.id, start) }
         sampler.sampleOnce()
         assertEquals(1.0, gauge("kraken.sagas.active", "type", "rt.Order"))
         assertEquals(0.0, gauge("kraken.saga.dispatch.pending"), "dispatched entries are not pending")

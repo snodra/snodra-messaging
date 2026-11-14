@@ -1,15 +1,11 @@
 package io.damoreira.kraken.messaging.deadline
 
-import io.damoreira.kraken.messaging.store.MessageStore
-import io.damoreira.kraken.messaging.mongoStore
-import io.damoreira.kraken.messaging.DEADLINES
-import io.damoreira.kraken.messaging.SAGAS
-import io.damoreira.kraken.messaging.SAGA_DISPATCH
-import io.damoreira.kraken.messaging.mongo.MongoMessageStore
+import io.damoreira.kraken.messaging.deadlines
+import io.damoreira.kraken.messaging.dispatchEntries
+import io.damoreira.kraken.messaging.sagas
+import io.damoreira.kraken.messaging.store.memory.MemoryMessageStore
 import io.damoreira.kraken.messaging.saga.payloadDoc
 import io.damoreira.kraken.messaging.saga.stateDoc
-import com.mongodb.client.MongoClient
-import com.mongodb.client.MongoClients
 import io.damoreira.kraken.messaging.MessageContext
 import io.damoreira.kraken.messaging.RetryPolicy
 import io.damoreira.kraken.messaging.api.Command
@@ -34,17 +30,8 @@ import io.damoreira.kraken.messaging.saga.SagaRetry
 import io.damoreira.kraken.messaging.saga.SagaRuntime
 import io.damoreira.kraken.messaging.saga.SettableClock
 import io.damoreira.kraken.messaging.saga.StartSaga
-import io.damoreira.kraken.messaging.test.KrakenContainers
-import org.junit.jupiter.api.AfterAll
-import org.junit.jupiter.api.BeforeAll
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
-import org.junit.jupiter.api.TestInstance
-import org.springframework.data.mongodb.MongoTransactionManager
-import org.springframework.data.mongodb.core.MongoTemplate
-import org.springframework.data.mongodb.core.SimpleMongoClientDatabaseFactory
-import org.springframework.data.mongodb.core.query.Criteria
-import org.springframework.data.mongodb.core.query.Query
 import org.springframework.transaction.support.TransactionTemplate
 import java.time.Duration
 import java.time.Instant
@@ -141,11 +128,8 @@ private class OverdueMetrics : SagaMetrics {
     override fun deadlinesOverdue(byName: Map<String, Long>) { overdue = byName }
 }
 
-@TestInstance(TestInstance.Lifecycle.PER_CLASS)
+/** The deadline scheduler and the saga runtime over the in-memory message store (no container). */
 class DeadlineSchedulerTest {
-    private val mongoContainer = KrakenContainers.mongo()
-    private lateinit var client: MongoClient
-    private lateinit var mongo: MongoTemplate
     private lateinit var tx: TransactionTemplate
     private val codec = JsonCodec()
     private val resolver = MessageTypeResolver("dl")
@@ -154,28 +138,12 @@ class DeadlineSchedulerTest {
     private val settings = DeadlineSettings(pollInterval = Duration.ofMillis(50), lease = Duration.ofSeconds(30))
     private lateinit var runtime: SagaRuntime
     private lateinit var metrics: OverdueMetrics
-    private lateinit var store: MessageStore
-
-    @BeforeAll
-    fun start() {
-        mongoContainer.start()
-        client = MongoClients.create(mongoContainer.connectionString + "/?directConnection=true")
-        val factory = SimpleMongoClientDatabaseFactory(client, "deadline_scheduler_test")
-        mongo = MongoTemplate(factory)
-        tx = TransactionTemplate(MongoTransactionManager(factory))
-        store = mongoStore(mongo)
-        listOf("processed_events", "saga_failures").forEach { if (!mongo.collectionExists(it)) mongo.createCollection(it) }
-    }
-
-    @AfterAll
-    fun stop() {
-        client.close()
-        mongoContainer.stop()
-    }
+    private lateinit var store: MemoryMessageStore
 
     @BeforeEach
     fun setUp() {
-        listOf("sagas", "saga_dispatch", "deadlines", "saga_failures", "processed_events").forEach { mongo.remove(Query(), it) }
+        store = MemoryMessageStore()
+        tx = TransactionTemplate(store.transactions)
         clock.now = start
         DlSwitch.broken.set(false)
         metrics = OverdueMetrics()
@@ -198,23 +166,21 @@ class DeadlineSchedulerTest {
         clock.now = clock.now.plusSeconds(seconds)
     }
 
-    private fun saga(orderId: String) = mongo.findAll(SagaDocument::class.java, SAGAS).single { it.stateDoc.getString("orderId") == orderId }
-    private fun deadlines(sagaId: String? = null) = mongo.find(
-        if (sagaId == null) Query() else Query(Criteria.where("sagaId").`is`(sagaId)), DeadlineDocument::class.java, DEADLINES,
-    )
+    private fun saga(orderId: String) = store.sagas().single { it.stateDoc.getString("orderId") == orderId }
+    private fun deadlines(sagaId: String? = null) = store.deadlines().filter { sagaId == null || it.sagaId == sagaId }
     private fun fired(orderId: String) = saga(orderId).stateDoc.getInteger("fired")
 
     @Test
     fun `a deadline carries the correlation id of the message that scheduled it, to its handler and to the commands it sends`() {
         deliver(DlPlaced("o40", seconds = 60), id = "e-40") // delivered with the correlation id "corr-e-40"
-        val stored = mongo.find(Query(), org.bson.Document::class.java, "deadlines").single()
-        assertEquals("corr-e-40", stored.getString("correlationId"), "stored with the deadline")
+        val stored = store.deadlines().single()
+        assertEquals("corr-e-40", stored.correlationId, "stored with the deadline")
 
         advance(61)
         scheduler().pollOnce()
 
         assertEquals("corr-e-40", saga("o40").stateDoc.getString("firedWithCorrelation"), "the handler's MessageContext")
-        val sent = mongo.findAll(SagaDispatchDocument::class.java, SAGA_DISPATCH).single()
+        val sent = store.dispatchEntries().single()
         assertEquals("corr-e-40", sent.headers["correlation-id"], "the command it sent")
     }
 
@@ -288,14 +254,14 @@ class DeadlineSchedulerTest {
         val ended = saga("o1")
         assertTrue(ended.ended)
         // A deadline still scheduled for an ended saga (its write raced the saga's end) or for no saga: found due, it is cancelled, not run.
-        mongo.insert(DeadlineDocument("late", "dl.Charge", ended.id, "charge-timeout", """{"reason":"late"}""", "dl.TimeoutPayload", start.plusSeconds(10), "corr-late"), DEADLINES)
-        mongo.insert(DeadlineDocument("orphan", "dl.Charge", "no-such-saga", "charge-timeout", """{"reason":"orphan"}""", "dl.TimeoutPayload", start.plusSeconds(10), "corr-orphan"), DEADLINES)
+        store.sagas.deadlines.insert(DeadlineDocument("late", "dl.Charge", ended.id, "charge-timeout", """{"reason":"late"}""", "dl.TimeoutPayload", start.plusSeconds(10), "corr-late"))
+        store.sagas.deadlines.insert(DeadlineDocument("orphan", "dl.Charge", "no-such-saga", "charge-timeout", """{"reason":"orphan"}""", "dl.TimeoutPayload", start.plusSeconds(10), "corr-orphan"))
 
         advance(3600)
         scheduler().pollOnce()
 
-        assertEquals(DeadlineStatus.CANCELLED, mongo.findById("late", DeadlineDocument::class.java, DEADLINES)!!.status)
-        assertEquals(DeadlineStatus.CANCELLED, mongo.findById("orphan", DeadlineDocument::class.java, DEADLINES)!!.status)
+        assertEquals(DeadlineStatus.CANCELLED, store.deadlines().single { it.id == "late" }.status)
+        assertEquals(DeadlineStatus.CANCELLED, store.deadlines().single { it.id == "orphan" }.status)
         assertEquals(0, fired("o1"))
         assertEquals(emptyList(), metrics.fired)
     }
@@ -363,7 +329,7 @@ class DeadlineSchedulerTest {
 
         scheduler().pollOnce()
 
-        val entry = mongo.find(Query(Criteria.where("sagaId").`is`(sagaId)), SagaDispatchDocument::class.java, SAGA_DISPATCH).single()
+        val entry = store.dispatchEntries().single { it.sagaId == sagaId }
         assertEquals(DispatchKind.COMMAND, entry.kind)
         assertEquals("dl.CancelCharge", entry.type)
         assertEquals("ref-o1", entry.payloadDoc.getString("ref"))

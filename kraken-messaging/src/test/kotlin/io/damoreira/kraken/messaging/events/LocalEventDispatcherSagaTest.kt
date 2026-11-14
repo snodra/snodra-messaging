@@ -1,10 +1,7 @@
 package io.damoreira.kraken.messaging.events
 
-import io.damoreira.kraken.messaging.store.MessageStore
-import io.damoreira.kraken.messaging.mongoStore
-import io.damoreira.kraken.messaging.SAGAS
-import io.damoreira.kraken.messaging.mongo.MongoMessageStore
-import com.mongodb.client.MongoClients
+import io.damoreira.kraken.messaging.sagas
+import io.damoreira.kraken.messaging.store.memory.MemoryMessageStore
 import io.damoreira.kraken.messaging.MessageContext
 import io.damoreira.kraken.messaging.RetryPolicy
 import io.damoreira.kraken.messaging.codec.JsonCodec
@@ -15,21 +12,11 @@ import io.damoreira.kraken.messaging.handler.HandlerRegistry
 import io.damoreira.kraken.messaging.saga.RtBean
 import io.damoreira.kraken.messaging.saga.RtOrderPlaced
 import io.damoreira.kraken.messaging.saga.RtOrderSaga
-import io.damoreira.kraken.messaging.saga.SagaDocument
 import io.damoreira.kraken.messaging.saga.SagaModelScanner
 import io.damoreira.kraken.messaging.saga.SagaRetry
 import io.damoreira.kraken.messaging.saga.SagaRuntime
 import io.damoreira.kraken.messaging.saga.stateDoc
-import io.damoreira.kraken.messaging.test.KrakenContainers
-import org.junit.jupiter.api.AfterAll
-import org.junit.jupiter.api.BeforeAll
-import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
-import org.junit.jupiter.api.TestInstance
-import org.springframework.data.mongodb.MongoTransactionManager
-import org.springframework.data.mongodb.core.MongoTemplate
-import org.springframework.data.mongodb.core.SimpleMongoClientDatabaseFactory
-import org.springframework.data.mongodb.core.query.Query
 import org.springframework.transaction.support.TransactionTemplate
 import java.time.Duration
 import java.util.concurrent.atomic.AtomicInteger
@@ -47,32 +34,12 @@ class FailingOrderHandler {
     }
 }
 
-@TestInstance(TestInstance.Lifecycle.PER_CLASS)
+/** The dispatcher and the saga runtime over the in-memory message store (no container). */
 class LocalEventDispatcherSagaTest {
-    private val mongoContainer = KrakenContainers.mongo()
-    private lateinit var mongo: MongoTemplate
-    private lateinit var tx: TransactionTemplate
-    private lateinit var store: MessageStore
+    private val store = MemoryMessageStore()
+    private val tx = TransactionTemplate(store.transactions)
     private val codec = JsonCodec()
     private val resolver = MessageTypeResolver("rt")
-
-    @BeforeAll
-    fun start() {
-        mongoContainer.start()
-        val factory = SimpleMongoClientDatabaseFactory(MongoClients.create(mongoContainer.connectionString + "/?directConnection=true"), "dispatcher_saga_test")
-        mongo = MongoTemplate(factory)
-        tx = TransactionTemplate(MongoTransactionManager(factory))
-        store = mongoStore(mongo)
-        listOf("processed_events", "saga_failures").forEach { if (!mongo.collectionExists(it)) mongo.createCollection(it) }
-    }
-
-    @AfterAll
-    fun stop() = mongoContainer.stop()
-
-    @BeforeEach
-    fun setUp() {
-        listOf("sagas", "saga_dispatch", "deadlines", "saga_failures", "processed_events").forEach { mongo.remove(Query(), it) }
-    }
 
     @Test
     fun `a throwing ordinary handler does not stop a saga from applying the event exactly once across redeliveries`() {
@@ -89,7 +56,7 @@ class LocalEventDispatcherSagaTest {
         repeat(3) { assertFailsWith<IllegalStateException> { dispatcher.dispatch("e-1", type, codec.encode(RtOrderPlaced("o1")), ctx) } }
 
         assertEquals(3, handler.calls.get(), "stage 1 ran on every delivery and failed")
-        val saga = mongo.findAll(SagaDocument::class.java, SAGAS).single()
+        val saga = store.sagas().single()
         assertEquals(1, saga.stateDoc.getInteger("placed"), "the saga applied the event once, however often the record came back")
     }
 }

@@ -8,6 +8,9 @@ import io.damoreira.kraken.messaging.saga.SagaFailureDocument
 import io.damoreira.kraken.messaging.store.ExternalCallRecord
 import io.damoreira.kraken.messaging.store.ExternalCallStore
 import io.damoreira.kraken.messaging.store.MessageStore
+import io.damoreira.kraken.messaging.store.OutboxEntry
+import io.damoreira.kraken.messaging.store.memory.MemoryMessageStore
+import io.damoreira.kraken.messaging.store.memory.Row
 import io.damoreira.kraken.messaging.store.SagaDispatchStore
 import io.damoreira.kraken.messaging.store.SagaStores
 import org.springframework.dao.DataAccessResourceFailureException
@@ -35,12 +38,12 @@ fun MongoTemplate.deadlines(): List<DeadlineDocument> = findAll(DeadlineDocument
 fun MongoTemplate.sagaFailures(): List<SagaFailureDocument> = findAll(SagaFailureDocument::class.java, SAGA_FAILURES)
 
 /**
- * The MongoDB message store over [mongo] with faults a test switches on, each for the next matching call only: the crash
+ * The message store [delegate] with faults a test switches on, each for the next matching call only: the crash
  * between sending a dispatch entry and marking it ([failNextMark]), the store going away right after an external call
  * returned ([failNextSucceededWrite]) or after a failure notice was delivered ([failNextNoticeClear]), and another call
  * writing right after a read of an external call record ([afterNextExternalCallRead]).
  */
-class FaultyMessageStore(val mongo: MongoTemplate, private val delegate: MessageStore = mongoStore(mongo)) : MessageStore by delegate {
+class FaultyMessageStore(private val delegate: MessageStore) : MessageStore by delegate {
     val failNextMark = AtomicBoolean()
     val failNextSucceededWrite = AtomicBoolean()
     val failNextNoticeClear = AtomicBoolean()
@@ -75,3 +78,33 @@ class FaultyMessageStore(val mongo: MongoTemplate, private val delegate: Message
 }
 const val DEAD_LETTERS = "dead_letters"
 const val PROCESSOR_CONTROL = "processor_control"
+
+/*
+ * What the in-memory message store holds, committed, for the tests that moved off MongoDB: the rows a test used to read through
+ * the template.
+ */
+fun MemoryMessageStore.sagas(): List<SagaDocument> = locked { sagaTable.rows.values.map { it.value } }
+fun MemoryMessageStore.dispatchEntries(): List<SagaDispatchDocument> = locked { dispatchTable.rows.values.map { it.value }.sortedBy { it.seq } }
+fun MemoryMessageStore.deadlines(): List<DeadlineDocument> = locked { deadlineTable.rows.values.map { it.value } }
+fun MemoryMessageStore.sagaFailures(): List<SagaFailureDocument> = locked { failureTable.rows.values.map { it.value } }
+fun MemoryMessageStore.markerIds(): Set<String> = locked { markerTable.rows.keys.toSet() }
+fun MemoryMessageStore.outboxEntries(): List<OutboxEntry> = locked { outboxTable.rows.values.map { it.value.entry } }
+fun MemoryMessageStore.externalCalls(): List<ExternalCallRecord> = locked { externalCallTable.rows.values.map { it.value } }
+
+/** The dispatch lease of [sagaId] (its holder until when), or null. */
+fun MemoryMessageStore.dispatchLeaseUntil(sagaId: String): Instant? = locked { leaseTable.rows[sagaId]?.value?.until }
+fun MemoryMessageStore.dispatchLeaseCount(): Int = locked { leaseTable.rows.size }
+
+/** Changes the external call [id] behind the store's back (committed at once, whatever transaction the caller is in), as another call would. */
+fun MemoryMessageStore.changeExternalCallBehindTheStoresBack(id: String, change: (ExternalCallRecord) -> ExternalCallRecord) = locked {
+    val row = externalCallTable.rows.getValue(id)
+    externalCallTable.rows[id] = Row(change(row.value), nextVersion())
+}
+
+/** Deletes the external call [id] behind the store's back, as another call would. */
+fun MemoryMessageStore.removeExternalCallBehindTheStoresBack(id: String) = locked { externalCallTable.rows.remove(id); Unit }
+
+/** Inserts [entry] behind the store's back (no check of its payload), as a document written by another version would be. */
+fun MemoryMessageStore.insertDispatchBehindTheStoresBack(entry: SagaDispatchDocument) = locked {
+    dispatchTable.rows[entry.id] = Row(entry, nextVersion())
+}
