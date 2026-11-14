@@ -18,6 +18,7 @@ import io.damoreira.kraken.messaging.store.MessageStore
 import io.damoreira.kraken.messaging.store.OutboxEntry
 import io.damoreira.kraken.messaging.store.ProcessedMarker
 import io.damoreira.kraken.messaging.store.ProcessorControlStore
+import io.damoreira.kraken.messaging.store.SagaRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -33,6 +34,7 @@ import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.springframework.dao.DuplicateKeyException
+import org.springframework.dao.TransientDataAccessException
 import org.springframework.transaction.support.TransactionTemplate
 import tools.jackson.databind.json.JsonMapper
 import java.time.Duration
@@ -62,6 +64,13 @@ import java.util.concurrent.TimeUnit
  * store inside it on the same thread, as the library does; a store joins it there.
  *
  * Instants are compared at millisecond precision (what every first-wave database keeps), so the checks build them truncated.
+ *
+ * **Concurrent saga writes** ([concurrentStartsOfOneSagaKeyLetOneWin], [concurrentUpdatesOfOneSagaLetOneWin]): two transactions
+ * write the same saga, both open before either commits. Exactly one wins; the other loses in a way the saga runtime retries
+ * (`SagaRuntime`'s conflict set): [SagaRepository.update] returns false, or the write or the commit throws an exception with a
+ * [DuplicateKeyException] or a [TransientDataAccessException] (a write conflict: `ConcurrencyFailureException`, a database's
+ * transient transaction error) in its cause chain. Any other exception fails the check: the runtime would park the event as a
+ * handler failure instead of retrying it.
  */
 abstract class MessageStoreConformanceTest {
     /** A store over empty state, called before each test. */
@@ -640,6 +649,35 @@ abstract class MessageStoreConformanceTest {
     }
 
     @Test
+    fun concurrentStartsOfOneSagaKeyLetOneWin() {
+        val t = now()
+        fun start(id: String) = SagaDocument(id, "t.Order", """{"orderId":"o-9"}""", listOf(Association("orderId", "o-9")), "t.Order|orderId=o-9", createdAt = t, updatedAt = t)
+        val outcomes = concurrentTransactions(
+            read = {},
+            write = { owner -> store.sagas.sagas.insert(start("s-$owner")); true },
+        )
+        assertOneWins(outcomes)
+        val live = store.sagas.sagas.findLive("t.Order", "orderId", "o-9")
+        assertEquals(1, live.size, "one live saga holds the start key: $live")
+        assertEquals("s-${outcomes.entries.single { it.value.won }.key}", live.single().id, "the winner's")
+    }
+
+    @Test
+    fun concurrentUpdatesOfOneSagaLetOneWin() {
+        val t = now()
+        val saga = SagaDocument("s1", "t.Order", """{"n":0}""", listOf(Association("orderId", "o-1")), "t.Order|orderId=o-1", createdAt = t, updatedAt = t)
+        store.sagas.sagas.insert(saga)
+        val outcomes = concurrentTransactions(
+            read = { assertEquals(0L, store.sagas.sagas.findById("s1")?.version, "both read version 0") },
+            write = { owner -> store.sagas.sagas.update(saga.copy(state = """{"n":"$owner"}""", version = 1, updatedAt = t.plusMillis(1)), expectedVersion = 0) },
+        )
+        assertOneWins(outcomes)
+        val stored = store.sagas.sagas.findById("s1")!!
+        assertEquals(1L, stored.version, "one update applied")
+        assertEquals("""{"n":"${outcomes.entries.single { it.value.won }.key}"}""", stored.state, "the winner's state")
+    }
+
+    @Test
     fun sagaDispatchEntriesAreRelayedInOrderPerSaga() {
         val dispatch = store.sagas.dispatch
         val t = now()
@@ -805,6 +843,52 @@ abstract class MessageStoreConformanceTest {
             return futures.mapValues { it.value.get(30, TimeUnit.SECONDS) }
         } finally {
             pool.shutdownNow()
+        }
+    }
+
+    /** How one of two concurrent transactions ended: it committed its write, or it lost ([lost]: false from the write, or the failure). */
+    private class Outcome(val won: Boolean, val lost: Any?)
+
+    /**
+     * Two transactions (owners `a` and `b`) on two threads: each opens a transaction, runs [read], waits until both did, runs
+     * [write] (false: the write did not apply), waits until both wrote or failed to, then commits. Both are open while both write.
+     */
+    private fun concurrentTransactions(read: () -> Unit, write: (owner: String) -> Boolean): Map<String, Outcome> {
+        val bothRead = CyclicBarrier(2)
+        val bothWrote = java.util.concurrent.CountDownLatch(2)
+        return race { owner ->
+            var applied = false
+            try {
+                TransactionTemplate(store.transactions).executeWithoutResult { status ->
+                    read()
+                    bothRead.await(10, TimeUnit.SECONDS)
+                    try {
+                        applied = write(owner)
+                    } finally {
+                        bothWrote.countDown()
+                    }
+                    assertTrue(bothWrote.await(10, TimeUnit.SECONDS), "both transactions wrote before either committed")
+                    if (!applied) status.setRollbackOnly()
+                }
+                if (applied) Outcome(won = true, lost = null) else Outcome(won = false, lost = "the write did not apply")
+            } catch (e: Exception) {
+                bothWrote.countDown() // a write that threw before counting down cannot hold the other one back
+                Outcome(won = false, lost = e)
+            }
+        }
+    }
+
+    /** Exactly one transaction committed its write; the other lost in a way the saga runtime retries (see the class docs). */
+    private fun assertOneWins(outcomes: Map<String, Outcome>) {
+        val won = outcomes.filterValues { it.won }.keys
+        assertEquals(1, won.size, "exactly one of the two transactions wins: ${outcomes.mapValues { it.value.won to it.value.lost }}")
+        val loser = outcomes.values.single { !it.won }.lost
+        if (loser is Throwable) {
+            val chain = generateSequence(loser) { e -> e.cause?.takeIf { it !== e } }.toList()
+            assertTrue(
+                chain.any { it is DuplicateKeyException || it is TransientDataAccessException },
+                "the loser failed with an exception the saga runtime retries (a DuplicateKeyException or a TransientDataAccessException in its cause chain), not: ${chain.map { "${it::class.java.name}: ${it.message}" }}",
+            )
         }
     }
 
