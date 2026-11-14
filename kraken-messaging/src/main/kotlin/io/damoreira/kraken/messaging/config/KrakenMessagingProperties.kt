@@ -35,11 +35,8 @@ data class KrakenMessagingProperties(
      * there is.
      */
     val eventStore: String? = null,
-    /**
-     * The message store's name (`mongo`, `jdbc`, `memory`): which one runs when two are available (ADR 0028), and the only way to
-     * run the in-memory one (`memory`, never chosen otherwise). Unset: the only one there is.
-     */
-    val store: String? = null,
+    /** The message store (ADR 0028): which one runs, and its schema. */
+    val store: Store = Store(),
     /** The in-memory event store (`kraken.messaging.event-store=memory`). */
     val memory: Memory = Memory(),
     val events: Events = Events(),
@@ -242,6 +239,17 @@ data class KrakenMessagingProperties(
     )
 
     /** `events.*`: the service's events on the event store (ADR 0027), whichever add-on provides it. */
+    /** `kraken.messaging.store.*`. */
+    data class Store(
+        /**
+         * The message store's name (`mongo`, `jdbc`, `memory`): which one runs when two are available, and the only way to run the
+         * in-memory one (`memory`, never chosen otherwise). Unset: the only one there is.
+         */
+        val type: String? = null,
+        /** Apply the message store's schema (indexes, tables) at startup; false when the service applies it itself. */
+        val initSchema: Boolean = true,
+    )
+
     /** The in-memory event store's settings (`kraken.messaging.memory.*`). */
     data class Memory(
         /** How many segments every source has (1 to 1024): a key always goes to the same one; competing instances share them. */

@@ -23,7 +23,7 @@ import java.time.Clock
  * JVM. Each runs only when its setting names it, never because nothing else is there:
  *
  * - `kraken.messaging.event-store=memory`: the [MemoryEventStore] (`kraken.messaging.memory.segments` segments per source).
- * - `kraken.messaging.store=memory`: the [MemoryMessageStore], and its [MemoryTransactionManager] as the application's
+ * - `kraken.messaging.store.type=memory`: the [MemoryMessageStore], and its [MemoryTransactionManager] as the application's
  *   transaction manager when it has none (so its `@Transactional` methods and the outbox commit together).
  *
  * Each logs at WARN when it starts that it is not durable, naming the active Spring profiles (`default` when none):

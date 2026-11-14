@@ -71,7 +71,7 @@ class MongoMessageStore(
     override fun initSchema() = ensureIndexes()
 
     companion object {
-        /** The message store's name (`kraken.messaging.store=mongo`). */
+        /** The message store's name (`kraken.messaging.store.type=mongo`). */
         const val NAME = "mongo"
     }
 }

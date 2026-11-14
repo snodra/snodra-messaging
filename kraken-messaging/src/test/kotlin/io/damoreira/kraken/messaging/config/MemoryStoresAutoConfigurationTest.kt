@@ -58,7 +58,7 @@ class InMemoryApplicationConfig {
 
 /**
  * The in-memory stores (ADR 0027, ADR 0028): chosen only by `kraken.messaging.event-store=memory` and
- * `kraken.messaging.store=memory`, never because nothing else is there, never behind an add-on's back; each warns that it is not
+ * `kraken.messaging.store.type=memory`, never because nothing else is there, never behind an add-on's back; each warns that it is not
  * durable, naming the profile; a setting naming a store the application lacks fails the startup.
  */
 @ExtendWith(OutputCaptureExtension::class)
@@ -81,7 +81,7 @@ class MemoryStoresAutoConfigurationTest {
             "kraken.messaging.hub.enabled=false",
         )
 
-    private val inMemory = arrayOf("kraken.messaging.store=memory", "kraken.messaging.event-store=memory")
+    private val inMemory = arrayOf("kraken.messaging.store.type=memory", "kraken.messaging.event-store=memory")
 
     @Test
     fun theSettingsRunTheInMemoryStoresAndEachWarnsItIsNotDurable(output: CapturedOutput) {
@@ -117,10 +117,10 @@ class MemoryStoresAutoConfigurationTest {
         runner.withUserConfiguration(EventHandlersConfig::class.java).run { context ->
             val message = failureOf(context.startupFailure)
             assertTrue("@EventHandler OrderEvents.on needs a message store" in message, message)
-            assertTrue("kraken.messaging.store=memory" in message, message)
+            assertTrue("kraken.messaging.store.type=memory" in message, message)
         }
         assertTrue("not durable (profile" !in output.out, "no in-memory store ran: ${output.out}")
-        runner.withUserConfiguration(EventHandlersConfig::class.java).withPropertyValues("kraken.messaging.store=memory").run { context ->
+        runner.withUserConfiguration(EventHandlersConfig::class.java).withPropertyValues("kraken.messaging.store.type=memory").run { context ->
             val message = failureOf(context.startupFailure)
             assertTrue("@EventHandler OrderEvents.on needs an event store" in message, message)
             assertTrue("kraken.messaging.event-store=memory" in message, message)
@@ -130,7 +130,7 @@ class MemoryStoresAutoConfigurationTest {
     @Test
     fun anEventStoreAddOnStaysTheStoreUnlessTheSettingNamesMemory() {
         val withKafka = runner.withConfiguration(AutoConfigurations.of(KafkaEventStoreAutoConfiguration::class.java))
-            .withPropertyValues("kraken.messaging.kafka.bootstrap-servers=localhost:9", "kraken.messaging.store=memory")
+            .withPropertyValues("kraken.messaging.kafka.bootstrap-servers=localhost:9", "kraken.messaging.store.type=memory")
         withKafka.run { context ->
             assertNull(context.startupFailure)
             assertIs<KafkaEventStore>(context.getBean(EventStore::class.java), "never the in-memory one silently")
@@ -144,18 +144,18 @@ class MemoryStoresAutoConfigurationTest {
 
     @Test
     fun aStoreSettingNamingAStoreTheApplicationLacksFailsTheStartup() {
-        runner.withPropertyValues("kraken.messaging.store=jdbc").run { context ->
+        runner.withPropertyValues("kraken.messaging.store.type=jdbc").run { context ->
             val message = failureOf(context.startupFailure)
-            assertTrue("kraken.messaging.store is 'jdbc', but no message store is configured" in message, message)
+            assertTrue("kraken.messaging.store.type is 'jdbc', but no message store is configured" in message, message)
         }
-        runner.withPropertyValues("kraken.messaging.store=jdbc").withUserConfiguration(MessageStoreMockConfig::class.java).run { context ->
+        runner.withPropertyValues("kraken.messaging.store.type=jdbc").withUserConfiguration(MessageStoreMockConfig::class.java).run { context ->
             val message = failureOf(context.startupFailure)
-            assertTrue("kraken.messaging.store is 'jdbc', but the message store is ''" in message, message)
+            assertTrue("kraken.messaging.store.type is 'jdbc', but the message store is ''" in message, message)
         }
         runner.withBean("first", MessageStore::class.java, { MemoryMessageStore() }).withBean("second", MessageStore::class.java, { MemoryMessageStore() })
             .run { context ->
                 val message = failureOf(context.startupFailure)
-                assertTrue("2 message stores are configured (memory, memory): set kraken.messaging.store" in message, message)
+                assertTrue("2 message stores are configured (memory, memory): set kraken.messaging.store.type" in message, message)
             }
     }
 

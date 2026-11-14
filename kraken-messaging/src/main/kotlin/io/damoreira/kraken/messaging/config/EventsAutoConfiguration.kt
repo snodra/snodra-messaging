@@ -50,7 +50,7 @@ import java.time.Clock
  * [MessagingMetricsAutoConfiguration] when a registry exists), else to [NoopMessagingMetrics].
  */
 @AutoConfiguration(after = [KrakenMessagingAutoConfiguration::class])
-@ConditionalOnSingleCandidate(MessageStore::class) // two: the MessageStoreGuard asks for kraken.messaging.store
+@ConditionalOnSingleCandidate(MessageStore::class) // two: the MessageStoreGuard asks for kraken.messaging.store.type
 class EventsAutoConfiguration {
 
     /** Runs an event's ordinary handlers, then the saga stage when the saga runtime provides one (none: [SagaStage.NONE]). */

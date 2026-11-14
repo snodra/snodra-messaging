@@ -187,7 +187,8 @@ All keys (`kraken.messaging.*`; durations accept `200ms`, `5s`, `7d`; relaxed bi
 | `hub.retry.multiplier` | `2` | Growth of the wait per further attempt. |
 | `hub.retry.max-backoff` | `2s` | Upper bound of a single wait. |
 | `event-store` | the only one | The event store's name (`kafka`, `rabbitmq-streams`, `memory`) when two event-store add-ons are on the classpath; two without it, or a name no add-on provides, fail the startup. `memory` runs the in-memory event store, and is the only way to run it (an add-on on the classpath then steps back). |
-| `store` | the only one | The message store's name (`mongo`, `jdbc`, `memory`) when two are available; two without it, or a name the application lacks, fail the startup. `memory` runs the in-memory message store, and is the only way to run it (the MongoDB add-on then steps back). In YAML, `store` and `store.init-schema` cannot both be nested keys: write one of them as a flat key (`kraken.messaging.store: memory`). |
+| `store.type` | the only one | The message store's name (`mongo`, `jdbc`, `memory`) when two are available; two without it, or a name the application lacks, fail the startup. `memory` runs the in-memory message store, and is the only way to run it (the MongoDB add-on then steps back). |
+| `store.init-schema` | `true` | Apply the message store's schema (indexes, tables) at startup; `false` when the service applies it itself. |
 | `memory.segments` | `4` | The in-memory event store's segments per source (1 to 1024): a key always goes to one of them; the competing instances of a subscription share them. |
 | `events.source` | `kraken.events` | The source the service's events are published to and read from (the topic on Kafka). |
 | `events.consumer.enabled` | `true` | Set `false` in tools that only publish. |
@@ -587,7 +588,8 @@ because nothing else is there, and an add-on on the classpath steps back when th
 kraken:
   messaging:
     event-store: memory     # the in-memory event store
-    store: memory           # the in-memory message store
+    store:
+      type: memory          # the in-memory message store
     memory:
       segments: 4           # segments per source (default 4)
 ```
@@ -1651,7 +1653,7 @@ service-a and service-b of the [examples](#examples) export this way when switch
 ## Test helpers (`kraken-messaging-test`)
 
 - `@KrakenInMemory` on a `@SpringBootTest`: the zero-infrastructure mode. The application runs on the in-memory event store and
-  message store (`kraken.messaging.event-store=memory`, `kraken.messaging.store=memory`), without a hub (`hub.enabled=false`: no
+  message store (`kraken.messaging.event-store=memory`, `kraken.messaging.store.type=memory`), without a hub (`hub.enabled=false`: no
   `CommandBus` or `QueryBus`; a service that injects one declares `InMemoryBuses` or an `InProcessHub` connection) and without the
   Kafka add-on's auto-configuration (no partner topics either). The test gets an `InMemoryEvents` bean:
   `publish(event, key)` hands an event to the service as another service would (its processors and sagas get it; returns its

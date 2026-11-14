@@ -20,15 +20,15 @@ import org.springframework.core.io.ResourceLoader
 /** What to do about a missing message store: the end of every message about one. */
 internal const val ADD_A_MESSAGE_STORE =
     "add a message store add-on (kraken-messaging-mongo for MongoDB) to the dependencies, or declare a MessageStore bean " +
-        "(kraken.messaging.store=memory runs the in-memory one, not durable: tests and local runs)"
+        "(kraken.messaging.store.type=memory runs the in-memory one, not durable: tests and local runs)"
 
 /**
  * Fails the startup when the application's message store (ADR 0028) is missing but something needs one, or is ambiguous:
  *
  * - none, and there is an `@EventHandler`, a `@Saga` (unless `kraken.messaging.sagas.enabled` is false) or an
  *   `@IdempotentHandler`. Command, query and subscription-query handlers need none.
- * - two or more when `kraken.messaging.store` does not choose one;
- * - `kraken.messaging.store` names one the application does not have.
+ * - two or more when `kraken.messaging.store.type` does not choose one;
+ * - `kraken.messaging.store.type` names one the application does not have.
  *
  * Runs once every singleton exists, so the [registry] holds every handler.
  */
@@ -68,7 +68,7 @@ class MessageStoreGuard(
 
     companion object {
         /** The message store's name, when two are available or to run the in-memory one. */
-        const val STORE = "kraken.messaging.store"
+        const val STORE = "kraken.messaging.store.type"
     }
 }
 

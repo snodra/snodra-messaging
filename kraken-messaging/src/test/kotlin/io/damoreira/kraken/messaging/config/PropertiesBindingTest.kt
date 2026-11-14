@@ -176,24 +176,26 @@ class PropertiesBindingTest {
         }
     }
 
-    @Test fun `the store, the event store and the in-memory segments bind beside init-schema`() {
+    @Test fun `the store type, the event store and the in-memory segments bind, the type beside init-schema`() {
         runner.withPropertyValues(*required).run { context ->
             val p = context.getBean(KrakenMessagingProperties::class.java)
-            assertEquals(null, p.store)
+            assertEquals(null, p.store.type)
+            assertEquals(true, p.store.initSchema)
             assertEquals(4, p.memory.segments)
         }
         runner.withPropertyValues(
-            *required, "kraken.messaging.store=memory", "kraken.messaging.store.init-schema=false",
+            *required, "kraken.messaging.store.type=memory", "kraken.messaging.store.init-schema=false",
             "kraken.messaging.event-store=memory", "kraken.messaging.memory.segments=8",
         ).run { context ->
             val p = context.getBean(KrakenMessagingProperties::class.java)
-            assertEquals("memory", p.store)
+            assertEquals("memory", p.store.type)
+            assertEquals(false, p.store.initSchema)
             assertEquals("memory", p.eventStore)
             assertEquals(8, p.memory.segments)
             assertEquals("false", context.environment.getProperty("kraken.messaging.store.init-schema"))
         }
         runner.withPropertyValues(*required, "kraken.messaging.store.init-schema=false").run { context ->
-            assertEquals(null, context.getBean(KrakenMessagingProperties::class.java).store, "init-schema alone is no store name")
+            assertEquals(null, context.getBean(KrakenMessagingProperties::class.java).store.type, "init-schema alone is no store name")
         }
         runner.withPropertyValues(*required, "kraken.messaging.memory.segments=0").run { context ->
             assertTrue("kraken.messaging.memory.segments must be between 1 and 1024, was 0" in generateSequence(context.startupFailure) { it.cause }.joinToString { it.message.orEmpty() })

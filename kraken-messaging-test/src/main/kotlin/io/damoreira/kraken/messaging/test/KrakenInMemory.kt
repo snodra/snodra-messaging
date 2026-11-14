@@ -27,7 +27,7 @@ import java.lang.annotation.Inherited
  * }
  * ```
  *
- * It sets `kraken.messaging.store=memory`, `kraken.messaging.event-store=memory` and `kraken.messaging.hub.enabled=false` (no
+ * It sets `kraken.messaging.store.type=memory`, `kraken.messaging.event-store=memory` and `kraken.messaging.hub.enabled=false` (no
  * `CommandBus` or `QueryBus` then: a service that injects one declares [InMemoryBuses] or an [InProcessHub] connection), and
  * excludes the Kafka add-on's auto-configuration (its event store and its partner sources: feed a partner's events through
  * [InMemoryEvents.publish] or test the translator on its own) through `spring.autoconfigure.exclude`, which replaces the
@@ -40,7 +40,7 @@ import java.lang.annotation.Inherited
 @Inherited
 @TestPropertySource(
     properties = [
-        "kraken.messaging.store=memory",
+        "kraken.messaging.store.type=memory",
         "kraken.messaging.event-store=memory",
         "kraken.messaging.hub.enabled=false",
         "spring.autoconfigure.exclude=io.damoreira.kraken.messaging.kafka.KafkaEventStoreAutoConfiguration",

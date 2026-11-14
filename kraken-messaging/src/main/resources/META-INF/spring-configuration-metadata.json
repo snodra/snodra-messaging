@@ -36,6 +36,12 @@
       "sourceMethod": "getTls()"
     },
     {
+      "name": "kraken.messaging.store",
+      "type": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Store",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties",
+      "sourceMethod": "getStore()"
+    },
+    {
       "name": "kraken.messaging.memory",
       "type": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Memory",
       "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties",
@@ -329,10 +335,10 @@
       "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties"
     },
     {
-      "name": "kraken.messaging.store",
+      "name": "kraken.messaging.store.type",
       "type": "java.lang.String",
       "description": "The message store's name (mongo, jdbc, memory): which one runs when two are available, and the only way to run the in-memory one (memory: not durable, one JVM; tests, local runs, demos). Unset: the only one there is.",
-      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties"
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Store"
     },
     {
       "name": "kraken.messaging.memory.segments",
@@ -428,6 +434,7 @@
       "name": "kraken.messaging.store.init-schema",
       "type": "java.lang.Boolean",
       "description": "Apply the message store's schema (indexes, tables) at startup. False when the service applies it itself.",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Store",
       "defaultValue": true
     },
     {

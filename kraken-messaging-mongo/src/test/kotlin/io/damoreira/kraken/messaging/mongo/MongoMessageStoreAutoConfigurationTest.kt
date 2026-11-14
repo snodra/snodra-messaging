@@ -84,7 +84,7 @@ class MongoMessageStoreAutoConfigurationTest {
     @Test
     fun theStoreSettingMemoryRunsTheInMemoryStoreInsteadOfMongo() {
         withMongo().withConfiguration(AutoConfigurations.of(MemoryStoresAutoConfiguration::class.java))
-            .withPropertyValues("kraken.messaging.store=memory", "kraken.messaging.store.init-schema=false")
+            .withPropertyValues("kraken.messaging.store.type=memory", "kraken.messaging.store.init-schema=false")
             .run { context ->
                 assertNull(context.startupFailure)
                 val store = context.getBean(MessageStore::class.java)
@@ -92,7 +92,7 @@ class MongoMessageStoreAutoConfigurationTest {
                 assertTrue(context.getBeansOfType(MongoTransactionManager::class.java).isEmpty(), "no MongoDB transaction manager either")
                 assertSame(store.transactions, context.getBean(PlatformTransactionManager::class.java))
             }
-        withMongo().withPropertyValues("kraken.messaging.store=mongo").run { context ->
+        withMongo().withPropertyValues("kraken.messaging.store.type=mongo").run { context ->
             assertNull(context.startupFailure)
             assertTrue(context.getBean(MessageStore::class.java) is MongoMessageStore, "named by the setting")
         }

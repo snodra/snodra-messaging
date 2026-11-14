@@ -156,7 +156,7 @@ class MemoryMessageStore(internal val clock: Clock = Clock.systemUTC()) : Messag
     }
 
     companion object {
-        /** The message store's name (`kraken.messaging.store=memory`). */
+        /** The message store's name (`kraken.messaging.store.type=memory`). */
         const val NAME = "memory"
     }
 }
