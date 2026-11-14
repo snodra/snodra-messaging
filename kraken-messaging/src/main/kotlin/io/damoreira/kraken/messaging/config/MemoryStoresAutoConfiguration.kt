@@ -26,7 +26,8 @@ import java.time.Clock
  * - `kraken.messaging.store.type=memory`: the [MemoryMessageStore], and its [MemoryTransactionManager] as the application's
  *   transaction manager when it has none (so its `@Transactional` methods and the outbox commit together).
  *
- * Each logs at WARN when it starts that it is not durable, naming the active Spring profiles (`default` when none):
+ * Each logs at WARN when it starts that it is not durable, naming the active Spring profiles (the default ones when none, so
+ * `default` unless `spring.profiles.default` says otherwise):
  * `in-memory event store: not durable (profile local)`, `in-memory message store: not durable (profile local)`. An event-store or
  * message-store add-on on the classpath steps back when its setting names `memory`.
  *
@@ -75,8 +76,8 @@ class MemoryStoresAutoConfiguration {
     companion object {
         private val log = LoggerFactory.getLogger(MemoryStoresAutoConfiguration::class.java)
 
-        /** The active Spring profiles, comma-separated; `default` when none is active. */
+        /** The active Spring profiles, comma-separated; the default ones (`spring.profiles.default`, `default` unless set) when none is active. */
         internal fun profiles(environment: Environment): String =
-            environment.activeProfiles.ifEmpty { arrayOf("default") }.joinToString(",")
+            environment.activeProfiles.ifEmpty { environment.defaultProfiles }.ifEmpty { arrayOf("default") }.joinToString(",")
     }
 }

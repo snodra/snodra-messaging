@@ -7,11 +7,13 @@ import io.damoreira.kraken.messaging.eventstore.memory.MemoryEventStore
 import io.damoreira.kraken.messaging.store.memory.MemoryMessageStore
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
+import org.springframework.beans.factory.ObjectProvider
 import org.springframework.boot.autoconfigure.EnableAutoConfiguration
 import org.springframework.context.annotation.Import
 import org.springframework.core.annotation.AliasFor
 import org.springframework.test.context.TestPropertySource
 import java.lang.annotation.Inherited
+import java.time.Clock
 
 /**
  * The zero-infrastructure mode of a service test (ADR 0027, ADR 0028): the application runs on the in-memory event store and
@@ -104,5 +106,6 @@ class KrakenInMemoryConfiguration {
         properties: KrakenMessagingProperties,
         codec: JsonCodec,
         typeResolver: MessageTypeResolver,
-    ) = InMemoryEvents(events, store, properties.serviceName, properties.events.source, codec, typeResolver)
+        clock: ObjectProvider<Clock>,
+    ) = InMemoryEvents(events, store, properties.serviceName, properties.events.source, codec, typeResolver, clock.getIfAvailable { Clock.systemUTC() })
 }

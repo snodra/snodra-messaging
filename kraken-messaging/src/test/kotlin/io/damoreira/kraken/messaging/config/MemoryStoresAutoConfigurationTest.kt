@@ -107,6 +107,15 @@ class MemoryStoresAutoConfigurationTest {
     }
 
     @Test
+    fun withoutAnActiveProfileTheWarningNamesTheDefaultOnes(output: CapturedOutput) {
+        runner.withPropertyValues(*inMemory).withInitializer { it.environment.setDefaultProfiles("dev") }.run { context ->
+            assertNull(context.startupFailure)
+        }
+        assertTrue("in-memory message store: not durable (profile dev)" in output.out, output.out)
+        assertTrue("in-memory event store: not durable (profile dev)" in output.out, output.out)
+    }
+
+    @Test
     fun withoutTheSettingsThereIsNoInMemoryStore(output: CapturedOutput) {
         runner.run { context ->
             assertNull(context.startupFailure)

@@ -2,6 +2,8 @@ package io.damoreira.kraken.messaging.mongo
 
 import io.damoreira.kraken.messaging.config.KrakenMessagingAutoConfiguration
 import io.damoreira.kraken.messaging.config.MemoryStoresAutoConfiguration
+import io.damoreira.kraken.messaging.eventstore.EventStore
+import io.damoreira.kraken.messaging.eventstore.memory.MemoryEventStore
 import io.damoreira.kraken.messaging.store.MessageStore
 import io.damoreira.kraken.messaging.store.memory.MemoryMessageStore
 import io.mockk.mockk
@@ -96,6 +98,18 @@ class MongoMessageStoreAutoConfigurationTest {
             assertNull(context.startupFailure)
             assertTrue(context.getBean(MessageStore::class.java) is MongoMessageStore, "named by the setting")
         }
+    }
+
+    @Test
+    fun theMongoStoreRunsWithTheInMemoryEventStore() {
+        withMongo().withConfiguration(AutoConfigurations.of(MemoryStoresAutoConfiguration::class.java))
+            .withPropertyValues("kraken.messaging.event-store=memory")
+            .run { context ->
+                assertNull(context.startupFailure)
+                assertTrue(context.getBean(MessageStore::class.java) is MongoMessageStore, "the message store stays MongoDB")
+                assertTrue(context.getBean(EventStore::class.java) is MemoryEventStore, "the events are in memory")
+                assertSame(context.getBean(MessageStore::class.java).transactions, context.getBean(PlatformTransactionManager::class.java))
+            }
     }
 
     @Test

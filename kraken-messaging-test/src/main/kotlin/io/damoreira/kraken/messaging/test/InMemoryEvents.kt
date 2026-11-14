@@ -11,8 +11,8 @@ import io.damoreira.kraken.messaging.eventstore.memory.StoredEvent
 import io.damoreira.kraken.messaging.handler.Processors
 import io.damoreira.kraken.messaging.store.memory.MemoryMessageStore
 import kotlinx.coroutines.runBlocking
+import java.time.Clock
 import java.time.Duration
-import java.time.Instant
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import java.util.UUID
@@ -34,6 +34,8 @@ class InMemoryEvents(
     private val source: String,
     private val codec: JsonCodec = JsonCodec(),
     private val typeResolver: MessageTypeResolver,
+    /** The application clock: it stamps the `timestamp` header of what [publish] sends. */
+    private val clock: Clock = Clock.systemUTC(),
 ) {
     /**
      * Publishes [event] to the service's events source as service [from] would (the seven headers, a fresh `id`, [headers] on
@@ -47,7 +49,7 @@ class InMemoryEvents(
             EventHeaders.TYPE to type,
             EventHeaders.ID to id,
             EventHeaders.CORRELATION_ID to id,
-            EventHeaders.TIMESTAMP to TIMESTAMPS.format(Instant.now()),
+            EventHeaders.TIMESTAMP to TIMESTAMPS.format(clock.instant()),
             EventHeaders.SOURCE to from,
             EventHeaders.USER_ID to "",
             EventHeaders.TRACEPARENT to "00-$trace-${trace.take(16)}-01",
