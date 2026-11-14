@@ -4,14 +4,22 @@ import io.damoreira.kraken.messaging.EventBus
 import io.damoreira.kraken.messaging.config.sagascan.SagaScanConfig
 import io.damoreira.kraken.messaging.eventstore.Capability
 import io.damoreira.kraken.messaging.eventstore.EventStore
+import io.damoreira.kraken.messaging.eventstore.OutgoingEvent
+import io.damoreira.kraken.messaging.eventstore.Subscription
+import io.damoreira.kraken.messaging.eventstore.SubscriptionAdmin
+import io.damoreira.kraken.messaging.eventstore.SubscriptionSpec
 import io.damoreira.kraken.messaging.kafka.KafkaEventStore
 import io.damoreira.kraken.messaging.kafka.KafkaEventStoreAutoConfiguration
 import io.mockk.every
 import io.mockk.mockk
 import org.junit.jupiter.api.Test
+import org.springframework.boot.autoconfigure.AutoConfiguration
 import org.springframework.boot.autoconfigure.AutoConfigurations
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
+import org.springframework.context.annotation.Bean
 import org.springframework.boot.test.context.runner.ApplicationContextRunner
 import org.springframework.boot.transaction.autoconfigure.TransactionAutoConfiguration
+import kotlin.test.assertEquals
 import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
@@ -118,8 +126,59 @@ class EventStoreRequiredTest {
             }
     }
 
+    /**
+     * Two event-store add-ons on one classpath (the Kafka add-on and another following the convention): without the setting
+     * the startup fails naming both, never one winning silently; each value runs that one; the application's own wins over both.
+     */
+    @Test
+    fun twoEventStoreAddOnsNeedTheSetting() {
+        val both = runner.withConfiguration(AutoConfigurations.of(KafkaEventStoreAutoConfiguration::class.java, OtherEventStoreAddOn::class.java))
+            .withPropertyValues("kraken.messaging.kafka.bootstrap-servers=localhost:9")
+        both.run { context ->
+            val message = failureOf(context.startupFailure)
+            assertTrue("2 event store add-ons are configured" in message, message)
+            assertTrue("KafkaEventStore: kafka" in message && "OtherEventStore: other" in message, message)
+            assertTrue("set kraken.messaging.event-store to the one this service uses (kafka, other)" in message || "set kraken.messaging.event-store to the one this service uses (other, kafka)" in message, message)
+        }
+        both.withPropertyValues("kraken.messaging.event-store=kafka").run { context ->
+            assertNull(context.startupFailure)
+            assertIs<KafkaEventStore>(context.getBean(EventStore::class.java))
+        }
+        both.withPropertyValues("kraken.messaging.event-store=other").run { context ->
+            assertNull(context.startupFailure)
+            assertIs<OtherEventStore>(context.getBean(EventStore::class.java))
+        }
+        val mine = store("mine")
+        both.withBean("myEventStore", EventStore::class.java, { mine }).run { context ->
+            assertNull(context.startupFailure)
+            assertEquals(listOf("myEventStore"), context.getBeanNamesForType(EventStore::class.java).toList())
+        }
+    }
+
     private fun failureOf(failure: Throwable?): String {
         assertNotNull(failure, "expected a startup failure")
         return generateSequence(failure) { it.cause }.joinToString(" | ") { it.message.orEmpty() }
+    }
+}
+
+/** A second event-store add-on following the convention ([ConditionalOnNoApplicationEventStore], its name as the setting). */
+@AutoConfiguration(after = [KrakenMessagingAutoConfiguration::class], before = [EventsAutoConfiguration::class])
+class OtherEventStoreAddOn {
+    @Bean
+    @ConditionalOnNoApplicationEventStore
+    @ConditionalOnProperty(name = ["kraken.messaging.event-store"], havingValue = OtherEventStore.NAME, matchIfMissing = true)
+    fun otherEventStore(): OtherEventStore = OtherEventStore()
+}
+
+class OtherEventStore : EventStore {
+    override val name: String = NAME
+    override val capabilities: Set<Capability> = emptySet()
+    override suspend fun publish(event: OutgoingEvent) = Unit
+    override suspend fun subscribe(spec: SubscriptionSpec): Subscription = error("not in this test")
+    override fun admin(spec: SubscriptionSpec): SubscriptionAdmin = error("not in this test")
+    override fun compare(a: String, b: String): Int = a.compareTo(b)
+
+    companion object {
+        const val NAME = "other"
     }
 }

@@ -1,5 +1,6 @@
 package io.damoreira.kraken.messaging.kafka
 
+import io.damoreira.kraken.messaging.config.ConditionalOnNoApplicationEventStore
 import io.damoreira.kraken.messaging.config.EventsAutoConfiguration
 import io.damoreira.kraken.messaging.config.ExternalAutoConfiguration
 import io.damoreira.kraken.messaging.config.KrakenMessagingAutoConfiguration
@@ -8,7 +9,6 @@ import io.damoreira.kraken.messaging.eventstore.EventStore
 import io.damoreira.kraken.messaging.external.ExternalSourceProviders
 import org.springframework.boot.autoconfigure.AutoConfiguration
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass
-import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
 import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.boot.context.properties.bind.Bindable
@@ -32,8 +32,9 @@ import org.springframework.core.type.AnnotatedTypeMetadata
 @ConditionalOnClass(KafkaEventStore::class)
 @EnableConfigurationProperties(KafkaProperties::class, KafkaExternalProperties::class)
 class KafkaEventStoreAutoConfiguration {
+    /** Steps back for an event store the application defines, not for another add-on's: two add-ons need the setting (EventStoreAddOnsCheck). */
     @Bean
-    @ConditionalOnMissingBean(EventStore::class)
+    @ConditionalOnNoApplicationEventStore
     @ConditionalOnProperty(name = ["kraken.messaging.event-store"], havingValue = KafkaEventStore.NAME, matchIfMissing = true)
     fun kafkaEventStore(properties: KafkaProperties): KafkaEventStore = KafkaEventStore(properties.toSettings())
 

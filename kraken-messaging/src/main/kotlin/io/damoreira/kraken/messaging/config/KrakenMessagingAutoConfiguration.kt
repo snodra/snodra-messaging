@@ -129,6 +129,11 @@ class KrakenMessagingAutoConfiguration {
         @JvmStatic
         @Bean
         fun krakenMessageStoreAddOnsCheck(environment: Environment) = MessageStoreAddOnsCheck(environment)
+
+        /** Two event-store add-ons without `kraken.messaging.event-store` fail the startup before any bean exists. */
+        @JvmStatic
+        @Bean
+        fun krakenEventStoreAddOnsCheck(environment: Environment) = EventStoreAddOnsCheck(environment)
     }
 }
 

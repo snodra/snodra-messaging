@@ -87,20 +87,16 @@ class MessageStoreAddOnsCheck(private val environment: Environment) : BeanFactor
             .mapNotNull { name -> beanFactory.getType(name, false)?.let { name to it } }
         if (addOns.size < 2) return
         throw IllegalStateException(
-            "${addOns.size} message store add-ons are configured (${addOns.joinToString { (_, type) -> "${type.simpleName}: ${storeName(type)}" }}): " +
-                "set ${MessageStoreGuard.STORE} to the one this service uses (${addOns.joinToString(", ") { storeName(it.second) }}), or remove the " +
+            "${addOns.size} message store add-ons are configured (${addOns.joinToString { (_, type) -> "${type.simpleName}: ${addOnName(type)}" }}): " +
+                "set ${MessageStoreGuard.STORE} to the one this service uses (${addOns.joinToString(", ") { addOnName(it.second) }}), or remove the " +
                 "others from the dependencies",
         )
     }
-
-    /** The store's name: the `NAME` constant of its class, else the class's simple name. */
-    private fun storeName(type: Class<*>): String =
-        runCatching { type.getField("NAME").get(null) as? String }.getOrNull() ?: type.simpleName
 }
 
 /** What to do about a missing event store: the end of every message about one. */
 internal const val ADD_AN_EVENT_STORE =
-    "add an event store add-on (kraken-messaging-kafka for Kafka) to the dependencies, or declare an EventStore bean " +
+    "add an event store add-on (kraken-messaging-kafka for Kafka, kraken-messaging-rabbitmq for RabbitMQ Streams) to the dependencies, or declare an EventStore bean " +
         "(kraken.messaging.event-store=memory runs the in-memory one, not durable: tests and local runs)"
 
 /**
