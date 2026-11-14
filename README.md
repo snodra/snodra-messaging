@@ -618,8 +618,12 @@ external calls, the saga ports) with the semantics of the database add-ons:
   `@Transactional` methods and the outbox commit together): what joins a transaction is visible to others only at the commit and
   dropped at a rollback; two live transactions writing one row conflict at the second write, and a commit over a row that changed
   fails; both are a `ConcurrencyFailureException`, the transient conflict a retry resolves.
+- An event published inside a transaction of **another** transaction manager (the application's own database, with its JDBC or
+  JPA manager) is appended to the in-memory outbox after that transaction committed, and never when it rolled back: after the
+  commit, not atomically with it (the in-memory store cannot join another database's transaction).
 - The relay is woken up as soon as an append commits (no poll interval to wait), claims and leases follow the application clock,
-  dead letters expire at their `expireAt`; nothing else expires.
+  dead letters expire at their `expireAt`; nothing else expires. Its cost grows with what it holds: every relay poll and every
+  query scans all the rows of its collection under one lock, and nothing is purged, so it suits test-sized and demo-sized loads.
 
 A service test that wants neither containers nor a hub uses both through `@KrakenInMemory` (see
 [Test helpers](#test-helpers-kraken-messaging-test)).

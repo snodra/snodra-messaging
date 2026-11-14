@@ -9,6 +9,8 @@ import org.springframework.dao.ConcurrencyFailureException
 import org.springframework.dao.DuplicateKeyException
 import org.springframework.transaction.TransactionDefinition
 import org.springframework.transaction.UnexpectedRollbackException
+import org.springframework.transaction.support.AbstractPlatformTransactionManager
+import org.springframework.transaction.support.DefaultTransactionStatus
 import org.springframework.transaction.support.TransactionSynchronization
 import org.springframework.transaction.support.TransactionSynchronizationManager
 import org.springframework.transaction.support.TransactionTemplate
@@ -171,6 +173,41 @@ class MemoryMessageStoreTest {
             assertTrue(store.processedEvents.exists("next"), "the second transaction began, joined nothing and committed")
         }
         tx.executeWithoutResult { runBlocking { assertTrue(store.processedEvents.record(marker("later")), "nothing left bound") } }
+    }
+
+    /** Another transaction manager (the application's own, over its database): it binds nothing the in-memory store knows. */
+    private class OtherManager : AbstractPlatformTransactionManager() {
+        override fun doGetTransaction(): Any = Any()
+        override fun doBegin(transaction: Any, definition: TransactionDefinition) = Unit
+        override fun doCommit(status: DefaultTransactionStatus) = Unit
+        override fun doRollback(status: DefaultTransactionStatus) = Unit
+    }
+
+    @Test
+    fun anAppendInAnotherManagersTransactionIsAppendedAfterItsCommitAndNeverOnItsRollback() {
+        val other = TransactionTemplate(OtherManager())
+        val woken = AtomicInteger()
+        store.outbox.onAppend { woken.incrementAndGet() }
+        other.executeWithoutResult {
+            runBlocking {
+                store.outbox.append(entry("e-1"))
+                assertEquals(0L, store.outbox.pending(), "not before the business transaction committed")
+            }
+            assertEquals(0, woken.get())
+        }
+        runBlocking { assertEquals(listOf("e-1"), store.outbox.claim("relay", Duration.ofSeconds(30), 10).map { it.id }, "appended after the commit") }
+        assertEquals(1, woken.get(), "and the relay woken")
+
+        other.executeWithoutResult { status ->
+            runBlocking { store.outbox.append(entry("e-2")) }
+            status.setRollbackOnly()
+        }
+        runBlocking { assertEquals(1L, store.outbox.pending(), "a rolled-back business transaction appends nothing") }
+        assertFailsWith<IllegalArgumentException>("a payload the outbox refuses fails at once, inside the business transaction") {
+            other.executeWithoutResult {
+                runBlocking { store.outbox.append(OutboxEntry("bad", "t.Happened", "k", emptyMap(), "[1]".toByteArray(), Instant.now(), 1)) }
+            }
+        }
     }
 
     @Test

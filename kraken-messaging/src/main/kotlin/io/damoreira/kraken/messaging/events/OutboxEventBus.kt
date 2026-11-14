@@ -23,7 +23,9 @@ import kotlin.coroutines.CoroutineContext
  * `createdAt` millisecond ties); across instances the outbox never promised it.
  *
  * Appends events to the message store's [outbox]; [OutboxPublisher] relays them to the event store. The append joins the Spring
- * transaction active on the calling thread (so the event commits or rolls back with the business write). The blocking
+ * transaction active on the calling thread (so the event commits or rolls back with the business write). With the in-memory
+ * message store and a transaction of another manager (the application's own database), the event is appended after that
+ * transaction committed and never when it rolled back: after the commit, not atomically with it. The blocking
  * entry points ([publishBlocking], [publishRaw]) run the append on the calling thread too.
  */
 class OutboxEventBus(

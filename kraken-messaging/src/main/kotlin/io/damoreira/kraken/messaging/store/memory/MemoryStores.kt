@@ -18,6 +18,8 @@ import io.damoreira.kraken.messaging.store.ProcessorControlStore.Control
 import io.damoreira.kraken.messaging.store.ProcessorControlStore.Lock
 import io.damoreira.kraken.messaging.store.ProcessorControlStore.Operation
 import org.springframework.dao.DuplicateKeyException
+import org.springframework.transaction.support.TransactionSynchronization
+import org.springframework.transaction.support.TransactionSynchronizationManager
 import java.time.Duration
 import java.time.Instant
 
@@ -72,13 +74,31 @@ internal data class OutboxRow(
 internal class MemoryOutboxStore(private val store: MemoryMessageStore) : OutboxStore {
     private val order = compareBy<OutboxRow>({ it.entry.createdAt }, { it.entry.seq }, { it.entry.id })
 
+    /**
+     * Appends [entry] in the store's transaction bound to the calling thread, or at once without one. Inside a transaction of
+     * another manager (the application's own database), the entry is appended after that transaction committed and never when
+     * it rolled back: after the commit, not atomically with it (the in-memory store cannot join another database).
+     */
     override suspend fun append(entry: OutboxEntry) {
         JsonPayloads.requireObject(entry.payload, "outbox entry ${entry.id} (${entry.type})")
         val copy = OutboxEntry(entry.id, entry.type, entry.key, LinkedHashMap(entry.headers), entry.payload.copyOf(), entry.createdAt, entry.seq, entry.attempts)
+        if (store.bound() == null && TransactionSynchronizationManager.isSynchronizationActive() &&
+            TransactionSynchronizationManager.isActualTransactionActive()
+        ) {
+            TransactionSynchronizationManager.registerSynchronization(object : TransactionSynchronization {
+                override fun afterCommit() = appendNow(copy)
+            })
+            return
+        }
+        appendNow(copy)
+    }
+
+    private fun appendNow(copy: OutboxEntry) {
+        val entry = copy
         val committed = store.locked {
             val view = store.view(store.outboxTable, joined = true)
             if (view.contains(entry.id)) throw DuplicateKeyException("outbox: an entry ${entry.id} exists")
-            view.put(entry.id, OutboxRow(copy))
+            view.put(entry.id, OutboxRow(entry))
             val tx = store.bound()
             if (tx != null) tx.appended = true
             tx == null
