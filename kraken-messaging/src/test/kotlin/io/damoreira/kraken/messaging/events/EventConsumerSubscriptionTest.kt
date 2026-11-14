@@ -178,16 +178,23 @@ class EventConsumerSubscriptionTest {
 
     private fun happened(id: String): ByteArray = JsonCodec().encode(Happened(id, Instant.EPOCH))
 
+    /** Calls [EventConsumer.stop] on a thread of its own; returns it once the stop waits for the reader thread (its job cancelled). */
+    private fun stopWaitingForTheReader(c: EventConsumer): Thread {
+        val stopper = Thread { c.stop() }.apply { start() }
+        await().atMost(Duration.ofSeconds(10)).until { stopper.state == Thread.State.TIMED_WAITING } // joining the reader
+        return stopper
+    }
+
     @Test
     fun aStopDuringSubscribeClosesTheSubscriptionItBuilt() {
         val events = ScriptedEventStore()
         events.subscribeGate = CompletableDeferred()
         val c = start(events)
         await().atMost(Duration.ofSeconds(10)).until { events.subscriptions.size == 1 } // built, subscribe() not returned yet
-        val stopped = CompletableFuture.runAsync { c.stop() }
-        Thread.sleep(200) // the stop is waiting for the subscribe in flight
+        val stopper = stopWaitingForTheReader(c) // the stop is waiting for the subscribe in flight
         events.subscribeGate!!.complete(Unit)
-        stopped.get(5, TimeUnit.SECONDS)
+        stopper.join(5_000)
+        assertTrue(!stopper.isAlive, "the stop returned")
         assertTrue(events.subscriptions.single().closed, "the subscription built while the processor stopped is closed, not left in its group")
     }
 
@@ -200,10 +207,10 @@ class EventConsumerSubscriptionTest {
         val built = events.subscriptions.single()
         built.assign("0")
         built.deliver("0", "0", "test.Other") // ready: next() would hand it out without suspending
-        val stopped = CompletableFuture.runAsync { c.stop() }
-        Thread.sleep(200) // the stop is waiting for the subscribe in flight
+        val stopper = stopWaitingForTheReader(c) // the stop is waiting for the subscribe in flight
         events.subscribeGate!!.complete(Unit)
-        stopped.get(5, TimeUnit.SECONDS)
+        stopper.join(5_000)
+        assertTrue(!stopper.isAlive, "the stop returned")
         assertTrue(built.closed, "the subscription built while the processor stopped is closed")
         assertEquals(emptyList<Pair<String, String>>(), built.acks, "nothing of it was read: the stop surfaced before the first next()")
     }
@@ -295,20 +302,24 @@ class EventConsumerSubscriptionTest {
         val registry = HandlerRegistry(MessageTypeResolver("test")).also { it.register(handlers) }
         val dispatcher = LocalEventDispatcher(registry, HandlerInvoker(registry, JsonCodec()), markingStore())
         val c = EventConsumer(
-            events, SubscriptionSpec("svc.default", "kraken.events"), dispatcher, maxAttempts = 1, stopTimeout = Duration.ofSeconds(2),
+            events, SubscriptionSpec("svc.default", "kraken.events"), dispatcher, maxAttempts = 1, stopTimeout = Duration.ofMillis(300),
         ).also { consumer = it; it.start() }
         awaitSubscriptions(events, 1)
         events.subscriptions[0].assign("0")
         events.subscriptions[0].deliver("0", "0", "test.Happened", id = "b-1", payload = happened("b-1"))
         await().atMost(Duration.ofSeconds(10)).until { handlers.seen.size == 1 }
-        c.stop() // gives up after its 2 s: the reader still runs the handler
+        c.stop() // gives up after its timeout: the reader still runs the handler
 
-        val began = System.nanoTime()
-        val refused = runCatching { c.start(waitForPrevious = false) }.exceptionOrNull()
-        val took = Duration.ofNanos(System.nanoTime() - began)
-        assertTrue(refused is IllegalStateException, "no second reader while the first runs a handler: $refused")
-        assertTrue(took < Duration.ofMillis(500), "refused at once, without waiting for the previous reader: $took")
-        assertTrue(!c.isRunning)
+        // On a thread already interrupted: a start that waited for the previous reader would have thrown InterruptedException
+        // from its join; one that does not wait refuses with IllegalStateException.
+        val refusal = CompletableFuture<Throwable?>()
+        Thread {
+            Thread.currentThread().interrupt()
+            refusal.complete(runCatching { c.start(waitForPrevious = false) }.exceptionOrNull())
+        }.start()
+        val refused = refusal.get(10, TimeUnit.SECONDS)
+        assertTrue(refused is IllegalStateException, "refused at once, without waiting for the previous reader: $refused")
+        assertTrue(handlers.release.count == 1L && !c.isRunning, "while the first reader still runs its handler")
 
         handlers.release.countDown()
         await().atMost(Duration.ofSeconds(10)).until { events.subscriptions[0].closed }
