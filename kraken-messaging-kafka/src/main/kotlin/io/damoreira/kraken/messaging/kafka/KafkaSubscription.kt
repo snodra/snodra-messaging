@@ -1,16 +1,16 @@
 package io.damoreira.kraken.messaging.kafka
 
-import io.damoreira.kraken.messaging.eventstore.SegmentOrder
 import io.damoreira.kraken.messaging.eventstore.Delivery
 import io.damoreira.kraken.messaging.eventstore.EventStoreException
+import io.damoreira.kraken.messaging.eventstore.SegmentOrder
 import io.damoreira.kraken.messaging.eventstore.SegmentStatus
 import io.damoreira.kraken.messaging.eventstore.Subscription
 import io.damoreira.kraken.messaging.eventstore.SubscriptionEvent
 import io.damoreira.kraken.messaging.eventstore.SubscriptionSpec
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.channels.Channel
-import org.apache.kafka.clients.consumer.ConsumerRebalanceListener
 import org.apache.kafka.clients.consumer.Consumer
+import org.apache.kafka.clients.consumer.ConsumerRebalanceListener
 import org.apache.kafka.clients.consumer.KafkaConsumer
 import org.apache.kafka.clients.consumer.OffsetAndMetadata
 import org.apache.kafka.common.TopicPartition
@@ -235,8 +235,8 @@ internal class KafkaSubscription private constructor(
         for ((partition, offset) in acked) {
             if (only != null && partition !in only) continue
             val track = tracks[partition] ?: continue
-            // Until the group's committed offset is known an ack could commit below what another instance committed.
-            if (!track.committedKnown) continue
+            // Never backwards relative to what this subscription knows. While the group's offset is unknown (its lookup failed) an
+            // ack still commits: the worst case is a late ack below another instance's offset, a few duplicates (at-least-once).
             if (offset > track.committed) offsets[TopicPartition(topic, partition)] = OffsetAndMetadata(offset)
         }
         if (offsets.isEmpty()) return
@@ -288,6 +288,8 @@ internal class KafkaSubscription private constructor(
             if (lag.isPresent && fetched >= 0) track.head = fetched + lag.asLong else ask += tp
         }
         if (ask.isNotEmpty()) {
+            // A running partition with no currentLag yet (before its first fetch) is asked too: until that fetch the call may hold
+            // the poll thread for up to END_OFFSETS_LOOKUP per refresh.
             try {
                 for ((tp, end) in consumer.endOffsets(ask, END_OFFSETS_LOOKUP)) tracks[tp.partition()]?.head = end
             } catch (e: Exception) {

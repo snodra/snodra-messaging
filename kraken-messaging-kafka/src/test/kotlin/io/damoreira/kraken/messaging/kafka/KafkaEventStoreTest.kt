@@ -2,9 +2,9 @@ package io.damoreira.kraken.messaging.kafka
 
 import io.damoreira.kraken.messaging.config.KrakenMessagingAutoConfiguration
 import io.damoreira.kraken.messaging.eventstore.Capability
-import io.damoreira.kraken.messaging.eventstore.SegmentOrder
 import io.damoreira.kraken.messaging.eventstore.EventStore
 import io.damoreira.kraken.messaging.eventstore.EventStoreException
+import io.damoreira.kraken.messaging.eventstore.SegmentOrder
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue

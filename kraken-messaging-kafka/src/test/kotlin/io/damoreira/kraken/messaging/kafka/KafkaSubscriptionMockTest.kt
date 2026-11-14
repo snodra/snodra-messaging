@@ -17,6 +17,8 @@ import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import java.time.Duration
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 /** The subscription over a `MockConsumer`: the rebalance and seek paths, deterministic and without a broker. */
@@ -30,10 +32,13 @@ class KafkaSubscriptionMockTest {
     /** A consumer whose first [timeouts] reads of the committed offsets time out; the group is at offset 3; commits are recorded. */
     private class Mock(timeouts: Int) : MockConsumer<String, ByteArray>("earliest") {
         val failures = AtomicInteger(timeouts)
+
+        /** While set, every read of the committed offsets times out. */
+        val lookupFails = AtomicBoolean(false)
         val commits = CopyOnWriteArrayList<Map<TopicPartition, Long>>()
 
         override fun committed(partitions: Set<TopicPartition>, timeout: Duration): Map<TopicPartition, OffsetAndMetadata> {
-            if (failures.getAndDecrement() > 0) throw TimeoutException("the broker did not answer")
+            if (lookupFails.get() || failures.getAndDecrement() > 0) throw TimeoutException("the broker did not answer")
             return partitions.associateWith { OffsetAndMetadata(3) }
         }
 
@@ -72,11 +77,8 @@ class KafkaSubscriptionMockTest {
         val delivered = (0 until 3).map { withTimeout(10_000) { subscription.next() } as Delivery }
         assertEquals(listOf("0", "1", "2"), delivered.map { it.position })
 
-        // The committed offset is not known yet: an acknowledgement waits rather than commit below what the group has.
-        subscription.ack("0", "0")
         until("the committed offset learned") { subscription.segments().first().committed == "3" }
         assertEquals(listOf("0", "1"), subscription.segments().map { it.segment })
-        assertTrue(mock.commits.isEmpty(), "committed nothing below the group's offset: ${mock.commits}")
         subscription.ack("0", "5")
         until("the commit") { mock.commits.isNotEmpty() }
         assertEquals(mapOf(tp0 to 6L), mock.commits.first())
@@ -105,6 +107,57 @@ class KafkaSubscriptionMockTest {
         subscription.redeliver("0", "1")
         until("the seek applied") { mock.position(tp0) == 1L }
         assertNull(withTimeoutOrNull(300) { subscription.next() }, "the records queued behind the redelivered one are dropped")
+
+        // The broker gives the segment again from the seek on: that position and the later ones, each once.
+        mock.schedulePollTask { (1L..4L).forEach { mock.addRecord(record(tp0, it)) } }
+        val again = (0 until 4).map { (withTimeout(10_000) { subscription.next() } as Delivery).position }
+        assertEquals(listOf("1", "2", "3", "4"), again)
+        assertNull(withTimeoutOrNull(300) { subscription.next() }, "no stale duplicate behind them")
         subscription.close()
+    }
+
+    @Test
+    fun `an ack is committed while the committed offsets cannot be read`() = runBlocking {
+        val mock = Mock(timeouts = 0)
+        mock.lookupFails.set(true)
+        assignWithRecords(mock, 0L..2L)
+        val subscription = KafkaSubscription.start(spec, settings, mock)
+        assertEquals(SubscriptionEvent.Assigned(listOf("0", "1")), withTimeout(10_000) { subscription.next() })
+        repeat(3) { withTimeout(10_000) { subscription.next() } }
+
+        subscription.ack("0", "1")
+        until("the commit") { mock.commits.isNotEmpty() }
+        assertEquals(mapOf(tp0 to 2L), mock.commits.first())
+        assertNull(subscription.segments().first().committed?.takeIf { it != "2" }, "the offset it committed is the one it reports")
+        subscription.close()
+    }
+
+    @Test
+    fun `close flushes a pending ack, and so does a revoke, while the committed offsets cannot be read`() = runBlocking {
+        // The poll thread is held inside a poll, so the ack is still pending when the close (or the revoke) comes.
+        val mock = Mock(timeouts = 0)
+        mock.lookupFails.set(true)
+        assignWithRecords(mock, 0L..2L)
+        val subscription = KafkaSubscription.start(spec, settings, mock)
+        assertEquals(SubscriptionEvent.Assigned(listOf("0", "1")), withTimeout(10_000) { subscription.next() })
+        repeat(3) { withTimeout(10_000) { subscription.next() } }
+
+        val inPoll = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        // One poll that revokes everything (a rebalance giving only partition 1 back) once released.
+        mock.schedulePollTask {
+            inPoll.countDown()
+            release.await()
+            mock.rebalance(listOf(tp1))
+        }
+        withTimeout(10_000) { while (inPoll.count > 0) kotlinx.coroutines.delay(10) }
+        subscription.ack("0", "2")
+        release.countDown()
+        until("the revoke committed the pending ack") { mock.commits.any { it == mapOf(tp0 to 3L) } }
+
+        // Close: an ack given just before it is committed by the time close() returns.
+        subscription.ack("1", "7") // not a partition it has delivered from, but it holds it
+        subscription.close()
+        assertTrue(mock.commits.any { it == mapOf(tp1 to 8L) }, "close flushed the pending ack: ${mock.commits}")
     }
 }

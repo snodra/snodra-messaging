@@ -1,9 +1,9 @@
 package io.damoreira.kraken.messaging.kafka
 
-import io.damoreira.kraken.messaging.eventstore.SegmentOrder
 import io.damoreira.kraken.messaging.eventstore.EventStoreException
 import io.damoreira.kraken.messaging.eventstore.ReplayRange
 import io.damoreira.kraken.messaging.eventstore.ResetTarget
+import io.damoreira.kraken.messaging.eventstore.SegmentOrder
 import io.damoreira.kraken.messaging.eventstore.SubscriptionAdmin
 import io.damoreira.kraken.messaging.eventstore.SubscriptionSpec
 import kotlinx.coroutines.Dispatchers
