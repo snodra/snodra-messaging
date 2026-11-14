@@ -27,6 +27,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertInstanceOf
@@ -65,10 +66,13 @@ import java.util.UUID
  *   check reads what the earlier ones appended and looks only at its own events (by their `id` header). A check of a
  *   capability the event store does not declare is skipped (one checks that it says so instead).
  * - The checks wait at most [wait] (a minute) for what the event store does in the background (an assignment, a lag refresh)
- *   and for every call they await: a publish, a subscribe, a `next` that does not give up when cancelled, a close or a
- *   [io.damoreira.kraken.messaging.eventstore.SubscriptionAdmin] call that does not answer fails the check naming the step
- *   (each runs on a coroutine of its own, so a stuck one is left behind instead of hanging the test). A check closes the
- *   subscriptions it left open when it fails.
+ *   and for every call they await: [eventStore] and [messageStore], a publish, a subscribe, a `next` that does not give up
+ *   when cancelled, a close, a [io.damoreira.kraken.messaging.eventstore.SubscriptionAdmin] call or a message store call that
+ *   does not answer fails the check naming the step (each runs on a coroutine of its own, so a stuck one is left behind
+ *   instead of hanging the test). A check closes the subscriptions it left open when it fails.
+ * - **`next` is cancelled** by the kit every time a slice of reading is up, as the core cancels it on its shutdown and timers
+ *   (see [io.damoreira.kraken.messaging.eventstore.Subscription.next]). One that loses an event it was about to return when it
+ *   is cancelled shows here as a delivery that never comes: the check names the events it waited for.
  */
 abstract class EventStoreConformanceTest {
     /** The prepared source (see the class docs). */
@@ -88,8 +92,14 @@ abstract class EventStoreConformanceTest {
     /** The check running, named in the failures of [bounded]. */
     private var check = ""
 
-    /** Where the kit's calls of the event store run: a call that never answers is left behind there. */
-    private val calls = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    /** Where the kit's calls of the event store run: a call that never answers is left behind there. One per test (a subclass may share its instance between tests). */
+    private var calls = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    @BeforeEach
+    fun startCheck() {
+        calls = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        readers.clear()
+    }
 
     @AfterEach
     fun closeOpenSubscriptions() = runBlocking {
@@ -108,7 +118,7 @@ abstract class EventStoreConformanceTest {
     /** The seven headers, any other header, the key (or none) and the payload arrive as published. */
     @Test
     fun headersRoundTrip() = check("headersRoundTrip") {
-        val events = eventStore()
+        val events = newEventStore()
         val keyed = event(source, fresh("key"), extra = mapOf("x-conformance" to "kept as given"))
         val unkeyed = event(source, null)
         publishAll(events, listOf(keyed, unkeyed))
@@ -130,7 +140,7 @@ abstract class EventStoreConformanceTest {
     /** Events of one key arrive in publish order, all from one segment, each once; a segment's positions increase by [EventStore.compare]. */
     @Test
     fun sameKeyArrivesInPublishOrder() = check("sameKeyArrivesInPublishOrder") {
-        val events = eventStore()
+        val events = newEventStore()
         val keys = (0 until 4).map { fresh("key") }
         val sent = (0 until 10).flatMap { keys.map { key -> event(source, key) } }
         publishAll(events, sent)
@@ -158,7 +168,7 @@ abstract class EventStoreConformanceTest {
     /** Two subscription names (two processors) each receive every event. */
     @Test
     fun everyProcessorGetsEveryEvent() = check("everyProcessorGetsEveryEvent") {
-        val events = eventStore()
+        val events = newEventStore()
         val sent = (0 until 10).map { event(source, fresh("key")) }
         publishAll(events, sent)
 
@@ -173,8 +183,8 @@ abstract class EventStoreConformanceTest {
     /** Two instances of one subscription split its segments (adding the second spreads them) and share its events: each event goes to one of them, and both get some. */
     @Test
     fun instancesShareAProcessor() = check("instancesShareAProcessor") {
-        val first = eventStore()
-        val second = eventStore()
+        val first = newEventStore()
+        val second = newEventStore()
         val spec = spec()
         val a = join(first, spec)
         a.until("the first instance holds segments") { it.assigned.isNotEmpty() }
@@ -182,6 +192,9 @@ abstract class EventStoreConformanceTest {
         bothUntil(a, b, "both instances hold segments, none held by both") { x, y ->
             x.assigned.isNotEmpty() && y.assigned.isNotEmpty() && x.assigned.none { it in y.assigned }
         }
+        // What the second instance took over, the first was told to give up (whether the event store then assigns the rest
+        // again or leaves it, the first's assignment ends as `assigned` says: Revoked, then Assigned, in the order given).
+        assertTrue(b.assigned.all { it in a.revoked }, "the first instance was told the segments ${b.assigned} went away (revoked ${a.revoked})")
 
         val sent = (0 until 40).map { event(source, fresh("key")) }
         publishAll(first, sent)
@@ -201,7 +214,7 @@ abstract class EventStoreConformanceTest {
      */
     @Test
     fun unackedDeliveryIsRedelivered() = check("unackedDeliveryIsRedelivered") {
-        val events = eventStore()
+        val events = newEventStore()
         val spec = spec()
         val key = fresh("key")
         val sent = (0 until 3).map { event(source, key) }
@@ -214,7 +227,7 @@ abstract class EventStoreConformanceTest {
         first.until("the three events delivered") { it.hasAll(all) }
         first.close()
 
-        val second = join(eventStore(), spec)
+        val second = join(newEventStore(), spec)
         second.hold(unacked)
         second.until("the unacknowledged events again") { it.hasAll(unacked) }
         assertEquals(unacked, second.idsInOrder(all), "after a close: the unacknowledged ones, in order, not the acknowledged one")
@@ -234,8 +247,8 @@ abstract class EventStoreConformanceTest {
      */
     @Test
     fun redeliveredAfterCommitIsSkipped() = check("redeliveredAfterCommitIsSkipped") {
-        val store = messageStore()
-        val events = eventStore()
+        val store = newMessageStore()
+        val events = newEventStore()
         val spec = spec()
         val key = fresh("key")
         val handled = event(source, key)
@@ -248,21 +261,21 @@ abstract class EventStoreConformanceTest {
         first.hold(only)
         first.until("the event delivered") { it.hasAll(only) }
         val firstMarker = marker(first.first(handled.id))
-        assertTrue(inTransaction(store) { store.processedEvents.record(firstMarker) }, "the first handling records its marker")
+        assertTrue(inTransaction("record the first marker", store) { store.processedEvents.record(firstMarker) }, "the first handling records its marker")
         first.close() // the crash: committed, never acknowledged
 
-        val second = join(eventStore(), spec)
+        val second = join(newEventStore(), spec)
         second.hold(only)
         second.until("the event again after the crash") { it.hasAll(only) }
         val again = second.first(handled.id)
-        val recorded = inTransaction(store, rollback = true) { store.processedEvents.record(marker(again)) }
+        val recorded = inTransaction("record the marker of the redelivery", store, rollback = true) { store.processedEvents.record(marker(again)) }
         assertFalse(recorded, "the redelivered event is a duplicate")
         second.ack(again)
         second.close()
 
         val fence = event(source, key)
         publishAll(events, listOf(fence))
-        val third = join(eventStore(), spec)
+        val third = join(newEventStore(), spec)
         third.until("the next event of the key") { it.has(fence.id) }
         assertFalse(third.has(handled.id), "the skipped event, acknowledged, does not come again")
         third.close()
@@ -271,7 +284,7 @@ abstract class EventStoreConformanceTest {
     /** A paused subscription delivers nothing (paused before its first `next` too) while its assignment goes on; resumed, it delivers from where it stopped, each event once, in order. */
     @Test
     fun pausedSubscriptionReceivesNothingAndResumesInPlace() = check("pausedSubscriptionReceivesNothingAndResumesInPlace") {
-        val events = eventStore()
+        val events = newEventStore()
         val key = fresh("key")
         val before = (0 until 3).map { event(source, key) }
         val during = (0 until 5).map { event(source, key) }
@@ -304,7 +317,7 @@ abstract class EventStoreConformanceTest {
      */
     @Test
     fun replayFromEarliestRedeliversHistory() = check("replayFromEarliestRedeliversHistory") {
-        val events = eventStore()
+        val events = newEventStore()
         assumeTrue(events.supports(Capability.REPLAY), "the event store does not declare replay")
         val spec = spec()
         val sent = (0 until 3).map { event(source, fresh("key")) }
@@ -345,12 +358,20 @@ abstract class EventStoreConformanceTest {
         val latest = bounded("admin plan Latest") { admin.plan(ResetTarget.Latest) }
         for (d in delivered) assertTrue(latest.any { it.segment == d.segment }, "latest moves segment ${d.segment}: $latest")
         assertTrue(latest.all { it.until.isEmpty() || !before(it.from, it.until) }, "latest replays nothing: $latest")
+        // Events of one millisecond share a timestamp, so the checks use only what a time decides: an event strictly before it is
+        // moved past, an event at or after it is not (the first position at or after the time is no later than the event's).
         val oldest = delivered.first()
-        val at = bounded("admin plan Timestamp") { admin.plan(ResetTarget.Timestamp(oldest.timestampMs)) }
-        assertTrue(
-            at.any { it.segment == oldest.segment && !before(oldest.position, it.from) },
-            "a time moves to the first position at or after it: $at",
-        )
+        val timestamps = delivered.map { it.timestampMs }.sorted()
+        val atTime = timestamps[timestamps.size / 2]
+        val at = bounded("admin plan Timestamp") { admin.plan(ResetTarget.Timestamp(atTime)) }
+        for (d in delivered) {
+            val from = at.firstOrNull { it.segment == d.segment }?.from ?: fail("a time moves segment ${d.segment}: $at")
+            if (d.timestampMs < atTime) {
+                assertTrue(before(d.position, from), "a time moves past ${d.position} of segment ${d.segment} (appended before it): $at")
+            } else {
+                assertTrue(!before(d.position, from), "a time keeps ${d.position} of segment ${d.segment} (appended at or after it): $at")
+            }
+        }
         val newest = delivered.maxOf { it.timestampMs }
         val past = bounded("admin plan Timestamp") { admin.plan(ResetTarget.Timestamp(newest + 1)) }
         for (d in delivered) {
@@ -372,7 +393,7 @@ abstract class EventStoreConformanceTest {
         }
 
         bounded("admin apply") { admin.apply(earliest) }
-        val second = join(eventStore(), spec)
+        val second = join(newEventStore(), spec)
         second.until("the acknowledged events replayed") { it.hasAll(all) }
         second.close()
     }
@@ -380,7 +401,7 @@ abstract class EventStoreConformanceTest {
     /** Without `replay`: the reset side of a subscription is refused as unsupported. */
     @Test
     fun adminWithoutReplayIsUnsupported() = check("adminWithoutReplayIsUnsupported") {
-        val events = eventStore()
+        val events = newEventStore()
         assumeFalse(events.supports(Capability.REPLAY), "the event store declares replay")
         val refused = runCatching { events.admin(spec()) }.exceptionOrNull()
         assertInstanceOf(EventStoreException.Unsupported::class.java, refused, "admin without replay: $refused")
@@ -390,7 +411,7 @@ abstract class EventStoreConformanceTest {
     /** Without `lag`: no segment reports a lag. */
     @Test
     fun lagUnknownWithoutCapability() = check("lagUnknownWithoutCapability") {
-        val events = eventStore()
+        val events = newEventStore()
         assumeFalse(events.supports(Capability.LAG), "the event store declares lag")
         val sent = event(source, fresh("key"))
         publishAll(events, listOf(sent))
@@ -405,7 +426,7 @@ abstract class EventStoreConformanceTest {
     /** `lag`: each segment's lag counts what the subscription has not acknowledged. */
     @Test
     fun lagCountsUnacked() = check("lagCountsUnacked") {
-        val events = eventStore()
+        val events = newEventStore()
         assumeTrue(events.supports(Capability.LAG), "the event store does not declare lag")
         val reader = join(events, spec())
         reader.until("the subscription holds segments") { it.assigned.isNotEmpty() }
@@ -443,7 +464,7 @@ abstract class EventStoreConformanceTest {
     /** `native-dead-letter`: the dead-letter source takes a letter (its `kraken-dlt-*` headers included) and delivers it as published. */
     @Test
     fun deadLetterSourceReceives() = check("deadLetterSourceReceives") {
-        val events = eventStore()
+        val events = newEventStore()
         assumeTrue(events.supports(Capability.NATIVE_DEAD_LETTER), "the event store does not declare native-dead-letter")
         val dlt = deadLetterSource(source)
         val letter = event(
@@ -507,15 +528,24 @@ abstract class EventStoreConformanceTest {
         }
     }
 
-    /** Runs [block] in a transaction of [store] on this thread, as the core does: committed, or rolled back when [rollback]. */
-    private fun <T> inTransaction(store: MessageStore, rollback: Boolean = false, block: suspend () -> T): T {
-        var result: Result<T>? = null
-        TransactionTemplate(store.transactions).executeWithoutResult { status ->
-            result = Result.success(runBlocking { block() })
-            if (rollback) status.setRollbackOnly()
+    /** One service instance of the event store under test, [eventStore] bounded like every call. */
+    private suspend fun newEventStore(): EventStore = bounded("eventStore()") { eventStore() }
+
+    private suspend fun newMessageStore(): MessageStore = bounded("messageStore()") { messageStore() }
+
+    /**
+     * Runs [block] in a transaction of [store], as the core does: committed, or rolled back when [rollback]. The transaction is
+     * thread-bound, so all of it runs on one thread of the bounded call, which names [step] when the message store does not answer.
+     */
+    private suspend fun <T> inTransaction(step: String, store: MessageStore, rollback: Boolean = false, block: suspend () -> T): T =
+        bounded(step) {
+            var result: Result<T>? = null
+            TransactionTemplate(store.transactions).executeWithoutResult { status ->
+                result = Result.success(runBlocking { block() })
+                if (rollback) status.setRollbackOnly()
+            }
+            result!!.getOrThrow()
         }
-        return result!!.getOrThrow()
-    }
 
     /**
      * One subscription and what it gave: its assignment and its deliveries, in order. Every delivery is acknowledged as it
@@ -523,6 +553,9 @@ abstract class EventStoreConformanceTest {
      */
     private inner class Reader(val name: String, private var open: Subscription?) {
         val assigned = TreeSet<String>()
+
+        /** Every segment a [SubscriptionEvent.Revoked] named. */
+        val revoked = TreeSet<String>()
         val seen = mutableListOf<Delivery>()
         private val held = HashSet<String>()
 
@@ -585,7 +618,13 @@ abstract class EventStoreConformanceTest {
                     )
                     assigned += segment
                 }
-                is SubscriptionEvent.Revoked -> assigned -= event.segments.toSet()
+                is SubscriptionEvent.Revoked -> {
+                    for (segment in event.segments) {
+                        assertTrue(segment in assigned, "$name: a revoke of segment $segment it does not hold ($assigned)")
+                    }
+                    assigned -= event.segments.toSet()
+                    revoked += event.segments
+                }
                 is Delivery -> {
                     assertTrue(event.segment in assigned, "$name: a delivery of segment ${event.segment} it does not hold ($assigned)")
                     assertTrue(

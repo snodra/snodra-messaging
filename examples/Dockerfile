@@ -9,6 +9,7 @@ COPY gradlew settings.gradle.kts build.gradle.kts ./
 COPY gradle ./gradle
 COPY kraken-messaging-api ./kraken-messaging-api
 COPY kraken-messaging ./kraken-messaging
+COPY kraken-messaging-kafka ./kraken-messaging-kafka
 COPY kraken-messaging-mongo ./kraken-messaging-mongo
 COPY kraken-messaging-test ./kraken-messaging-test
 COPY examples ./examples

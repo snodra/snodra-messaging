@@ -59,6 +59,7 @@ Repo conventions: `../kraken/docs/04-repositories.md`.
 |---|---|---|
 | `kraken-messaging-api` | `io.damoreira.kraken:kraken-messaging-api:0.1.0-SNAPSHOT` | `@MessageType`, `Event`, `Command<R>`, `Query<R>`, `StreamingQuery<R>`. No Spring. Depended on by every `*-api` module. |
 | `kraken-messaging` | `io.damoreira.kraken:kraken-messaging:0.1.0-SNAPSHOT` | Spring Boot starter: buses, handler annotations, hub client, outbox, Kafka consumer, sagas, deadlines and the external-integration toolkit, auto-configuration. Its state goes through the message store interfaces (`io.damoreira.kraken.messaging.store`, ADR 0028); it depends on no database. |
+| `kraken-messaging-kafka` | `io.damoreira.kraken:kraken-messaging-kafka:0.1.0-SNAPSHOT` | The Kafka event store (`io.damoreira.kraken.messaging.eventstore`, ADR 0027): publish, competing subscriptions, replay, lag and dead-letter topics, over the plain Kafka clients. |
 | `kraken-messaging-mongo` | `io.damoreira.kraken:kraken-messaging-mongo:0.1.0-SNAPSHOT` | The MongoDB message store: the outbox, processed events, dead letters, processor control, external calls and sagas in the service's MongoDB (a replica set), and its `MongoTransactionManager`. |
 | `kraken-messaging-test` | `io.damoreira.kraken:kraken-messaging-test:0.1.0-SNAPSHOT` | `InMemoryBuses`, `InProcessHub`, `KrakenContainers`, `KrakenTestKafka`, `SagaTestFixture`. |
 | `examples/examples-api`, `examples/service-a`, `examples/service-b` | not published | Two sample services talking through the hub; see [Examples](#examples). |
