@@ -36,6 +36,7 @@ Repo conventions: `../kraken/docs/04-repositories.md`.
 - [Requirements](#requirements)
 - [Build, test, publish](#build-test-publish)
 - [Using the starter](#using-the-starter)
+- [In-memory event store and message store](#in-memory-event-store-and-message-store)
 - [Semantics worth knowing](#semantics-worth-knowing)
 - [Multiple hubs](#multiple-hubs)
 - [Scatter-gather](#scatter-gather)
@@ -58,10 +59,10 @@ Repo conventions: `../kraken/docs/04-repositories.md`.
 | Module | Coordinates | Purpose |
 |---|---|---|
 | `kraken-messaging-api` | `io.damoreira.kraken:kraken-messaging-api:0.1.0-SNAPSHOT` | `@MessageType`, `Event`, `Command<R>`, `Query<R>`, `StreamingQuery<R>`. No Spring. Depended on by every `*-api` module. |
-| `kraken-messaging` | `io.damoreira.kraken:kraken-messaging:0.1.0-SNAPSHOT` | Spring Boot starter: buses, handler annotations, hub client, outbox, event processors, sagas, deadlines and the external-integration toolkit, auto-configuration. Its state goes through the message store interfaces (`io.damoreira.kraken.messaging.store`, ADR 0028) and its events through the event-store interfaces (`io.damoreira.kraken.messaging.eventstore`, ADR 0027); it depends on no database and no event-store client. |
+| `kraken-messaging` | `io.damoreira.kraken:kraken-messaging:0.1.0-SNAPSHOT` | Spring Boot starter: buses, handler annotations, hub client, outbox, event processors, sagas, deadlines and the external-integration toolkit, auto-configuration. Its state goes through the message store interfaces (`io.damoreira.kraken.messaging.store`, ADR 0028) and its events through the event-store interfaces (`io.damoreira.kraken.messaging.eventstore`, ADR 0027); it depends on no database and no event-store client. It ships the in-memory event store and message store (not durable: tests, local runs, demos; see [In-memory event store and message store](#in-memory-event-store-and-message-store)). |
 | `kraken-messaging-kafka` | `io.damoreira.kraken:kraken-messaging-kafka:0.1.0-SNAPSHOT` | The Kafka event store (`io.damoreira.kraken.messaging.eventstore`, ADR 0027): publish, competing subscriptions, replay, lag and dead-letter topics, over the plain Kafka clients; its settings `kraken.messaging.kafka.*` and the partner topics `kraken.messaging.external.kafka.sources.*`. Add it to publish or handle events on Kafka. |
 | `kraken-messaging-mongo` | `io.damoreira.kraken:kraken-messaging-mongo:0.1.0-SNAPSHOT` | The MongoDB message store: the outbox, processed events, dead letters, processor control, external calls and sagas in the service's MongoDB (a replica set), and its `MongoTransactionManager`. |
-| `kraken-messaging-test` | `io.damoreira.kraken:kraken-messaging-test:0.1.0-SNAPSHOT` | `InMemoryBuses`, `InProcessHub`, `KrakenContainers`, `KrakenTestKafka`, `SagaTestFixture`. |
+| `kraken-messaging-test` | `io.damoreira.kraken:kraken-messaging-test:0.1.0-SNAPSHOT` | The zero-infrastructure mode `@KrakenInMemory` with `InMemoryEvents`, the conformance kits of the event store and the message store (`EventStoreConformanceTest`, `MessageStoreConformanceTest`), `InMemoryBuses`, `InProcessHub`, `KrakenContainers`, `KrakenTestKafka`, `SagaTestFixture`. |
 | `examples/examples-api`, `examples/service-a`, `examples/service-b` | not published | Two sample services talking through the hub; see [Examples](#examples). |
 
 ## Requirements
@@ -185,7 +186,9 @@ All keys (`kraken.messaging.*`; durations accept `200ms`, `5s`, `7d`; relaxed bi
 | `hub.retry.initial-backoff` | `100ms` | Wait before the second attempt. Every wait is jittered by ±20 % and capped at `max-backoff` (at the cap: 80-100 % of it). |
 | `hub.retry.multiplier` | `2` | Growth of the wait per further attempt. |
 | `hub.retry.max-backoff` | `2s` | Upper bound of a single wait. |
-| `event-store` | the only one | The event store's name (`kafka`, `rabbitmq-streams`, `memory`) when two event-store add-ons are on the classpath; two without it, or a name no add-on provides, fail the startup. |
+| `event-store` | the only one | The event store's name (`kafka`, `rabbitmq-streams`, `memory`) when two event-store add-ons are on the classpath; two without it, or a name no add-on provides, fail the startup. `memory` runs the in-memory event store, and is the only way to run it (an add-on on the classpath then steps back). |
+| `store` | the only one | The message store's name (`mongo`, `jdbc`, `memory`) when two are available; two without it, or a name the application lacks, fail the startup. `memory` runs the in-memory message store, and is the only way to run it (the MongoDB add-on then steps back). In YAML, `store` and `store.init-schema` cannot both be nested keys: write one of them as a flat key (`kraken.messaging.store: memory`). |
+| `memory.segments` | `4` | The in-memory event store's segments per source (1 to 1024): a key always goes to one of them; the competing instances of a subscription share them. |
 | `events.source` | `kraken.events` | The source the service's events are published to and read from (the topic on Kafka). |
 | `events.consumer.enabled` | `true` | Set `false` in tools that only publish. |
 | `events.subscription-prefix` | `service-name` | The prefix of every processor's subscription: every event processor, `default` included, uses `<this>.<name>` (on Kafka the consumer group, as before). See [Event processors](#event-processors). |
@@ -572,6 +575,52 @@ val urgent = commandBus.send(
 )
 val quick = queryBus.sendBlocking(GetWorkout(id), SendOptions(retry = RetryPolicy.NONE)) // no retry for this call
 ```
+
+## In-memory event store and message store
+
+The core ships an event store and a message store that keep everything in the JVM's memory (ADR 0027, ADR 0028), for
+**tests, local runs and single-process demos**. They are **not durable**: everything is gone when the process ends, and only
+that JVM sees it (a second instance of the service has stores of its own). Each runs only when its setting names it, never
+because nothing else is there, and an add-on on the classpath steps back when the setting says `memory`:
+
+```yaml
+kraken:
+  messaging:
+    event-store: memory     # the in-memory event store
+    store: memory           # the in-memory message store
+    memory:
+      segments: 4           # segments per source (default 4)
+```
+
+At startup each logs at `WARN`, naming the active Spring profiles (`default` when none), so a production profile that runs one
+by mistake shows it: `in-memory event store: not durable (profile local)` and `in-memory message store: not durable (profile
+local)`. Nothing stops a profile from using them: the warning is the guard.
+
+**The in-memory event store** (name `memory`; capabilities `replay`, `browse`, `lag`, not `native-dead-letter`):
+
+- Every source is a log of `memory.segments` segments, named `0` to `n - 1`; an event goes to the segment of its key (FNV-1a 64 of
+  the key's UTF-8 bytes, unsigned, modulo the segments), an event without a key to the next segment in turn. A position is the
+  event's index in its segment (`0`, `1`, ...), the timestamp the application clock's.
+- A subscription name keeps one committed position per segment; the instances of one name in the JVM share its segments round
+  robin, and a segment changes hands only once its holder gave it up, so two never read one segment at once. A new name starts at
+  the earliest position. A subscription wakes up at once on a publish, a resume or a reassignment.
+- Reset and replay work as on any event store with `replay` (while no instance reads the subscription); `lag` counts what is not
+  acknowledged. `browse` is the read access tests use (`MemoryEventStore.sources()`, `events(source, type, key)`,
+  `event(source, segment, position)`): there is no event browser for an in-process store.
+- Nothing is ever deleted: a long run keeps every event.
+
+**The in-memory message store** (name `memory`) implements every store (outbox, processed events, dead letters, processor control,
+external calls, the saga ports) with the semantics of the database add-ons:
+
+- Its transactions are Spring's (`MemoryTransactionManager`, also the application's transaction manager when it has none, so its
+  `@Transactional` methods and the outbox commit together): what joins a transaction is visible to others only at the commit and
+  dropped at a rollback; two live transactions writing one row conflict at the second write, and a commit over a row that changed
+  fails; both are a `ConcurrencyFailureException`, the transient conflict a retry resolves.
+- The relay is woken up as soon as an append commits (no poll interval to wait), claims and leases follow the application clock,
+  dead letters expire at their `expireAt`; nothing else expires.
+
+A service test that wants neither containers nor a hub uses both through `@KrakenInMemory` (see
+[Test helpers](#test-helpers-kraken-messaging-test)).
 
 ## Semantics worth knowing
 
@@ -1601,6 +1650,31 @@ service-a and service-b of the [examples](#examples) export this way when switch
 
 ## Test helpers (`kraken-messaging-test`)
 
+- `@KrakenInMemory` on a `@SpringBootTest`: the zero-infrastructure mode. The application runs on the in-memory event store and
+  message store (`kraken.messaging.event-store=memory`, `kraken.messaging.store=memory`), without a hub (`hub.enabled=false`: no
+  `CommandBus` or `QueryBus`; a service that injects one declares `InMemoryBuses` or an `InProcessHub` connection) and without the
+  Kafka add-on's auto-configuration (no partner topics either). The test gets an `InMemoryEvents` bean:
+  `publish(event, key)` hands an event to the service as another service would (its processors and sagas get it; returns its
+  id), `published()` / `published(Type::class)` / `awaitPublished(Type::class, count)` read what the service published,
+  `deadLetters(processor)` / `awaitDeadLetters(processor, count)` its processors' dead letters, and `processed(eventId,
+  processor)` / `awaitProcessed(eventId, processor)` whether a processor handled an event. service-b's `AuditInMemoryTest` is an
+  example: the real `audit` processor, its dead letters and their retry, over HTTP, with no container.
+
+```kotlin
+@SpringBootTest(properties = ["kraken.messaging.events.consumer.max-attempts=1"])
+@KrakenInMemory
+class ShippingInMemoryTest(@Autowired val events: InMemoryEvents) {
+    @Test fun `an order is shipped`() {
+        val id = events.publish(OrderPlaced("o-1"), key = "o-1")
+        events.awaitProcessed(id, processor = "shipping")
+        assertEquals(listOf(OrderShipped("o-1")), events.awaitPublished(OrderShipped::class))
+    }
+}
+```
+
+- `EventStoreConformanceTest` and `MessageStoreConformanceTest`: the behaviour every event-store and message-store add-on owes the
+  core, as JUnit classes an add-on subclasses in its own tests (the in-memory stores run them in the core's tests, with no
+  container).
 - `InMemoryBuses(typePrefix, userId)`: implements `EventBus`, `CommandBus` and `QueryBus` in memory for unit tests without
   Docker. Messages still pass through the JSON codec. `register(handlerBean)` adds handlers; `published` lists events.
   A scatter-gather returns one part from the registered handler (service and instance `in-memory`); a streaming query
