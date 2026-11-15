@@ -276,7 +276,7 @@ class OutboxTest {
         assertNotNull(doc.sentAt)
         assertEquals(doc.id, headers["id"])
         assertEquals(doc.type, headers["type"])
-        assertEquals(doc.createdAt.toString(), headers["timestamp"])
+        assertEquals(io.damoreira.kraken.messaging.eventstore.EventHeaders.timestamp(doc.createdAt), headers["timestamp"])
     }
 
     @Test

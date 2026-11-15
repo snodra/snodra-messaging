@@ -13,8 +13,6 @@ import io.damoreira.kraken.messaging.store.memory.MemoryMessageStore
 import kotlinx.coroutines.runBlocking
 import java.time.Clock
 import java.time.Duration
-import java.time.ZoneOffset
-import java.time.format.DateTimeFormatter
 import java.util.UUID
 import kotlin.reflect.KClass
 
@@ -49,7 +47,7 @@ class InMemoryEvents(
             EventHeaders.TYPE to type,
             EventHeaders.ID to id,
             EventHeaders.CORRELATION_ID to id,
-            EventHeaders.TIMESTAMP to TIMESTAMPS.format(clock.instant()),
+            EventHeaders.TIMESTAMP to EventHeaders.timestamp(clock.instant()),
             EventHeaders.SOURCE to from,
             EventHeaders.USER_ID to "",
             EventHeaders.TRACEPARENT to "00-$trace-${trace.take(16)}-01",
@@ -101,6 +99,5 @@ class InMemoryEvents(
     private companion object {
         val TIMEOUT: Duration = Duration.ofSeconds(10)
         const val POLL_MS = 20L
-        val TIMESTAMPS: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'").withZone(ZoneOffset.UTC)
     }
 }

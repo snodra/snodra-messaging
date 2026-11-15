@@ -42,4 +42,18 @@ class OutboxWakeUpTest {
         relay.stop()
         assertEquals(0, store.appendListenerCount(), "nor a restarted one")
     }
+
+    @Test
+    fun theTimestampHeaderAlwaysCarriesMilliseconds() {
+        val store = MemoryMessageStore()
+        val events = MemoryEventStore()
+        val relay = OutboxPublisher(store.outbox, events, "kraken.events", "orders", pollInterval = Duration.ofMinutes(10), batchSize = 100)
+        runBlocking {
+            store.outbox.append(OutboxEntry("e-whole", "t.Happened", "k", emptyMap(), "{}".toByteArray(), Instant.parse("2026-11-15T10:20:35Z"), 1))
+            store.outbox.append(OutboxEntry("e-ms", "t.Happened", "k", emptyMap(), "{}".toByteArray(), Instant.parse("2026-11-15T10:20:35.120Z"), 2))
+        }
+        relay.publishPendingNow()
+        val stamps = events.events("kraken.events").associate { it.id to it.headers[io.damoreira.kraken.messaging.eventstore.EventHeaders.TIMESTAMP] }
+        assertEquals<Map<String?, String?>>(mapOf("e-whole" to "2026-11-15T10:20:35.000Z", "e-ms" to "2026-11-15T10:20:35.120Z"), stamps)
+    }
 }

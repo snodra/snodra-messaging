@@ -129,7 +129,7 @@ class OutboxPublisher(
         val headers = LinkedHashMap(entry.headers)
         headers[EventHeaders.TYPE] = entry.type
         headers[EventHeaders.ID] = entry.id
-        headers[EventHeaders.TIMESTAMP] = entry.createdAt.toString()
+        headers[EventHeaders.TIMESTAMP] = EventHeaders.timestamp(entry.createdAt)
         headers[EventHeaders.SOURCE] = service
         return OutgoingEvent(source, entry.id, entry.type, entry.key, headers, entry.payload)
     }
