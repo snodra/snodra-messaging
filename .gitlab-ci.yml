@@ -39,6 +39,17 @@ test:
     reports:
       junit: "**/build/test-results/test/TEST-*.xml"
 
+# The throughput floors (tag `throughput`, excluded from `test`): on the same runner as the test job, after it.
+throughput:
+  stage: test
+  needs: ["test"]
+  script:
+    - ./gradlew throughputTest --no-daemon
+  artifacts:
+    when: always
+    reports:
+      junit: "**/build/test-results/throughputTest/TEST-*.xml"
+
 release:
   stage: release
   resource_group: release
