@@ -1,58 +1,96 @@
 package io.damoreira.kraken.messaging.rabbitmq
 
-import com.rabbitmq.stream.OffsetSpecification
 import com.rabbitmq.stream.impl.Client
-import java.util.function.ToLongFunction
+import java.io.InputStream
+import java.util.Properties
 
 /**
  * The RabbitMQ Stream Java client this add-on runs on, checked when a [RabbitEventStore] is built: the add-on speaks the client's
  * low-level `com.rabbitmq.stream.impl.Client` (an internal package that changes between versions) and reads two of its
  * package-private methods reflectively, so it requires exactly [REQUIRED] — and Spring Boot's dependency management sets another
  * version (`rabbit-stream-client.version`, 1.6.0 in Boot 4.1) in a service that uses it.
+ *
+ * The version is checked first; only then are the members the add-on uses looked up, by name, so a class another client
+ * version lacks is reported in the check's message, never as a class-loading error.
  */
 internal object RabbitClientCheck {
     const val REQUIRED = "1.13.1"
 
-    /** A member of the client the add-on uses: a method of [type] named [name] taking [parameters], [declared] when not public. */
-    class Member(val type: Class<*>, val name: String, val parameters: List<Class<*>>, val declared: Boolean = false) {
-        override fun toString() = "${type.name}.$name(${parameters.joinToString { it.simpleName }})"
+    /** Where a Maven-built jar (and a shaded or merged one that kept it) says its version. */
+    const val POM = "META-INF/maven/com.rabbitmq/stream-client/pom.properties"
+
+    /**
+     * A member of the client the add-on uses: a method of the class named [type] named [name] taking [parameters] (class names;
+     * `byte`, `int`, `long` for primitives, a `[]` suffix for arrays), [declared] when not public.
+     */
+    class Member(val type: String, val name: String, val parameters: List<String> = emptyList(), val declared: Boolean = false) {
+        override fun toString() = "$type.$name(${parameters.joinToString { it.substringAfterLast('.') }})"
     }
 
+    private const val CLIENT = "com.rabbitmq.stream.impl.Client"
+    private const val PARAMETERS = "$CLIENT\$ClientParameters"
+
     /** What the add-on uses beyond the public API, each checked by [verify]. */
-    val USED: List<Member> = listOf(
-        Member(Client::class.java, RabbitConnector.ADVERTISED_HOST, emptyList(), declared = true),
-        Member(Client::class.java, RabbitConnector.ADVERTISED_PORT, emptyList(), declared = true),
-        Member(Client::class.java, "streamStats", listOf(String::class.java)),
-        Member(Client::class.java, "queryOffset", listOf(String::class.java, String::class.java)),
-        Member(Client::class.java, "storeOffset", listOf(String::class.java, String::class.java, Long::class.javaPrimitiveType!!)),
-        Member(
-            Client::class.java, "subscribe",
-            listOf(Byte::class.javaPrimitiveType!!, String::class.java, OffsetSpecification::class.java, Int::class.javaPrimitiveType!!, Map::class.java),
-        ),
-        Member(Client::class.java, "credit", listOf(Byte::class.javaPrimitiveType!!, Int::class.javaPrimitiveType!!)),
-        Member(Client::class.java, "unsubscribe", listOf(Byte::class.javaPrimitiveType!!)),
-        Member(Client::class.java, "declarePublisher", listOf(Byte::class.javaPrimitiveType!!, String::class.java, String::class.java)),
-        Member(Client::class.java, "publish", listOf(Byte::class.javaPrimitiveType!!, List::class.java, ToLongFunction::class.java)),
-        Member(Client::class.java, "partitions", listOf(String::class.java)),
-        Member(Client::class.java, "metadata", listOf(Array<String>::class.java)),
-        Member(Client.ClientParameters::class.java, "messageIgnoredListener", listOf(Client.MessageIgnoredListener::class.java)),
-        Member(Client.ClientParameters::class.java, "consumerUpdateListener", listOf(Client.ConsumerUpdateListener::class.java)),
-        Member(Client.ClientParameters::class.java, "rpcTimeout", listOf(java.time.Duration::class.java)),
-        Member(Class.forName("com.rabbitmq.stream.codec.InternalCodec"), "messageBuilder", emptyList()),
+    fun used(): List<Member> = listOf(
+        Member(CLIENT, RabbitConnector.ADVERTISED_HOST, declared = true),
+        Member(CLIENT, RabbitConnector.ADVERTISED_PORT, declared = true),
+        Member(CLIENT, "streamStats", listOf("java.lang.String")),
+        Member(CLIENT, "queryOffset", listOf("java.lang.String", "java.lang.String")),
+        Member(CLIENT, "storeOffset", listOf("java.lang.String", "java.lang.String", "long")),
+        Member(CLIENT, "subscribe", listOf("byte", "java.lang.String", "com.rabbitmq.stream.OffsetSpecification", "int", "java.util.Map")),
+        Member(CLIENT, "credit", listOf("byte", "int")),
+        Member(CLIENT, "unsubscribe", listOf("byte")),
+        Member(CLIENT, "declarePublisher", listOf("byte", "java.lang.String", "java.lang.String")),
+        Member(CLIENT, "publish", listOf("byte", "java.util.List", "java.util.function.ToLongFunction")),
+        Member(CLIENT, "partitions", listOf("java.lang.String")),
+        Member(CLIENT, "metadata", listOf("java.lang.String[]")),
+        Member(PARAMETERS, "messageIgnoredListener", listOf("$CLIENT\$MessageIgnoredListener")),
+        Member(PARAMETERS, "consumerUpdateListener", listOf("$CLIENT\$ConsumerUpdateListener")),
+        Member(PARAMETERS, "rpcTimeout", listOf("java.time.Duration")),
+        Member("com.rabbitmq.stream.codec.InternalCodec", "messageBuilder"),
     )
 
-    /** The version of the client on the classpath (its jar's `Implementation-Version`). */
-    val found: String? get() = Client::class.java.`package`?.implementationVersion
+    /**
+     * What the classpath says the client's version is: its jar's `Implementation-Version`, then its [POM] (a shaded or merged jar
+     * may have lost the first).
+     */
+    fun versions(
+        implementationVersion: String? = Client::class.java.`package`?.implementationVersion,
+        pom: () -> InputStream? = { Client::class.java.getResourceAsStream("/$POM") },
+    ): List<String> {
+        val fromPom = runCatching { pom()?.use { Properties().apply { load(it) }.getProperty("version") } }.getOrNull()
+        return listOfNotNull(implementationVersion, fromPom?.trim()?.takeIf { it.isNotEmpty() })
+    }
 
-    /** Throws [IllegalStateException] naming the fix when [version] is not [REQUIRED] or a member of [members] is missing. */
-    fun verify(version: String? = found, members: List<Member> = USED) {
-        if (version != REQUIRED) throw IllegalStateException(fix("com.rabbitmq:stream-client ${version ?: "of an unknown version"} is on the classpath"))
-        val missing = members.filter { m ->
-            runCatching {
-                if (m.declared) m.type.getDeclaredMethod(m.name, *m.parameters.toTypedArray()) else m.type.getMethod(m.name, *m.parameters.toTypedArray())
-            }.isFailure
+    /**
+     * Throws [IllegalStateException] naming the fix when none of [versions] is [REQUIRED], or (checked only then) a member of
+     * [members] is missing from the classes [loader] loads.
+     */
+    fun verify(
+        versions: List<String> = versions(),
+        members: () -> List<Member> = ::used,
+        loader: ClassLoader = RabbitClientCheck::class.java.classLoader,
+    ) {
+        if (REQUIRED !in versions) {
+            val found = versions.distinct().joinToString(" / ").ifEmpty { "of an unknown version" }
+            throw IllegalStateException(fix("com.rabbitmq:stream-client $found is on the classpath"))
         }
+        val missing = members().filter { m -> runCatching { find(m, loader) }.isFailure }
         if (missing.isNotEmpty()) throw IllegalStateException(fix("com.rabbitmq:stream-client lacks $missing"))
+    }
+
+    private fun find(m: Member, loader: ClassLoader) {
+        val type = type(m.type, loader)
+        val parameters = m.parameters.map { type(it, loader) }.toTypedArray()
+        if (m.declared) type.getDeclaredMethod(m.name, *parameters) else type.getMethod(m.name, *parameters)
+    }
+
+    private fun type(name: String, loader: ClassLoader): Class<*> = when {
+        name.endsWith("[]") -> java.lang.reflect.Array.newInstance(type(name.removeSuffix("[]"), loader), 0).javaClass
+        name == "byte" -> java.lang.Byte.TYPE
+        name == "int" -> java.lang.Integer.TYPE
+        name == "long" -> java.lang.Long.TYPE
+        else -> Class.forName(name, false, loader)
     }
 
     private fun fix(what: String) =
