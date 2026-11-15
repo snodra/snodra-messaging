@@ -11,6 +11,8 @@ grpc-kotlin = "1.5.0"
 protobuf = "4.36.2"
 protobuf-plugin = "0.10.0"
 testcontainers = "2.0.5"
+# Checked on Maven Central on 2026-11-14 (com.rabbitmq:stream-client, latest 1.13.1).
+rabbitmq-stream-client = "1.13.1"
 springdoc = "3.2.0"
 mockk = "1.14.5"
 kraken-messaging = "0.1.0-SNAPSHOT"
@@ -47,6 +49,7 @@ spring-security-oauth2-resource-server = { module = "org.springframework.securit
 micrometer-tracing = { module = "io.micrometer:micrometer-tracing" }
 nimbus-jose-jwt = { module = "com.nimbusds:nimbus-jose-jwt" }
 spring-kafka = { module = "org.springframework.kafka:spring-kafka" }
+rabbitmq-stream-client = { module = "com.rabbitmq:stream-client", version.ref = "rabbitmq-stream-client" }
 spring-kafka-test = { module = "org.springframework.kafka:spring-kafka-test" }
 
 # Spring Cloud

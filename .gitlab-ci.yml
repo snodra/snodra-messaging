@@ -108,7 +108,7 @@ release:
       else
         echo "Tag $NEXT already exists, skipping tag push"
       fi
-      ./gradlew :kraken-messaging-api:publish :kraken-messaging:publish :kraken-messaging-kafka:publish :kraken-messaging-mongo:publish :kraken-messaging-test:publish --no-daemon -Pversion="$VERSION"
+      ./gradlew :kraken-messaging-api:publish :kraken-messaging:publish :kraken-messaging-kafka:publish :kraken-messaging-rabbitmq:publish :kraken-messaging-mongo:publish :kraken-messaging-test:publish --no-daemon -Pversion="$VERSION"
       RELEASE=$(jq -n \
         --arg name "$CI_PROJECT_NAME $NEXT" \
         --arg tag "$NEXT" \

@@ -1,0 +1,105 @@
+# kraken-messaging-rabbitmq
+
+The RabbitMQ Streams event store (ADR 0027) of `kraken-messaging`: publish, competing subscriptions, replay, lag and a
+dead-letter stream on **RabbitMQ 3.13 or later with the stream plugin** (`rabbitmq_stream`), through the stream protocol
+(port 5552, 5551 with TLS) and the RabbitMQ Stream Java client (`com.rabbitmq:stream-client`). It reads and writes the same
+streams as the Rust crate `kraken-messaging-rabbitmq`: the layout on the wire below is shared, rule for rule.
+
+```kotlin
+dependencies {
+    implementation("io.damoreira.kraken:kraken-messaging:0.1.0-SNAPSHOT")
+    implementation("io.damoreira.kraken:kraken-messaging-rabbitmq:0.1.0-SNAPSHOT")
+    implementation("io.damoreira.kraken:kraken-messaging-mongo:0.1.0-SNAPSHOT") // or another message store
+}
+```
+
+```yaml
+kraken:
+  messaging:
+    rabbitmq:
+      hosts: rabbitmq-0:5552,rabbitmq-1:5552
+      username: orders
+      password-file: /run/secrets/rabbitmq-password
+      management:
+        url: http://rabbitmq:15672     # enables replay (resets)
+```
+
+With the Kafka add-on on the classpath too, `kraken.messaging.event-store=rabbitmq-streams` (or `kafka`) chooses; without it
+the startup fails naming both.
+
+## Create the streams first
+
+The library never creates them. The source as a super stream, with as many partitions as the instances should share (six by
+default, as Kafka's topic), and its dead-letter stream when the dead-letter mode is `event-store`:
+
+```bash
+rabbitmq-streams add_super_stream kraken.events --partitions 6
+rabbitmq-streams add_stream kraken.events.dlt
+```
+
+A missing super stream fails the publish (the outbox relay retries it) and the processors' subscriptions (subscribed again after
+a backoff), naming the command above.
+
+## Settings (`kraken.messaging.rabbitmq.*`)
+
+The Rust add-on reads the same settings as `KRAKEN_RABBITMQ_*`.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `hosts` | `rabbitmq` | nodes to connect to first, `host` or `host:port`, comma-separated, tried in order (then each stream's leader as the broker advertises it) |
+| `port` | 5552 (5551 with TLS) | the port of a host given without one |
+| `virtual-host` | `/` | |
+| `username` | `guest` | |
+| `password` / `password-file` | `guest` | the password, or a file holding it (its trailing newline removed; the setting wins); never logged |
+| `tls` | `false` | TLS to every node, with host name verification |
+| `tls-ca-file` | none | PEM CA certificates the nodes are verified against; required with TLS (the store never connects unverified) |
+| `load-balancer` | `false` | the hosts are a load balancer: connect through it until it lands on the node needed (at most 32 tries) |
+| `offset-store-messages` | `10000` | a processor stores its position every so many acknowledgements... |
+| `offset-store-interval` | `5s` | ...or this often, whichever first, and always when a partition moves away and at shutdown (every stored position is an entry in the stream) |
+| `management.url` | none | the management API (`http://rabbitmq:15672`, no credentials in the URL): declares `replay`; metrics collection must be on (`management.disable_stats = false`) |
+| `management.username` / `password` / `password-file` | the stream user's | |
+| `management.ca-file` | none | PEM CA certificates of an `https` management API |
+
+The source and its dead-letter stream are the core's: `kraken.messaging.events.source` (`kraken.events`) and `<source>.dlt`.
+The Rust add-on's `KRAKEN_RABBITMQ_KNOWN_SUBSCRIPTIONS` belongs to its event browser and has no Kotlin counterpart.
+
+## What it covers
+
+- **Events go to the super stream's partitions by key** (the stream clients' hash routing), unkeyed events by their id; a key
+  always reaches a processor in publish order. Publishing waits for the broker's confirm of each event (at most 10 s); a
+  refusal for good (access refused, an event over the 1 MiB frame) gives the event up, anything else is retried by the relay.
+- **A processor** `<service>.<processor>` is a single active consumer of that name on every partition: the broker makes one
+  instance active per partition and spreads the partitions over the instances. Positions are tracked on the server under that
+  name.
+- **Capabilities**: `browse`, `lag` and `native-dead-letter` always; **`replay` only with the management API**
+  (`management.url`, plugin `rabbitmq_stream_management`): a reset is refused while an instance reads the processor, and only
+  that API can tell. The store asks it once at startup: it must answer (else the startup fails), and with its metrics off no
+  `replay` is declared. Without it, a reset is answered `UNSUPPORTED`.
+
+## The layout on the wire (shared with the Rust add-on)
+
+These are rules both libraries follow; a program writing kraken's streams must follow them too.
+
+| What | Rule |
+|---|---|
+| Source | a super stream (`kraken.events`, partitions `kraken.events-0` .. `-N`, binding keys `0` .. `N-1`), created by the infrastructure; a plain stream source (the dead letter) is one partition, segment `0` |
+| Routing | murmur3 x86_32 of the routing key's UTF-8 bytes, seed 104729, as an **unsigned** number modulo the partition count, over the partitions in the broker's order (the Java client's default hash routing). Routing key = the event's key, else its id. With 6 partitions: `order-1` 0, `order-2` 2, `customer-123` 5, `order-7` 3, `""` 4 |
+| Message | one AMQP 1.0 message per event, **no sub-entry batching, no compression** (the Rust client cannot read them): exactly one `data` section = the JSON payload; `message-id` = the event id (string); `content-type` = the symbol `application/json`; message annotation `x-routing-key` (symbol) = the key (string), absent without one; every header (`type`, `id`, `correlationId`, `timestamp`, `source`, `userId`, `traceparent`, and any other, a dead letter's `kraken-dlt-*`) an application property with a string value |
+| Segment / position | the partition's suffix after `<source>-` (`3`); the offset in decimal; an event's time is its chunk's timestamp |
+| Consumer | name `<service>.<processor>` on every partition stream; properties `single-active-consumer=true`, `name`, `super-stream=<source>` (absent on a plain stream), `kraken-member=<random id per subscription instance>` |
+| Offset tracking | reference = the consumer name, per partition stream; **the stored value is the next offset to read** (the acknowledged offset + 1); nothing stored = `first`. Not the Java client's "last processed" convention: a tool assuming it shows a value one higher |
+| Dead letter | the plain stream `<source>.dlt`, with what the core publishes there (the original key, payload, headers and `kraken-dlt-*`) |
+| Connections | named `kraken-messaging` |
+
+## Limits
+
+- **Replay needs the management API**: the stream protocol lists no consumers, so without it nothing can tell whether an instance
+  still reads a processor.
+- **Lag is approximate** for what a processor has not received yet: offsets also number the streams' offset-tracking entries, so
+  that part may be overstated; what it received and has not acknowledged is counted one by one (exact when caught up).
+- **Redelivery after a crash**: positions are stored every 10 000 acknowledgements or 5 s (and always when a partition moves
+  and at shutdown), so a crash redelivers at most what was acknowledged since the last store; the processed-event markers skip
+  those duplicates. There is no publish deduplication either: an event the outbox republishes after a crash is skipped the same way.
+- A partition added to a super stream is read once the instances subscribe again; publishing reads the partitions again every 30 s.
+- A reset stores each partition's offset in turn and reads them back: a connection lost half way leaves some moved (the reset
+  fails; running it again is safe).

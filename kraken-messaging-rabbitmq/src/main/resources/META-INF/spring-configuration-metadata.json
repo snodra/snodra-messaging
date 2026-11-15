@@ -1,0 +1,133 @@
+{
+  "groups": [
+    {
+      "name": "kraken.messaging.rabbitmq",
+      "type": "io.damoreira.kraken.messaging.rabbitmq.RabbitProperties",
+      "sourceType": "io.damoreira.kraken.messaging.rabbitmq.RabbitProperties"
+    },
+    {
+      "name": "kraken.messaging.rabbitmq.management",
+      "type": "io.damoreira.kraken.messaging.rabbitmq.RabbitProperties$Management",
+      "sourceType": "io.damoreira.kraken.messaging.rabbitmq.RabbitProperties",
+      "sourceMethod": "getManagement()"
+    }
+  ],
+  "properties": [
+    {
+      "name": "kraken.messaging.rabbitmq.hosts",
+      "type": "java.util.List<java.lang.String>",
+      "description": "Nodes of the RabbitMQ Streams event store to connect to first, host or host:port, comma-separated, tried in order (then each stream's leader as the broker advertises it).",
+      "sourceType": "io.damoreira.kraken.messaging.rabbitmq.RabbitProperties",
+      "defaultValue": [
+        "rabbitmq"
+      ]
+    },
+    {
+      "name": "kraken.messaging.rabbitmq.port",
+      "type": "java.lang.Integer",
+      "description": "The port of a host given without one (5552, 5551 with TLS).",
+      "sourceType": "io.damoreira.kraken.messaging.rabbitmq.RabbitProperties"
+    },
+    {
+      "name": "kraken.messaging.rabbitmq.virtual-host",
+      "type": "java.lang.String",
+      "description": "The virtual host.",
+      "sourceType": "io.damoreira.kraken.messaging.rabbitmq.RabbitProperties",
+      "defaultValue": "/"
+    },
+    {
+      "name": "kraken.messaging.rabbitmq.username",
+      "type": "java.lang.String",
+      "description": "The stream user.",
+      "sourceType": "io.damoreira.kraken.messaging.rabbitmq.RabbitProperties",
+      "defaultValue": "guest"
+    },
+    {
+      "name": "kraken.messaging.rabbitmq.password",
+      "type": "java.lang.String",
+      "description": "The stream user's password (default guest); wins over password-file. Never logged.",
+      "sourceType": "io.damoreira.kraken.messaging.rabbitmq.RabbitProperties"
+    },
+    {
+      "name": "kraken.messaging.rabbitmq.password-file",
+      "type": "java.nio.file.Path",
+      "description": "A file holding the stream user's password (its trailing newline removed).",
+      "sourceType": "io.damoreira.kraken.messaging.rabbitmq.RabbitProperties"
+    },
+    {
+      "name": "kraken.messaging.rabbitmq.tls",
+      "type": "java.lang.Boolean",
+      "description": "TLS to every node, verified against tls-ca-file (with host name verification).",
+      "sourceType": "io.damoreira.kraken.messaging.rabbitmq.RabbitProperties",
+      "defaultValue": false
+    },
+    {
+      "name": "kraken.messaging.rabbitmq.tls-ca-file",
+      "type": "java.nio.file.Path",
+      "description": "PEM CA certificates the nodes are verified against; required with TLS (the store never connects unverified).",
+      "sourceType": "io.damoreira.kraken.messaging.rabbitmq.RabbitProperties"
+    },
+    {
+      "name": "kraken.messaging.rabbitmq.load-balancer",
+      "type": "java.lang.Boolean",
+      "description": "The hosts are a load balancer: connect through it until it lands on the node needed (at most 32 tries).",
+      "sourceType": "io.damoreira.kraken.messaging.rabbitmq.RabbitProperties",
+      "defaultValue": false
+    },
+    {
+      "name": "kraken.messaging.rabbitmq.offset-store-messages",
+      "type": "java.lang.Long",
+      "description": "A processor stores its position every so many acknowledgements, or every offset-store-interval, whichever first, and always when a partition moves away and at shutdown.",
+      "sourceType": "io.damoreira.kraken.messaging.rabbitmq.RabbitProperties",
+      "defaultValue": 10000
+    },
+    {
+      "name": "kraken.messaging.rabbitmq.offset-store-interval",
+      "type": "java.time.Duration",
+      "description": "A processor stores its position this often at least (see offset-store-messages).",
+      "sourceType": "io.damoreira.kraken.messaging.rabbitmq.RabbitProperties",
+      "defaultValue": "5s"
+    },
+    {
+      "name": "kraken.messaging.rabbitmq.management.url",
+      "type": "java.lang.String",
+      "description": "The RabbitMQ management API (http(s)://host:port, no credentials in it; plugin rabbitmq_stream_management, metrics collection on): declares the capability replay. Asked once at startup.",
+      "sourceType": "io.damoreira.kraken.messaging.rabbitmq.RabbitProperties$Management"
+    },
+    {
+      "name": "kraken.messaging.rabbitmq.management.username",
+      "type": "java.lang.String",
+      "description": "The management API's user; default the stream user.",
+      "sourceType": "io.damoreira.kraken.messaging.rabbitmq.RabbitProperties$Management"
+    },
+    {
+      "name": "kraken.messaging.rabbitmq.management.password",
+      "type": "java.lang.String",
+      "description": "The management API's password; default the stream user's. Never logged.",
+      "sourceType": "io.damoreira.kraken.messaging.rabbitmq.RabbitProperties$Management"
+    },
+    {
+      "name": "kraken.messaging.rabbitmq.management.password-file",
+      "type": "java.nio.file.Path",
+      "description": "A file holding the management API's password.",
+      "sourceType": "io.damoreira.kraken.messaging.rabbitmq.RabbitProperties$Management"
+    },
+    {
+      "name": "kraken.messaging.rabbitmq.management.ca-file",
+      "type": "java.nio.file.Path",
+      "description": "PEM CA certificates of an https management API.",
+      "sourceType": "io.damoreira.kraken.messaging.rabbitmq.RabbitProperties$Management"
+    }
+  ],
+  "hints": [
+    {
+      "name": "kraken.messaging.event-store",
+      "values": [
+        {
+          "value": "rabbitmq-streams",
+          "description": "The RabbitMQ Streams event store (kraken-messaging-rabbitmq)."
+        }
+      ]
+    }
+  ]
+}
