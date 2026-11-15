@@ -318,4 +318,16 @@ class JdbcMessageStoreAutoConfigurationTest {
                 assertEquals(1L, runBlocking { store.outbox.pending() }, "never after a rollback")
             }
     }
+
+    @Test fun `the configuration metadata describes every SQL store setting`() {
+        val metadata = javaClass.classLoader.getResources("META-INF/spring-configuration-metadata.json").toList()
+            .map { url -> url.openStream().use { String(it.readAllBytes()) } }
+            .single { "\"kraken.messaging.store.jdbc\"" in it }
+        val described = io.damoreira.kraken.messaging.codec.JsonCodec().decodeTree(metadata.toByteArray())["properties"]
+            .associate { it["name"].asString() to it["description"]?.asString() }
+        for (key in JdbcStoreProperties::class.java.declaredFields.map { it.name }.filterNot { it.startsWith("$") }) {
+            val name = "kraken.messaging.store.jdbc." + key.replace(Regex("([A-Z])")) { "-" + it.value.lowercase() }
+            assertTrue(!described[name].isNullOrBlank(), "$name is described in the metadata")
+        }
+    }
 }

@@ -14,6 +14,13 @@
       "sourceType": "io.damoreira.kraken.messaging.jdbc.JdbcStoreProperties"
     },
     {
+      "name": "kraken.messaging.store.jdbc.notify",
+      "type": "java.lang.Boolean",
+      "description": "Whether appends wake the outbox relays up at once (PostgreSQL LISTEN/NOTIFY); off, the relays poll. Turn it off behind PgBouncer in transaction mode (LISTEN needs a session). Ignored on MySQL.",
+      "sourceType": "io.damoreira.kraken.messaging.jdbc.JdbcStoreProperties",
+      "defaultValue": true
+    },
+    {
       "name": "kraken.messaging.store.jdbc.purge-interval",
       "type": "java.time.Duration",
       "description": "How often the SQL message store deletes what its retentions (kraken.messaging.*.retention) let go, the expired dead letters and the passed dispatch leases. Zero turns the purge off.",
