@@ -92,6 +92,11 @@ Error messages name a saga's type and a key's hash, never a start key or an asso
 
 ## Competing relays and schedulers
 
+**A database (or schema) holds the stores of one logical service**: its instances share it, and the claims below spread the work
+over them. Two different services use separate databases or schemas: the processed-event markers, the processor control, the
+dead letters' key blocking and the deadline and failure-notice claims carry no service name, so two services in one schema would
+see each other's rows.
+
 A claim (the outbox relay's, the deadline scheduler's, the saga relay's failure notices) runs in a transaction of its own at
 READ COMMITTED: `SELECT ... ORDER BY ... LIMIT n FOR UPDATE SKIP LOCKED` picks the rows that are free, already the claimer's or
 whose lease passed, then an `UPDATE` makes them the claimer's until its lease ends (`owner`, `lease_until`; `claimed_by`,
@@ -234,7 +239,7 @@ exact (`jsonb` as `numeric`, MySQL as `BIGINT`). **Decimals are not kept exact o
 fraction as a double (`jsonb` keeps it exact) — the same contract as the MongoDB add-on, whose documents keep doubles. An
 operator can query the outbox. What the library must read back exactly as written is text: the saga state (`BigDecimal` scales,
 key order), the saga dispatch, deadline and failure payloads, the external calls' reply and error, and the dead letters' payload
-(which may not be JSON at all: an INVALID letter's; a payload that is not UTF-8 goes to `payload_binary`).
+(which may not be JSON at all: an INVALID letter's; a payload that is not UTF-8, or that holds U+0000, goes to `payload_binary`).
 
 ### Tables
 

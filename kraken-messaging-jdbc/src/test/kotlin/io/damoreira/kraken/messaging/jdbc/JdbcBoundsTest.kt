@@ -211,6 +211,20 @@ abstract class JdbcBoundsTest(private val database: TestDatabase) {
         assertEquals(null, store.sagas.sagas.findById("nul-s2"), "the association's refusal rolled its saga back")
     }
 
+    /**
+     * A dead letter whose payload is valid UTF-8 holding U+0000 is parked anyway, its bytes in `payload_binary` (the record must
+     * not be lost because its text cannot be stored), as the Rust store does; it reads back with the same bytes.
+     */
+    @Test
+    fun aDeadLetterPayloadHoldingNulIsKeptAsBytes() = runBlocking {
+        val payload = "{\"s\":\"a\u0000b\"}"
+        val nul = letter("p:s:0:nul", "p", "s", "0", "77", "k-nul").copy(payload = payload, payloadBinary = null)
+        assertTrue(store.deadLetters.park(nul), "parked")
+        val read = store.deadLetters.get(nul.id) ?: error("the letter is read back")
+        assertEquals(payload, String(read.value(), Charsets.UTF_8), "the same bytes")
+        assertEquals(null, read.payload, "not as text")
+    }
+
     /** MySQL: a session without a STRICT sql_mode would truncate instead of refusing: the store refuses to start on it. */
     @Test
     fun mysqlNeedsAStrictSqlMode() {

@@ -36,7 +36,10 @@ internal class JdbcDeadLetterStore(private val db: Db) : DeadLetterStore {
                 "position" to letter.position, "positionNum" to positionNumber(letter.position), "key" to letter.key,
                 "keyHash" to letter.key?.let(Limits::sha256),
                 "eventId" to letter.eventId, "eventType" to letter.eventType, "headers" to Json.write("a dead letter's headers", letter.headers),
-                "payload" to letter.payload, "payloadBinary" to letter.payloadBinary, "reason" to letter.reason.name,
+                // A text payload holding U+0000 (no text column takes it) is kept as its bytes, never refused: the letter must not be lost.
+                "payload" to letter.payload?.takeUnless { it.contains('\u0000') },
+                "payloadBinary" to (letter.payload?.takeIf { it.contains('\u0000') }?.toByteArray(Charsets.UTF_8) ?: letter.payloadBinary),
+                "reason" to letter.reason.name,
                 "errorType" to Limits.cut(letter.error.type), "errorMessage" to Limits.cut(letter.error.message), "blockedBy" to letter.blockedBy,
                 "attempts" to letter.attempts, "parkedAt" to db.ts(letter.parkedAt), "lastAttemptAt" to db.ts(letter.lastAttemptAt),
                 "expireAt" to db.ts(letter.expireAt), "replay" to letter.replay,

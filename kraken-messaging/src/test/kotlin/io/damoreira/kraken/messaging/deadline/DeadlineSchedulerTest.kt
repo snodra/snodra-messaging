@@ -157,9 +157,9 @@ class DeadlineSchedulerTest {
 
     private fun scheduler() = DeadlineScheduler(store.sagas.deadlines, runtime, clock, settings, metrics)
 
-    private fun deliver(event: Event, id: String = UUID.randomUUID().toString()) {
+    private fun deliver(event: Event, id: String = UUID.randomUUID().toString(), correlationId: String = "corr-$id") {
         val type = resolver.typeNameOf(event::class)
-        runtime.process(type, codec.encode(event), MessageContext(id, type, "corr-$id", null, emptySet(), null, mapOf("id" to id, "type" to type)))
+        runtime.process(type, codec.encode(event), MessageContext(id, type, correlationId, null, emptySet(), null, mapOf("id" to id, "type" to type)))
     }
 
     private fun advance(seconds: Long) {
@@ -182,6 +182,20 @@ class DeadlineSchedulerTest {
         assertEquals("corr-e-40", saga("o40").stateDoc.getString("firedWithCorrelation"), "the handler's MessageContext")
         val sent = store.dispatchEntries().single()
         assertEquals("corr-e-40", sent.headers["correlation-id"], "the command it sent")
+    }
+
+    /** A deadline stored without a correlation id ('', as a store may keep "none") fires with its own id as the correlation id. */
+    @Test
+    fun `a deadline stored with an empty correlation id fires correlated by its own id`() {
+        deliver(DlPlaced("o41", seconds = 60), id = "e-41", correlationId = "")
+        val stored = store.deadlines().single()
+        assertEquals("", stored.correlationId)
+
+        advance(61)
+        scheduler().pollOnce()
+
+        assertEquals(stored.id, saga("o41").stateDoc.getString("firedWithCorrelation"), "the deadline id, not ''")
+        assertEquals(stored.id, store.dispatchEntries().single().headers["correlation-id"], "the command it sent")
     }
 
     @Test

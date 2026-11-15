@@ -383,7 +383,7 @@ internal class JdbcDeadlineStore(private val db: Db) : DeadlineStore {
         payload = rs.getString("payload"),
         payloadType = rs.getString("payload_type"),
         dueAt = db.instant(rs, "due_at")!!,
-        correlationId = rs.getString("correlation_id"),
+        correlationId = rs.getString("correlation_id").orEmpty(), // none stored: '' (the runtime then uses the deadline id)
         status = DeadlineStatus.valueOf(rs.getString("status")),
         claimedBy = rs.getString("claimed_by"),
         claimedUntil = db.instant(rs, "claimed_until"),
