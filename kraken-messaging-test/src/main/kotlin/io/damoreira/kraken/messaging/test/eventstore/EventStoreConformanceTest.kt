@@ -213,11 +213,13 @@ abstract class EventStoreConformanceTest {
     }
 
     /**
-     * More instances than segments: instances join one at a time; after each join the segments are spread with none held twice
-     * and every instance's last assignment change closed (a [SubscriptionEvent.Revoked] followed by an
-     * [SubscriptionEvent.Assigned], an empty one for an instance left without segments). The instances join until one that held
-     * segments holds none (or there are twice as many instances as segments, two more): that instance saw its revocation closed
-     * by an empty assignment, so the core reports it running, idle, never starting.
+     * More instances than segments: instances join one at a time. After each join every instance is read until a revocation
+     * comes (or a window passes: the newcomer may be left idle); then the segments must be spread (none held twice, and once
+     * there are two instances none holds every segment) with every instance's last assignment change closed (a
+     * [SubscriptionEvent.Revoked] followed by an [SubscriptionEvent.Assigned], an empty one for an instance left without
+     * segments). The instances join until one that held segments holds none (or there are twice as many instances as segments,
+     * two more): that instance saw its revocation closed by an empty assignment, so the core reports it running, idle, never
+     * starting.
      */
     @Test
     fun anInstanceLeftWithoutSegmentsClosesItsChange() = check("anInstanceLeftWithoutSegmentsClosesItsChange") {
@@ -229,16 +231,34 @@ abstract class EventStoreConformanceTest {
         val all = TreeSet(readers[0].assigned)
         fun settled(): Boolean {
             val held = readers.flatMap { it.assigned }
-            return held.size == held.toSet().size && held.toSet() == all && readers.none { it.changing }
+            return held.size == held.toSet().size && held.toSet() == all && readers.none { it.changing } &&
+                (readers.size < 2 || readers.none { it.assigned.containsAll(all) })
         }
         var emptied = false
         while (!emptied && readers.size < 2 * all.size + 2) {
-            readers += join(newEventStore(), spec)
+            val revocationsBefore = readers.sumOf { it.revocations }
+            val newcomer = join(newEventStore(), spec)
+            readers += newcomer
+            // The join may move segments (a revocation somewhere) or leave the newcomer idle: read everyone until a revocation, at
+            // most a window; once the newcomer saw its first change and a slice passes with nothing anywhere, it is over.
+            val windowEnd = System.nanoTime() + JOIN_WINDOW_MS * 1_000_000
+            while (readers.sumOf { it.revocations } == revocationsBefore && System.nanoTime() < windowEnd) {
+                val taken = readers.sumOf { it.taken }
+                pumpAll(readers)
+                if (newcomer.changes > 0 && readers.sumOf { it.taken } == taken) break
+            }
             allUntil(readers, "the segments spread, every revocation closed by an assignment") { settled() }
             emptied = readers.any { it.assigned.isEmpty() && it.revocations > 0 }
         }
         allUntil(readers, "the segments spread, every revocation closed by an assignment") { settled() }
         assertTrue(readers.any { it.assigned.isEmpty() }, "more instances than segments leave one without segments")
+        if (!emptied) {
+            System.getLogger(EventStoreConformanceTest::class.java.name).log(
+                System.Logger.Level.INFO,
+                "check `$check`: ${readers.size} instances on ${all.size} segments and no instance that held segments was left without any " +
+                    "(the event store keeps its first instances' segments): only the joins' revocations were checked",
+            )
+        }
         for (reader in readers) reader.close()
     }
 
@@ -566,16 +586,19 @@ abstract class EventStoreConformanceTest {
         }
     }
 
-    /** Reads all of [readers] until [done], at most a minute. */
+    /** Reads all of [readers] (at least once) until [done], at most a minute. */
     private suspend fun allUntil(readers: List<Reader>, what: String, done: () -> Boolean) {
         val deadline = System.nanoTime() + wait.toNanos()
-        while (!done()) {
+        do {
             if (System.nanoTime() > deadline) {
                 fail<Unit>("$what within ${wait.seconds} s (assigned ${readers.map { it.assigned }}, revocations ${readers.map { it.revocations }})")
             }
-            coroutineScope { for (reader in readers) launch { reader.pump(SLICE_MS) } }
-        }
+            pumpAll(readers)
+        } while (!done())
     }
+
+    /** Reads all of [readers] for one slice, side by side. */
+    private suspend fun pumpAll(readers: List<Reader>) = coroutineScope { for (reader in readers) launch { reader.pump(SLICE_MS) } }
 
     /** One service instance of the event store under test, [eventStore] bounded like every call. */
     private suspend fun newEventStore(): EventStore = bounded("eventStore()") { eventStore() }
@@ -611,6 +634,12 @@ abstract class EventStoreConformanceTest {
 
         /** A [SubscriptionEvent.Revoked] came and no [SubscriptionEvent.Assigned] after it yet (the contract closes every revocation with one). */
         var changing = false
+
+        /** How many assignment changes came. */
+        var changes = 0
+
+        /** How many events (changes and deliveries) came. */
+        var taken = 0
         val seen = mutableListOf<Delivery>()
         private val held = HashSet<String>()
 
@@ -665,6 +694,8 @@ abstract class EventStoreConformanceTest {
         }
 
         private fun take(event: SubscriptionEvent) {
+            taken++
+            if (event !is Delivery) changes++
             when (event) {
                 is SubscriptionEvent.Assigned -> {
                     changing = false
@@ -740,6 +771,9 @@ abstract class EventStoreConformanceTest {
 
         /** One turn of reading a subscription. */
         const val SLICE_MS = 250L
+
+        /** How long a check waits for the assignment change a join may cause. */
+        const val JOIN_WINDOW_MS = 6_000L
 
         /** The type of the kit's events. */
         const val EVENT_TYPE = "conformance.Event"

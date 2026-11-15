@@ -17,6 +17,7 @@ import org.junit.jupiter.api.TestInstance
 import org.springframework.data.mongodb.core.MongoTemplate
 import org.springframework.data.mongodb.core.SimpleMongoClientDatabaseFactory
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.TimeUnit
 
 /**
@@ -52,8 +53,18 @@ class KafkaEventStoreConformanceTest : EventStoreConformanceTest() {
         kafka.stop()
     }
 
-    override fun eventStore(): EventStore =
-        KafkaEventStore(KafkaEventStoreSettings(bootstrapServers = kafka.bootstrapServers)).also { synchronized(opened) { opened += it } }
+    private val instances = AtomicInteger()
+
+    /**
+     * Each instance's client id sorts before the earlier instances' (the range assignor hands partitions out in member order), so a
+     * new instance takes partitions from the earlier ones and an earlier holder is left without any: the kit then sees that
+     * instance's revocation closed by an empty assignment (with Kafka's default client ids the earliest members keep them).
+     */
+    override fun eventStore(): EventStore {
+        val clientId = "kit-%04d".format(9_999 - instances.incrementAndGet())
+        return KafkaEventStore(KafkaEventStoreSettings(bootstrapServers = kafka.bootstrapServers, clientProperties = mapOf("client.id" to clientId)))
+            .also { synchronized(opened) { opened += it } }
+    }
 
     override fun messageStore(): MessageStore {
         val template = MongoTemplate(SimpleMongoClientDatabaseFactory(client, "store_" + UUID.randomUUID().toString().replace("-", "")))
