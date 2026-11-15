@@ -265,10 +265,11 @@ class SagaDispatchRelayTest {
 
     private fun relay(
         commands: RawCommandSender = sender, stage: SagaStage = runtime, settings: RelaySettings = this.settings,
+        sagaMetrics: SagaMetrics = metrics,
     ): SagaDispatchRelay {
         val dispatcher = LocalEventDispatcher(registry, HandlerInvoker(registry, codec), store, stage)
         val events = OutboxEventBus(store.outbox, codec, resolver, TraceHeaders(null, null))
-        return SagaDispatchRelay(store.sagas.dispatch, tx, commands, events, dispatcher, codec, resolver, clock, settings, metrics).also { relays += it }
+        return SagaDispatchRelay(store.sagas.dispatch, tx, commands, events, dispatcher, codec, resolver, clock, settings, sagaMetrics).also { relays += it }
     }
 
     private fun deliver(event: Event, id: String, correlationId: String = "corr-$id", traceparent: String? = null) {
@@ -302,6 +303,17 @@ class SagaDispatchRelayTest {
 
         assertEquals(listOf("s1:1000", "s1:2000", "s1:3000"), sender.keys())
         assertTrue(entries("s1").all { it.dispatchedAt != null })
+    }
+
+    @Test
+    fun `an event the outbox refuses counts on kraken_saga_command_failures with reason INVALID`() {
+        val registry = io.micrometer.core.instrument.simple.SimpleMeterRegistry()
+        record("s1", 1000, type = "rl.Announced", payload = "[1,2]", kind = DispatchKind.EVENT)
+
+        relay(sagaMetrics = MicrometerSagaMetrics(registry, emptyList())).pollOnce()
+
+        val counter = registry.find("kraken.saga.command.failures").tags("type", "rl.Announced", "reason", "INVALID").counter()
+        assertEquals(1.0, counter?.count(), "kraken.saga.command.failures{type=rl.Announced,reason=INVALID}")
     }
 
     @Test
