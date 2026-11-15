@@ -7,6 +7,8 @@ import io.damoreira.kraken.messaging.eventstore.Capability
 import io.damoreira.kraken.messaging.eventstore.EventStoreException
 import io.damoreira.kraken.messaging.eventstore.Subscription
 import io.damoreira.kraken.messaging.eventstore.SubscriptionSpec
+import io.damoreira.kraken.messaging.eventstore.memory.MemoryEventStore
+import io.damoreira.kraken.messaging.eventstore.memory.MemoryEventStoreSettings
 import io.damoreira.kraken.messaging.fixtures.Happened
 import io.damoreira.kraken.messaging.handler.EventHandler
 import io.damoreira.kraken.messaging.handler.HandlerInvoker
@@ -46,6 +48,9 @@ class EventConsumerSubscriptionTest {
     private fun start(events: ScriptedEventStore, resubscribe: () -> Resubscribe = { Resubscribe() }) =
         EventConsumer(events, SubscriptionSpec("svc.default", "kraken.events"), dispatcher, maxAttempts = 1, resubscribe = resubscribe)
             .also { consumer = it; it.start() }
+
+    private fun start(events: io.damoreira.kraken.messaging.eventstore.EventStore, spec: SubscriptionSpec) =
+        EventConsumer(events, spec, dispatcher, maxAttempts = 1).also { consumer = it; it.start() }
 
     private fun awaitSubscriptions(events: ScriptedEventStore, n: Int) =
         await().atMost(Duration.ofSeconds(10)).until { events.subscriptions.size >= n }
@@ -242,6 +247,23 @@ class EventConsumerSubscriptionTest {
         await().atMost(Duration.ofSeconds(10)).until { second.acks == listOf("0" to "0") }
         assertEquals(2, handlers.seen.size, "a new subscription starts afresh: the handlers run again, as on another instance")
         assertEquals(listOf("kraken.events.dlt"), events.published.map { it.source })
+    }
+
+    @Test
+    fun anIdleNewcomerOnTheInMemoryStoreReadsRunning() {
+        val events = MemoryEventStore(MemoryEventStoreSettings(segments = 1))
+        val spec = SubscriptionSpec("svc.default", "kraken.events")
+        val first = EventConsumer(events, spec, dispatcher, maxAttempts = 1).also { it.start() }
+        try {
+            await().atMost(Duration.ofSeconds(10)).until { first.status().state == ProcessorState.PROCESSOR_RUNNING }
+            // The only segment is held: the newcomer holds nothing, and is a member, idle (its first event an empty Assigned).
+            val idle = start(events, spec)
+            await().atMost(Duration.ofSeconds(10)).until { idle.status().state == ProcessorState.PROCESSOR_RUNNING }
+            assertEquals(emptyList(), idle.status().segmentsList, "no segment")
+            assertEquals(1, first.status().segmentsCount)
+        } finally {
+            first.stop()
+        }
     }
 
     @Test

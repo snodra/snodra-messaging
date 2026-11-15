@@ -213,13 +213,51 @@ abstract class EventStoreConformanceTest {
     }
 
     /**
+     * Instances join one subscription one at a time, one more than its segments, each reading the whole time: every newcomer's
+     * first event is an [SubscriptionEvent.Assigned] (an empty one when it holds nothing, as the last one may), within
+     * [Subscription.FIRST_ASSIGNMENT_WITHIN] of joining, so an instance that joined and holds nothing is a member, idle, and never
+     * reads `STARTING`.
+     */
+    @Test
+    fun aJoiningInstanceAnnouncesItsFirstAssignment() = check("aJoiningInstanceAnnouncesItsFirstAssignment") {
+        val spec = spec()
+        val readers = mutableListOf(join(newEventStore(), spec))
+        readers[0].until("the first instance holds segments") { it.assigned.isNotEmpty() }
+        readers[0].pump(QUIET_MS)
+        val segments = readers[0].assigned.size
+        val within = Subscription.FIRST_ASSIGNMENT_WITHIN
+        while (readers.size <= segments) {
+            val newcomer = join(newEventStore(), spec)
+            readers += newcomer
+            val deadline = System.nanoTime() + within.toNanos()
+            while (newcomer.first == null) {
+                if (System.nanoTime() > deadline) {
+                    fail<Unit>(
+                        "instance ${readers.size} of ${segments + 1} (assigned ${readers.map { it.assigned }}): its first assignment, " +
+                            "possibly empty, within ${within.seconds} s of joining",
+                    )
+                }
+                pumpAll(readers)
+            }
+            assertEquals("Assigned", newcomer.first, "instance ${readers.size}: the first event of a new subscription is an Assigned")
+        }
+        for (reader in readers) reader.close()
+    }
+
+    /**
      * More instances than segments: instances join one at a time. After each join every instance is read until a revocation
-     * comes (or a window passes: the newcomer may be left idle); then the segments must be spread (none held twice, and once
-     * there are two instances none holds every segment) with every instance's last assignment change closed (a
-     * [SubscriptionEvent.Revoked] followed by an [SubscriptionEvent.Assigned], an empty one for an instance left without
-     * segments). The instances join until one that held segments holds none (or there are twice as many instances as segments,
-     * two more): that instance saw its revocation closed by an empty assignment, so the core reports it running, idle, never
+     * comes (or a window passes: the newcomer may be left idle); then the segments must be spread (none held twice, every one
+     * held, and once there are two instances no former holder — an instance that held segments before the join — holds every
+     * segment; how the segments spread beyond that is the event store's, a third party's assignor is not constrained) with every
+     * instance's last assignment change closed (a [SubscriptionEvent.Revoked] followed by an [SubscriptionEvent.Assigned], an
+     * empty one for an instance left without segments). The instances join until one that held segments holds none (or there are
+     * twice as many instances as segments, two more; a run that reaches that cap without such an instance logs it, the check then
+     * proved less): that instance saw its revocation closed by an empty assignment, so the core reports it running, idle, never
      * starting.
+     *
+     * After each join the check watches for the change the join may cause: until a revocation somewhere, or until the newcomer
+     * saw its first change (its first `Assigned`, empty when it is left idle: [aJoiningInstanceAnnouncesItsFirstAssignment]) and
+     * a slice then passed with no event at any instance, at most a window of [JOIN_WINDOW_MS].
      */
     @Test
     fun anInstanceLeftWithoutSegmentsClosesItsChange() = check("anInstanceLeftWithoutSegmentsClosesItsChange") {
@@ -229,14 +267,16 @@ abstract class EventStoreConformanceTest {
         // Alone, it holds every segment (in time: an assignment may come in parts).
         readers[0].pump(QUIET_MS)
         val all = TreeSet(readers[0].assigned)
+        var formerHolders: List<Reader> = readers.toList()
         fun settled(): Boolean {
             val held = readers.flatMap { it.assigned }
             return held.size == held.toSet().size && held.toSet() == all && readers.none { it.changing } &&
-                (readers.size < 2 || readers.none { it.assigned.containsAll(all) })
+                (readers.size < 2 || formerHolders.none { it.assigned.containsAll(all) })
         }
         var emptied = false
         while (!emptied && readers.size < 2 * all.size + 2) {
             val revocationsBefore = readers.sumOf { it.revocations }
+            formerHolders = readers.filter { it.assigned.isNotEmpty() }
             val newcomer = join(newEventStore(), spec)
             readers += newcomer
             // The join may move segments (a revocation somewhere) or leave the newcomer idle: read everyone until a revocation, at
@@ -640,6 +680,9 @@ abstract class EventStoreConformanceTest {
 
         /** How many events (changes and deliveries) came. */
         var taken = 0
+
+        /** The kind of the first event that came: `Assigned`, `Revoked` or `Delivery`. */
+        var first: String? = null
         val seen = mutableListOf<Delivery>()
         private val held = HashSet<String>()
 
@@ -695,6 +738,13 @@ abstract class EventStoreConformanceTest {
 
         private fun take(event: SubscriptionEvent) {
             taken++
+            if (first == null) {
+                first = when (event) {
+                    is SubscriptionEvent.Assigned -> "Assigned"
+                    is SubscriptionEvent.Revoked -> "Revoked"
+                    is Delivery -> "Delivery"
+                }
+            }
             if (event !is Delivery) changes++
             when (event) {
                 is SubscriptionEvent.Assigned -> {

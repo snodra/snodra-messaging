@@ -30,7 +30,8 @@ import kotlin.concurrent.withLock
  * broker spreads the partitions over the consumers sharing the name) carrying `kraken-member=<this instance's id>`.
  *
  * - **Assignment** is the broker's consumer updates: a partition whose consumer becomes active is `Assigned`, one that stops
- *   being active is `Revoked` followed by an empty `Assigned` (the change is over). On activation the subscription reads the
+ *   being active is `Revoked` followed by an empty `Assigned` (the change is over). A subscription active on no partition
+ *   [FIRST_SETTLE] after joining announces an empty `Assigned` (a member, idle). On activation the subscription reads the
  *   offset stored under its name (on a connection of its own: the update is answered from the data connection's own thread) and
  *   answers the broker `offset(stored)`, or `first` when none is stored; a failed read ends the subscription (never `first`). On
  *   deactivation it stores what was acknowledged first, waits until it reads it back, then answers.
@@ -69,6 +70,9 @@ internal class RabbitSubscription private constructor(
     private val conns = ArrayList<DataConn>()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val recovered = AtomicReference<String?>(null)
+
+    /** An [SubscriptionEvent.Assigned] was queued (guarded by [lock]): a new subscription's first event is one (see [join]). */
+    private var announced = false
 
     @Volatile private var paused = false
 
@@ -227,6 +231,7 @@ internal class RabbitSubscription private constructor(
             part.inflight.clear()
             part.head = stored?.let { maxOf(part.head ?: 0, it) } ?: part.head
             changes.addLast(SubscriptionEvent.Assigned(listOf(part.segment)))
+            announced = true
             credit
         }
         log.info("Subscription {}: partition {} assigned (from {})", name, part.stream, stored ?: "first")
@@ -458,6 +463,23 @@ internal class RabbitSubscription private constructor(
         }
         scope.launch { refresh() }
         scope.launch { storeEvery() }
+        scope.launch { announce() }
+    }
+
+    /**
+     * A new subscription's first event is an `Assigned`: when no partition became active [FIRST_SETTLE] after subscribing to all
+     * of them, an empty one says this instance is a member, idle. An activation before that was the first `Assigned` (it marks the
+     * subscription announced under the same lock), so an empty one never follows a real one.
+     */
+    private suspend fun announce() {
+        delay(FIRST_SETTLE.toMillis())
+        val queued = lock.withLock {
+            if (announced) return@withLock false
+            announced = true
+            changes.addLast(SubscriptionEvent.Assigned(emptyList()))
+            true
+        }
+        if (queued) signal.trySend(Unit)
     }
 
     /** Stores the acknowledged offsets every [RabbitEventStoreSettings.offsetStoreInterval]. */
@@ -504,6 +526,9 @@ internal class RabbitSubscription private constructor(
 
         /** How long a stored offset may take to be read back (at close, at deactivation). */
         val STORE_WAIT: Duration = Duration.ofSeconds(5)
+
+        /** How long after subscribing to every partition a subscription that became active on none announces `Assigned([])`. */
+        val FIRST_SETTLE: Duration = Duration.ofSeconds(1)
 
         /** How often the end of each active partition is read (ADR 0022: at most every 5 s). */
         val STATUS_REFRESH: Duration = Duration.ofSeconds(5)

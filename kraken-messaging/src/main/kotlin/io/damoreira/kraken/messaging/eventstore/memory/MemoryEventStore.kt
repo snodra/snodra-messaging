@@ -200,6 +200,9 @@ class MemoryEventStore(
         /** A [SubscriptionEvent.Revoked] was given and no [SubscriptionEvent.Assigned] since: the next step closes the change. */
         private var changing = false
 
+        /** An [SubscriptionEvent.Assigned] was given: a new subscription's first event is one, empty when it holds nothing. */
+        private var announced = false
+
         @Volatile private var paused = false
 
         override suspend fun next(): SubscriptionEvent {
@@ -233,11 +236,14 @@ class MemoryEventStore(
                     group.holders[s] = this
                 }
                 changing = false
+                announced = true
                 return@locked SubscriptionEvent.Assigned(gained.map(Int::toString))
             }
-            if (changing) {
-                // Every revocation is closed by an assignment, an empty one when nothing new came.
+            if (changing || !announced) {
+                // Every revocation is closed by an assignment, an empty one when nothing new came; and a new subscription that
+                // holds nothing says so (a member, idle).
                 changing = false
+                announced = true
                 return@locked SubscriptionEvent.Assigned(emptyList())
             }
             if (paused || held.isEmpty()) return@locked null

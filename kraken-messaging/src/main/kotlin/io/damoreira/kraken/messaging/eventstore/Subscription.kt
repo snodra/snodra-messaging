@@ -12,6 +12,10 @@ package io.damoreira.kraken.messaging.eventstore
  *   the assignment change is over only then (the core reports the processor `STARTING` in between). An event store that only
  *   moves segments away (a single active consumer losing one, an instance left with none) still closes the change with
  *   `Assigned([])`.
+ * - **The first event is an [SubscriptionEvent.Assigned]**, within [FIRST_ASSIGNMENT_WITHIN] of joining, an empty one when the
+ *   instance holds no segment (every segment held by the others): an instance that joined and holds nothing is a member, idle,
+ *   and the core reports it `RUNNING`, never `STARTING`. An empty first `Assigned` may be followed by one naming segments; one
+ *   naming segments is never followed by a late empty "first" one.
  * - **At-least-once.** An event is acknowledged with [ack] after its handling committed; one not acknowledged comes again to
  *   the next subscription of the same name that gets its segment (after a [close], a crash or a reassignment), or to this one
  *   after [redeliver].
@@ -23,6 +27,11 @@ package io.damoreira.kraken.messaging.eventstore
  *   [resume] and [segments] may be called from any thread at any time (the control plane, the status report).
  */
 interface Subscription {
+    companion object {
+        /** The longest a new subscription takes to yield its first event, an [SubscriptionEvent.Assigned] (see the class docs); the conformance kit checks it. */
+        val FIRST_ASSIGNMENT_WITHIN: java.time.Duration = java.time.Duration.ofSeconds(10)
+    }
+
     /**
      * The next assignment change or delivery; suspends until there is one. Cancellable: cancelling the call before it returns
      * loses nothing (the core races it with its shutdown and its timers).

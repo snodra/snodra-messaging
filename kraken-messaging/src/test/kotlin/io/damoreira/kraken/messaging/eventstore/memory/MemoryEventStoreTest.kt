@@ -65,6 +65,8 @@ class MemoryEventStoreTest {
         val a = events.subscribe(spec)
         assertEquals(SubscriptionEvent.Assigned(listOf("0", "1")), a.nextWithin())
         val b = events.subscribe(spec)
+        // A member at once, holding nothing yet: segment 1 is still the first instance's until it hears of the change.
+        assertEquals(SubscriptionEvent.Assigned(emptyList()), b.nextWithin(), "a new subscription's first event, empty")
         assertNull(b.nextWithin(300), "segment 1 is still the first instance's until it hears of the change")
         assertEquals(SubscriptionEvent.Revoked(listOf("1")), a.nextWithin())
         assertEquals(SubscriptionEvent.Assigned(listOf("1")), withTimeout(2_000) { b.next() }, "woken at once when the segment is free")

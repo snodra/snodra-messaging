@@ -183,6 +183,9 @@ private class Member(private val log: Log, private val spec: SubscriptionSpec, p
     /** A Revoked was given and no Assigned since (the contract closes every revocation with one). */
     private var changing = false
 
+    /** An Assigned was given (a new subscription's first event is one, empty when it holds nothing). */
+    private var announced = false
+
     /** What `next` gives now, if anything. */
     private fun step(): SubscriptionEvent? = log.locked {
         val now = assignment(spec, member)
@@ -201,10 +204,12 @@ private class Member(private val log: Log, private val spec: SubscriptionSpec, p
                 cursor[s] = committed[s] ?: 0L
             }
             changing = false
+            announced = true
             return@locked SubscriptionEvent.Assigned(added.map { it.toString() })
         }
-        if (changing) {
+        if (changing || !announced) {
             changing = false
+            announced = true
             return@locked SubscriptionEvent.Assigned(emptyList())
         }
         if (paused) return@locked null
