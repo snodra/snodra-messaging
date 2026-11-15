@@ -94,13 +94,11 @@ class ConformanceLevel1Test {
         /** A cold JVM and Spring Boot start in a few seconds; the runner's default (30 s) is kept with a margin. */
         const val STARTUP_TIMEOUT_S = 60
 
-        /** Checks kraken-messaging fails as the runner writes them, with the reason (see the KT-cleanup report). */
-        val KNOWN_FAILURES: Map<String, String> = mapOf(
-            "L1-STATUS" to "kraken-messaging sends an InstanceStatus every 5 s and also at once whenever its set of live hubs " +
-                "changes (documented in its README); the runner requires every gap between two reports on a stream to be 3.5 to " +
-                "6.5 s, so the report sent when the second hub comes up (gap 0) fails it. The rule (protocol.md, Instance status: " +
-                "\"every 5 s\") does not say whether an extra report is allowed: a contract question, not changed in the library",
-        )
+        /**
+         * Checks kraken-messaging fails as the runner writes them, with the reason: none. (L1-STATUS failed until the runner
+         * allowed the extra report sent when the set of live hubs changes: the contract bounds only the longest gap.)
+         */
+        val KNOWN_FAILURES: Map<String, String> = emptyMap()
     }
 }
 
