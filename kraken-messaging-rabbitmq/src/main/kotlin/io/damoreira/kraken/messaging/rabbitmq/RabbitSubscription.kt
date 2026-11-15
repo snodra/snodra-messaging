@@ -413,21 +413,35 @@ internal class RabbitSubscription private constructor(
     override suspend fun close() {
         if (closing) return
         withContext(Dispatchers.IO) {
-            // Everything acknowledged is stored (and read back) before the consumers leave, so the next active consumer of a
-            // partition resumes after it.
-            val active = lock.withLock { parts.filter { it.active } }
-            for (part in active) flush(part)
-            closing = true
-            scope.cancel()
-            for (conn in conns) {
-                for (id in lock.withLock { conn.byId.keys.toList() }) runCatching { conn.client.unsubscribe(id) }
-                runCatching { conn.client.close() }
+            try {
+                // Everything acknowledged is stored (and read back) before the consumers leave, so the next active consumer of a
+                // partition resumes after it.
+                beforeFlush?.invoke()
+                val active = lock.withLock { parts.filter { it.active } }
+                for (part in active) flush(part)
+            } finally {
+                // Whatever the flush threw: the connections, the reads' connection and the store's record of this member go.
+                closing = true
+                scope.cancel()
+                for (conn in conns) {
+                    for (id in lock.withLock { conn.byId.keys.toList() }) runCatching { conn.client.unsubscribe(id) }
+                    runCatching { conn.client.close() }
+                }
+                try {
+                    offsets.close()
+                } finally {
+                    onClose()
+                    signal.trySend(Unit)
+                }
             }
-            offsets.close()
-            onClose()
-            signal.trySend(Unit)
         }
     }
+
+    /** Test hook: runs as [close] starts storing the acknowledged positions. */
+    @Volatile internal var beforeFlush: (() -> Unit)? = null
+
+    /** The data connections still open (tests). */
+    internal fun openConnections(): Int = lock.withLock { conns.toList() }.count { it.client.isOpen }
 
     // ------------------------------------------------------------------------------------------------ joining
 

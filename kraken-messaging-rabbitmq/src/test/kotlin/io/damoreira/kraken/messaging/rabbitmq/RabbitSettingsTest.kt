@@ -75,6 +75,18 @@ class RabbitSettingsTest {
     }
 
     @Test
+    fun `a password file loses every trailing CR and LF, as in the Rust add-on`(@TempDir dir: Path) {
+        val file = Files.writeString(dir.resolve("password"), "from-file\r\n\n\r\n")
+        assertEquals("from-file", RabbitProperties(passwordFile = file).toSettings().password)
+        val management = RabbitProperties(
+            management = RabbitProperties.Management(url = "http://h:15672", username = "admin", passwordFile = file),
+        ).toSettings().management!!
+        assertEquals("admin" to "from-file", management.login("guest", "guest"))
+        Files.writeString(file, " in side \t\n")
+        assertEquals(" in side \t", RabbitProperties(passwordFile = file).toSettings().password, "only CR and LF go")
+    }
+
+    @Test
     fun `secrets never appear in the settings' text`() {
         val s = RabbitProperties(password = "stream-secret", management = RabbitProperties.Management(url = "http://h:15672", password = "api-secret")).toSettings()
         for (text in listOf(s.toString(), s.management.toString(), RabbitProperties(password = "stream-secret").toString())) {

@@ -108,6 +108,9 @@ internal class RabbitPublisher(private val connector: RabbitConnector, private v
         }
     }
 
+    /** Test hook: runs after a publish took its node's client, before it registers for the confirm. */
+    @Volatile internal var beforeRegister: ((Node) -> Unit)? = null
+
     private class PublishError(val code: Short) : RuntimeException("the broker refused the message: ${RabbitConnector.codeName(code)}")
 
     suspend fun publish(event: OutgoingEvent) {
@@ -131,7 +134,16 @@ internal class RabbitPublisher(private val connector: RabbitConnector, private v
         }
         val confirmed = CompletableFuture<Unit>()
         val id = node.sequence.incrementAndGet()
+        beforeRegister?.invoke(node)
         node.pending[id] = confirmed
+        // A lost() between taking the client and the line above failed nothing of this publish (it was not pending yet); lost()
+        // marks the node dead before it fails the pending ones, so a dead node seen here is that case: fail now, not at the
+        // confirm timeout.
+        if (node.dead) {
+            node.pending.remove(id)
+            leaders.remove(stream)
+            throw EventStoreException.Failed("rabbitmq: publishing ${event.id} to $stream: the connection to ${node.key.first}:${node.key.second} was replaced")
+        }
         try {
             client.publish(publisher, listOf(message), ToLongFunction<Any> { id })
         } catch (e: Exception) {

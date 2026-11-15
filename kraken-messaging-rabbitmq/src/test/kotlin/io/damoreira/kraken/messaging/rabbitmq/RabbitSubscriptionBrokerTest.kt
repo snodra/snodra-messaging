@@ -67,6 +67,22 @@ class RabbitSubscriptionBrokerTest {
     }
 
     @Test
+    fun `a close whose flush throws still closes every connection`() = runBlocking {
+        val source = fresh("flushfails")
+        RabbitBroker.superStream(source, 2)
+        RabbitEventStore(RabbitBroker.settings(management = false)).use { store ->
+            repeat(4) { store.publish(event(source, "k-$it")) }
+            val sub = store.subscribe(SubscriptionSpec("svc.flushfails", source)) as RabbitSubscription
+            deliveries(sub, 4)
+            assertTrue(sub.openConnections() > 0)
+            sub.beforeFlush = { throw IllegalStateException("flush failed") }
+            val failure = runCatching { sub.close() }.exceptionOrNull()
+            assertEquals("flush failed", failure?.message)
+            assertEquals(0, sub.openConnections(), "every data connection is closed whatever the flush threw")
+        }
+    }
+
+    @Test
     fun `a partition moving away stores its position first`() = runBlocking {
         val source = fresh("moving")
         RabbitBroker.superStream(source, 2)

@@ -60,11 +60,15 @@ import kotlin.coroutines.cancellation.CancellationException
  * its own (`kraken-member`, a wire rule), and its automatic offset tracking follows the "last processed" convention. The `Client`
  * gives every protocol command; nothing of the client's tracking is used.
  */
-class RabbitEventStore(
+class RabbitEventStore internal constructor(
     private val settings: RabbitEventStoreSettings,
-    /** Whether `replay` is declared: with the management API, unless [open] found its metrics off. */
-    replay: Boolean = settings.management != null,
+    /** The management API's client, closed with the store; null: `replay` is not declared. */
+    internal val management: RabbitManagement?,
 ) : EventStore, AutoCloseable {
+    /** The store of [settings]; [replay]: whether `replay` is declared (with the management API, unless [open] found its metrics off). */
+    constructor(settings: RabbitEventStoreSettings, replay: Boolean = settings.management != null) :
+        this(settings, settings.management?.takeIf { replay }?.let { managementOf(settings, it) })
+
     init {
         RabbitClientCheck.verify()
     }
@@ -72,9 +76,6 @@ class RabbitEventStore(
     private val connector = RabbitConnector(settings, CONNECTION_NAME)
     private val publisher = RabbitPublisher(connector, settings.confirmTimeout)
     private val live = RabbitLive()
-    private val management = settings.management?.takeIf { replay }?.let {
-        RabbitManagement(it, settings.username, settings.password, settings.virtualHost)
-    }
 
     override val name: String = NAME
 
@@ -116,8 +117,14 @@ class RabbitEventStore(
         return x.compareTo(y)
     }
 
-    /** Closes the publishers' connections (each subscription closes its own). */
-    override fun close() = publisher.close()
+    /** Closes the publishers' connections (each subscription closes its own) and the management API's client. */
+    override fun close() {
+        try {
+            publisher.close()
+        } finally {
+            management?.close()
+        }
+    }
 
     override fun toString(): String = "RabbitEventStore($settings, capabilities=$capabilities)"
 
@@ -136,12 +143,20 @@ class RabbitEventStore(
          * (`management.disable_stats`), since its consumer list is then empty whoever reads. Blocking.
          */
         fun open(settings: RabbitEventStoreSettings): RabbitEventStore {
-            val management = settings.management ?: return RabbitEventStore(settings)
-            val stats = RabbitManagement(management, settings.username, settings.password, settings.virtualHost).statsEnabled()
-            if (!stats) {
-                log.warn("The RabbitMQ management API collects no metrics (management.disable_stats): the event store does not declare replay")
+            val api = settings.management?.let { managementOf(settings, it) } ?: return RabbitEventStore(settings)
+            val stats = try {
+                api.statsEnabled()
+            } catch (e: Exception) {
+                api.close()
+                throw e
             }
-            return RabbitEventStore(settings, replay = stats)
+            if (stats) return RabbitEventStore(settings, api)
+            api.close()
+            log.warn("The RabbitMQ management API collects no metrics (management.disable_stats): the event store does not declare replay")
+            return RabbitEventStore(settings, null)
         }
+
+        private fun managementOf(settings: RabbitEventStoreSettings, management: RabbitManagementSettings) =
+            RabbitManagement(management, settings.username, settings.password, settings.virtualHost)
     }
 }

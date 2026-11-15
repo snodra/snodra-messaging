@@ -1,6 +1,7 @@
 package io.damoreira.kraken.messaging.rabbitmq
 
 import io.damoreira.kraken.messaging.eventstore.EventStoreException
+import org.slf4j.LoggerFactory
 import tools.jackson.databind.JsonNode
 import tools.jackson.databind.json.JsonMapper
 import java.io.ByteArrayOutputStream
@@ -30,7 +31,10 @@ import javax.net.ssl.TrustManagerFactory
  * without its stream or properties, a non-string property, or metrics switched off (`management.disable_stats`) is an error,
  * never "nobody reads". No redirect is followed; an answer is read up to [MAX_ANSWER] bytes.
  */
-internal class RabbitManagement(settings: RabbitManagementSettings, streamUser: String, streamPassword: String, private val virtualHost: String) {
+private val log = LoggerFactory.getLogger(RabbitManagement::class.java)
+
+internal class RabbitManagement(settings: RabbitManagementSettings, streamUser: String, streamPassword: String, private val virtualHost: String) :
+    AutoCloseable {
     private val root = settings.url.trim().trimEnd('/')
     private val authorization: String
     private val http: HttpClient
@@ -41,7 +45,24 @@ internal class RabbitManagement(settings: RabbitManagementSettings, streamUser: 
         val builder = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NEVER).connectTimeout(REQUEST_TIMEOUT)
         settings.caFile?.let { builder.sslContext(sslContext(it)) }
         http = builder.build()
+        if (root.startsWith("http://", ignoreCase = true)) {
+            log.warn(
+                "The RabbitMQ management API at {} is plain http: every request carries the user's credentials (Basic) in clear; " +
+                    "use https (management.ca-file for a private CA)",
+                root,
+            )
+        }
     }
+
+    /** Requests sent so far (tests). */
+    @Volatile internal var requests = 0
+        private set
+
+    /** Whether [close] ended the HTTP client. */
+    internal val closed: Boolean get() = http.isTerminated
+
+    /** Ends the HTTP client (its threads and connections); the event store closes it with itself. */
+    override fun close() = http.close()
 
     /** One stream consumer the API lists: its name (the subscription's; null for one without), its stream, its member. */
     data class Consumer(val name: String?, val stream: String, val member: String)
@@ -71,6 +92,7 @@ internal class RabbitManagement(settings: RabbitManagementSettings, streamUser: 
         val request = HttpRequest.newBuilder(URI.create("$root/api/$path")).timeout(REQUEST_TIMEOUT)
             .header("Authorization", authorization).header("Accept", "application/json").GET().build()
         // The whole exchange, the body included, within the request's deadline; the body at most MAX_ANSWER bytes.
+        requests++
         val pending = http.sendAsync(request) { info -> BoundedBody(info.statusCode()) }
         val response = try {
             pending.get(REQUEST_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS)

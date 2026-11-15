@@ -64,15 +64,15 @@ The Rust add-on reads the same settings as `KRAKEN_RABBITMQ_*`.
 | `port` | 5552 (5551 with TLS) | the port of a host given without one |
 | `virtual-host` | `/` | |
 | `username` | `guest` | |
-| `password` / `password-file` | `guest` | the password, or a file holding it (its trailing newline removed; the file wins, as the hub token file does); never logged |
+| `password` / `password-file` | `guest` | the password, or a file holding it (every trailing CR and LF removed; the file wins, as the hub token file does); never logged, and masked in the actuator's `configprops` and `env` |
 | `tls` | `false` | TLS to every node, with host name verification |
 | `tls-ca-file` | none | PEM CA certificates the nodes are verified against; required with TLS (the store never connects unverified) |
 | `load-balancer` | `false` | the hosts are a load balancer: connect through it until it lands on the node needed (at most 32 tries) |
 | `offset-store-messages` | `10000` | a processor stores its position every so many acknowledgements... |
 | `offset-store-interval` | `5s` | ...or this often, whichever first, and always when a partition moves away and at shutdown (every stored position is an entry in the stream) |
 | `confirm-timeout` | `30s` | the longest a publish waits for the broker's confirm; a connection that confirms nothing within it is replaced (the relay retries) |
-| `management.url` | none | the management API (`http://rabbitmq:15672`, no credentials in the URL): declares `replay`; metrics collection must be on (`management.disable_stats = false`) |
-| `management.username` / `password` / `password-file` | the stream user's | the file wins over the password |
+| `management.url` | none | the management API (`http://rabbitmq:15672`, no credentials in the URL): declares `replay`; metrics collection must be on (`management.disable_stats = false`). Every request carries the user's credentials (Basic): a plain `http` URL logs a warning at startup, prefer `https` |
+| `management.username` / `password` / `password-file` | the stream user's | the file wins over the password (every trailing CR and LF removed); the password is masked in the actuator's output |
 | `management.ca-file` | none | PEM CA certificates of an `https` management API |
 
 The source and its dead-letter stream are the core's: `kraken.messaging.events.source` (`kraken.events`) and `<source>.dlt`.

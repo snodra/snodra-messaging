@@ -14,12 +14,14 @@ dependencies {
     // a service with Spring's dependency management sets rabbit-stream-client.version (see the README), checked at startup.
     implementation(libs.rabbitmq.stream.client) { version { strictly(libs.versions.rabbitmq.stream.client.get()) } }
     implementation(libs.spring.boot.starter)
+    compileOnly("org.springframework.boot:spring-boot-actuator") // optional: the SanitizingFunction that masks the add-on's secrets
     // The management API's consumer list (capability replay) is JSON.
     implementation("tools.jackson.core:jackson-databind")
 
     testImplementation(project(":kraken-messaging-test"))
     testImplementation(libs.spring.boot.starter.test)
     testImplementation(libs.kotlin.test.junit5)
+    testImplementation("org.springframework.boot:spring-boot-actuator")
     testImplementation(libs.testcontainers.junit)
     // Two event-store add-ons on one classpath need kraken.messaging.event-store.
     testImplementation(project(":kraken-messaging-kafka"))

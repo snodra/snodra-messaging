@@ -116,4 +116,19 @@ class RabbitManagementTest {
             assertEquals(Capability.REPLAY, (refused as EventStoreException.Unsupported).capability)
         }
     }
+
+    @Test
+    fun `open keeps the client it asked through, and the store closes it`() {
+        val settings = RabbitEventStoreSettings(hosts = listOf("127.0.0.1:1"), management = RabbitManagementSettings(url))
+        answers["/api/overview"] = 200 to """{"disable_stats": false}"""
+        val store = RabbitEventStore.open(settings)
+        val api = checkNotNull(store.management)
+        assertEquals(1, api.requests, "open asked once, through the client the store keeps")
+        assertFalse(api.closed)
+        store.close()
+        assertTrue(api.closed, "the management client closes with the store")
+
+        answers["/api/overview"] = 200 to """{"disable_stats": true}"""
+        RabbitEventStore.open(settings).use { assertEquals(null, it.management, "no replay: no management client kept") }
+    }
 }

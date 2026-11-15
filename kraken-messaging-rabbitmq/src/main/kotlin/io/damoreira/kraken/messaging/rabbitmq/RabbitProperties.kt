@@ -20,7 +20,7 @@ data class RabbitProperties(
     val username: String = "guest",
     /** The password (default `guest`); [passwordFile] wins over it. */
     val password: String? = null,
-    /** A file holding the password (its trailing newline removed); wins over [password], as the hub token file does. */
+    /** A file holding the password (every trailing CR and LF removed); wins over [password], as the hub token file does. */
     val passwordFile: Path? = null,
     val tls: Boolean = false,
     /** PEM CA certificates the nodes are verified against; required with TLS. */
@@ -71,6 +71,6 @@ data class RabbitProperties(
 
     private companion object {
         fun secret(value: String?, file: Path?): String? =
-            file?.let { Files.readString(it).removeSuffix("\n").removeSuffix("\r") } ?: value
+            file?.let { Files.readString(it).trimEnd('\r', '\n') } ?: value
     }
 }

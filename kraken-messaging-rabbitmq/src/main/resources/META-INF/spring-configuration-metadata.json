@@ -51,7 +51,7 @@
     {
       "name": "kraken.messaging.rabbitmq.password-file",
       "type": "java.nio.file.Path",
-      "description": "A file holding the stream user's password (its trailing newline removed); wins over password.",
+      "description": "A file holding the stream user's password (every trailing CR and LF removed); wins over password.",
       "sourceType": "io.damoreira.kraken.messaging.rabbitmq.RabbitProperties"
     },
     {

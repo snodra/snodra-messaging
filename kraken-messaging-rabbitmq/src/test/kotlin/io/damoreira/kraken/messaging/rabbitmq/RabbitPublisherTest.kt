@@ -101,4 +101,23 @@ class RabbitPublisherTest {
             publisher.publish(event(source))
         }
     }
+
+    @Test
+    fun `a connection lost between taking its client and registering the publish fails the publish at once`() = runBlocking {
+        val source = fresh("lostrace")
+        RabbitBroker.stream(source)
+        RabbitPublisher(Opening(), Duration.ofSeconds(20)).use { publisher ->
+            publisher.publish(event(source)) // the node's connection and its publisher exist
+            publisher.beforeRegister = { node ->
+                publisher.beforeRegister = null
+                node.lost("lost in the race") // what the client's shutdown listener calls, on its own thread
+            }
+            val started = System.nanoTime()
+            val outcome = runCatching { publisher.publish(event(source)) }
+            val tookMs = (System.nanoTime() - started) / 1_000_000
+            assertInstanceOf(EventStoreException.Failed::class.java, outcome.exceptionOrNull(), "$outcome")
+            assertTrue(tookMs < 5_000, "failed at once, not after the 20 s confirm timeout: $tookMs ms")
+            publisher.publish(event(source)) // a new connection takes the next one
+        }
+    }
 }
