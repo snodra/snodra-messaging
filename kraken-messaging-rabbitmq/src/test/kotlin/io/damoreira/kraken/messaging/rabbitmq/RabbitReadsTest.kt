@@ -2,8 +2,10 @@ package io.damoreira.kraken.messaging.rabbitmq
 
 import io.damoreira.kraken.messaging.eventstore.EventStoreException
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertThrows
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
 /** The decisions of the leader-side reads, on read doubles: never "empty" or "the head" from a stalled read. */
@@ -41,6 +43,35 @@ class RabbitReadsTest {
         val reads = ArrayDeque(listOf(ChunkRead(0, 5, 100), chunk))
         assertEquals(10, RabbitReads.offsetAt("s", 500, bounds) { reads.removeFirstOrNull() })
         assertEquals(2, RabbitReads.offsetAt("s", 50, bounds) { ChunkRead(0, 5, 100) }, "not before the first offset")
+    }
+
+    @Test
+    fun `a stream known event-less whose committed chunk changed takes both reads, never one quiet read`() {
+        val eventless = EventlessStreams()
+        eventless.remember("n/s", 0, 5)
+        val reads = mutableListOf<Boolean>()
+        // Chunks were added (committed 5 -> 7); the read of the last chunk stalls, the first chunk's read answers.
+        val stalledLast: (Boolean) -> ChunkRead? = { last -> reads += last; if (last) null else chunk }
+        assertThrows(EventStoreException.Failed::class.java) { RabbitReads.boundsWith("s", "n/s", 0, 7, eventless, stalledLast) }
+        assertEquals(listOf(true, false), reads, "the last read, then the first: the normal two-read path")
+        // Both quiet: event-less again, remembered with the new statistics.
+        assertEquals(Bounds.EMPTY, RabbitReads.boundsWith("s", "n/s", 0, 7, eventless) { null })
+        assertEquals(Bounds.EMPTY, RabbitReads.boundsWith("s", "n/s", 0, 7, eventless) { error("no read expected") }, "unchanged: no read")
+    }
+
+    @Test
+    fun `the event-less cache is bounded and forgets after its time or on other statistics`() {
+        var now = 0L
+        val eventless = EventlessStreams(capacity = 2, ttl = java.time.Duration.ofSeconds(10), now = { now })
+        eventless.remember("a", 0, 1)
+        eventless.remember("b", 0, 1)
+        eventless.remember("c", 0, 1)
+        assertEquals(2, eventless.size(), "pruned to its capacity")
+        assertFalse(eventless.known("a", 0, 1), "the least recently used one pruned")
+        assertTrue(eventless.known("c", 0, 1))
+        assertFalse(eventless.known("c", 3, 1), "another first chunk is another stream (or truncated): read again")
+        now += java.time.Duration.ofSeconds(11).toNanos()
+        assertFalse(eventless.known("c", 0, 1), "kept at most its time")
     }
 
     @Test

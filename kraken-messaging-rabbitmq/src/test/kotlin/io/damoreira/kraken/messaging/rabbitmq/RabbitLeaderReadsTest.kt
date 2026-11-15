@@ -17,8 +17,10 @@ import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertInstanceOf
+import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import java.time.Duration
 import java.util.UUID
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CountDownLatch
@@ -55,6 +57,22 @@ class RabbitLeaderReadsTest {
                 override fun metadata(vararg streams: String) = super.metadata(*streams).also { note("metadata") }
                 override fun partitions(superStream: String) = super.partitions(superStream).also { note("partitions") }
             }
+        }
+    }
+
+    @Test
+    fun `a read by time that fails leaves the leader's connection ready for the next read`() = runBlocking {
+        val stream = fresh("bytime")
+        RabbitBroker.stream(stream)
+        RabbitEventStore(RabbitBroker.settings(management = false)).use { store -> repeat(3) { store.publish(event(stream, "k")) } }
+        RabbitReads(RabbitConnector(RabbitBroker.settings(), "kraken-test")).use { reads ->
+            val bounds = reads.bounds(stream)
+            assertEquals(3, bounds.head)
+            // A time no chunk reaches, with bounds that say one does: the read gets nothing and fails...
+            val future = Bounds(0, Long.MAX_VALUE, lastTimestampMs = Long.MAX_VALUE)
+            assertThrows(EventStoreException.Failed::class.java) { reads.offsetAt(stream, Long.MAX_VALUE - 1, future, Duration.ofMillis(500)) }
+            // ...and leaves no subscription behind on the connection: the next read on it works.
+            assertEquals(3, reads.bounds(stream).head)
         }
     }
 

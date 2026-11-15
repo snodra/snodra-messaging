@@ -101,18 +101,9 @@ internal class RabbitReads(private val connector: RabbitConnector) : AutoCloseab
         val (first, committed) = stats(stream)
         if (first == null) return Bounds.EMPTY
         val key = node(stream).node.let { "${it.host}:${it.port}/$stream" } // the same name on another broker is another stream
-        val known = eventless[key]
-        if (committed != null && known == committed) return Bounds.EMPTY
-        // Known event-less and chunks added since: an event among them would be the last chunk of events, so one read tells.
-        val lastRead = readOne(stream, OffsetSpecification.last())
-        if (known != null && lastRead == null) {
-            if (committed != null) eventless[key] = committed
-            return Bounds.EMPTY
+        return boundsWith(stream, key, first, committed, eventless) { last ->
+            readOne(stream, if (last) OffsetSpecification.last() else OffsetSpecification.first())
         }
-        val firstRead = readOne(stream, OffsetSpecification.first())
-        val bounds = boundsOf(stream, first, firstRead, lastRead)
-        if (bounds == Bounds.EMPTY && committed != null) eventless[key] = committed
-        return bounds
     }
 
     /**
@@ -122,10 +113,14 @@ internal class RabbitReads(private val connector: RabbitConnector) : AutoCloseab
     @Synchronized
     fun offsetAt(stream: String, timestampMs: Long, bounds: Bounds, wait: Duration): Long {
         val node = node(stream)
-        return offsetAt(stream, timestampMs, bounds) { first ->
-            if (first) subscribe(node, stream, OffsetSpecification.timestamp(timestampMs)) else credit(node)
-            node.reads.poll(wait.toMillis(), TimeUnit.MILLISECONDS)
-        }.also { unsubscribe(node) }
+        try {
+            return offsetAt(stream, timestampMs, bounds) { first ->
+                if (first) subscribe(node, stream, OffsetSpecification.timestamp(timestampMs)) else credit(node)
+                node.reads.poll(wait.toMillis(), TimeUnit.MILLISECONDS)
+            }
+        } finally {
+            unsubscribe(node)
+        }
     }
 
     private fun readOne(stream: String, from: OffsetSpecification): ChunkRead? {
@@ -182,11 +177,22 @@ internal class RabbitReads(private val connector: RabbitConnector) : AutoCloseab
 
         private const val SUBSCRIPTION: Byte = 0
 
+        /** Streams found empty of events, for the whole process (see [EventlessStreams]). */
+        private val eventless = EventlessStreams()
+
         /**
-         * Streams found empty of events (only offset-tracking entries), with the statistics' committed chunk id then, for the whole
-         * process: not read again (two quiet reads) until a chunk is added.
+         * The bounds of [stream] (statistics: first chunk [first], committed chunk [committed]) known to [eventless] under [key]:
+         * empty without a read while its statistics are those it was found event-less with; otherwise the two reads of
+         * [boundsOf] ([read] with true: the last chunk of events, false: the first).
          */
-        private val eventless = java.util.concurrent.ConcurrentHashMap<String, Long>()
+        fun boundsWith(stream: String, key: String, first: Long, committed: Long?, eventless: EventlessStreams, read: (Boolean) -> ChunkRead?): Bounds {
+            if (committed != null && eventless.known(key, first, committed)) return Bounds.EMPTY
+            // Chunks added since it was found event-less take both reads: one quiet read is no proof (a stalled read is silent too).
+            val lastRead = read(true)
+            val bounds = boundsOf(stream, first, read(false), lastRead)
+            if (bounds == Bounds.EMPTY && committed != null) eventless.remember(key, first, committed)
+            return bounds
+        }
 
         /**
          * The bounds of [stream] whose statistics show chunks from [first] on: empty of events when neither read brought a chunk
@@ -216,4 +222,43 @@ internal class RabbitReads(private val connector: RabbitConnector) : AutoCloseab
             }
         }
     }
+}
+
+/**
+ * Streams found empty of events (only offset-tracking entries), each with its statistics then (first and committed chunk ids):
+ * not read again (two quiet reads) while they are unchanged. Bounded: at most [capacity] streams, the least recently used
+ * pruned, and each kept for [ttl] at most. The stream protocol offers nothing that tells one incarnation of a stream from the
+ * next (no creation id in its metadata or statistics), so a stream deleted and created again under the same name, whose
+ * statistics happen to equal what an event-less one had, reads as empty until [ttl] passes: a reset then starts that
+ * partition at its beginning (events read again, never lost).
+ */
+internal class EventlessStreams(
+    private val capacity: Int = 4096,
+    private val ttl: Duration = Duration.ofMinutes(10),
+    private val now: () -> Long = System::nanoTime,
+) {
+    private class Seen(val first: Long, val committed: Long, val at: Long)
+
+    private val seen = object : LinkedHashMap<String, Seen>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Seen>?) = size > capacity
+    }
+
+    /** Whether the stream [key] was found event-less with exactly these statistics, within [ttl]. */
+    @Synchronized
+    fun known(key: String, first: Long, committed: Long): Boolean {
+        val s = seen[key] ?: return false
+        if (now() - s.at > ttl.toNanos()) {
+            seen.remove(key)
+            return false
+        }
+        return s.first == first && s.committed == committed
+    }
+
+    @Synchronized
+    fun remember(key: String, first: Long, committed: Long) {
+        seen[key] = Seen(first, committed, now())
+    }
+
+    @Synchronized
+    fun size(): Int = seen.size
 }
