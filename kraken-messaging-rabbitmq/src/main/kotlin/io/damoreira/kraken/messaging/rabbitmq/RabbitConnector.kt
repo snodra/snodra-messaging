@@ -117,10 +117,21 @@ internal open class RabbitConnector(private val settings: RabbitEventStoreSettin
         /** The leader of [stream]; [EventStoreException.Failed] when the stream is missing or has none now. */
         fun leader(control: Client, stream: String): Client.Broker {
             val metadata = metadata(control, stream)
-            if (!metadata.isResponseOk) {
-                throw EventStoreException.Failed("rabbitmq: the stream $stream: ${codeName(metadata.responseCode)}")
-            }
-            return metadata.leader ?: throw EventStoreException.Failed("rabbitmq: the stream $stream has no leader now")
+            if (!metadata.isResponseOk) throw EventStoreException.Failed(noLeader(stream, metadata.responseCode))
+            return metadata.leader
+                ?: throw EventStoreException.Failed("rabbitmq: the stream $stream has no leader now (a leader election?); retried")
+        }
+
+        /**
+         * What a failed leader lookup of [stream] says. While a stream elects a leader (its leader's node was lost) the broker
+         * answers "does not exist" or "not available" for a stream that exists: the message says both, so an operator does not
+         * go looking for a deleted stream. The caller's retry is unchanged (a failed publish or subscribe, retried).
+         */
+        internal fun noLeader(stream: String, code: Short): String = when (code) {
+            Constants.RESPONSE_CODE_STREAM_DOES_NOT_EXIST, Constants.RESPONSE_CODE_STREAM_NOT_AVAILABLE ->
+                "rabbitmq: the stream $stream has no leader the broker can name now (code $code): a leader election " +
+                    "after a node was lost, or the stream was deleted; retried"
+            else -> "rabbitmq: the stream $stream: ${codeName(code)}"
         }
 
         private fun metadata(control: Client, stream: String): Client.StreamMetadata = try {
@@ -169,8 +180,9 @@ internal open class RabbitConnector(private val settings: RabbitEventStoreSettin
 
         /** A response code's name, for messages. */
         fun codeName(code: Short): String = when (code) {
-            Constants.RESPONSE_CODE_STREAM_DOES_NOT_EXIST -> "the stream does not exist"
-            Constants.RESPONSE_CODE_STREAM_NOT_AVAILABLE -> "the stream is not available"
+            // The broker gives both answers while a stream elects a leader, for a stream that exists.
+            Constants.RESPONSE_CODE_STREAM_DOES_NOT_EXIST -> "the stream does not exist, or has no leader now (a leader election)"
+            Constants.RESPONSE_CODE_STREAM_NOT_AVAILABLE -> "the stream is not available (a leader election?)"
             Constants.RESPONSE_CODE_ACCESS_REFUSED -> "access refused"
             Constants.RESPONSE_CODE_SUBSCRIPTION_ID_ALREADY_EXISTS -> "subscription id already exists"
             Constants.RESPONSE_CODE_PUBLISHER_DOES_NOT_EXIST -> "publisher does not exist"
