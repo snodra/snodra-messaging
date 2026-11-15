@@ -21,10 +21,12 @@ import java.util.concurrent.atomic.AtomicLong
  * - `kraken.deadlines.fired{name}` (counter) and `kraken.deadlines.due{name}`, the gauge of deadlines past their due time,
  *   set by every scheduler poll and back to 0 when none is overdue;
  * - `kraken.external.calls{handler,outcome}`, outcome `succeeded | replayed | failed | retryable | unknown` (counter);
- * - `kraken.saga.command.failures{type,reason}` (counter, added by the S1 plan): a `SagaCommandFailed` nobody handled; `type`
- *   is the failed command's wire type name;
+ * - `kraken.saga.command.failures{type,reason}` (counter): a `SagaCommandFailed` nobody handled, `type` the failed command's
+ *   wire type name and `reason` its wire enum (`NO_HANDLER`, ...); also a saga's event the outbox refused, `type` the event's
+ *   and `reason` `INVALID`;
  * - the gauges `kraken.sagas.active{type}` and `kraken.saga.dispatch.pending`, which no runtime hook moves: a
- *   [SagaGaugeSampler] counts them in the database every few seconds and calls [activeSagas] and [dispatchPending].
+ *   [SagaGaugeSampler] counts them in the message store every 15 s (its default interval) and calls [activeSagas] and
+ *   [dispatchPending].
  *
  * [sagaTypes] are the saga types of this service: their `active` gauge exists (at 0) from the start.
  */
