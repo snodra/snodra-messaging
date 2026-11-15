@@ -410,6 +410,70 @@ class AutoConfigurationTest {
             }
     }
 
+    @Test fun `every removed kafka setting still set fails the startup in one message naming each replacement`() {
+        runner
+            .withPropertyValues(
+                "kraken.messaging.kafka.topic=orders.events",
+                "kraken.messaging.kafka.group-id=orders",
+                "kraken.messaging.kafka.consumer.enabled=false",
+                "kraken.messaging.kafka.consumer.max-attempts=3",
+                "kraken.messaging.kafka.dead-letter.mode=log",
+                "kraken.messaging.kafka.dead-letter.retention=1d",
+            )
+            .run { context ->
+                val message = startupFailureMessage(context.startupFailure)
+                listOf(
+                    "kraken.messaging.kafka.topic" to "kraken.messaging.events.source",
+                    "kraken.messaging.kafka.group-id" to "kraken.messaging.events.subscription-prefix",
+                    "kraken.messaging.kafka.consumer.enabled" to "kraken.messaging.events.consumer.enabled",
+                    "kraken.messaging.kafka.consumer.max-attempts" to "kraken.messaging.events.consumer.max-attempts",
+                    "kraken.messaging.kafka.dead-letter.mode" to "kraken.messaging.events.dead-letter.mode",
+                    "kraken.messaging.kafka.dead-letter.retention" to "kraken.messaging.events.dead-letter.retention",
+                ).forEach { (removed, replacement) -> assertTrue(message.contains("$removed was removed, use $replacement"), message) }
+            }
+    }
+
+    @Test fun `a removed setting in its environment form fails the startup`() {
+        runner
+            .withInitializer { ctx ->
+                ctx.environment.propertySources.addFirst(
+                    org.springframework.core.env.SystemEnvironmentPropertySource(
+                        "test-systemEnvironment",
+                        mapOf("KRAKEN_MESSAGING_KAFKA_GROUPID" to "orders"),
+                    ),
+                )
+            }
+            .run { context ->
+                val message = startupFailureMessage(context.startupFailure)
+                assertTrue(message.contains("kraken.messaging.kafka.group-id was removed, use kraken.messaging.events.subscription-prefix"), message)
+            }
+    }
+
+    @Test fun `the removed dead-letter mode topic fails the startup naming event-store`() {
+        runner.withPropertyValues("kraken.messaging.events.dead-letter.mode=topic").run { context ->
+            val message = startupFailureMessage(context.startupFailure)
+            assertTrue(message.contains("kraken.messaging.events.dead-letter.mode=topic was removed, use event-store"), message)
+        }
+        runner.withPropertyValues("kraken.messaging.kafka.dead-letter.mode=topic").run { context ->
+            val message = startupFailureMessage(context.startupFailure)
+            assertTrue(message.contains("kraken.messaging.kafka.dead-letter.mode was removed, use kraken.messaging.events.dead-letter.mode"), message)
+            assertTrue(message.contains("event-store"), message)
+        }
+    }
+
+    @Test fun `removed settings and require-jwt are reported together`() {
+        runner.withPropertyValues("kraken.messaging.security.require-jwt=true", "kraken.messaging.kafka.topic=t").run { context ->
+            val message = startupFailureMessage(context.startupFailure)
+            assertTrue(message.contains("kraken.messaging.security.require-jwt was removed"), message)
+            assertTrue(message.contains("kraken.messaging.kafka.topic was removed"), message)
+        }
+    }
+
+    private fun startupFailureMessage(failure: Throwable?): String {
+        assertNotNull(failure, "expected startup failure")
+        return generateSequence(failure) { it.cause }.joinToString(" | ") { it.message.orEmpty() }
+    }
+
     @Test fun `require-jwt check also runs with a user supplied identity resolver bean`() {
         runner
             .withPropertyValues("kraken.messaging.security.require-jwt=true")
