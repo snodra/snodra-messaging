@@ -21,6 +21,7 @@ import org.bson.Document
 import org.junit.jupiter.api.AfterAll
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
+import org.junit.jupiter.api.Tag
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.TestInstance
 import org.slf4j.LoggerFactory
@@ -256,6 +257,8 @@ class EventProcessorsTest {
      * Throughput of one processor end to end (subscription, marker transaction in MongoDB, acknowledgement), the shape of the
      * add-on's 10 000 event test; the spring-kafka consumer it replaces read the same 10 000 events at about 575 a second here.
      */
+    /** A throughput floor: tagged `throughput`, run alone with `./gradlew throughputTest` (a shared Docker VM made it fail spuriously). */
+    @Tag("throughput")
     @Test fun `a processor reads thousands of events end to end without falling behind the old consumer`() {
         val total = 10_000
         KafkaProducer(

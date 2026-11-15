@@ -76,8 +76,11 @@ internal class RabbitSubscription private constructor(
 
     @Volatile private var broken: EventStoreException.Failed? = null
 
-    /** Stored-offset reads and read-backs, never on a data connection (whose thread may be the one waiting). */
-    private lateinit var control: Client
+    /**
+     * Stored-offset reads and read-backs, on each stream's leader but never on a data connection (whose thread may be the one
+     * waiting); also the layout and the leaders at join.
+     */
+    private val offsets = RabbitReads(connector)
 
     /** One data connection (to one leader node) and the partitions it consumes, by subscription id. */
     private inner class DataConn(node: Client.Broker) {
@@ -85,8 +88,9 @@ internal class RabbitSubscription private constructor(
         val byId = HashMap<Byte, PartState>()
         var nextId = 0
         val client: Client = connector.node(node) { p ->
-            p.chunkListener { client, id, _, _, _ -> chunk(client, id); null }
+            p.chunkListener { client, id, offset, count, _ -> chunk(client, id, offset, count); null }
             p.messageListener { id, offset, timestamp, _, _, message -> message(id, offset, timestamp, message) }
+            p.messageIgnoredListener { id, _, _, _, _ -> part(id)?.chunks?.arrived() }
             p.consumerUpdateListener { _, id, active -> update(id, active) }
             p.shutdownListener { context -> if (!closing) broke("the connection to $label closed (${context.shutdownReason})") }
             p.metadataListener { stream, code ->
@@ -96,8 +100,14 @@ internal class RabbitSubscription private constructor(
 
         fun part(id: Byte): PartState? = lock.withLock { byId[id] }
 
-        private fun chunk(client: Client, id: Byte) {
+        private fun chunk(client: Client, id: Byte, first: Long, count: Long) {
             val part = part(id) ?: return
+            part.chunks.started(first, count)?.let { gap ->
+                // The client could not hand out every message of the last chunk (checksum, decoding, a listener error: it only logs
+                // them): acknowledgements must never pass the gap, so the subscription ends.
+                broke("${part.stream}: $gap")
+                return
+            }
             val credit = lock.withLock {
                 // A chunk that came while not active (sent just before a deactivation) is dropped; its credit is given back so the
                 // broker can send again once this consumer is active.
@@ -110,6 +120,8 @@ internal class RabbitSubscription private constructor(
 
         private fun message(id: Byte, offset: Long, timestamp: Long, message: com.rabbitmq.stream.Message) {
             val part = part(id) ?: return
+            part.chunks.arrived()
+            if (broken != null) return
             val added = lock.withLock {
                 if (!part.active || offset < part.next) return@withLock false
                 part.ready.addLast(RabbitWire.delivery(part.segment, offset, timestamp, message))
@@ -128,6 +140,9 @@ internal class RabbitSubscription private constructor(
 
     /** One partition stream: what it received, handed out and acknowledged in its current activation. */
     private class PartState(val segment: String, val stream: String, val conn: DataConn, val id: Byte) {
+        /** Whether every message of each chunk came (only the data connection's delivery thread touches it). */
+        val chunks = ChunkTracker()
+
         var active = false
 
         /** The next offset taken from the broker (a chunk may start before it). */
@@ -190,7 +205,7 @@ internal class RabbitSubscription private constructor(
 
     private fun activate(conn: DataConn, id: Byte, part: PartState): OffsetSpecification {
         val stored = try {
-            RabbitConnector.storedOffset(control, name, part.stream)
+            offsets.storedOffset(name, part.stream)
         } catch (e: EventStoreException) {
             // Never from the first offset on a failed read (the whole partition again, its markers maybe purged): the subscription
             // ends and the core subscribes again.
@@ -263,7 +278,11 @@ internal class RabbitSubscription private constructor(
 
     // --------------------------------------------------------------------------------------------- offsets stored
 
-    /** Stores the acknowledged offset of [part] if it moved (the broker applies it asynchronously). */
+    /**
+     * Stores the acknowledged offset of [part] if it moved (the broker applies it asynchronously). A periodic store still in
+     * flight when the partition moves away may land after the deactivation's store and lower the next owner's offset: that owner
+     * then redelivers what was acknowledged in between (duplicates the processed-event markers skip), never loses an event.
+     */
     private fun store(part: PartState) {
         val acked = lock.withLock {
             val acked = part.acked?.takeIf { part.active && part.lastStored.let { s -> s == null || s < it } } ?: return
@@ -287,7 +306,13 @@ internal class RabbitSubscription private constructor(
     private fun flush(part: PartState) {
         val (acked, stored) = lock.withLock { part.acked?.takeIf { part.active }?.let { it to (part.lastStored == it) } } ?: return
         try {
-            RabbitConnector.storeAndConfirm(part.conn.client, control, name, part.stream, acked, STORE_WAIT, store = !stored)
+            try {
+                offsets.storeAndConfirm(part.conn.client, name, part.stream, acked, STORE_WAIT, store = !stored)
+            } catch (e: EventStoreException) {
+                // A periodic store that was taken for done may never have reached the broker: store it, then read it back.
+                if (!stored) throw e
+                offsets.storeAndConfirm(part.conn.client, name, part.stream, acked, STORE_WAIT, store = true)
+            }
             lock.withLock {
                 part.lastStored = acked
                 part.unstored = 0
@@ -393,7 +418,7 @@ internal class RabbitSubscription private constructor(
                 for (id in lock.withLock { conn.byId.keys.toList() }) runCatching { conn.client.unsubscribe(id) }
                 runCatching { conn.client.close() }
             }
-            if (::control.isInitialized) runCatching { control.close() }
+            offsets.close()
             onClose()
             signal.trySend(Unit)
         }
@@ -402,14 +427,13 @@ internal class RabbitSubscription private constructor(
     // ------------------------------------------------------------------------------------------------ joining
 
     private fun join() {
-        control = connector.seed()
-        val layout = RabbitConnector.layout(control, spec.source) ?: throw EventStoreException.Failed(
+        val layout = offsets.layout(spec.source) ?: throw EventStoreException.Failed(
             "rabbitmq: neither a super stream nor a stream named ${spec.source} exists: create it " +
                 "(rabbitmq-streams add_super_stream ${spec.source} --partitions 6)",
         )
         val superStream = !(layout.size == 1 && layout[0].stream == spec.source)
         for (p in layout.sortedWith(compareBy(SegmentOrder) { it.segment })) {
-            val leader = RabbitConnector.leader(control, p.stream)
+            val leader = RabbitConnector.leader(offsets.control(), p.stream)
             val conn = lock.withLock { conns.firstOrNull { it.label == "${leader.host}:${leader.port}" && it.nextId <= MAX_SUBSCRIPTION_ID } }
                 ?: DataConn(leader).also { lock.withLock { conns += it } }
             val id = (conn.nextId++).toByte()
@@ -446,19 +470,17 @@ internal class RabbitSubscription private constructor(
 
     /** Every [STATUS_REFRESH] (sooner until every active partition's end is known): the end of each active partition. */
     private suspend fun refresh() {
-        var reads: RabbitReads? = null
+        val reads = RabbitReads(connector)
         try {
             while (scope.isActive) {
                 val active = lock.withLock { parts.filter { it.active } }
                 var allKnown = active.isNotEmpty()
                 for (part in active) {
+                    // A partition holding only offset-tracking entries is found empty once, then not read again until it changes.
                     val head = try {
-                        val r = reads?.takeIf { it.isOpen } ?: RabbitReads(connector).also { reads = it }
-                        if (r.firstOffset(part.stream) == null) 0L else r.head(part.stream, HEAD_WAIT)
+                        reads.bounds(part.stream).head
                     } catch (e: EventStoreException) {
                         log.debug("Subscription {}: the end of {} was not read: {}", name, part.stream, e.message)
-                        reads?.close()
-                        reads = null
                         null
                     }
                     lock.withLock {
@@ -469,7 +491,7 @@ internal class RabbitSubscription private constructor(
                 delay(if (allKnown) STATUS_REFRESH.toMillis() else STATUS_FIRST.toMillis())
             }
         } finally {
-            reads?.close()
+            reads.close()
         }
     }
 
@@ -488,9 +510,6 @@ internal class RabbitSubscription private constructor(
 
         /** Until every active partition's end is known: how long between two reads. */
         private val STATUS_FIRST: Duration = Duration.ofMillis(500)
-
-        /** How long the last chunk of a partition that has some may take to come. */
-        private val HEAD_WAIT: Duration = Duration.ofSeconds(5)
 
         /** Subscription ids are one byte per connection: past the last one another connection to the node is opened. */
         private const val MAX_SUBSCRIPTION_ID = 255

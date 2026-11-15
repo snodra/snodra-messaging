@@ -4,7 +4,6 @@ import com.rabbitmq.stream.Codec
 import com.rabbitmq.stream.Message
 import com.rabbitmq.stream.amqp.Symbol
 import com.rabbitmq.stream.codec.InternalCodec
-import com.rabbitmq.stream.impl.HashUtils
 import io.damoreira.kraken.messaging.eventstore.Delivery
 import io.damoreira.kraken.messaging.eventstore.OutgoingEvent
 import io.netty.buffer.Unpooled
@@ -21,7 +20,7 @@ internal object RabbitWire {
     /** The content type every event carries (AMQP `properties.content-type`). */
     const val CONTENT_TYPE = "application/json"
 
-    /** The seed of the partition hash: the stream clients' hash routing (murmur3 x86_32), [HashUtils.MURMUR3]'s. */
+    /** The seed of the partition hash: the stream clients' hash routing (murmur3 x86_32 with this seed). */
     const val HASH_SEED = 104_729
 
     /** The segment of a source that is one plain stream (a dead-letter stream). */
@@ -33,10 +32,48 @@ internal object RabbitWire {
     /**
      * The index of the partition an event with [routingKey] goes to among [partitions] partitions (in the order the broker lists
      * the super stream's partitions): murmur3 x86_32 of the key's UTF-8 bytes with seed [HASH_SEED], as an unsigned number,
-     * modulo the count. Exactly the Java client's `HashRoutingStrategy` (its hash, `Integer.remainderUnsigned`).
+     * modulo the count. Exactly what the Java client's `HashRoutingStrategy` computes (its hash, `Integer.remainderUnsigned`).
      */
     fun partitionIndex(routingKey: String, partitions: Int): Int =
-        Integer.remainderUnsigned(HashUtils.MURMUR3.applyAsInt(routingKey), maxOf(1, partitions))
+        Integer.remainderUnsigned(murmur3(routingKey.toByteArray(Charsets.UTF_8), HASH_SEED), maxOf(1, partitions))
+
+    /** MurmurHash3 x86_32 of [data] with [seed] (Austin Appleby's reference algorithm). */
+    fun murmur3(data: ByteArray, seed: Int): Int {
+        val c1 = -0x3361d2af // 0xcc9e2d51
+        val c2 = 0x1b873593
+        var h = seed
+        val blocks = data.size / 4
+        for (i in 0 until blocks) {
+            val at = i * 4
+            var k = (data[at].toInt() and 0xff) or ((data[at + 1].toInt() and 0xff) shl 8) or
+                ((data[at + 2].toInt() and 0xff) shl 16) or ((data[at + 3].toInt() and 0xff) shl 24)
+            k *= c1
+            k = Integer.rotateLeft(k, 15)
+            k *= c2
+            h = h xor k
+            h = Integer.rotateLeft(h, 13)
+            h = h * 5 + -0x19ab949c // 0xe6546b64
+        }
+        val tail = blocks * 4
+        var k = 0
+        val rest = data.size and 3
+        if (rest >= 3) k = k xor ((data[tail + 2].toInt() and 0xff) shl 16)
+        if (rest >= 2) k = k xor ((data[tail + 1].toInt() and 0xff) shl 8)
+        if (rest >= 1) {
+            k = k xor (data[tail].toInt() and 0xff)
+            k *= c1
+            k = Integer.rotateLeft(k, 15)
+            k *= c2
+            h = h xor k
+        }
+        h = h xor data.size
+        h = h xor (h ushr 16)
+        h *= -0x7a143595 // 0x85ebca6b
+        h = h xor (h ushr 13)
+        h *= -0x3d4d51cb // 0xc2b2ae35
+        h = h xor (h ushr 16)
+        return h
+    }
 
     /** The routing key of [event]: its key, or its id when it has none (an unkeyed event is spread over the partitions by its id). */
     fun routingKey(event: OutgoingEvent): String = event.key ?: event.id
@@ -84,6 +121,10 @@ internal object RabbitWire {
         val payload = runCatching { message.bodyAsBinary }.getOrNull() ?: ByteArray(0)
         return Delivery(segment, offset.toString(), keyOf(message), headers, payload, timestampMs)
     }
+
+    /** Whether [segment] fits the protocol's bound (1 to [io.damoreira.kraken.messaging.eventstore.MAX_SEGMENT_BYTES] bytes). */
+    fun segmentFits(segment: String): Boolean =
+        segment.isNotEmpty() && segment.toByteArray(Charsets.UTF_8).size <= io.damoreira.kraken.messaging.eventstore.MAX_SEGMENT_BYTES
 
     /** The segment of partition stream [stream] of super stream [source]: the suffix after `<source>-` (`kraken.events-3` is `3`), else the stream's whole name. */
     fun segmentOf(source: String, stream: String): String {

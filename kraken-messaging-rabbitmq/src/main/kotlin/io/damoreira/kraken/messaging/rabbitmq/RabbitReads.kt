@@ -7,120 +7,213 @@ import java.time.Duration
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 
-/** A stream's offsets: the first one ([first], a chunk's first offset) and the one after its last event ([head]). */
-internal data class Bounds(val first: Long, val head: Long)
+/**
+ * A stream's offsets: the first one ([first], a chunk's first offset), the one after its last event ([head]), and the time of its
+ * last chunk of events ([lastTimestampMs], null when it holds no event).
+ */
+internal data class Bounds(val first: Long, val head: Long, val lastTimestampMs: Long?) {
+    companion object {
+        val EMPTY = Bounds(0, 0, null)
+    }
+}
+
+/** One chunk of events as a read sees it: its first offset, its records and its time. */
+internal data class ChunkRead(val first: Long, val count: Long, val timestampMs: Long)
 
 /**
- * Reads what the stream protocol has no command for, by reading chunks on a connection of its own (one read at a time):
- * where a stream ends (the last chunk of events: its first offset plus its messages; offset-tracking entries also take offsets,
- * so the committed offset of the stream statistics may lie past the last event) and the first chunk written at or after a time.
- * Whether a stream holds anything comes from its statistics (`first_chunk_id`), never from silence.
+ * What decides correctness — stored offsets, stream statistics, the first and last chunk of events, the chunk at a time — read on
+ * each stream's **leader** (a replica catching up could answer stale: "empty", "no offset"); the source's layout and the streams'
+ * leaders come from a control connection to the first configured host that answers. One read at a time; connections are opened
+ * on first use and kept until [close].
+ *
+ * Offset-tracking entries take offsets too: the head is read from the last chunk of events (the statistics' committed offset may
+ * lie past it), and a stream whose statistics show chunks but whose first and last reads both bring no event within [QUIET] holds
+ * only tracking entries (empty of events); one read answering and the other not is a failure, never "empty".
  */
-internal class RabbitReads(connector: RabbitConnector) : AutoCloseable {
+internal class RabbitReads(private val connector: RabbitConnector) : AutoCloseable {
     private class Chunk(val first: Long, val count: Long) {
         @Volatile var seen = false
     }
 
-    private class Read(val first: Long, val count: Long, val timestampMs: Long)
-
-    private val reads = LinkedBlockingQueue<Read>()
-
-    private val client: Client = connector.seed { p ->
-        p.chunkListener { _, _, offset, count, _ -> Chunk(offset, count) }
-        p.messageListener { _, _, timestamp, _, context, _ ->
-            val chunk = context as Chunk
-            if (!chunk.seen) {
-                chunk.seen = true
-                reads.add(Read(chunk.first, chunk.count, timestamp))
+    /** One leader node's connection and what its reads receive. */
+    private inner class Node(val node: Client.Broker) {
+        val reads = LinkedBlockingQueue<ChunkRead>()
+        val client: Client = connector.node(node) { p ->
+            p.chunkListener { _, _, offset, count, _ -> Chunk(offset, count) }
+            p.messageListener { _, _, timestamp, _, context, _ ->
+                val chunk = context as Chunk
+                if (!chunk.seen) {
+                    chunk.seen = true
+                    reads.add(ChunkRead(chunk.first, chunk.count, timestamp))
+                }
             }
         }
     }
 
-    val isOpen: Boolean get() = client.isOpen
+    private var control: Client? = null
+    private val nodes = HashMap<Pair<String, Int>, Node>()
 
-    /** The statistics' first offset of [stream]; null when it holds no chunk. */
     @Synchronized
-    fun firstOffset(stream: String): Long? {
+    fun control(): Client = control?.takeIf { it.isOpen } ?: connector.seed().also { control = it }
+
+    /** The partitions of [source] (see [RabbitConnector.layout]). */
+    @Synchronized
+    fun layout(source: String): List<Part>? = guarded { RabbitConnector.layout(control(), source) }
+
+    /** The connection to the leader of [stream]. */
+    @Synchronized
+    fun leader(stream: String): Client = node(stream).client
+
+    private fun node(stream: String): Node = guarded {
+        val leader = RabbitConnector.leader(control(), stream)
+        val key = leader.host to leader.port
+        nodes[key]?.takeIf { it.client.isOpen } ?: Node(leader).also { nodes[key] = it }
+    }
+
+    /** The offset stored under [reference] on [stream], read on its leader; null when none. */
+    @Synchronized
+    fun storedOffset(reference: String, stream: String): Long? = guarded { RabbitConnector.storedOffset(leader(stream), reference, stream) }
+
+    /** Stores [offset] through [writer] (unless [store] is false) and reads it back on the leader (see [RabbitConnector.storeAndConfirm]). */
+    @Synchronized
+    fun storeAndConfirm(writer: Client?, reference: String, stream: String, offset: Long, wait: Duration, store: Boolean = true) = guarded {
+        val leader = leader(stream)
+        RabbitConnector.storeAndConfirm(writer ?: leader, leader, reference, stream, offset, wait, store)
+    }
+
+    /** The statistics of [stream] on its leader: its first chunk's offset (null when it holds no chunk) and its committed chunk id. */
+    @Synchronized
+    fun stats(stream: String): Pair<Long?, Long?> = guarded {
         val response = try {
-            client.streamStats(stream)
+            leader(stream).streamStats(stream)
+        } catch (e: EventStoreException) {
+            throw e
         } catch (e: Exception) {
             throw EventStoreException.Failed("rabbitmq: the statistics of $stream: ${e.message}", e)
         }
         if (!response.isOk) throw EventStoreException.Failed("rabbitmq: the statistics of $stream: ${RabbitConnector.codeName(response.responseCode)}")
-        return response.info["first_chunk_id"]?.takeIf { it >= 0 }
+        response.info["first_chunk_id"]?.takeIf { it >= 0 } to response.info["committed_chunk_id"]?.takeIf { it >= 0 }
     }
 
-    /**
-     * The bounds of [stream]: (0, 0) when it holds nothing; else its first offset and the end of its last chunk of events, read
-     * within [wait]. [EventStoreException.Failed] when that chunk does not come (it never says "empty" from silence).
-     */
+    /** The bounds of [stream], read on its leader (see the class docs); [EventStoreException.Failed] on a mixed answer. */
     @Synchronized
-    fun bounds(stream: String, wait: Duration): Bounds {
-        val first = firstOffset(stream) ?: return Bounds(0, 0)
-        val head = head(stream, wait)
-            ?: throw EventStoreException.Failed("rabbitmq: the last chunk of $stream did not come within $wait (it has chunks: $first on)")
-        return Bounds(first, maxOf(first, head))
-    }
-
-    /** The end of the last chunk of events of [stream] (its first offset plus its messages), null when none came within [wait]. */
-    @Synchronized
-    fun head(stream: String, wait: Duration): Long? {
-        var head: Long? = null
-        read(stream, OffsetSpecification.last(), wait) { r ->
-            head = r.first + r.count
-            false
+    fun bounds(stream: String): Bounds {
+        val (first, committed) = stats(stream)
+        if (first == null) return Bounds.EMPTY
+        val key = node(stream).node.let { "${it.host}:${it.port}/$stream" } // the same name on another broker is another stream
+        val known = eventless[key]
+        if (committed != null && known == committed) return Bounds.EMPTY
+        // Known event-less and chunks added since: an event among them would be the last chunk of events, so one read tells.
+        val lastRead = readOne(stream, OffsetSpecification.last())
+        if (known != null && lastRead == null) {
+            if (committed != null) eventless[key] = committed
+            return Bounds.EMPTY
         }
-        return head
+        val firstRead = readOne(stream, OffsetSpecification.first())
+        val bounds = boundsOf(stream, first, firstRead, lastRead)
+        if (bounds == Bounds.EMPTY && committed != null) eventless[key] = committed
+        return bounds
     }
 
     /**
-     * The offset of the first chunk of [stream] written at or after [timestampMs] (epoch milliseconds, the chunk's time), else
-     * [bounds]' head. A time reads at most [wait], and once [QUIET] passes without a chunk the rest is not events: the head.
+     * The first offset of [stream] whose chunk was written at or after [timestampMs], read on its leader; the head when its last
+     * chunk of events is older (no read). A read that does not come within [wait] is [EventStoreException.Failed].
      */
     @Synchronized
     fun offsetAt(stream: String, timestampMs: Long, bounds: Bounds, wait: Duration): Long {
-        if (bounds.head <= bounds.first) return bounds.head
-        var found = bounds.head
-        val deadline = System.nanoTime() + wait.toNanos()
-        read(stream, OffsetSpecification.timestamp(timestampMs), QUIET) { r ->
-            if (System.nanoTime() > deadline) throw EventStoreException.Failed("rabbitmq: the time $timestampMs in $stream: not found within $wait")
-            when {
-                r.timestampMs >= timestampMs -> { found = r.first; false }
-                r.first + r.count >= bounds.head -> false
-                else -> true
-            }
-        }
-        return found
+        val node = node(stream)
+        return offsetAt(stream, timestampMs, bounds) { first ->
+            if (first) subscribe(node, stream, OffsetSpecification.timestamp(timestampMs)) else credit(node)
+            node.reads.poll(wait.toMillis(), TimeUnit.MILLISECONDS)
+        }.also { unsubscribe(node) }
     }
 
-    /** Reads [stream] from [from], one chunk at a time, while [more] says so; returns when a chunk does not come within [quiet]. */
-    private fun read(stream: String, from: OffsetSpecification, quiet: Duration, more: (Read) -> Boolean) {
-        reads.clear()
+    private fun readOne(stream: String, from: OffsetSpecification): ChunkRead? {
+        val node = node(stream)
+        subscribe(node, stream, from)
+        try {
+            return node.reads.poll(QUIET.toMillis(), TimeUnit.MILLISECONDS)
+        } finally {
+            unsubscribe(node)
+        }
+    }
+
+    private fun subscribe(node: Node, stream: String, from: OffsetSpecification) {
+        node.reads.clear()
         val response = try {
-            client.subscribe(SUBSCRIPTION, stream, from, 1)
+            node.client.subscribe(SUBSCRIPTION, stream, from, 1)
         } catch (e: Exception) {
             throw EventStoreException.Failed("rabbitmq: reading $stream: ${e.message}", e)
         }
         if (!response.isOk) throw EventStoreException.Failed("rabbitmq: reading $stream: ${RabbitConnector.codeName(response.responseCode)}")
-        try {
-            while (true) {
-                val r = reads.poll(quiet.toMillis(), TimeUnit.MILLISECONDS) ?: return
-                if (!more(r)) return
-                client.credit(SUBSCRIPTION, 1)
-            }
-        } finally {
-            runCatching { client.unsubscribe(SUBSCRIPTION) }
-        }
     }
 
-    override fun close() {
-        runCatching { client.close() }
+    private fun credit(node: Node) = try {
+        node.client.credit(SUBSCRIPTION, 1)
+    } catch (e: Exception) {
+        throw EventStoreException.Failed("rabbitmq: reading: ${e.message}", e)
     }
+
+    private fun unsubscribe(node: Node) {
+        runCatching { node.client.unsubscribe(SUBSCRIPTION) }
+    }
+
+    /** A connection that failed is dropped (opened again on next use). */
+    private fun <T> guarded(block: () -> T): T = try {
+        block()
+    } catch (e: EventStoreException.Failed) {
+        drop()
+        throw e
+    }
+
+    private fun drop() {
+        control?.let { runCatching { it.close() } }
+        control = null
+        nodes.values.forEach { runCatching { it.client.close() } }
+        nodes.clear()
+    }
+
+    @Synchronized
+    override fun close() = drop()
 
     companion object {
-        /** How long a read by time waits for the next chunk before the rest is taken for no events. */
+        /** How long a read of the first or last chunk waits before it is taken for "no event". */
         val QUIET: Duration = Duration.ofMillis(1500)
 
         private const val SUBSCRIPTION: Byte = 0
+
+        /**
+         * Streams found empty of events (only offset-tracking entries), with the statistics' committed chunk id then, for the whole
+         * process: not read again (two quiet reads) until a chunk is added.
+         */
+        private val eventless = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+        /**
+         * The bounds of [stream] whose statistics show chunks from [first] on: empty of events when neither read brought a chunk
+         * of events (only tracking entries), a failure when one did and the other did not.
+         */
+        fun boundsOf(stream: String, first: Long, firstRead: ChunkRead?, lastRead: ChunkRead?): Bounds = when {
+            firstRead == null && lastRead == null -> Bounds.EMPTY
+            firstRead == null || lastRead == null -> throw EventStoreException.Failed(
+                "rabbitmq: $stream answered one of its first and last chunks and not the other within $QUIET",
+            )
+            else -> Bounds(first, maxOf(first, lastRead.first + lastRead.count), lastRead.timestampMs)
+        }
+
+        /**
+         * The offset at [timestampMs] (see the instance method) from the chunks [next] reads (true for the first read); a read that
+         * brings nothing is a failure, never the head.
+         */
+        fun offsetAt(stream: String, timestampMs: Long, bounds: Bounds, next: (Boolean) -> ChunkRead?): Long {
+            val last = bounds.lastTimestampMs
+            if (last == null || last < timestampMs) return bounds.head
+            var first = true
+            while (true) {
+                val chunk = next(first) ?: throw EventStoreException.Failed("rabbitmq: reading $stream at the time $timestampMs: no answer in time")
+                first = false
+                if (chunk.timestampMs >= timestampMs) return maxOf(chunk.first, bounds.first)
+                if (chunk.first + chunk.count >= bounds.head) return bounds.head
+            }
+        }
     }
 }

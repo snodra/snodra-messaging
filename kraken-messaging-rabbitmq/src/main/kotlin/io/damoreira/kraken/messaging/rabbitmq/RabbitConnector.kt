@@ -14,7 +14,7 @@ internal data class Part(val segment: String, val stream: String)
  * answers), or to the node a stream's leader is on, as the broker advertises it (with a load balancer: through the hosts until
  * the connection lands on that node). Every connection carries [connectionName] and every request is bounded by [RPC_TIMEOUT].
  */
-internal class RabbitConnector(private val settings: RabbitEventStoreSettings, private val connectionName: String) {
+internal open class RabbitConnector(private val settings: RabbitEventStoreSettings, private val connectionName: String) {
     private val ssl = if (settings.tls) {
         SslContextBuilder.forClient().trustManager(settings.tlsCaFile!!.toFile()).endpointIdentificationAlgorithm("HTTPS").build()
     } else {
@@ -32,11 +32,14 @@ internal class RabbitConnector(private val settings: RabbitEventStoreSettings, p
         ssl?.let(parameters::sslContext)
         configure(parameters)
         return try {
-            Client(parameters)
+            newClient(host, port, parameters)
         } catch (e: Exception) {
             throw EventStoreException.Failed("rabbitmq: cannot connect to $host:$port: ${e.message ?: e::class.java.simpleName}", e)
         }
     }
+
+    /** Opens the connection (a test double records which node each call goes to). */
+    protected open fun newClient(host: String, port: Int, parameters: Client.ClientParameters): Client = Client(parameters)
 
     /** A connection to the first configured host that answers. */
     fun seed(configure: (Client.ClientParameters) -> Unit = {}): Client {
@@ -56,7 +59,13 @@ internal class RabbitConnector(private val settings: RabbitEventStoreSettings, p
         if (!settings.loadBalancer) return connect(node.host, node.port, configure)
         repeat(LOAD_BALANCER_TRIES) {
             val client = seed(configure)
-            if (advertised(client) == node.host to node.port) return client
+            val landed = try {
+                advertised(client)
+            } catch (e: Exception) {
+                runCatching { client.close() }
+                throw EventStoreException.Failed("rabbitmq: the node a connection landed on cannot be read: ${e.message}", e)
+            }
+            if (landed == node.host to node.port) return client
             runCatching { client.close() }
         }
         throw EventStoreException.Failed("rabbitmq: the load balancer did not reach the node $node in $LOAD_BALANCER_TRIES tries")
@@ -75,8 +84,12 @@ internal class RabbitConnector(private val settings: RabbitEventStoreSettings, p
          */
         fun advertised(client: Client): Pair<String, Int> {
             fun call(name: String) = Client::class.java.getDeclaredMethod(name).apply { isAccessible = true }.invoke(client)
-            return call("serverAdvertisedHost") as String to (call("serverAdvertisedPort") as Int)
+            return call(ADVERTISED_HOST) as String to (call(ADVERTISED_PORT) as Int)
         }
+
+        /** The client's package-private methods [advertised] calls. */
+        const val ADVERTISED_HOST = "serverAdvertisedHost"
+        const val ADVERTISED_PORT = "serverAdvertisedPort"
 
         /**
          * The partitions of [source] on [control]: a super stream's partition streams in the broker's order (segment: the suffix),
@@ -88,7 +101,15 @@ internal class RabbitConnector(private val settings: RabbitEventStoreSettings, p
             } catch (e: Exception) {
                 throw EventStoreException.Failed("rabbitmq: the partitions of $source: ${e.message}", e)
             }
-            if (partitions.isNotEmpty()) return partitions.map { Part(RabbitWire.segmentOf(source, it), it) }
+            if (partitions.isNotEmpty()) {
+                return partitions.map { stream ->
+                    val segment = RabbitWire.segmentOf(source, stream)
+                    if (!RabbitWire.segmentFits(segment)) {
+                        throw EventStoreException.Invalid("the partition $stream of $source makes a segment name over 128 bytes")
+                    }
+                    Part(segment, stream)
+                }
+            }
             val metadata = metadata(control, source)
             return if (metadata.isResponseOk) listOf(Part(RabbitWire.SINGLE_SEGMENT, source)) else null
         }

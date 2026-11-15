@@ -1,6 +1,5 @@
 package io.damoreira.kraken.messaging.rabbitmq
 
-import com.rabbitmq.stream.impl.Client
 import io.damoreira.kraken.messaging.eventstore.EventStoreException
 import io.damoreira.kraken.messaging.eventstore.ReplayRange
 import io.damoreira.kraken.messaging.eventstore.ResetTarget
@@ -28,20 +27,20 @@ internal class RabbitSubscriptionAdmin(
     /** One partition with its offsets as they are now. */
     private class Now(val part: Part, val stored: Long?, val bounds: Bounds)
 
-    override suspend fun members(): List<String> = call { control, _ -> membersOf(control) }
+    override suspend fun members(): List<String> = call { reads -> membersOf(reads) }
 
-    private fun membersOf(control: Client): List<String> {
-        val streams = layout(control).map { it.stream }
+    private fun membersOf(reads: RabbitReads): List<String> {
+        val streams = layout(reads).map { it.stream }
         return (management.members(spec.name, streams) + live.members(spec)).toSortedSet().toList()
     }
 
-    override suspend fun plan(target: ResetTarget): List<ReplayRange> = call { control, reads ->
-        val now = now(control, reads)
+    override suspend fun plan(target: ResetTarget): List<ReplayRange> = call { reads ->
+        val now = now(reads)
         fun range(n: Now, from: Long) = ReplayRange(spec.source, n.part.segment, from.toString(), n.stored?.toString().orEmpty())
         when (target) {
             ResetTarget.Earliest -> now.map { range(it, it.bounds.first) }
             ResetTarget.Latest -> now.map { range(it, it.bounds.head) }
-            is ResetTarget.Timestamp -> now.map { range(it, reads.offsetAt(it.part.stream, target.timestampMs, it.bounds, CALL_BUDGET)) }
+            is ResetTarget.Timestamp -> now.map { range(it, reads.offsetAt(it.part.stream, target.timestampMs, it.bounds, READ_WAIT)) }
             is ResetTarget.Positions -> {
                 if (target.positions.isEmpty()) throw EventStoreException.Invalid("the target lists no segment")
                 target.positions.map { (segment, position) ->
@@ -52,22 +51,22 @@ internal class RabbitSubscriptionAdmin(
         }
     }
 
-    override suspend fun apply(ranges: List<ReplayRange>): Unit = call { control, reads ->
+    override suspend fun apply(ranges: List<ReplayRange>): Unit = call { reads ->
         if (ranges.isEmpty()) return@call
-        val members = membersOf(control)
+        val members = membersOf(reads)
         if (members.isNotEmpty()) throw EventStoreException.SubscribersActive(members.joinToString())
-        val now = now(control, reads)
+        val now = now(reads)
         val moves = LinkedHashMap<String, Long>()
         for (r in ranges) {
             if (r.source != spec.source) throw EventStoreException.Invalid("segment ${r.segment} is of ${r.source}, not of ${spec.source}")
             val n = now.firstOrNull { it.part.segment == r.segment } ?: throw EventStoreException.Invalid("${spec.source} has no segment ${r.segment}")
             if (moves.put(n.part.stream, checked(n, r.from)) != null) throw EventStoreException.Invalid("segment ${r.segment} is moved twice")
         }
-        for ((stream, from) in moves) RabbitConnector.storeAndConfirm(control, control, spec.name, stream, from, STORE_WAIT)
+        for ((stream, from) in moves) reads.storeAndConfirm(null, spec.name, stream, from, STORE_WAIT)
         // Read back once all are stored: an instance that joined meanwhile and stored its own position undoes the reset, which
         // then fails.
         for ((stream, from) in moves) {
-            val stored = RabbitConnector.storedOffset(control, spec.name, stream)
+            val stored = reads.storedOffset(spec.name, stream)
             if (stored != from) {
                 throw EventStoreException.SubscribersActive(
                     "the offset of ${spec.name} on $stream is $stored after the reset stored $from: an instance read and stored meanwhile",
@@ -76,13 +75,13 @@ internal class RabbitSubscriptionAdmin(
         }
     }
 
-    private fun layout(control: Client): List<Part> =
-        (RabbitConnector.layout(control, spec.source) ?: throw EventStoreException.Invalid("the source ${spec.source} does not exist"))
+    private fun layout(reads: RabbitReads): List<Part> =
+        (reads.layout(spec.source) ?: throw EventStoreException.Invalid("the source ${spec.source} does not exist"))
             .sortedWith(compareBy(SegmentOrder) { it.segment })
 
-    private fun now(control: Client, reads: RabbitReads): List<Now> = layout(control).map { part ->
-        val stored = RabbitConnector.storedOffset(control, spec.name, part.stream)
-        val bounds = reads.bounds(part.stream, HEAD_WAIT)
+    private fun now(reads: RabbitReads): List<Now> = layout(reads).map { part ->
+        val stored = reads.storedOffset(spec.name, part.stream)
+        val bounds = reads.bounds(part.stream)
         if (stored != null && stored > bounds.head) {
             // The stored offset past the end read: one of the two is wrong, so nothing is planned from them.
             throw EventStoreException.Failed("rabbitmq: the offset stored for ${spec.name} on ${part.stream} ($stored) is past its end (${bounds.head})")
@@ -98,17 +97,10 @@ internal class RabbitSubscriptionAdmin(
         return offset
     }
 
-    /** Runs [block] off the caller's thread with connections of its own, closed after, within [CALL_BUDGET]. */
-    private suspend fun <T> call(block: (Client, RabbitReads) -> T): T = try {
+    /** Runs [block] off the caller's thread with connections of its own (to each stream's leader), closed after, within [CALL_BUDGET]. */
+    private suspend fun <T> call(block: (RabbitReads) -> T): T = try {
         withTimeout(CALL_BUDGET.toMillis()) {
-            runInterruptible(Dispatchers.IO) {
-                val control = connector.seed()
-                try {
-                    RabbitReads(connector).use { reads -> block(control, reads) }
-                } finally {
-                    runCatching { control.close() }
-                }
-            }
+            runInterruptible(Dispatchers.IO) { RabbitReads(connector).use(block) }
         }
     } catch (e: TimeoutCancellationException) {
         throw EventStoreException.Failed("rabbitmq: the reset side of ${spec.name} took over $CALL_BUDGET")
@@ -118,11 +110,11 @@ internal class RabbitSubscriptionAdmin(
         /** The longest one admin call may take. */
         val CALL_BUDGET: Duration = Duration.ofSeconds(20)
 
+        /** How long one chunk of a read by time may take to come. */
+        val READ_WAIT: Duration = Duration.ofSeconds(5)
+
         /** How long a moved offset may take to be read back. */
         val STORE_WAIT: Duration = Duration.ofSeconds(5)
-
-        /** How long the last chunk of a partition that has some may take to come. */
-        val HEAD_WAIT: Duration = Duration.ofSeconds(5)
     }
 }
 

@@ -10,7 +10,9 @@ dependencies {
     implementation(platform("org.springframework.boot:spring-boot-dependencies:${libs.versions.spring.boot.get()}"))
     // RabbitEventStore speaks the stream protocol through the RabbitMQ Stream Java client's Client (see the class docs for why
     // not its Environment).
-    implementation(libs.rabbitmq.stream.client)
+    // Exactly this version (the add-on uses the client's internal Client): strictly, so Gradle consumers cannot resolve another;
+    // a service with Spring's dependency management sets rabbit-stream-client.version (see the README), checked at startup.
+    implementation(libs.rabbitmq.stream.client) { version { strictly(libs.versions.rabbitmq.stream.client.get()) } }
     implementation(libs.spring.boot.starter)
     // The management API's consumer list (capability replay) is JSON.
     implementation("tools.jackson.core:jackson-databind")

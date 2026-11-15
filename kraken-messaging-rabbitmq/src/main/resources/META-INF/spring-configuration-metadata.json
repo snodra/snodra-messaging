@@ -89,6 +89,13 @@
       "defaultValue": "5s"
     },
     {
+      "name": "kraken.messaging.rabbitmq.confirm-timeout",
+      "type": "java.time.Duration",
+      "description": "The longest a publish waits for the broker's confirm; a connection that confirms nothing within it is replaced and the publish retried by the outbox relay.",
+      "sourceType": "io.damoreira.kraken.messaging.rabbitmq.RabbitProperties",
+      "defaultValue": "30s"
+    },
+    {
       "name": "kraken.messaging.rabbitmq.management.url",
       "type": "java.lang.String",
       "description": "The RabbitMQ management API (http(s)://host:port, no credentials in it; plugin rabbitmq_stream_management, metrics collection on): declares the capability replay. Asked once at startup.",

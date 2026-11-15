@@ -26,7 +26,19 @@ subprojects {
             }
         }
     }
+    // Throughput floors are not part of `test`: on a shared Docker VM the rates mean nothing (and failed spuriously). Run them
+    // alone: ./gradlew throughputTest
     tasks.withType<Test>().configureEach {
-        useJUnitPlatform()
+        useJUnitPlatform { if (name != "throughputTest") excludeTags("throughput") }
+    }
+    plugins.withId("java") {
+        val sourceSets = extensions.getByType<SourceSetContainer>()
+        tasks.register<Test>("throughputTest") {
+            description = "Runs the throughput floors (tag throughput) alone."
+            group = "verification"
+            testClassesDirs = sourceSets["test"].output.classesDirs
+            classpath = sourceSets["test"].runtimeClasspath
+            useJUnitPlatform { includeTags("throughput") }
+        }
     }
 }

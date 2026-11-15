@@ -4,6 +4,13 @@ import io.damoreira.kraken.messaging.eventstore.EventStoreException
 import tools.jackson.databind.JsonNode
 import tools.jackson.databind.json.JsonMapper
 import java.io.ByteArrayOutputStream
+import java.nio.ByteBuffer
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CompletionStage
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.Flow
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 import java.net.URI
 import java.net.URLEncoder
 import java.net.http.HttpClient
@@ -63,29 +70,62 @@ internal class RabbitManagement(settings: RabbitManagementSettings, streamUser: 
     private fun get(path: String): JsonNode {
         val request = HttpRequest.newBuilder(URI.create("$root/api/$path")).timeout(REQUEST_TIMEOUT)
             .header("Authorization", authorization).header("Accept", "application/json").GET().build()
+        // The whole exchange, the body included, within the request's deadline; the body at most MAX_ANSWER bytes.
+        val pending = http.sendAsync(request) { info -> BoundedBody(info.statusCode()) }
         val response = try {
-            http.send(request, HttpResponse.BodyHandlers.ofInputStream())
+            pending.get(REQUEST_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS)
+        } catch (e: TimeoutException) {
+            pending.cancel(true)
+            throw failed("$path: no whole answer within $REQUEST_TIMEOUT")
         } catch (e: InterruptedException) {
+            pending.cancel(true)
             Thread.currentThread().interrupt()
             throw failed("interrupted")
-        } catch (e: Exception) {
-            throw failed("$path: ${e::class.java.simpleName}: ${e.message}")
+        } catch (e: ExecutionException) {
+            val cause = e.cause ?: e
+            throw failed("$path: ${cause::class.java.simpleName}: ${cause.message}")
         }
-        response.body().use { body ->
-            if (response.statusCode() !in 200..299) throw failed("$path: HTTP ${response.statusCode()}")
-            val out = ByteArrayOutputStream()
-            val buffer = ByteArray(64 * 1024)
-            while (true) {
-                val n = body.read(buffer)
-                if (n < 0) break
-                if (out.size() + n > MAX_ANSWER) throw failed("$path: an answer over $MAX_ANSWER bytes")
-                out.write(buffer, 0, n)
+        if (response.statusCode() !in 200..299) throw failed("$path: HTTP ${response.statusCode()}")
+        return try {
+            mapper.readTree(response.body())
+        } catch (e: Exception) {
+            throw failed("$path: not JSON")
+        }
+    }
+
+    /** Collects a body of at most [MAX_ANSWER] bytes (a larger one fails); the body of a non-2xx answer is not kept. */
+    private class BoundedBody(private val status: Int) : HttpResponse.BodySubscriber<ByteArray> {
+        private val result = CompletableFuture<ByteArray>()
+        private val out = ByteArrayOutputStream()
+        private lateinit var subscription: Flow.Subscription
+
+        override fun getBody(): CompletionStage<ByteArray> = result
+
+        override fun onSubscribe(subscription: Flow.Subscription) {
+            this.subscription = subscription
+            subscription.request(Long.MAX_VALUE)
+        }
+
+        override fun onNext(item: List<ByteBuffer>) {
+            if (status !in 200..299) return
+            for (buffer in item) {
+                if (out.size() + buffer.remaining() > MAX_ANSWER) {
+                    subscription.cancel()
+                    result.completeExceptionally(IllegalStateException("an answer over $MAX_ANSWER bytes"))
+                    return
+                }
+                val bytes = ByteArray(buffer.remaining())
+                buffer.get(bytes)
+                out.write(bytes)
             }
-            return try {
-                mapper.readTree(out.toByteArray())
-            } catch (e: Exception) {
-                throw failed("$path: not JSON")
-            }
+        }
+
+        override fun onError(throwable: Throwable) {
+            result.completeExceptionally(throwable)
+        }
+
+        override fun onComplete() {
+            result.complete(out.toByteArray())
         }
     }
 

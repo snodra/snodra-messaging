@@ -29,6 +29,8 @@ data class RabbitProperties(
     val loadBalancer: Boolean = false,
     val offsetStoreMessages: Long = 10_000,
     val offsetStoreInterval: Duration = Duration.ofSeconds(5),
+    /** The longest a publish waits for the broker's confirm. */
+    val confirmTimeout: Duration = Duration.ofSeconds(30),
     val management: Management = Management(),
 ) {
     /** `kraken.messaging.rabbitmq.management.*`: the management API, which declares `replay`. */
@@ -55,6 +57,7 @@ data class RabbitProperties(
         loadBalancer = loadBalancer,
         offsetStoreMessages = offsetStoreMessages,
         offsetStoreInterval = offsetStoreInterval,
+        confirmTimeout = confirmTimeout,
         management = management.url?.takeIf { it.isNotBlank() }?.let {
             RabbitManagementSettings(it, management.username, secret(management.password, management.passwordFile), management.caFile)
         },
@@ -63,7 +66,7 @@ data class RabbitProperties(
     override fun toString(): String =
         "RabbitProperties(hosts=$hosts, port=$port, virtualHost=$virtualHost, username=$username, password=<hidden>, passwordFile=$passwordFile, " +
             "tls=$tls, tlsCaFile=$tlsCaFile, loadBalancer=$loadBalancer, offsetStoreMessages=$offsetStoreMessages, " +
-            "offsetStoreInterval=$offsetStoreInterval, management=$management)"
+            "offsetStoreInterval=$offsetStoreInterval, confirmTimeout=$confirmTimeout, management=$management)"
 
     private companion object {
         fun secret(value: String?, file: Path?): String? =

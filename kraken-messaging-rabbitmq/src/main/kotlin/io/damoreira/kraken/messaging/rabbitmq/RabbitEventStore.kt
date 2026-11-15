@@ -49,9 +49,12 @@ import kotlin.coroutines.cancellation.CancellationException
  * [Capability.NATIVE_DEAD_LETTER] always; [Capability.REPLAY] only with the management API ([RabbitEventStoreSettings.management]):
  * a reset is refused while an instance reads the subscription, and only that API can tell. [open] asks it once.
  *
- * **Publish** returns once the broker confirmed the event (at most 10 s); a refusal for good (access refused, an event over the
+ * **Publish** returns once the broker confirmed the event (at most [RabbitEventStoreSettings.confirmTimeout], 30 s); a refusal for good (access refused, an event over the
  * 1 MiB frame) is [EventStoreException.Rejected], anything else (a missing stream included) [EventStoreException.Failed]. There is
  * no deduplication: an event the outbox publishes again after a crash is a duplicate, which the processed-event markers skip.
+ *
+ * **The client is pinned**: com.rabbitmq:stream-client 1.13.1 exactly, checked when the store is built ([RabbitClientCheck]); a
+ * Spring Boot service sets `rabbit-stream-client.version=1.13.1` (Boot's dependency management sets another version).
  *
  * **Why the client's `Client`, not its `Environment`**: the `Environment`'s consumer builder cannot set a subscription property of
  * its own (`kraken-member`, a wire rule), and its automatic offset tracking follows the "last processed" convention. The `Client`
@@ -62,8 +65,12 @@ class RabbitEventStore(
     /** Whether `replay` is declared: with the management API, unless [open] found its metrics off. */
     replay: Boolean = settings.management != null,
 ) : EventStore, AutoCloseable {
+    init {
+        RabbitClientCheck.verify()
+    }
+
     private val connector = RabbitConnector(settings, CONNECTION_NAME)
-    private val publisher = RabbitPublisher(connector)
+    private val publisher = RabbitPublisher(connector, settings.confirmTimeout)
     private val live = RabbitLive()
     private val management = settings.management?.takeIf { replay }?.let {
         RabbitManagement(it, settings.username, settings.password, settings.virtualHost)

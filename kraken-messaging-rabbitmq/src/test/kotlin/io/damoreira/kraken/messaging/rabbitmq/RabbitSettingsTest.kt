@@ -22,6 +22,7 @@ class RabbitSettingsTest {
         assertFalse(s.loadBalancer)
         assertEquals(10_000L, s.offsetStoreMessages)
         assertEquals(Duration.ofSeconds(5), s.offsetStoreInterval)
+        assertEquals(Duration.ofSeconds(30), s.confirmTimeout)
         assertNull(s.management)
     }
 
@@ -42,6 +43,7 @@ class RabbitSettingsTest {
             { RabbitEventStoreSettings(tls = true) }, // TLS without a CA file: never unverified
             { RabbitEventStoreSettings(offsetStoreMessages = 0) },
             { RabbitEventStoreSettings(offsetStoreInterval = Duration.ZERO) },
+            { RabbitEventStoreSettings(confirmTimeout = Duration.ZERO) },
             { RabbitEventStoreSettings(management = RabbitManagementSettings("ftp://h:15672")) },
             { RabbitEventStoreSettings(management = RabbitManagementSettings("http://user:secret@h:15672")) },
         )) assertThrows(IllegalArgumentException::class.java) { bad() }

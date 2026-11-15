@@ -19,6 +19,14 @@ class RabbitManagementTest {
     private val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
         createContext("/") { exchange ->
             synchronized(seenAuth) { seenAuth += exchange.requestHeaders.getFirst("Authorization").orEmpty() }
+            if (exchange.requestURI.rawPath == "/api/slow") {
+                exchange.sendResponseHeaders(200, 0) // the headers at once, then a body that never ends in time
+                exchange.responseBody.write("[".toByteArray())
+                exchange.responseBody.flush()
+                runCatching { Thread.sleep(10_000) }
+                runCatching { exchange.responseBody.close() }
+                return@createContext
+            }
             val (status, body) = answers[exchange.requestURI.rawPath] ?: (404 to "{}")
             if (status == 302) exchange.responseHeaders.add("Location", "/api/overview")
             val bytes = body.toByteArray()
@@ -70,6 +78,16 @@ class RabbitManagementTest {
             answers[consumers] = bad
             assertThrows(EventStoreException.Failed::class.java, { api().members("svc.p", listOf("s-0")) }, "$bad")
         }
+    }
+
+    @Test
+    fun `a body that does not end within the request deadline fails`() {
+        val started = System.nanoTime()
+        val api = RabbitManagement(RabbitManagementSettings(url), "u", "p", "/")
+        val method = RabbitManagement::class.java.getDeclaredMethod("get", String::class.java).apply { isAccessible = true }
+        val failure = runCatching { method.invoke(api, "slow") }.exceptionOrNull()?.cause
+        assertTrue(failure is EventStoreException.Failed, "$failure")
+        assertTrue((System.nanoTime() - started) / 1_000_000 < 8_000, "within the 5 s deadline, not the server's 10 s")
     }
 
     @Test

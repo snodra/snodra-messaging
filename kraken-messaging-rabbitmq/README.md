@@ -24,6 +24,20 @@ kraken:
         url: http://rabbitmq:15672     # enables replay (resets)
 ```
 
+**The client version is pinned**: the add-on needs `com.rabbitmq:stream-client` **1.13.1 exactly** and checks it when the store
+is built. Spring Boot's dependency management sets another version (1.6.0 in Boot 4.1), so a Spring Boot service sets the
+property:
+
+```kotlin
+extra["rabbit-stream-client.version"] = "1.13.1" // build.gradle.kts, with io.spring.dependency-management
+```
+
+```xml
+<properties><rabbit-stream-client.version>1.13.1</rabbit-stream-client.version></properties> <!-- Maven -->
+```
+
+Without it the startup fails with that line in its message.
+
 With the Kafka add-on on the classpath too, `kraken.messaging.event-store=rabbitmq-streams` (or `kafka`) chooses; without it
 the startup fails naming both.
 
@@ -56,6 +70,7 @@ The Rust add-on reads the same settings as `KRAKEN_RABBITMQ_*`.
 | `load-balancer` | `false` | the hosts are a load balancer: connect through it until it lands on the node needed (at most 32 tries) |
 | `offset-store-messages` | `10000` | a processor stores its position every so many acknowledgements... |
 | `offset-store-interval` | `5s` | ...or this often, whichever first, and always when a partition moves away and at shutdown (every stored position is an entry in the stream) |
+| `confirm-timeout` | `30s` | the longest a publish waits for the broker's confirm; a connection that confirms nothing within it is replaced (the relay retries) |
 | `management.url` | none | the management API (`http://rabbitmq:15672`, no credentials in the URL): declares `replay`; metrics collection must be on (`management.disable_stats = false`) |
 | `management.username` / `password` / `password-file` | the stream user's | |
 | `management.ca-file` | none | PEM CA certificates of an `https` management API |
@@ -68,6 +83,12 @@ The Rust add-on's `KRAKEN_RABBITMQ_KNOWN_SUBSCRIPTIONS` belongs to its event bro
 - **Events go to the super stream's partitions by key** (the stream clients' hash routing), unkeyed events by their id; a key
   always reaches a processor in publish order. Publishing waits for the broker's confirm of each event (at most 10 s); a
   refusal for good (access refused, an event over the 1 MiB frame) gives the event up, anything else is retried by the relay.
+  A source's partitions and each stream's leader are cached and looked up again every 30 s or after a failure.
+- **What decides correctness is read on each stream's leader**: stored offsets (on activation, and read back after every store
+  that must hold), stream statistics, the first and last chunk of events, the chunk at a time of a reset. A replica catching up
+  could answer "no offset" (the whole partition again) or "empty" (a reset to latest storing 0).
+- **A chunk the client cannot hand out whole** (a checksum, a codec, a listener error, which the client only logs) ends the
+  processor's subscription, which subscribes again: no acknowledgement passes the gap.
 - **A processor** `<service>.<processor>` is a single active consumer of that name on every partition: the broker makes one
   instance active per partition and spreads the partitions over the instances. Positions are tracked on the server under that
   name.
@@ -101,5 +122,10 @@ These are rules both libraries follow; a program writing kraken's streams must f
   and at shutdown), so a crash redelivers at most what was acknowledged since the last store; the processed-event markers skip
   those duplicates. There is no publish deduplication either: an event the outbox republishes after a crash is skipped the same way.
 - A partition added to a super stream is read once the instances subscribe again; publishing reads the partitions again every 30 s.
+- A partition holding only offset-tracking entries (a reset stored an offset where no event was ever written) reads as empty of
+  events; one whose first or last chunk of events answers and the other not fails the call rather than guess.
+- A periodic store still in flight when a partition moves away may land after the move's store and lower the next owner's
+  position: that owner redelivers what was acknowledged in between (duplicates the processed-event markers skip), never loses one.
+- Segment names (the partitions' suffixes) are at most 128 bytes; a longer one is refused.
 - A reset stores each partition's offset in turn and reads them back: a connection lost half way leaves some moved (the reset
   fails; running it again is safe).

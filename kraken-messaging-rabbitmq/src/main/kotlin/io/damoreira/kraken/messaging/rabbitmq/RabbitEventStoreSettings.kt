@@ -31,6 +31,8 @@ data class RabbitEventStoreSettings(
     val offsetStoreMessages: Long = 10_000,
     /** ...or this often, whichever first, and always when a partition moves away and at close. */
     val offsetStoreInterval: Duration = Duration.ofSeconds(5),
+    /** The longest a publish waits for the broker's confirm (a connection that confirms nothing within it is replaced). */
+    val confirmTimeout: Duration = Duration.ofSeconds(30),
     /** The management API: declares `replay` (a reset needs to know who reads); null without it. */
     val management: RabbitManagementSettings? = null,
 ) {
@@ -42,6 +44,7 @@ data class RabbitEventStoreSettings(
             "kraken.messaging.rabbitmq.tls needs kraken.messaging.rabbitmq.tls-ca-file: the nodes are verified against it, never trusted unverified"
         }
         require(offsetStoreMessages >= 1) { "kraken.messaging.rabbitmq.offset-store-messages must be at least 1, was $offsetStoreMessages" }
+        require(confirmTimeout > Duration.ZERO) { "kraken.messaging.rabbitmq.confirm-timeout must be positive, was $confirmTimeout" }
         require(offsetStoreInterval > Duration.ZERO) { "kraken.messaging.rabbitmq.offset-store-interval must be positive, was $offsetStoreInterval" }
     }
 
@@ -65,7 +68,7 @@ data class RabbitEventStoreSettings(
     override fun toString(): String =
         "RabbitEventStoreSettings(hosts=$hosts, port=$port, virtualHost=$virtualHost, username=$username, password=<hidden>, tls=$tls, " +
             "tlsCaFile=$tlsCaFile, loadBalancer=$loadBalancer, offsetStoreMessages=$offsetStoreMessages, offsetStoreInterval=$offsetStoreInterval, " +
-            "management=$management)"
+            "confirmTimeout=$confirmTimeout, management=$management)"
 
     companion object {
         const val DEFAULT_PORT = 5552

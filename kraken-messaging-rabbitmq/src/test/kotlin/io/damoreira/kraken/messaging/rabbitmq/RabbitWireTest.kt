@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import java.util.HexFormat
+import java.util.UUID
 
 /** The layout on the wire shared with the Rust add-on: routing, the message's AMQP types, how a message reads back. */
 class RabbitWireTest {
@@ -40,11 +41,26 @@ class RabbitWireTest {
             Triple("order-7", 0x813d1adb.toInt(), 3),
             Triple("", 0xc6757d56.toInt(), 4),
         )) {
-            assertEquals(hash, HashUtils.MURMUR3.applyAsInt(key), "the hash of \"$key\"")
+            assertEquals(hash, RabbitWire.murmur3(key.toByteArray(), RabbitWire.HASH_SEED), "the hash of \"$key\"")
+            assertEquals(HashUtils.MURMUR3.applyAsInt(key), RabbitWire.murmur3(key.toByteArray(), RabbitWire.HASH_SEED), "the Java client's hash of \"$key\"")
             assertEquals(partition, RabbitWire.partitionIndex(key, 6), "the partition of \"$key\"")
         }
         assertEquals(104_729, RabbitWire.HASH_SEED)
         assertNotEquals(Math.abs(0x813d1adb.toInt() % 6), RabbitWire.partitionIndex("order-7", 6), "a signed modulo gives another partition")
+    }
+
+    /** Every tail length and multi-byte UTF-8 against the Java client's own hash routing. */
+    @Test
+    fun `the hash is the Java client's on keys of every length`() {
+        for (key in (0..40).map { "k".repeat(it) } + listOf("ü", "日本語のキー", "order-ü-42", UUID.randomUUID().toString())) {
+            assertEquals(HashUtils.MURMUR3.applyAsInt(key), RabbitWire.murmur3(key.toByteArray(), RabbitWire.HASH_SEED), key)
+        }
+    }
+
+    @Test
+    fun `a segment name over 128 bytes does not fit`() {
+        assertTrue(RabbitWire.segmentFits("3"))
+        assertTrue(!RabbitWire.segmentFits("") && !RabbitWire.segmentFits("9".repeat(129)))
     }
 
     @Test
