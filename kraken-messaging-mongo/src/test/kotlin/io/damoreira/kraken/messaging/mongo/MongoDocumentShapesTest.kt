@@ -62,6 +62,79 @@ class MongoDocumentShapesTest {
     }
 
     @Test
+    fun `an empty correlation id is stored as no field, and a deadline without one reads as empty`() {
+        val due = Instant.now().truncatedTo(ChronoUnit.MILLIS).minusSeconds(1)
+        store.sagas.deadlines.insert(DeadlineDocument("d-empty", "t.Order", "s-empty", "remind", null, null, due, ""))
+        assertNull(raw("deadlines", "d-empty")["correlationId"], "an empty correlation id is not written")
+        assertEquals("", store.sagas.deadlines.findScheduled("d-empty")!!.correlationId)
+    }
+
+    @Test
+    fun `documents the Rust store writes without its optional fields are read as absent`() {
+        val now = java.util.Date.from(Instant.now().truncatedTo(ChronoUnit.MILLIS))
+        val past = java.util.Date.from(Instant.now().minusSeconds(60).truncatedTo(ChronoUnit.MILLIS))
+        val tag = UUID.randomUUID().toString().take(8)
+        // deadlines: no payload, payloadType, correlationId, claimedBy, claimedUntil, finishedAt
+        mongo.insert(Document("_id", "rd-$tag").append("sagaType", "t.Order").append("sagaId", "rs-$tag").append("name", "remind")
+            .append("dueAt", past).append("status", "SCHEDULED"), "deadlines")
+        val scheduled = store.sagas.deadlines.findScheduled("rd-$tag")!!
+        assertEquals("", scheduled.correlationId)
+        assertNull(scheduled.payload)
+        val claimed = generateSequence { store.sagas.deadlines.claimDue("w-$tag", Instant.now(), Instant.now().plusSeconds(30)) }
+            .first { it.id == "rd-$tag" }
+        assertEquals("", claimed.correlationId)
+        // sagas: no startKey, endedAt
+        mongo.insert(Document("_id", "rs-$tag").append("type", "t.Order").append("state", "{}").append("associations", listOf<Document>())
+            .append("ended", false).append("version", 0L).append("createdAt", now).append("updatedAt", now), "sagas")
+        val saga = store.sagas.sagas.findById("rs-$tag")!!
+        assertNull(saga.startKey)
+        assertNull(saga.endedAt)
+        // saga_dispatch: no routingKey, dispatchedAt, nextAttemptAt, failedAt, failureReason, failureMessage, notice*
+        mongo.insert(Document("_id", "rs-$tag:1000").append("sagaId", "rs-$tag").append("seq", 1000L).append("kind", "COMMAND")
+            .append("type", "t.Charge").append("payload", "{}").append("headers", Document()).append("createdAt", now).append("attempts", 0), "saga_dispatch")
+        val pending = store.sagas.dispatch.nextPending("rs-$tag")!!
+        assertNull(pending.routingKey)
+        assertNull(pending.noticePending)
+        // dead_letters: no key, eventId, eventType, payload, payloadBinary, blockedBy, replay
+        mongo.insert(Document("_id", "p:s:0:$tag").append("processor", "p-$tag").append("topic", "s").append("partition", 0).append("offset", 7L)
+            .append("headers", Document()).append("reason", "INVALID").append("error", Document("type", "InvalidMessage").append("message", "x"))
+            .append("attempts", 1).append("parkedAt", now).append("lastAttemptAt", now).append("expireAt", now), "dead_letters")
+        val letter = runBlocking { store.deadLetters.get("p:s:0:$tag") }!!
+        assertNull(letter.key)
+        assertNull(letter.payload)
+        assertEquals(false, letter.replay)
+        assertEquals(1, runBlocking { store.deadLetters.summaries("p-$tag") }.size)
+        // outbox: no key, owner, leaseUntil
+        mongo.insert(Document("_id", "ro-$tag").append("type", "t.Happened").append("headers", Document()).append("payload", Document("n", 1))
+            .append("createdAt", past).append("seq", 1L).append("attempts", 0), "outbox")
+        assertEquals(listOf("ro-$tag"), runBlocking { store.outbox.claim("relay-$tag", java.time.Duration.ofSeconds(30), limit = 100) }.map { it.id }.filter { it == "ro-$tag" })
+        // external_calls: no reply, error, leaseUntil, owner
+        mongo.insert(Document("_id", "rx-$tag").append("status", "UNKNOWN").append("attempts", 1).append("updatedAt", now), "external_calls")
+        val call = runBlocking { store.externalCalls.find("rx-$tag") }!!
+        assertNull(call.reply)
+        assertNull(call.owner)
+    }
+
+    @Test
+    fun `a relayed payload is compact JSON, numbers exactly as written`() {
+        val payloads = listOf(
+            """{"a":{"b":[1,2,{"c":"x y, z: w"}],"d":[]},"e":{}}""",
+            """{"max":9223372036854775807,"min":-9223372036854775808,"small":7,"neg":-1}""",
+            """{"f":1.5,"g":-0.25,"h":0.1,"big":1.0E+10}""",
+            "{\"u\":\"\u00e9 \u2603 \\ud83d\\ude00\",\"q\":\"a \\\"quote\\\" and \\\\ backslash\"}",
+        )
+        // As BSON gives them back: a double in the driver's notation (1.0E+10), a character outside the BMP as its escape.
+        val tag = UUID.randomUUID().toString().take(8)
+        runBlocking {
+            payloads.forEachIndexed { i, p ->
+                store.outbox.append(io.damoreira.kraken.messaging.store.OutboxEntry("cj-$tag-$i", "t.Happened", "k-$tag", emptyMap(), p.toByteArray(), Instant.now(), i.toLong()))
+            }
+            val claimed = store.outbox.claim("relay-cj-$tag", java.time.Duration.ofSeconds(30), limit = 100).filter { it.id.startsWith("cj-$tag-") }.sortedBy { it.id }
+            assertEquals(payloads, claimed.map { String(it.payload, Charsets.UTF_8) })
+        }
+    }
+
+    @Test
     fun `an external call is stored with its status as the enum name and its reply as JSON text, and read back from that layout`() {
         val now = Instant.now().truncatedTo(ChronoUnit.MILLIS)
         runBlocking {

@@ -91,7 +91,7 @@ internal class MongoOutboxStore(private val mongo: MongoTemplate, private val cl
         type = d.getString("type"),
         key = d.getString("key"),
         headers = (d.get("headers", Document::class.java) ?: Document()).mapValues { it.value?.toString() ?: "" },
-        payload = d.get("payload", Document::class.java).toJson().toByteArray(Charsets.UTF_8),
+        payload = compactJson(d.get("payload", Document::class.java).toJson()).toByteArray(Charsets.UTF_8),
         createdAt = d.getDate("createdAt").toInstant(),
         seq = (d["seq"] as Number).toLong(),
         attempts = (d["attempts"] as? Number)?.toInt() ?: 0,
@@ -113,4 +113,33 @@ internal fun outboxPayload(payload: ByteArray, what: String): Document {
     } catch (e: RuntimeException) {
         throw IllegalArgumentException("The payload of $what is not a JSON object: ${e.message}", e)
     }
+}
+
+/**
+ * [json] without the whitespace the driver's writer puts between tokens (after `:` and `,`): compact JSON, as the Rust store
+ * relays it. Strings are copied as they are (escapes included) and every number keeps the driver's text.
+ */
+internal fun compactJson(json: String): String {
+    val out = StringBuilder(json.length)
+    var inString = false
+    var i = 0
+    while (i < json.length) {
+        val c = json[i]
+        if (inString) {
+            out.append(c)
+            if (c == '\\' && i + 1 < json.length) {
+                out.append(json[i + 1])
+                i += 2
+                continue
+            }
+            if (c == '"') inString = false
+        } else if (c == '"') {
+            inString = true
+            out.append(c)
+        } else if (!c.isWhitespace()) {
+            out.append(c)
+        }
+        i++
+    }
+    return out.toString()
 }

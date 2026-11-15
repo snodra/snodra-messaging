@@ -351,7 +351,7 @@ internal fun deadlineDocument(x: DeadlineDocument): Document = Document("_id", x
     .optional("payload", x.payload)
     .optional("payloadType", x.payloadType)
     .append("dueAt", Date.from(x.dueAt))
-    .append("correlationId", x.correlationId)
+    .optional("correlationId", x.correlationId.ifEmpty { null }) // empty is no field, as the Rust store writes it
     .append("status", x.status.name)
     .optional("claimedBy", x.claimedBy)
     .optional("claimedUntil", x.claimedUntil?.let(Date::from))
@@ -365,7 +365,7 @@ internal fun readDeadline(d: Document) = DeadlineDocument(
     payload = d.getString("payload"),
     payloadType = d.getString("payloadType"),
     dueAt = d.instant("dueAt")!!,
-    correlationId = d.getString("correlationId"),
+    correlationId = d.getString("correlationId") ?: "", // absent (the Rust store omits an empty one) reads as empty
     status = DeadlineStatus.valueOf(d.getString("status")),
     claimedBy = d.getString("claimedBy"),
     claimedUntil = d.instant("claimedUntil"),
