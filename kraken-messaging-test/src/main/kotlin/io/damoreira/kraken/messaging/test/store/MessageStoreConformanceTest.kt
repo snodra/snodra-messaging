@@ -186,16 +186,36 @@ abstract class MessageStoreConformanceTest {
     @Test
     fun outboxPayloadMustBeAJsonObject() = runBlocking {
         val tooBig = "9223372036854775808" // Long.MAX_VALUE + 1
-        for (payload in listOf("[1,2]", "42", "\"text\"", "null", "{not json", """{"n":$tooBig}""", """{"a":{"b":[-9223372036854775809]}}""")) {
-            val entry = OutboxEntry("e-$payload", "t.Happened", "k", emptyMap(), payload.toByteArray(), now(), seq = 1)
-            assertThrows(IllegalArgumentException::class.java, { runBlocking { store.outbox.append(entry) } }, payload)
+        val refused = listOf("[1,2]", "42", "\"text\"", "null", "{not json", """{"n":$tooBig}""", """{"a":{"b":[-9223372036854775809]}}""")
+            .map { it.toByteArray() } + refusedLikeTheRustTwin()
+        for ((i, payload) in refused.withIndex()) {
+            val entry = OutboxEntry("e-$i", "t.Happened", "k", emptyMap(), payload, now(), seq = 1)
+            assertThrows(IllegalArgumentException::class.java, { runBlocking { store.outbox.append(entry) } }, String(payload).take(80))
         }
         assertEquals(0L, store.outbox.pending(), "nothing was appended")
         assertEquals(emptyList<OutboxEntry>(), store.outbox.claim("relay", Duration.ofSeconds(30), limit = 10))
-        // The bounds themselves are fine.
-        store.outbox.append(OutboxEntry("bounds", "t.Happened", "k", emptyMap(), """{"max":${Long.MAX_VALUE},"min":${Long.MIN_VALUE}}""".toByteArray(), now(), seq = 2))
-        assertJson("""{"max":${Long.MAX_VALUE},"min":${Long.MIN_VALUE}}""".toByteArray(), store.outbox.claim("relay", Duration.ofSeconds(30), limit = 10).single().payload)
+        // The bounds themselves are fine: the integers, a surrogate pair, 127 nested containers.
+        val bounds = """{"max":${Long.MAX_VALUE},"min":${Long.MIN_VALUE},"pair":"\ud83d\ude00","deep":${nested(126)}}"""
+        store.outbox.append(OutboxEntry("bounds", "t.Happened", "k", emptyMap(), bounds.toByteArray(), now(), seq = 2))
+        assertJson(bounds.toByteArray(), store.outbox.claim("relay", Duration.ofSeconds(30), limit = 10).single().payload)
     }
+
+    /**
+     * Payloads a Rust consumer cannot decode (serde_json): a number no double holds, a lone surrogate escape (in a value or a
+     * name), 128 nested arrays or objects, a leading byte order mark.
+     */
+    private fun refusedLikeTheRustTwin(): List<ByteArray> = listOf(
+        """{"a":1e400}""".toByteArray(),
+        """{"a":-1e400}""".toByteArray(),
+        """{"a":"\ud800"}""".toByteArray(),
+        """{"a":"x\udc00"}""".toByteArray(),
+        """{"\ud800":1}""".toByteArray(),
+        """{"deep":${nested(127)}}""".toByteArray(),
+        byteArrayOf(0xEF.toByte(), 0xBB.toByte(), 0xBF.toByte()) + "{}".toByteArray(),
+    )
+
+    /** [levels] nested arrays around `1`. */
+    private fun nested(levels: Int): String = "[".repeat(levels) + "1" + "]".repeat(levels)
 
     @Test
     fun oldestPendingIsTheOldestEntryNeitherSentNorFailed() = runBlocking {
@@ -752,7 +772,8 @@ abstract class MessageStoreConformanceTest {
         val dispatch = store.sagas.dispatch
         val t = now()
         val command = SagaDispatchDocument("s1:1000", "s1", 1000, DispatchKind.COMMAND, "t.Charge", """{"n":1}""", createdAt = t)
-        for (payload in listOf("[1,2]", "42", "{not json", """{"n":9223372036854775808}""")) {
+        val refused = listOf("[1,2]", "42", "{not json", """{"n":9223372036854775808}""") + refusedLikeTheRustTwin().map { String(it) }
+        for (payload in refused) {
             val event = SagaDispatchDocument("s1:1001", "s1", 1001, DispatchKind.EVENT, "t.Charged", payload, createdAt = t)
             assertThrows(IllegalArgumentException::class.java, { dispatch.record(listOf(command, event)) }, payload)
             assertNull(dispatch.nextPending("s1"), "nothing of the batch was recorded: $payload")
