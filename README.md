@@ -228,7 +228,7 @@ setting that was removed and is still set fails the startup, naming its replacem
 | `idempotency.retention` | `30d` | Processed-event markers older than this are deleted. |
 | `security.forward-jwt` | `true` | Put the current request's bearer token in the hub request's `authorization` header. |
 | `sagas.enabled` | `true` | Switch for the saga runtime, the dispatch relay and the deadline scheduler. They exist only when the application has a `@Saga` class (found by scanning its packages) anyway. See [Sagas](#sagas). |
-| `sagas.max-attempts` | `5` | Attempts per saga event (first try included) for **conflicts** (a version check, a start-key duplicate, a Mongo write conflict or transient transaction error) before the event is parked in `saga_failures`; also the bound for firing a deadline. Backoff 200 ms doubling to 5 s (not configurable). A **handler exception** is not cured by waiting: it gets two attempts in all, at most 50 ms apart, and the event is then parked. |
+| `sagas.max-attempts` | `5` | Attempts per saga event (first try included) for **conflicts** (a version check, a start-key duplicate, a write conflict between two transactions in the message store) before the event is parked in the saga failures; also the bound for firing a deadline. Backoff 200 ms doubling to 5 s (not configurable). A **handler exception** is not cured by waiting: it gets two attempts in all, at most 50 ms apart, and the event is then parked. |
 | `sagas.ended-retention` | `30d` | Ended sagas are deleted this long after they ended (TTL index on `sagas.endedAt`). Must be positive. |
 | `sagas.dispatch-retention` | `7d` | Dispatched `saga_dispatch` entries are deleted this long after they were sent (TTL index on `dispatchedAt`). Must be positive. |
 | `sagas.failed-retention` | `30d` | What failed for good is deleted this long after it failed: `saga_dispatch` entries given up on (TTL index on `failedAt`) and parked events in `saga_failures` (TTL index on `lastFailedAt`, which a retry that fails again moves on). Must be positive. |
@@ -1406,7 +1406,7 @@ Use `@IdempotentHandler`, or make the effect idempotent on `headers['idempotency
 Two more things about the adapter:
 
 - The body of an `@IdempotentHandler` **`@EventHandler`** runs inside the ordinary handlers' stage-1 transaction, so a slow
-  call there holds that transaction open (the database's own limits apply: 60 s by default on MongoDB). The `@CommandHandler`
+  call there holds that transaction open (the database's own limit on a transaction's lifetime applies). The `@CommandHandler`
   adapter the relay calls runs in no library transaction: prefer it for anything slow.
 - `idempotency-key` is just a header that any sender of the command can set, a hub client that is not a saga included. Keep
   adapters internal: do not expose their command types to services or clients you do not trust.
@@ -1904,9 +1904,19 @@ headers are unchanged, so **no data migration**.
    `kraken.messaging.kafka.bootstrap-servers` and `kraken.messaging.external.kafka.sources.*` keep their names (now the Kafka
    add-on's).
 4. **Code.**
-   - `EventProcessors`, `EventConsumer`, `LocalEventDispatcher`, `OutboxEventBus` and `OutboxPublisher` moved from
-     `io.damoreira.kraken.messaging.kafka` to `io.damoreira.kraken.messaging.events`; `EventHeaders` to
-     `io.damoreira.kraken.messaging.eventstore`.
+   - `EventProcessors`, `ProcessorStatusSource`, `EventConsumer`, `LocalEventDispatcher`, `SagaStageException`, `OutboxEventBus`
+     and `OutboxPublisher` moved from `io.damoreira.kraken.messaging.kafka` to `io.damoreira.kraken.messaging.events`; `EventHeaders`
+     to `io.damoreira.kraken.messaging.eventstore`. `RecordPosition` moved there too (`events`), its `topic`, `partition: Int`,
+     `offset: Long` now `source`, `segment`, `position` (strings).
+   - The store interfaces live in `io.damoreira.kraken.messaging.store`: the saga ports (`SagaRepository`, `DeadlineStore`,
+     `SagaFailureStore`, `SagaMarkerStore`; `SagaDispatchRecorder` is now `SagaDispatchStore`) moved there from
+     `io.damoreira.kraken.messaging.saga`, beside the new `MessageStore`, `OutboxStore`, `ProcessedEventStore`, `DeadLetterStore`,
+     `ProcessorControlStore` and `ExternalCallStore`. The MongoDB implementations (`MongoDeadlineStore`, the former
+     `DeadLetterStore` and `ProcessorControlStore` classes, ...) are internal to `kraken-messaging-mongo` now.
+   - `KafkaEventsAutoConfiguration` is gone (the events are `EventsAutoConfiguration`, the Kafka event store
+     `KafkaEventStoreAutoConfiguration`): an application that names it in `exclude = [...]` no longer compiles. Without
+     `kraken-messaging-kafka` on the classpath nothing connects to Kafka anyway; to keep the add-on and leave the Kafka event store
+     out, exclude `KafkaEventStoreAutoConfiguration` (an `@EventHandler` or a saga then needs another event store).
    - `ResetTarget` and `ReplayRange` moved to `io.damoreira.kraken.messaging.eventstore`: `ResetTarget.Offsets(Map<Int, Long>)` is
      `ResetTarget.Positions(Map<String, String>)` (segment to position), `ReplayRange(topic, partition, from, until)` is
      `ReplayRange(source, segment, from, until)`, all strings.
@@ -1915,6 +1925,9 @@ headers are unchanged, so **no data migration**.
    - `DeadLetter.topic`, `partition`, `offset` are `source`, `segment`, `position` (strings); `DeadLetterMode.TOPIC` is
      `EVENT_STORE`.
    - `HubConnection.lastRejection` is internal: read `HubConnections.latestRejection`.
+   - Anything else of the former `io.damoreira.kraken.messaging.kafka` package, and every class that touched MongoDB, moved to an
+     add-on or became internal: a type the compiler no longer finds is in `events`, `eventstore` or `store`, or in the add-on's
+     package (`io.damoreira.kraken.messaging.kafka` in `kraken-messaging-kafka`, `...mongo` in `kraken-messaging-mongo`).
 5. **Metrics.** `kraken_processor_lag` is labelled `segment` instead of `partition`: update the dashboards and alerts that select or
    aggregate on it.
 
