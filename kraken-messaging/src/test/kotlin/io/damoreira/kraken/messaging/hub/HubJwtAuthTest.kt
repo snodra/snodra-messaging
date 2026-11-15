@@ -178,6 +178,30 @@ class HubJwtAuthTest {
 
     // --- an endpoint that cannot give a token ---
 
+    @Test fun `a token endpoint that refuses the client is not a hub's refusal, so the latest rejection stays empty`() = runBlocking {
+        oauth.responder = { TokenResponse(401, """{"error":"invalid_client"}""") }
+        val all = HubConnections(
+            targets = HubTargets.parse("static://hub-a:7000"),
+            channelFactory = HubChannelFactory { InProcessChannelBuilder.forName(hubA.name).build() },
+            serviceName = service,
+            instanceId = "t-1",
+            settings = settings(provider()),
+            inbound = { req -> Reply.newBuilder().setRequestId(req.id).build() },
+            scope = scope,
+        )
+        all.start()
+        try {
+            await atMost wait until { oauth.requests.size >= 3 }
+            assertNotNull(all.connections().single().lastRejection.value, "the connection is held back by the token failure")
+            assertNull(all.latestRejection.value, "no hub refused anything")
+            oauth.responder = null
+            await atMost wait until { all.liveHubIds().isNotEmpty() }
+            assertNull(all.latestRejection.value)
+        } finally {
+            all.stop()
+        }
+    }
+
     @Test fun `a token endpoint that refuses the client opens no stream, is logged at ERROR once, is retried and recovers`() = runBlocking {
         oauth.responder = { TokenResponse(401, """{"error":"invalid_client","error_description":"Invalid client credentials"}""") }
         val provider = provider()
