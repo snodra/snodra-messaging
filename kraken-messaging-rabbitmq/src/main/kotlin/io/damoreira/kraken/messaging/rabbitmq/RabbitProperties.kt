@@ -20,7 +20,7 @@ data class RabbitProperties(
     val username: String = "guest",
     /** The password (default `guest`); [passwordFile] wins over it. */
     val password: String? = null,
-    /** A file holding the password (every trailing CR and LF removed); wins over [password], as the hub token file does. */
+    /** A file holding the password (trimmed at both ends; an empty one fails the startup); wins over [password], as the hub token file does. */
     val passwordFile: Path? = null,
     val tls: Boolean = false,
     /** PEM CA certificates the nodes are verified against; required with TLS. */
@@ -52,7 +52,7 @@ data class RabbitProperties(
         port = port,
         virtualHost = virtualHost,
         username = username,
-        password = secret(password, passwordFile) ?: "guest",
+        password = secret(password, passwordFile, "kraken.messaging.rabbitmq.password-file") ?: "guest",
         tls = tls,
         tlsCaFile = tlsCaFile,
         loadBalancer = loadBalancer,
@@ -60,7 +60,7 @@ data class RabbitProperties(
         offsetStoreInterval = offsetStoreInterval,
         confirmTimeout = confirmTimeout,
         management = management.url?.takeIf { it.isNotBlank() }?.let {
-            RabbitManagementSettings(it, management.username, secret(management.password, management.passwordFile), management.caFile)
+            RabbitManagementSettings(it, management.username, secret(management.password, management.passwordFile, "kraken.messaging.rabbitmq.management.password-file"), management.caFile)
         },
     )
 
@@ -70,7 +70,12 @@ data class RabbitProperties(
             "offsetStoreInterval=$offsetStoreInterval, confirmTimeout=$confirmTimeout, management=$management)"
 
     private companion object {
-        fun secret(value: String?, file: Path?): String? =
-            file?.let { Files.readString(it).trimEnd('\r', '\n') } ?: value
+        /** [file]'s content trimmed at both ends when set (an empty one fails, naming [setting]), else [value]. */
+        fun secret(value: String?, file: Path?, setting: String): String? {
+            file ?: return value
+            val content = Files.readString(file).trim()
+            check(content.isNotEmpty()) { "$setting $file is empty: it must hold the password" }
+            return content
+        }
     }
 }

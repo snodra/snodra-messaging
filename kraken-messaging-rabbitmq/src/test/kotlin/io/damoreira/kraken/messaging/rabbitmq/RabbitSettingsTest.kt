@@ -75,15 +75,24 @@ class RabbitSettingsTest {
     }
 
     @Test
-    fun `a password file loses every trailing CR and LF, as in the Rust add-on`(@TempDir dir: Path) {
-        val file = Files.writeString(dir.resolve("password"), "from-file\r\n\n\r\n")
+    fun `a password file is trimmed at both ends, as in the Rust add-on`(@TempDir dir: Path) {
+        val file = Files.writeString(dir.resolve("password"), " \tfrom-file\r\n\n\r\n")
         assertEquals("from-file", RabbitProperties(passwordFile = file).toSettings().password)
         val management = RabbitProperties(
             management = RabbitProperties.Management(url = "http://h:15672", username = "admin", passwordFile = file),
         ).toSettings().management!!
         assertEquals("admin" to "from-file", management.login("guest", "guest"))
-        Files.writeString(file, " in side \t\n")
-        assertEquals(" in side \t", RabbitProperties(passwordFile = file).toSettings().password, "only CR and LF go")
+    }
+
+    @Test
+    fun `a password file empty after trimming fails naming the setting and the file`(@TempDir dir: Path) {
+        val file = Files.writeString(dir.resolve("password"), " \t\r\n")
+        val stream = assertThrows(IllegalStateException::class.java) { RabbitProperties(password = "set", passwordFile = file).toSettings() }
+        assertTrue("kraken.messaging.rabbitmq.password-file" in stream.message!! && file.toString() in stream.message!!, stream.message)
+        val api = assertThrows(IllegalStateException::class.java) {
+            RabbitProperties(management = RabbitProperties.Management(url = "http://h:15672", passwordFile = file)).toSettings()
+        }
+        assertTrue("kraken.messaging.rabbitmq.management.password-file" in api.message!! && file.toString() in api.message!!, api.message)
     }
 
     @Test

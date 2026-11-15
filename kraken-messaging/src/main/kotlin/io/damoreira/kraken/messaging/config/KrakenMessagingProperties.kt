@@ -102,8 +102,8 @@ data class KrakenMessagingProperties(
         val token: String? = null,
         /**
          * File holding the token (a container secret, for example `/run/secrets/kraken-hub-token`): read at startup (a file
-         * that cannot be read fails it) and again on every reconnect, so a rotated secret is picked up without a restart.
-         * Surrounding whitespace is ignored. When both [token] and this are set, the file wins. Environment variable
+         * that cannot be read, or holds only whitespace, fails it) and again on every reconnect, so a rotated secret is picked
+         * up without a restart. Trimmed at both ends. When both [token] and this are set, the file wins. Environment variable
          * `KRAKEN_MESSAGING_HUB_TOKEN_FILE`, or `KRAKEN_HUB_TOKEN_FILE` when this property is unset.
          */
         val tokenFile: Path? = null,
@@ -193,7 +193,7 @@ data class KrakenMessagingProperties(
         val clientId: String? = null,
         /** The client secret. Never logged, redacted in [toString] and in the actuator's `configprops` and `env`. Prefer [clientSecretFile]. */
         val clientSecret: String? = null,
-        /** File holding the client secret: read at startup (an unreadable file fails it) and again on every token fetch, so a rotated secret applies without a restart. Wins over [clientSecret]. */
+        /** File holding the client secret, trimmed at both ends: read at startup (an unreadable or empty file fails it) and again on every token fetch, so a rotated secret applies without a restart. Wins over [clientSecret]. */
         val clientSecretFile: Path? = null,
         /** `scope` of the token request, as sent (space-separated); none by default. */
         val scope: String? = null,

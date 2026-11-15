@@ -197,7 +197,7 @@
     {
       "name": "kraken.messaging.hub.token-file",
       "type": "java.nio.file.Path",
-      "description": "File holding the hub token (a container secret): read at startup, where an unreadable file fails the startup, and again on every reconnect. Wins over kraken.messaging.hub.token when both are set. Environment variable KRAKEN_MESSAGING_HUB_TOKEN_FILE, or KRAKEN_HUB_TOKEN_FILE when this property is unset.",
+      "description": "File holding the hub token (a container secret), trimmed at both ends: read at startup, where an unreadable or empty file fails the startup, and again on every reconnect. Wins over kraken.messaging.hub.token when both are set. Environment variable KRAKEN_MESSAGING_HUB_TOKEN_FILE, or KRAKEN_HUB_TOKEN_FILE when this property is unset.",
       "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Hub"
     },
     {
@@ -221,7 +221,7 @@
     {
       "name": "kraken.messaging.hub.oauth2.client-secret-file",
       "type": "java.nio.file.Path",
-      "description": "File holding the client secret (a container secret): read at startup, where an unreadable file fails the startup, and again on every token fetch, so a rotated secret applies without a restart. Wins over client-secret. Environment variable KRAKEN_MESSAGING_HUB_OAUTH2_CLIENT_SECRET_FILE, or KRAKEN_HUB_OAUTH2_CLIENT_SECRET_FILE when this property is unset.",
+      "description": "File holding the client secret (a container secret), trimmed at both ends: read at startup, where an unreadable or empty file fails the startup, and again on every token fetch, so a rotated secret applies without a restart. Wins over client-secret. Environment variable KRAKEN_MESSAGING_HUB_OAUTH2_CLIENT_SECRET_FILE, or KRAKEN_HUB_OAUTH2_CLIENT_SECRET_FILE when this property is unset.",
       "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$OAuth2"
     },
     {

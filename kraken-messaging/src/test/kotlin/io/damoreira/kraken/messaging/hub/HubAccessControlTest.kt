@@ -202,13 +202,13 @@ class HubAccessControlTest {
         assertEquals(token, source.current())
     }
 
-    @Test fun `an empty token file at startup is no token`(@TempDir dir: Path) {
+    @Test fun `a token file empty at startup, whitespace aside, fails naming the setting and the file`(@TempDir dir: Path) {
         val file = dir.resolve("hub-token")
-        Files.writeString(file, " \n")
-        val source = HubToken.of(null, file)
-        assertNull(source.current(), "an empty file at startup is no token")
-        Files.writeString(file, token)
-        assertEquals(token, source.current())
+        Files.writeString(file, " \t\r\n")
+        val e = assertFailsWith<IllegalStateException> { HubToken.of(null, file) }
+        assertTrue("kraken.messaging.hub.token-file" in e.message!! && file.toString() in e.message!! && "empty" in e.message!!, e.message)
+        Files.writeString(file, "\t $token \r\n\n")
+        assertEquals(token, HubToken.of(null, file).current(), "whitespace at both ends goes")
     }
 
     @Test fun `an empty token file read after a good one keeps the last token and warns once, a new token is then picked up`(@TempDir dir: Path) = runBlocking {

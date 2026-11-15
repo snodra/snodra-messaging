@@ -199,6 +199,9 @@ class HubOAuth2ConfigTest {
         val missing = dir.resolve("nope")
         val unreadable = failure(starter().withPropertyValues("kraken.messaging.hub.oauth2.token-uri=${oauth.tokenUri}", "kraken.messaging.hub.oauth2.client-secret-file=$missing"))
         assertTrue(missing.toString() in unreadable, unreadable)
+        val blank = dir.resolve("blank").also { Files.writeString(it, " \t\r\n") }
+        val empty = failure(starter().withPropertyValues("kraken.messaging.hub.oauth2.token-uri=${oauth.tokenUri}", "kraken.messaging.hub.oauth2.client-secret-file=$blank"))
+        assertTrue("kraken.messaging.hub.oauth2.client-secret-file" in empty && blank.toString() in empty && "empty" in empty, empty)
     }
 
     @Test fun `any oauth2 setting without a token uri fails the startup naming it, like the Rust library does`(@TempDir dir: Path) {

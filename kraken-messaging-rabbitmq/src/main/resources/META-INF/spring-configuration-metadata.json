@@ -51,7 +51,7 @@
     {
       "name": "kraken.messaging.rabbitmq.password-file",
       "type": "java.nio.file.Path",
-      "description": "A file holding the stream user's password (every trailing CR and LF removed); wins over password.",
+      "description": "A file holding the stream user's password, trimmed at both ends (an empty one fails the startup); wins over password.",
       "sourceType": "io.damoreira.kraken.messaging.rabbitmq.RabbitProperties"
     },
     {
@@ -116,7 +116,7 @@
     {
       "name": "kraken.messaging.rabbitmq.management.password-file",
       "type": "java.nio.file.Path",
-      "description": "A file holding the management API's password; wins over management.password.",
+      "description": "A file holding the management API's password, trimmed at both ends (an empty one fails the startup); wins over management.password.",
       "sourceType": "io.damoreira.kraken.messaging.rabbitmq.RabbitProperties$Management"
     },
     {
