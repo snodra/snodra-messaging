@@ -134,7 +134,8 @@ class Handlers(
         put("service", env.service)
         put("instanceId", env.instance)
         set("hubIds", json.arrayNode().apply { connections.liveHubIds().forEach { add(it) } })
-        put("lastRejection", RejectionLog.latest(connections))
+        // The newest refusal by any hub, kept after a later acceptance.
+        put("lastRejection", connections.latestRejection.value?.let { r -> r.code + (r.description?.let { ": $it" } ?: "") })
         put("subscriptionsServed", subscriptions.size)
         // CONFORMANCE_RETRY_* configures the library's policy for every send (it also takes one per call).
         put("retry", env.retry != null)

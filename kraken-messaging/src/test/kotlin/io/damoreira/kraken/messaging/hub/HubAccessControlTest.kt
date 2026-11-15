@@ -30,8 +30,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.awaitility.kotlin.atMost
 import org.awaitility.kotlin.await
 import org.awaitility.kotlin.until
@@ -43,6 +45,7 @@ import org.slf4j.LoggerFactory
 import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Duration
+import java.time.Instant
 import java.util.UUID
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -321,6 +324,49 @@ class HubAccessControlTest {
         try {
             val e = assertFailsWith<HubRegistrationRejectedException> { connections.awaitRegistered(wait) }
             assertTrue("UNAUTHENTICATED" in e.message!!, e.message)
+        } finally {
+            connections.stop()
+        }
+    }
+
+    @Test fun `the latest rejection survives a later acceptance and is replaced only by a newer refusal`(@TempDir dir: Path) = runBlocking {
+        hub.auth = HubAuth.enforce(acl)
+        val file = dir.resolve("hub-token")
+        Files.writeString(file, "stale-" + UUID.randomUUID())
+        val connections = HubConnections(
+            targets = HubTargets.parse("static://hub-a:7000"),
+            channelFactory = HubChannelFactory { InProcessChannelBuilder.forName(hub.name).build() },
+            serviceName = "svc-a",
+            instanceId = "l-1",
+            settings = settings(HubToken.of(null, file)),
+            inbound = { req -> Reply.newBuilder().setRequestId(req.id).build() },
+            scope = scope,
+        )
+        assertNull(connections.latestRejection.value, "nothing refused yet")
+        val before = Instant.now()
+        connections.start()
+        try {
+            // Never registered with this hub: the rejection names the target dialled.
+            val first = withTimeout(5_000) { connections.latestRejection.first { it != null } }!!
+            assertEquals("hub-a:7000", first.hub)
+            assertEquals("UNAUTHENTICATED", first.code)
+            assertNotNull(first.description)
+            assertFalse(first.at.isBefore(before), "${first.at} before $before")
+
+            Files.writeString(file, token)
+            await atMost wait until { connections.liveHubIds().isNotEmpty() }
+            val kept = assertNotNull(connections.latestRejection.value, "an acceptance does not clear it")
+            assertEquals("hub-a:7000", kept.hub)
+            assertEquals("UNAUTHENTICATED", kept.code)
+            delay(cap.toMillis() * 2) // past the next attempt: an accepted stream records nothing
+            assertEquals(kept, connections.latestRejection.value)
+
+            // A newer refusal replaces it, naming the hub that registered this instance before.
+            Files.writeString(file, "stale-again-" + UUID.randomUUID())
+            hub.dropInstance("l-1")
+            val second = withTimeout(5_000) { connections.latestRejection.first { it?.hub == hub.hubId } }!!
+            assertEquals("UNAUTHENTICATED", second.code)
+            assertTrue(second.at.isAfter(kept.at), "${second.at} after ${kept.at}")
         } finally {
             connections.stop()
         }

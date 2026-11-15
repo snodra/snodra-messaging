@@ -59,6 +59,7 @@ import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withTimeoutOrNull
 import org.slf4j.LoggerFactory
 import java.time.Duration
+import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentSkipListMap
 import java.util.concurrent.atomic.AtomicBoolean
@@ -232,6 +233,8 @@ class HubConnection(
     private val inboundSubscription: SubscriptionInbound = NO_SUBSCRIPTION_HANDLERS,
     /** Called for every `ClientMessage.credentials` this connection writes ([HubConnections] keeps the process-wide, monotonic total). */
     private val onCredentialsRefreshSent: () -> Unit = {},
+    /** Called for every refusal of this connection's registration ([HubConnections] keeps the newest of all its hubs). */
+    private val onRejected: (HubRejection) -> Unit = {},
     /** Serves the hub's `ControlRequest`s (P6b); without event processors every one is `UNKNOWN_PROCESSOR`. */
     private val control: ControlInbound = NO_PROCESSOR_CONTROL,
 ) : HubTransport {
@@ -246,7 +249,14 @@ class HubConnection(
     val ack: StateFlow<RegisterAck?> = ackState.asStateFlow()
 
     private val rejection = MutableStateFlow<Status?>(null)
-    val lastRejection: StateFlow<Status?> = rejection.asStateFlow()
+    /**
+     * The refusal (or the failure to get a token) that keeps this connection from registering now; cleared once a stream completes
+     * its handshake. The application reads [HubConnections.latestRejection], which a later acceptance never clears.
+     */
+    internal val lastRejection: StateFlow<Status?> = rejection.asStateFlow()
+
+    /** The id of the hub that last acknowledged a stream of this connection, kept after that stream ended; null before the first. */
+    @Volatile private var lastHubId: String? = null
 
     /** A request in flight, with the stream it was written to (only that stream's failure fails it). */
     private sealed class Pending(val stream: Stream) {
@@ -972,6 +982,7 @@ class HubConnection(
                 retry
             } else if (isRegistrationRejection(status)) {
                 rejection.value = status
+                onRejected(HubRejection(lastHubId ?: target, status.code.name, status.description, Instant.now()))
                 val retry = ReconnectBackoff.jittered(settings.backoffMax, settings.backoffMax)
                 // The same message repeats at every attempt: one error line, then debug (a refused service retries for as long as it runs).
                 val text = "Hub rejected the registration of {} ({}): {} {}; retrying in {}"
@@ -1166,6 +1177,7 @@ class HubConnection(
         if (ack.heartbeatIntervalMs > 0) stream.heartbeatIntervalMs = ack.heartbeatIntervalMs.toLong()
         val first = stream.ack == null
         stream.ack = ack
+        lastHubId = ack.hubId.ifEmpty { target }
         if (current === stream) {
             ackState.value = ack
             if (first) {

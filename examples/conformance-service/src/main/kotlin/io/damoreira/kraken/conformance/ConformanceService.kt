@@ -2,8 +2,6 @@ package io.damoreira.kraken.conformance
 
 import org.springframework.boot.autoconfigure.SpringBootApplication
 import org.springframework.boot.builder.SpringApplicationBuilder
-import org.springframework.boot.context.event.ApplicationPreparedEvent
-import org.springframework.context.ApplicationListener
 import org.springframework.context.annotation.Bean
 import org.springframework.security.oauth2.core.DelegatingOAuth2TokenValidator
 import org.springframework.security.oauth2.jwt.JwtDecoder
@@ -126,7 +124,5 @@ fun main(args: Array<String>) {
     val env = ConformanceEnv.read(System.getenv())
     SpringApplicationBuilder(ConformanceService::class.java)
         .properties(env.properties())
-        // After Spring Boot set the logging up (it resets Logback), before the hub connections start.
-        .listeners(ApplicationListener<ApplicationPreparedEvent> { RejectionLog.install() })
         .run(*args)
 }

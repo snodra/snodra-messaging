@@ -20,12 +20,14 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.merge
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.slf4j.LoggerFactory
 import java.net.InetAddress
 import java.time.Duration
+import java.time.Instant
 import java.util.concurrent.ThreadLocalRandom
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -159,6 +161,19 @@ class HubConnections(
 
     /** True while at least one hub is live. */
     val connected: StateFlow<Boolean> = anyLive.asStateFlow()
+
+    private val latest = MutableStateFlow<HubRejection?>(null)
+
+    /**
+     * The newest refusal of this instance's registration by any hub (`ALREADY_EXISTS`, `INVALID_ARGUMENT`, `UNAUTHENTICATED`,
+     * `PERMISSION_DENIED`): set on every refusal, replaced only by a newer one, never cleared by a later acceptance (nor when its
+     * hub leaves the targets); null while no hub ever refused. A failure to get an access token is not a hub's refusal and is not
+     * kept here ([awaitRegistered] and [authStatus] report it).
+     */
+    val latestRejection: StateFlow<HubRejection?> = latest.asStateFlow()
+
+    private fun keepNewer(rejection: HubRejection) =
+        latest.update { current -> if (current == null || !rejection.at.isBefore(current.at)) rejection else current }
 
     /** Incoming requests of every hub currently being handled (or waiting for a handler permit). */
     val inFlightHandlers: StateFlow<Int> get() = gate.inFlightHandlers
@@ -433,6 +448,7 @@ class HubConnections(
                     subscriptions = subscriptions,
                     inboundSubscription = inboundSubscription,
                     onCredentialsRefreshSent = { refreshesSent.incrementAndGet() },
+                    onRejected = ::keepNewer,
                     control = control,
                 )
                 self = connection
@@ -693,6 +709,13 @@ class HubConnections(
         connection.stop()
     }
 }
+
+/**
+ * A hub's refusal of this instance's registration ([HubConnections.latestRejection]): the [hub] (its id when it registered this
+ * instance before, else the target dialled, `host:port`: a refused `Register` carries no hub id), the gRPC status [code]'s name
+ * (`PERMISSION_DENIED`), the hub's [description] (null when it gave none) and when it was refused ([at]).
+ */
+data class HubRejection(val hub: String, val code: String, val description: String?, val at: Instant)
 
 /** The credential a service presents to the hub: nothing, a static token (P5a), a Keycloak access token (P5b) or a client certificate (P5c). */
 enum class HubAuthKind { NONE, TOKEN, JWT, CERTIFICATE }

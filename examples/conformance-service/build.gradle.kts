@@ -20,8 +20,6 @@ dependencies {
     implementation(libs.spring.boot.starter)
     implementation(libs.jackson.module.kotlin)
     implementation(libs.kotlin.reflect)
-    // HubConnection.lastRejection is a gRPC Status.
-    implementation(libs.grpc.stub)
     // Callers' tokens validated against CONFORMANCE_JWKS_URL (a JwtDecoder bean the library picks up).
     implementation(libs.spring.security.oauth2.jose)
     implementation(libs.spring.security.oauth2.resource.server)

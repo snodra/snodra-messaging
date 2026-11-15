@@ -343,12 +343,15 @@ file still means no token. A file that disappears later likewise keeps the last 
 | a request whose type is outside `send` (unary, scatter-gather, streaming, subscription) | an immediate `Error{PERMISSION_DENIED}`, nothing routed | `AccessDeniedException`, **never retried** |
 | a request after the token left the ACL | an immediate `Error{UNAUTHENTICATED}` | `UnauthenticatedException`, never retried |
 
-A **registration rejection** (`ALREADY_EXISTS`, `INVALID_ARGUMENT`, `UNAUTHENTICATED`, `PERMISSION_DENIED`, the last also for an instance id that belongs to another service): the status is
-in `HubConnection.lastRejection`, `awaitRegistered` throws `HubRegistrationRejectedException` naming the code and the hub's
+A **registration rejection** (`ALREADY_EXISTS`, `INVALID_ARGUMENT`, `UNAUTHENTICATED`, `PERMISSION_DENIED`, the last also for an instance id that belongs to another service):
+`awaitRegistered` throws `HubRegistrationRejectedException` naming the code and the hub's
 message, the connection reconnects at the backoff cap (80-100 % of `hub.reconnect-backoff.max`, no tight loop), logs at
 `ERROR` once per distinct message and then at `DEBUG`, and keeps retrying (a fixed ACL or token file heals it without a
-restart; `lastRejection` clears when a stream completes its handshake). The service keeps running; the hub counts every attempt as a
-violation. In `permissive` nothing is refused: the hub logs and counts what `enforce` would refuse (except an instance-id
+restart). The service keeps running; the hub counts every attempt as a violation.
+`HubConnections.latestRejection` (a `StateFlow<HubRejection?>`) holds the newest refusal by any hub: `hub` (its id when it
+registered this instance before, else the target dialled), `code` (`PERMISSION_DENIED`), the hub's `description` and `at`. It is
+set on every refusal, replaced only by a newer one, and never cleared by a later acceptance, so a service can show why it was
+refused after it healed. In `permissive` nothing is refused: the hub logs and counts what `enforce` would refuse (except an instance-id
 takeover, below, which it refuses too).
 
 **Instance ids belong to a service.** A `Register` that names the instance id of a live session of *another* service is
@@ -420,7 +423,7 @@ without a token URI: a stray client id or secret would otherwise leave the servi
   `authStatus().tokenExpiresAt` is null meanwhile. `PERMISSION_DENIED` (wrong `azp`, no `[[service]]` entry) keeps it: a new token would not help
   and the identity provider is not asked again for every retry.
 - **No token, no stream.** When the endpoint cannot give a token (401 `invalid_client`, down, TLS, an unusable answer) the stream is
-  not opened: the attempt fails locally, `HubConnection.lastRejection` holds `UNAUTHENTICATED` and `awaitRegistered` throws
+  not opened: the attempt fails locally (not a hub's refusal: `latestRejection` keeps it out) and `awaitRegistered` throws
   `HubRegistrationRejectedException` ("no access token for ...: invalid_client: ..." with the endpoint's `error` and
   `error_description`, clipped to 200 characters), the connection retries with the normal reconnect back-off, logs `ERROR` once
   per distinct error and then `DEBUG`, and recovers by itself when the endpoint does. A hub that is not ready (`UNAVAILABLE`
