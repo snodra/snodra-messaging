@@ -57,5 +57,9 @@ data class KafkaExternalProperties(
         init {
             require(topic.isNotBlank()) { "the topic of an external Kafka source must not be blank" }
         }
+
+        /** Never prints [properties]' values (a `sasl.jaas.config` holds a secret): only their names. */
+        override fun toString(): String =
+            "Source(bootstrapServers=$bootstrapServers, topic=$topic, groupId=$groupId, properties=${properties.keys})"
     }
 }

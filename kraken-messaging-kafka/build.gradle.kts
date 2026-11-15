@@ -12,10 +12,13 @@ dependencies {
     // KafkaEventStoreSettings.clientProperties, so the classes are on its compile classpath.
     api("org.apache.kafka:kafka-clients")
     implementation(libs.spring.boot.starter)
+    compileOnly("org.springframework.boot:spring-boot-actuator") // optional: the SanitizingFunction that masks the add-on's secrets
 
     testImplementation(project(":kraken-messaging-test"))
     testImplementation(libs.spring.boot.starter.test)
     testImplementation(libs.kotlin.test.junit5)
+    testImplementation("org.springframework.boot:spring-boot-actuator")
+    testImplementation("tools.jackson.core:jackson-databind")
     testImplementation(libs.testcontainers.kafka)
     testImplementation(libs.testcontainers.mongodb)
     // The conformance kit's at-least-once check needs a message store: the MongoDB add-on's.

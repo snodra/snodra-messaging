@@ -7,6 +7,7 @@ import io.damoreira.kraken.messaging.config.KrakenMessagingAutoConfiguration
 import io.damoreira.kraken.messaging.config.KrakenMessagingProperties
 import io.damoreira.kraken.messaging.eventstore.EventStore
 import io.damoreira.kraken.messaging.external.ExternalSourceProviders
+import org.springframework.boot.actuate.endpoint.SanitizingFunction
 import org.springframework.boot.autoconfigure.AutoConfiguration
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
@@ -17,6 +18,7 @@ import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Condition
 import org.springframework.context.annotation.ConditionContext
 import org.springframework.context.annotation.Conditional
+import org.springframework.context.annotation.Configuration
 import org.springframework.core.type.AnnotatedTypeMetadata
 
 /**
@@ -57,6 +59,30 @@ class KafkaEventStoreAutoConfiguration {
             )
         }
         return ExternalSourceProviders { sources }
+    }
+
+    /**
+     * Masks the Kafka client properties (a `sasl.jaas.config` holds a secret) and the partner sources' properties in the actuator's
+     * `configprops` and `env` output, whatever `show-values` is.
+     */
+    @Configuration(proxyBeanMethods = false)
+    @ConditionalOnClass(name = ["org.springframework.boot.actuate.endpoint.SanitizingFunction"])
+    class KafkaSecretsSanitizingConfiguration {
+        @Bean
+        fun krakenKafkaSecretsSanitizingFunction(): SanitizingFunction = SanitizingFunction { data ->
+            if (KafkaSecretKeys.matches(data.key)) data.withSanitizedValue() else data
+        }
+    }
+}
+
+/** The settings whose values may hold Kafka secrets, in every form (property, relaxed environment variable, configprops key). */
+internal object KafkaSecretKeys {
+    private const val CLIENT_PROPERTIES = "krakenmessagingkafkaclientproperties"
+    private val partnerProperties = Regex("krakenmessagingexternalkafkasources[a-z0-9]*properties.*")
+
+    fun matches(key: String?): Boolean {
+        val normalized = key?.lowercase()?.filter { it.isLetterOrDigit() } ?: return false
+        return normalized.startsWith(CLIENT_PROPERTIES) || partnerProperties.matches(normalized)
     }
 }
 
