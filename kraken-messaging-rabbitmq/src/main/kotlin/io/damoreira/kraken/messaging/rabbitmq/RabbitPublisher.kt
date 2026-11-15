@@ -11,7 +11,9 @@ import kotlinx.coroutines.withTimeoutOrNull
 import java.time.Duration
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import java.util.function.ToLongFunction
 
 /**
@@ -34,29 +36,37 @@ internal class RabbitPublisher(private val connector: RabbitConnector, private v
 
     @Volatile private var closed = false
 
-    /** One leader node's connection (opened on first use): its publishers by stream and the publishes waiting for their confirm. */
-    private inner class Node(val key: Pair<String, Int>) {
+    /**
+     * One leader node's connection (opened on first use): its publishers by stream and the publishes waiting for their confirm.
+     * The client's own threads (listeners) never wait for this node's lock: what they report is handed over ([forget], [lost]).
+     */
+    internal inner class Node(val key: Pair<String, Int>) {
         val pending = ConcurrentHashMap<Long, CompletableFuture<Unit>>()
         val sequence = AtomicLong()
         private val publishers = HashMap<String, Byte>()
         private var nextId = 0
-        @Volatile private var opened: Client? = null
+
+        /** Streams whose publisher is gone on the broker, handed over by [forget]: dropped from [publishers] on the next [publisher]. */
+        private val forgotten = ConcurrentLinkedQueue<String>()
+
+        /** The connection once opened, [GONE] once this node is given up (a connection opened after that is closed at once). */
+        private val opened = AtomicReference<Any?>(null)
 
         @Volatile var dead = false
+
+        /** The publisher of [stream] is gone on the broker (a metadata update, a publish error): declared again on next use. Never waits. */
+        fun forget(stream: String) {
+            forgotten.add(stream)
+            leaders.remove(stream)
+        }
 
         /** The publisher id of [stream] on this node, and the connection (opening it and declaring the publisher when missing). */
         @Synchronized
         fun publisher(stream: String): Pair<Client, Byte> {
             if (dead) throw EventStoreException.Failed("rabbitmq: the connection to ${key.first}:${key.second} was replaced")
-            val client = opened ?: connector.node(Client.Broker(key.first, key.second)) { p ->
-                p.publishConfirmListener { _, id -> pending.remove(id)?.complete(Unit) }
-                p.publishErrorListener { _, id, code -> pending.remove(id)?.completeExceptionally(PublishError(code)) }
-                p.shutdownListener { context -> lost("the connection closed (${context.shutdownReason})") }
-                p.metadataListener { stream, _ ->
-                    synchronized(this) { publishers.remove(stream) }
-                    leaders.remove(stream)
-                }
-            }.also { opened = it }
+            if (closed) throw EventStoreException.Failed("rabbitmq: the event store is closed")
+            while (true) publishers.remove(forgotten.poll() ?: break)
+            val client = opened.get() as? Client ?: open()
             publishers[stream]?.let { return client to it }
             if (nextId > MAX_PUBLISHER_ID) {
                 // Publisher ids are one byte per connection: past the last one the connection is replaced, never wrapped.
@@ -73,13 +83,28 @@ internal class RabbitPublisher(private val connector: RabbitConnector, private v
             return client to id
         }
 
-        /** This connection is given up: dropped from the nodes, its waiting publishes failed, the connection closed. */
+        private fun open(): Client {
+            val client = connector.node(Client.Broker(key.first, key.second)) { p ->
+                p.publishConfirmListener { _, id -> pending.remove(id)?.complete(Unit) }
+                p.publishErrorListener { _, id, code -> pending.remove(id)?.completeExceptionally(PublishError(code)) }
+                p.shutdownListener { context -> lost("the connection closed (${context.shutdownReason})") }
+                p.metadataListener { stream, _ -> forget(stream) }
+            }
+            // Given up while it connected (the store closed, the node lost): this connection is never used.
+            if (!opened.compareAndSet(null, client)) {
+                runCatching { client.close() }
+                throw EventStoreException.Failed("rabbitmq: the connection to ${key.first}:${key.second} was given up while it opened")
+            }
+            return client
+        }
+
+        /** This connection is given up: dropped from the nodes, its waiting publishes failed, the connection closed. Never waits. */
         fun lost(why: String) {
             dead = true
             nodes.remove(key, this)
             val failure = EventStoreException.Failed("rabbitmq: publishing through ${key.first}:${key.second}: $why")
             pending.keys.toList().forEach { pending.remove(it)?.completeExceptionally(failure) }
-            opened?.let { runCatching { it.close() } }
+            (opened.getAndSet(GONE) as? Client)?.let { runCatching { it.close() } }
         }
     }
 
@@ -123,7 +148,9 @@ internal class RabbitPublisher(private val connector: RabbitConnector, private v
             throw EventStoreException.Failed("rabbitmq: publishing ${event.id} to $stream: no confirm within $confirmTimeout")
         }
         outcome.exceptionOrNull()?.let {
-            if (it !is PublishError) leaders.remove(stream)
+            // A refused message too (e.g. the publisher no longer exists after its stream's leader moved): looked up and declared again.
+            leaders.remove(stream)
+            if (it is PublishError) node.forget(stream)
             throw failedOrRejected(event, stream, it)
         }
     }
@@ -192,5 +219,8 @@ internal class RabbitPublisher(private val connector: RabbitConnector, private v
         const val FRAME_OVERHEAD = 4 + 2 + 2 + 1 + 4 + 8 + 4
 
         private const val MAX_PUBLISHER_ID = 255
+
+        /** A node's connection slot once the node is given up. */
+        private val GONE = Any()
     }
 }
