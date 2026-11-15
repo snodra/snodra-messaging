@@ -20,8 +20,6 @@ import kotlin.test.fail
  * changes the test.
  */
 class ConformanceLevel1Test {
-    private val mapper = JsonMapper.builder().build()
-
     @Test
     fun kotlin_reference_passes_level_1() {
         val runner = System.getProperty("conformance.runner")?.let(::File)
@@ -77,7 +75,7 @@ class ConformanceLevel1Test {
             process.destroyForcibly()
             fail("the runner did not finish within 60 minutes")
         }
-        val report = mapper.readTree(out)
+        val report = ConformanceReport.read(out, process.exitValue(), work)
         println("conformance report (exit ${process.exitValue()}, logs in $work):")
         for (c in report.path("checks")) {
             println("  ${c.path("id").asString()} ${c.path("status").asString()} (${c.path("millis").asLong()} ms): ${c.path("detail").asString()}")
@@ -103,5 +101,24 @@ class ConformanceLevel1Test {
                 "6.5 s, so the report sent when the second hub comes up (gap 0) fails it. The rule (protocol.md, Instance status: " +
                 "\"every 5 s\") does not say whether an extra report is allowed: a contract question, not changed in the library",
         )
+    }
+}
+
+/** The runner's JSON report. */
+internal object ConformanceReport {
+    private val mapper = JsonMapper.builder().build()
+
+    /** The report in [out] the runner wrote; a missing, empty or unreadable one, or one without checks, fails naming [exitValue] and [work]. */
+    fun read(out: File, exitValue: Int, work: File): JsonNode {
+        fun noReport(why: String): Nothing =
+            fail("the runner (exit $exitValue) left $why at $out: its own errors are above, the service's logs in $work")
+        if (!out.isFile || out.length() == 0L) noReport("no report")
+        val report = try {
+            mapper.readTree(out)
+        } catch (e: Exception) {
+            noReport("a report that is not JSON (${e.message})")
+        }
+        if (report.path("checks").isEmpty) noReport("a report without checks")
+        return report
     }
 }
