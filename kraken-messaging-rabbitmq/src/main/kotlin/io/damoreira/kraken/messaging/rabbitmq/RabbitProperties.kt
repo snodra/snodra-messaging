@@ -1,6 +1,7 @@
 package io.damoreira.kraken.messaging.rabbitmq
 
 import org.springframework.boot.context.properties.ConfigurationProperties
+import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Duration
@@ -70,10 +71,17 @@ data class RabbitProperties(
             "offsetStoreInterval=$offsetStoreInterval, confirmTimeout=$confirmTimeout, management=$management)"
 
     private companion object {
-        /** [file]'s content trimmed at both ends when set (an empty one fails, naming [setting]), else [value]. */
+        /**
+         * [file]'s content trimmed at both ends when set, else [value]. A file that is missing, unreadable, not UTF-8 or empty
+         * fails, naming [setting] and the file (never its content).
+         */
         fun secret(value: String?, file: Path?, setting: String): String? {
             file ?: return value
-            val content = Files.readString(file).trim()
+            val content = try {
+                Files.readString(file).trim()
+            } catch (e: IOException) {
+                throw IllegalStateException("$setting $file cannot be read: ${e.javaClass.simpleName}", e)
+            }
             check(content.isNotEmpty()) { "$setting $file is empty: it must hold the password" }
             return content
         }

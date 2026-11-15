@@ -64,7 +64,7 @@ The Rust add-on reads the same settings as `KRAKEN_RABBITMQ_*`.
 | `port` | 5552 (5551 with TLS) | the port of a host given without one |
 | `virtual-host` | `/` | |
 | `username` | `guest` | |
-| `password` / `password-file` | `guest` | the password, or a file holding it (trimmed at both ends, an empty one fails the startup naming the setting and the file; the file wins, as the hub token file does); never logged, and masked in the actuator's `configprops` and `env` |
+| `password` / `password-file` | `guest` | the password, or a file holding it (trimmed at both ends; a missing, unreadable, non-UTF-8 or empty file fails the startup naming the setting and the file; the file wins, as the hub token file does); never logged, and masked in the actuator's `configprops` and `env` |
 | `tls` | `false` | TLS to every node, with host name verification |
 | `tls-ca-file` | none | PEM CA certificates the nodes are verified against; required with TLS (the store never connects unverified) |
 | `load-balancer` | `false` | the hosts are a load balancer: connect through it until it lands on the node needed (at most 32 tries) |

@@ -142,7 +142,13 @@ class RabbitEventStore internal constructor(
          * does not answer (or answers what cannot be trusted); `replay` is not declared when its metrics collection is off
          * (`management.disable_stats`), since its consumer list is then empty whoever reads. Blocking.
          */
-        fun open(settings: RabbitEventStoreSettings): RabbitEventStore {
+        fun open(settings: RabbitEventStoreSettings): RabbitEventStore = open(settings, ::managementOf)
+
+        /** [open] with the management client made by [managementOf] (tests). */
+        internal fun open(
+            settings: RabbitEventStoreSettings,
+            managementOf: (RabbitEventStoreSettings, RabbitManagementSettings) -> RabbitManagement,
+        ): RabbitEventStore {
             val api = settings.management?.let { managementOf(settings, it) } ?: return RabbitEventStore(settings)
             val stats = try {
                 api.statsEnabled()
@@ -150,7 +156,14 @@ class RabbitEventStore internal constructor(
                 api.close()
                 throw e
             }
-            if (stats) return RabbitEventStore(settings, api)
+            if (stats) {
+                return try {
+                    RabbitEventStore(settings, api)
+                } catch (e: Exception) {
+                    api.close() // the store that would have closed it does not exist
+                    throw e
+                }
+            }
             api.close()
             log.warn("The RabbitMQ management API collects no metrics (management.disable_stats): the event store does not declare replay")
             return RabbitEventStore(settings, null)

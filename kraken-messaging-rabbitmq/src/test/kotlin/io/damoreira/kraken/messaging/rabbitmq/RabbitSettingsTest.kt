@@ -96,6 +96,21 @@ class RabbitSettingsTest {
     }
 
     @Test
+    fun `a password file that is missing, unreadable or not UTF-8 fails naming the setting and the file`(@TempDir dir: Path) {
+        val missing = dir.resolve("nope")
+        val notUtf8 = Files.write(dir.resolve("latin1"), byteArrayOf(0x70, 0xE9.toByte(), 0xFF.toByte()))
+        val directory = Files.createDirectory(dir.resolve("a-directory"))
+        for (file in listOf(missing, notUtf8, directory)) {
+            val stream = assertThrows(IllegalStateException::class.java, { RabbitProperties(passwordFile = file).toSettings() }, "$file")
+            assertTrue("kraken.messaging.rabbitmq.password-file" in stream.message!! && file.toString() in stream.message!!, stream.message)
+            val api = assertThrows(IllegalStateException::class.java, {
+                RabbitProperties(management = RabbitProperties.Management(url = "http://h:15672", passwordFile = file)).toSettings()
+            }, "$file")
+            assertTrue("kraken.messaging.rabbitmq.management.password-file" in api.message!! && file.toString() in api.message!!, api.message)
+        }
+    }
+
+    @Test
     fun `secrets never appear in the settings' text`() {
         val s = RabbitProperties(password = "stream-secret", management = RabbitProperties.Management(url = "http://h:15672", password = "api-secret")).toSettings()
         for (text in listOf(s.toString(), s.management.toString(), RabbitProperties(password = "stream-secret").toString())) {

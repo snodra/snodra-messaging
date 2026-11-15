@@ -131,4 +131,15 @@ class RabbitManagementTest {
         answers["/api/overview"] = 200 to """{"disable_stats": true}"""
         RabbitEventStore.open(settings).use { assertEquals(null, it.management, "no replay: no management client kept") }
     }
+
+    @Test
+    fun `open closes the management client when the store cannot be built`(@org.junit.jupiter.api.io.TempDir dir: java.nio.file.Path) {
+        answers["/api/overview"] = 200 to """{"disable_stats": false}"""
+        val badCa = java.nio.file.Files.writeString(dir.resolve("ca.pem"), "not a certificate")
+        val settings = RabbitEventStoreSettings(hosts = listOf("127.0.0.1:1"), tls = true, tlsCaFile = badCa, management = RabbitManagementSettings(url))
+        var made: RabbitManagement? = null
+        val failure = runCatching { RabbitEventStore.open(settings) { s, m -> RabbitManagement(m, s.username, s.password, s.virtualHost).also { made = it } } }
+        assertTrue(failure.isFailure, "the TLS context cannot be built from that CA file")
+        assertTrue(checkNotNull(made).closed, "the client open() made is closed")
+    }
 }
