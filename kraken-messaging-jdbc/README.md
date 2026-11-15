@@ -234,12 +234,17 @@ next to it:
 ### Payloads
 
 The outbox payload and every header map are the database's JSON type (`jsonb`, `JSON`): an outbox payload is a JSON object whose
-integers fit in a signed 64-bit integer (the store refuses anything else before it writes), and both types keep such integers
+integers fit in a signed 64-bit integer, at most 100 deep (the store refuses anything else before it writes), and both types keep such integers
 exact (`jsonb` as `numeric`, MySQL as `BIGINT`). **Decimals are not kept exact on MySQL**: its `JSON` stores a number with a
 fraction as a double (`jsonb` keeps it exact) — the same contract as the MongoDB add-on, whose documents keep doubles. An
 operator can query the outbox. What the library must read back exactly as written is text: the saga state (`BigDecimal` scales,
 key order), the saga dispatch, deadline and failure payloads, the external calls' reply and error, and the dead letters' payload
 (which may not be JSON at all: an INVALID letter's; a payload that is not UTF-8, or that holds U+0000, goes to `payload_binary`).
+
+**Depth.** MySQL refuses a JSON document whose `JSON_DEPTH` exceeds 100 (a scalar or an empty array or object is 1, a non-empty
+one is 1 + its deepest member: `{"a":1}` is 2; checked on MySQL 8.4.7: depth 100 is stored, 101 refused). The payload contract
+is the same on every message store, so the core's check (`checkOutboxPayload`) refuses a payload deeper than 100 with an
+`IllegalArgumentException` before any store sees it, on PostgreSQL and the other stores too.
 
 ### Tables
 

@@ -194,16 +194,17 @@ abstract class MessageStoreConformanceTest {
         }
         assertEquals(0L, store.outbox.pending(), "nothing was appended")
         assertEquals(emptyList<OutboxEntry>(), store.outbox.claim("relay", Duration.ofSeconds(30), limit = 10))
-        // The bounds themselves are fine: the integers, a surrogate pair, deep nesting (64 levels here: the contract allows 127,
-        // and a store may refuse more than the contract, as MySQL does past a depth of 100).
-        val bounds = """{"max":${Long.MAX_VALUE},"min":${Long.MIN_VALUE},"pair":"\ud83d\ude00","deep":${nested(63)}}"""
+        // The bounds themselves are fine: the integers, a surrogate pair, the deepest payload the contract allows (depth 100: the
+        // object, 98 arrays, the number).
+        val bounds = """{"max":${Long.MAX_VALUE},"min":${Long.MIN_VALUE},"pair":"\ud83d\ude00","deep":${nested(98)}}"""
         store.outbox.append(OutboxEntry("bounds", "t.Happened", "k", emptyMap(), bounds.toByteArray(), now(), seq = 2))
         assertJson(bounds.toByteArray(), store.outbox.claim("relay", Duration.ofSeconds(30), limit = 10).single().payload)
     }
 
     /**
-     * Payloads a Rust consumer cannot decode (serde_json): a number no double holds, a lone surrogate escape (in a value or a
-     * name), 128 nested arrays or objects, a leading byte order mark.
+     * Payloads the contract refuses on top of "a JSON object with 64-bit integers": what a Rust consumer (serde_json) cannot
+     * decode (a number no double holds, a lone surrogate escape in a value or a name, a leading byte order mark) and a depth over
+     * 100 (MySQL's JSON limit: the object, 99 arrays, the number is 101).
      */
     private fun refusedLikeTheRustTwin(): List<ByteArray> = listOf(
         """{"a":1e400}""".toByteArray(),
@@ -211,7 +212,7 @@ abstract class MessageStoreConformanceTest {
         """{"a":"\ud800"}""".toByteArray(),
         """{"a":"x\udc00"}""".toByteArray(),
         """{"\ud800":1}""".toByteArray(),
-        """{"deep":${nested(127)}}""".toByteArray(),
+        """{"deep":${nested(99)}}""".toByteArray(),
         byteArrayOf(0xEF.toByte(), 0xBB.toByte(), 0xBF.toByte()) + "{}".toByteArray(),
     )
 

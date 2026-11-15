@@ -8,17 +8,22 @@ import java.nio.charset.CodingErrorAction
 
 private val payloadMapper: JsonMapper = JsonMapper.builder().build()
 
-/** The most arrays and objects nested in one another a payload may hold (127: serde_json's limit of 128 refuses the 128th). */
-private const val MAX_NESTING = 127
+/**
+ * The deepest payload every message store holds: MySQL's JSON limit (MySQL 8.4 refuses a document whose `JSON_DEPTH` exceeds
+ * 100). Depth as `JSON_DEPTH` counts it: a scalar or an empty array or object is 1, a non-empty one is 1 + its deepest member.
+ */
+private const val MAX_DEPTH = 100
 
 /**
  * The payload contract (both libraries', `store::check_outbox_payload` in kraken-messaging-rs): an event's payload in the outbox
  * ([OutboxEntry.payload]) and in the saga dispatch (an entry of kind `EVENT`) is a JSON object (UTF-8) whose integers all fit in
- * a signed 64-bit integer, and which a Rust consumer (serde_json) can decode, so it also refuses:
+ * a signed 64-bit integer, which every message store holds and a Rust consumer (serde_json) can decode, so it also refuses:
  *
+ * - a depth over 100, counted as MySQL's `JSON_DEPTH` (a scalar or an empty array or object is 1, a non-empty one is 1 + its
+ *   deepest member: `{}` is 1, `{"a":1}` is 2, `{"a":[1]}` is 3): the payload contract is store-independent, and MySQL refuses
+ *   deeper documents (serde_json's own limit, 128 nested arrays and objects, is looser);
  * - a number no double holds (`1e400`; one that merely rounds, `1e-400`, is fine);
- * - a lone surrogate escape (`"\ud800"`), in a value or a name (a pair, `"😀"`, is fine);
- * - 128 or more arrays and objects nested in one another, the payload's own object included (127 are fine);
+ * - a lone surrogate escape (`"\ud800"`), in a value or a name (a pair, `"\ud83d\ude00"`, is fine);
  * - a leading byte order mark (and any bytes that are not UTF-8).
  *
  * Anything else (another JSON value, bytes that are not JSON, a larger integer anywhere in it) is refused too, all with an
@@ -46,11 +51,12 @@ fun checkOutboxPayload(payload: ByteArray, what: String) {
     check(node, 1, what)
 }
 
-/** Walks [node], [depth] containers deep, refusing what the contract does not allow. */
+/** Walks [node], at [depth] (the payload's object is 1), refusing what the contract does not allow. */
 private fun check(node: JsonNode, depth: Int, what: String) {
+    // Every node at depth d makes the document at least d deep (JSON_DEPTH is the deepest node's).
+    require(depth <= MAX_DEPTH) { "The payload of $what has a depth over $MAX_DEPTH (as MySQL's JSON_DEPTH counts it)" }
     when {
         node.isContainer -> {
-            require(depth <= MAX_NESTING) { "The payload of $what nests 128 or more arrays and objects" }
             if (node.isObject) {
                 for ((name, value) in node.properties()) {
                     require(!hasLoneSurrogate(name)) { "The payload of $what has a name with a lone surrogate" }

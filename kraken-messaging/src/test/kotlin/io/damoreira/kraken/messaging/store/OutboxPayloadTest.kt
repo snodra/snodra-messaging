@@ -23,7 +23,7 @@ class OutboxPayloadTest {
             """{"a":1e400}""".toByteArray() to "double",
             """{"a":"\ud800"}""".toByteArray() to "surrogate",
             """{"\udfff":1}""".toByteArray() to "surrogate",
-            ("""{"a":""" + "[".repeat(127) + "1" + "]".repeat(127) + "}").toByteArray() to "128",
+            ("""{"a":""" + "[".repeat(99) + "1" + "]".repeat(99) + "}").toByteArray() to "depth",
             byteArrayOf(0xEF.toByte(), 0xBB.toByte(), 0xBF.toByte()) + "{}".toByteArray() to "byte order mark",
             byteArrayOf('{'.code.toByte(), '"'.code.toByte(), 0xED.toByte(), 0xA0.toByte(), 0x80.toByte(), '"'.code.toByte(), ':'.code.toByte(), '1'.code.toByte(), '}'.code.toByte()) to "UTF-8",
         )
@@ -31,7 +31,16 @@ class OutboxPayloadTest {
             val e = assertFailsWith<IllegalArgumentException>(String(payload)) { checkOutboxPayload(payload, "event e-9") }
             assertTrue("event e-9" in e.message!! && why in e.message!!, "${String(payload).take(60)}: ${e.message}")
         }
-        // At the bounds: 127 nested containers, a pair, a tiny number that rounds to 0.
-        checkOutboxPayload(("""{"a":""" + "[".repeat(126) + "1" + "]".repeat(126) + ""","p":"\ud83d\ude00","t":1e-400}""").toByteArray(), "event e-9")
+        // At the bounds: depth 100 (the object, 98 arrays, the number), a pair, a tiny number that rounds to 0.
+        checkOutboxPayload(("""{"a":""" + "[".repeat(98) + "1" + "]".repeat(98) + ""","p":"\ud83d\ude00","t":1e-400}""").toByteArray(), "event e-9")
+    }
+
+    @Test fun `depth is MySQL's JSON_DEPTH, at most 100`() {
+        fun depth(levels: String) = checkOutboxPayload(levels.toByteArray(), "event e-1")
+        // {} is 1, {"a":1} is 2, an empty array inside counts 1: 100 objects nested, the innermost empty, is depth 100.
+        depth("""{"a":""".repeat(99) + "{}" + "}".repeat(99))
+        assertFailsWith<IllegalArgumentException> { depth("""{"a":""".repeat(100) + "{}" + "}".repeat(100)) }
+        depth("""{"a":""".repeat(98) + "{\"b\":true}" + "}".repeat(98))
+        assertFailsWith<IllegalArgumentException> { depth("""{"a":""".repeat(99) + "{\"b\":true}" + "}".repeat(99)) }
     }
 }
