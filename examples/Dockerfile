@@ -5,14 +5,9 @@ ARG SERVICE
 FROM eclipse-temurin:25-jdk AS build
 ARG SERVICE
 WORKDIR /src
-COPY gradlew settings.gradle.kts build.gradle.kts ./
-COPY gradle ./gradle
-COPY kraken-messaging-api ./kraken-messaging-api
-COPY kraken-messaging ./kraken-messaging
-COPY kraken-messaging-kafka ./kraken-messaging-kafka
-COPY kraken-messaging-mongo ./kraken-messaging-mongo
-COPY kraken-messaging-test ./kraken-messaging-test
-COPY examples ./examples
+# The whole repository (less what .dockerignore leaves out): settings.gradle.kts includes every module, and a module it names
+# that is not here fails the build, so nothing is listed one by one.
+COPY . .
 # sharing=locked: compose builds service-a and service-b in parallel, and two Gradle runs on one cache collide on its
 # journal lock ("Timeout waiting to lock journal cache").
 RUN --mount=type=cache,target=/root/.gradle,sharing=locked ./gradlew :examples:${SERVICE}:bootJar --no-daemon -x test \
