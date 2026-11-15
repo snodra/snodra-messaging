@@ -52,10 +52,15 @@ class RabbitSettingsTest {
     }
 
     @Test
-    fun `the password variable wins over the file, whose trailing newline is removed`(@TempDir dir: Path) {
+    fun `the password file wins over the setting, its trailing newline removed`(@TempDir dir: Path) {
         val file = Files.writeString(dir.resolve("password"), "from-file\n")
         assertEquals("from-file", RabbitProperties(passwordFile = file).toSettings().password)
-        assertEquals("set", RabbitProperties(password = "set", passwordFile = file).toSettings().password)
+        assertEquals("from-file", RabbitProperties(password = "set", passwordFile = file).toSettings().password, "the file wins")
+        assertEquals("set", RabbitProperties(password = "set").toSettings().password)
+        val both = RabbitProperties(
+            management = RabbitProperties.Management(url = "http://h:15672", username = "admin", password = "set", passwordFile = file),
+        ).toSettings().management!!
+        assertEquals("admin" to "from-file", both.login("guest", "guest"), "the management password file wins too")
         val management = RabbitProperties(
             username = "stream-user",
             password = "stream-secret",

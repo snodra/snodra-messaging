@@ -45,13 +45,13 @@
     {
       "name": "kraken.messaging.rabbitmq.password",
       "type": "java.lang.String",
-      "description": "The stream user's password (default guest); wins over password-file. Never logged.",
+      "description": "The stream user's password (default guest); password-file wins over it. Never logged.",
       "sourceType": "io.damoreira.kraken.messaging.rabbitmq.RabbitProperties"
     },
     {
       "name": "kraken.messaging.rabbitmq.password-file",
       "type": "java.nio.file.Path",
-      "description": "A file holding the stream user's password (its trailing newline removed).",
+      "description": "A file holding the stream user's password (its trailing newline removed); wins over password.",
       "sourceType": "io.damoreira.kraken.messaging.rabbitmq.RabbitProperties"
     },
     {
@@ -116,7 +116,7 @@
     {
       "name": "kraken.messaging.rabbitmq.management.password-file",
       "type": "java.nio.file.Path",
-      "description": "A file holding the management API's password.",
+      "description": "A file holding the management API's password; wins over management.password.",
       "sourceType": "io.damoreira.kraken.messaging.rabbitmq.RabbitProperties$Management"
     },
     {

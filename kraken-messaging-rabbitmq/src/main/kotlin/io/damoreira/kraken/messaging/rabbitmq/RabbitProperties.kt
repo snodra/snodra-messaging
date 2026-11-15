@@ -18,9 +18,9 @@ data class RabbitProperties(
     val port: Int? = null,
     val virtualHost: String = "/",
     val username: String = "guest",
-    /** The password (default `guest`); wins over [passwordFile]. */
+    /** The password (default `guest`); [passwordFile] wins over it. */
     val password: String? = null,
-    /** A file holding the password (its trailing newline removed). */
+    /** A file holding the password (its trailing newline removed); wins over [password], as the hub token file does. */
     val passwordFile: Path? = null,
     val tls: Boolean = false,
     /** PEM CA certificates the nodes are verified against; required with TLS. */
@@ -39,13 +39,14 @@ data class RabbitProperties(
         val url: String? = null,
         val username: String? = null,
         val password: String? = null,
+        /** Wins over [password]. */
         val passwordFile: Path? = null,
         val caFile: Path? = null,
     ) {
         override fun toString(): String = "Management(url=$url, username=$username, password=<hidden>, passwordFile=$passwordFile, caFile=$caFile)"
     }
 
-    /** The event store's settings: a password from its file when the setting is not given. */
+    /** The event store's settings: a password from its file when one is given, else the setting. */
     fun toSettings() = RabbitEventStoreSettings(
         hosts = hosts.flatMap { it.split(',') }.map(String::trim).filter(String::isNotEmpty).ifEmpty { hosts },
         port = port,
@@ -70,6 +71,6 @@ data class RabbitProperties(
 
     private companion object {
         fun secret(value: String?, file: Path?): String? =
-            value ?: file?.let { Files.readString(it).removeSuffix("\n").removeSuffix("\r") }
+            file?.let { Files.readString(it).removeSuffix("\n").removeSuffix("\r") } ?: value
     }
 }
