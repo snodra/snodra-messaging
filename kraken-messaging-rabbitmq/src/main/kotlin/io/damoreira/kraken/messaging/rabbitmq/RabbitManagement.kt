@@ -25,14 +25,14 @@ import java.util.Base64
 import javax.net.ssl.SSLContext
 import javax.net.ssl.TrustManagerFactory
 
+private val log = LoggerFactory.getLogger(RabbitManagement::class.java)
+
 /**
  * The management HTTP API (plugin `rabbitmq_stream_management`): the stream consumers connected now, which the stream protocol
  * cannot list. It tells who reads a subscription (the reset's refusal). It fails closed: an answer of another shape, a consumer
  * without its stream or properties, a non-string property, or metrics switched off (`management.disable_stats`) is an error,
  * never "nobody reads". No redirect is followed; an answer is read up to [MAX_ANSWER] bytes.
  */
-private val log = LoggerFactory.getLogger(RabbitManagement::class.java)
-
 internal class RabbitManagement(settings: RabbitManagementSettings, streamUser: String, streamPassword: String, private val virtualHost: String) :
     AutoCloseable {
     private val root = settings.url.trim().trimEnd('/')
