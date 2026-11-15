@@ -86,7 +86,6 @@ import java.util.concurrent.TimeUnit
  * | [concurrentDeadlineClaimsReturnEachDeadlineOnce] | `two_schedulers_claim_each_due_deadline_once` |
  * | [sagaDispatchEntriesAreRelayedInOrderPerSaga] and [sagaDispatchLeaseIsExclusiveUntilItExpires] | `dispatch_hands_out_each_saga_in_seq_order` (one check) |
  * | [concurrentLeaseClaimsGrantOneOwner] | `two_relays_never_hold_one_saga_lease` |
- * | [concurrentNoticeClaimsReturnEachNoticeOnce] | **none** (Rust checks the notice claim by one relay at a time, in `dispatch_hands_out_each_saga_in_seq_order`) |
  * | **none** (Rust only) | `dead_letter_deleted_in_a_transaction_goes_with_it` |
  */
 abstract class MessageStoreConformanceTest {
