@@ -1,8 +1,6 @@
 package io.damoreira.kraken.messaging.store.memory
 
 import org.springframework.dao.ConcurrencyFailureException
-import tools.jackson.databind.JsonNode
-import tools.jackson.databind.json.JsonMapper
 
 /*
  * The in-memory message store's state: one table per collection, read and written under the store's lock, and the journal of
@@ -85,22 +83,4 @@ internal class View<V : Any>(private val table: Table<V>, private val tx: Memory
         val existing = writes[id]
         if (existing != null) existing.value = value else writes[id] = Pending(value, table.rows[id]?.version ?: 0L)
     }
-}
-
-/** What the outbox and the saga dispatch accept as an event's payload (see `OutboxEntry`): a JSON object whose integers fit in a signed 64-bit integer. */
-internal object JsonPayloads {
-    private val mapper: JsonMapper = JsonMapper.builder().build()
-
-    /** Refuses [payload] with an [IllegalArgumentException] naming [what] unless it is such a JSON object. */
-    fun requireObject(payload: ByteArray, what: String) {
-        val node = try {
-            mapper.readTree(payload)
-        } catch (e: RuntimeException) {
-            throw IllegalArgumentException("The payload of $what is not a JSON object: ${e.message}", e)
-        }
-        require(node != null && node.isObject) { "The payload of $what is not a JSON object" }
-        require(fits(node)) { "The payload of $what has an integer outside the signed 64-bit range" }
-    }
-
-    private fun fits(node: JsonNode): Boolean = if (node.isIntegralNumber) node.canConvertToLong() else node.values().all(::fits)
 }

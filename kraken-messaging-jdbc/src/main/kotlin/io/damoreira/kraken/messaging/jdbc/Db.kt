@@ -1,5 +1,6 @@
 package io.damoreira.kraken.messaging.jdbc
 
+import io.damoreira.kraken.messaging.store.checkOutboxPayload
 import org.springframework.dao.DataAccessException
 import org.springframework.dao.DuplicateKeyException
 import org.springframework.jdbc.core.JdbcTemplate
@@ -178,21 +179,13 @@ internal object Json {
         text?.let { mapper.readTree(it) }?.properties()?.associate { (k, v) -> k to (if (v.isString) v.asString() else v.toString()) } ?: emptyMap()
 
     /**
-     * Refuses [payload] with an [IllegalArgumentException] naming [what] unless it is a JSON object whose integers fit in a
-     * signed 64-bit integer (the outbox's contract).
+     * The core's payload contract ([checkOutboxPayload]), and what PostgreSQL's `jsonb` cannot hold on top of it: the character
+     * U+0000 in a string or a name. Refused with an [IllegalArgumentException] naming [what].
      */
     fun requireObject(payload: ByteArray, what: String) {
-        val node = try {
-            mapper.readTree(payload)
-        } catch (e: RuntimeException) {
-            throw IllegalArgumentException("The payload of $what is not a JSON object: ${e.message}", e)
-        }
-        require(node != null && node.isObject) { "The payload of $what is not a JSON object" }
-        require(fits(node)) { "The payload of $what has an integer outside the signed 64-bit range" }
-        require(noNul(node)) { "The message store refuses the character U+0000 in the payload of $what" }
+        checkOutboxPayload(payload, what)
+        require(noNul(mapper.readTree(payload))) { "The message store refuses the character U+0000 in the payload of $what" }
     }
-
-    private fun fits(node: JsonNode): Boolean = if (node.isIntegralNumber) node.canConvertToLong() else node.values().all(::fits)
 
     private fun noNul(node: JsonNode): Boolean = when {
         node.isString -> node.asString().indexOf('\u0000') < 0

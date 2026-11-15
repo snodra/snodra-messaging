@@ -17,6 +17,7 @@ import io.damoreira.kraken.messaging.store.ProcessorControlStore.Companion.KIND_
 import io.damoreira.kraken.messaging.store.ProcessorControlStore.Control
 import io.damoreira.kraken.messaging.store.ProcessorControlStore.Lock
 import io.damoreira.kraken.messaging.store.ProcessorControlStore.Operation
+import io.damoreira.kraken.messaging.store.checkOutboxPayload
 import org.springframework.dao.DuplicateKeyException
 import org.springframework.transaction.support.TransactionSynchronization
 import org.springframework.transaction.support.TransactionSynchronizationManager
@@ -83,7 +84,7 @@ internal class MemoryOutboxStore(private val store: MemoryMessageStore) : Outbox
      * is appended at once, as without a transaction.
      */
     override suspend fun append(entry: OutboxEntry) {
-        JsonPayloads.requireObject(entry.payload, "outbox entry ${entry.id} (${entry.type})")
+        checkOutboxPayload(entry.payload, "outbox entry ${entry.id} (${entry.type})")
         val copy = OutboxEntry(entry.id, entry.type, entry.key, LinkedHashMap(entry.headers), entry.payload.copyOf(), entry.createdAt, entry.seq, entry.attempts)
         if (store.bound() == null && !store.endedTransactionBound() && TransactionSynchronizationManager.isSynchronizationActive() &&
             TransactionSynchronizationManager.isActualTransactionActive()

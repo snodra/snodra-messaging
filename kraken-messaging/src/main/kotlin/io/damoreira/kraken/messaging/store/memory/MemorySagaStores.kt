@@ -14,6 +14,7 @@ import io.damoreira.kraken.messaging.store.SagaFailureStore
 import io.damoreira.kraken.messaging.store.SagaMarkerStore
 import io.damoreira.kraken.messaging.store.SagaRepository
 import io.damoreira.kraken.messaging.store.SagaStores
+import io.damoreira.kraken.messaging.store.checkOutboxPayload
 import org.springframework.dao.DuplicateKeyException
 import java.time.Instant
 
@@ -78,7 +79,7 @@ internal class MemorySagaDispatchStore(private val store: MemoryMessageStore) : 
     override fun record(entries: List<SagaDispatchDocument>) {
         if (entries.isEmpty()) return
         // An event the outbox would refuse is refused here, inside the saga's transaction: never committed, then stuck.
-        for (e in entries) if (e.kind == DispatchKind.EVENT) JsonPayloads.requireObject(e.payload.toByteArray(Charsets.UTF_8), "saga event ${e.id} (${e.type})")
+        for (e in entries) if (e.kind == DispatchKind.EVENT) checkOutboxPayload(e.payload.toByteArray(Charsets.UTF_8), "saga event ${e.id} (${e.type})")
         store.locked {
             val view = view()
             val ids = HashSet<String>()

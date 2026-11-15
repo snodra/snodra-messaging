@@ -1,13 +1,14 @@
 package io.damoreira.kraken.messaging.mongo
 
 import com.mongodb.client.model.Filters
-import com.mongodb.client.model.Projections
 import com.mongodb.client.model.FindOneAndUpdateOptions
+import com.mongodb.client.model.Projections
 import com.mongodb.client.model.ReturnDocument
 import com.mongodb.client.model.Sorts
 import com.mongodb.client.model.Updates
 import io.damoreira.kraken.messaging.store.OutboxEntry
 import io.damoreira.kraken.messaging.store.OutboxStore
+import io.damoreira.kraken.messaging.store.checkOutboxPayload
 import org.bson.Document
 import org.springframework.data.mongodb.core.MongoTemplate
 import java.time.Clock
@@ -102,12 +103,14 @@ internal class MongoOutboxStore(private val mongo: MongoTemplate, private val cl
 }
 
 /**
- * [payload] as the document an outbox entry stores it as; anything but a JSON object whose integers fit in a signed 64-bit
- * integer is refused with an [IllegalArgumentException] naming [what] (see [OutboxEntry]): the parser refuses a larger
- * integer (`NumberFormatException`), which becomes that exception.
+ * [payload] as the document an outbox entry stores it as, once the core's payload contract ([checkOutboxPayload]) accepted it;
+ * refused with an [IllegalArgumentException] naming [what].
  */
-internal fun outboxPayload(payload: ByteArray, what: String): Document = try {
-    Document.parse(String(payload, Charsets.UTF_8))
-} catch (e: RuntimeException) {
-    throw IllegalArgumentException("The payload of $what is not a JSON object: ${e.message}", e)
+internal fun outboxPayload(payload: ByteArray, what: String): Document {
+    checkOutboxPayload(payload, what)
+    return try {
+        Document.parse(String(payload, Charsets.UTF_8))
+    } catch (e: RuntimeException) {
+        throw IllegalArgumentException("The payload of $what is not a JSON object: ${e.message}", e)
+    }
 }
