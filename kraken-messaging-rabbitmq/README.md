@@ -48,8 +48,13 @@ default, as Kafka's topic), and its dead-letter stream when the dead-letter mode
 
 ```bash
 rabbitmq-streams add_super_stream kraken.events --partitions 6
-rabbitmq-streams add_stream kraken.events.dlt
+rabbitmqadmin declare queue --name kraken.events.dlt --type stream --durable true
 ```
+
+`rabbitmq-streams` has no command for a plain stream on RabbitMQ 4.x: the dead-letter stream is a queue of type `stream`, declared
+with `rabbitmqadmin` (v2, shipped in the `rabbitmq:4.4.0-management` image; on a node it talks to the local management API, from
+elsewhere add `--host`, `--port`, `--username`, `--password`), through the management API (`PUT /api/queues/%2F/kraken.events.dlt`
+with `{"durable":true,"arguments":{"x-queue-type":"stream"}}`) or by any AMQP client with `x-queue-type=stream`.
 
 A missing super stream fails the publish (the outbox relay retries it) and the processors' subscriptions (subscribed again after
 a backoff), naming the command above.
@@ -81,7 +86,7 @@ The Rust add-on's `KRAKEN_RABBITMQ_KNOWN_SUBSCRIPTIONS` belongs to its event bro
 ## What it covers
 
 - **Events go to the super stream's partitions by key** (the stream clients' hash routing), unkeyed events by their id; a key
-  always reaches a processor in publish order. Publishing waits for the broker's confirm of each event (at most 10 s); a
+  always reaches a processor in publish order. Publishing waits for the broker's confirm of each event (at most `confirm-timeout`, 30 s); a
   refusal for good (access refused, an event over the 1 MiB frame) gives the event up, anything else is retried by the relay.
   A source's partitions and each stream's leader are cached and looked up again every 30 s or after a failure.
 - **What decides correctness is read on each stream's leader**: stored offsets (on activation, and read back after every store
@@ -115,7 +120,13 @@ These are rules both libraries follow; a program writing kraken's streams must f
 ## Limits
 
 - **Replay needs the management API**: the stream protocol lists no consumers, so without it nothing can tell whether an instance
-  still reads a processor.
+  still reads a processor. The API is one URL: with `replay` enabled (`management.url` set) the store cannot open while that node
+  is down, and the service does not start.
+- **Taking a partition over.** An instance that stops or crashes hands its partitions over at once (the broker activates another
+  member). After the loss of a broker **node**, a partition whose active consumer was connected to that node has no active
+  consumer until the broker's `consumer_disconnected_timeout` passes (60 s by default on RabbitMQ 4.x; measured 60.1 s on a
+  3-node cluster). The add-on reads each partition on its leader's node, so the loss of a leader's node always means that wait
+  for the partitions it led. Publishing to those partitions resumes as soon as a new leader is elected (seconds).
 - **Lag is approximate** for what a processor has not received yet: offsets also number the streams' offset-tracking entries, so
   that part may be overstated; what it received and has not acknowledged is counted one by one (exact when caught up).
 - **Redelivery after a crash**: positions are stored every 10 000 acknowledgements or 5 s (and always when a partition moves

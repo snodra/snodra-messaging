@@ -42,7 +42,8 @@ import kotlin.coroutines.cancellation.CancellationException
  *   (the offset after the last acknowledged event); nothing stored means `first`. Stored every 10 000 acknowledgements or 5 s
  *   ([RabbitEventStoreSettings.offsetStoreMessages], [RabbitEventStoreSettings.offsetStoreInterval]), and always on deactivation and
  *   at close.
- * - **The native dead letter** is the plain stream `<source>.dlt`, created by the infrastructure.
+ * - **The native dead letter** is the plain stream `<source>.dlt`, created by the infrastructure (a queue of type stream:
+ *   `rabbitmqadmin declare queue --name kraken.events.dlt --type stream --durable true`).
  * - Connections are named `kraken-messaging`.
  *
  * **Capabilities**: [Capability.BROWSE] (the event browser can read the streams; it is a separate program), [Capability.LAG] and
