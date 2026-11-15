@@ -367,8 +367,10 @@ message, the connection reconnects at the backoff cap (80-100 % of `hub.reconnec
 restart). The service keeps running; the hub counts every attempt as a violation.
 `HubConnections.latestRejection` (a `StateFlow<HubRejection?>`) holds the newest refusal by any hub: `hub` (its id when it
 registered this instance before, else the target dialled), `code` (`PERMISSION_DENIED`), the hub's `description` and `at`. It is
-set on every refusal, replaced only by a newer one, and never cleared by a later acceptance, so a service can show why it was
-refused after it healed. In `permissive` nothing is refused: the hub logs and counts what `enforce` would refuse (except an instance-id
+set on every refusal, replaced only by a later one (in the order they were recorded, whatever the clock says; `at` is for
+display), and never cleared by a later acceptance, so a service can show why it was refused after it healed. The client's own
+check of an expired client certificate sets it too (`UNAUTHENTICATED`, the stream is not opened); a failure to get an access
+token does not (it is not a hub's refusal). In `permissive` nothing is refused: the hub logs and counts what `enforce` would refuse (except an instance-id
 takeover, below, which it refuses too).
 
 **Instance ids belong to a service.** A `Register` that names the instance id of a live session of *another* service is

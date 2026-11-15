@@ -58,8 +58,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withTimeoutOrNull
 import org.slf4j.LoggerFactory
+import java.time.Clock
 import java.time.Duration
-import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentSkipListMap
 import java.util.concurrent.atomic.AtomicBoolean
@@ -234,7 +234,9 @@ class HubConnection(
     /** Called for every `ClientMessage.credentials` this connection writes ([HubConnections] keeps the process-wide, monotonic total). */
     private val onCredentialsRefreshSent: () -> Unit = {},
     /** Called for every refusal of this connection's registration ([HubConnections] keeps the newest of all its hubs). */
-    private val onRejected: (HubRejection) -> Unit = {},
+    private val onRejected: (seq: Long, rejection: HubRejection) -> Unit = { _, _ -> },
+    /** Stamps [HubRejection.at]. */
+    private val clock: Clock = Clock.systemUTC(),
     /** Serves the hub's `ControlRequest`s (P6b); without event processors every one is `UNKNOWN_PROCESSOR`. */
     private val control: ControlInbound = NO_PROCESSOR_CONTROL,
 ) : HubTransport {
@@ -982,7 +984,7 @@ class HubConnection(
                 retry
             } else if (isRegistrationRejection(status)) {
                 rejection.value = status
-                onRejected(HubRejection(lastHubId ?: target, status.code.name, status.description, Instant.now()))
+                onRejected(REJECTION_SEQ.incrementAndGet(), HubRejection(lastHubId ?: target, status.code.name, status.description, clock.instant()))
                 val retry = ReconnectBackoff.jittered(settings.backoffMax, settings.backoffMax)
                 // The same message repeats at every attempt: one error line, then debug (a refused service retries for as long as it runs).
                 val text = "Hub rejected the registration of {} ({}): {} {}; retrying in {}"

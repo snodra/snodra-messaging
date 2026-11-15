@@ -372,6 +372,35 @@ class HubAccessControlTest {
         }
     }
 
+    @Test fun `a later refusal replaces the latest rejection even when the clock went backwards`() = runBlocking {
+        hub.auth = HubAuth.enforce(acl)
+        // Every reading is a minute earlier than the one before: wall-clock order is the reverse of the order of the refusals.
+        val readings = java.util.concurrent.atomic.AtomicLong()
+        val backwards = object : java.time.Clock() {
+            override fun getZone() = java.time.ZoneOffset.UTC
+            override fun withZone(zone: java.time.ZoneId?) = this
+            override fun instant(): Instant = Instant.parse("2026-11-15T12:00:00Z").minusSeconds(60 * readings.incrementAndGet())
+        }
+        val connections = HubConnections(
+            targets = HubTargets.parse("static://hub-a:7000"),
+            channelFactory = HubChannelFactory { InProcessChannelBuilder.forName(hub.name).build() },
+            serviceName = "svc-a",
+            instanceId = "b-1",
+            settings = settings(HubToken.NONE),
+            inbound = { req -> Reply.newBuilder().setRequestId(req.id).build() },
+            scope = scope,
+            clock = backwards,
+        )
+        connections.start()
+        try {
+            val first = withTimeout(5_000) { connections.latestRejection.first { it != null } }!!
+            val later = withTimeout(5_000) { connections.latestRejection.first { it != null && it.at.isBefore(first.at) } }!!
+            assertEquals("UNAUTHENTICATED", later.code, "the next refusal, stamped earlier by the clock, is the latest")
+        } finally {
+            connections.stop()
+        }
+    }
+
     @Test fun `rejections back off straight to the cap, with no tight loop, for both new codes`() = runBlocking {
         hub.auth = HubAuth.enforce(acl)
         val unauthenticated = connection("r-1", settings = settings(HubToken.NONE))
