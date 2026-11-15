@@ -6,4 +6,12 @@
 .superpowers/
 .idea/
 docs/
-*.iml
+**/*.iml
+# Local config and secrets (as .gitignore): never in an image
+**/.env
+**/.env.*
+**/*.local.yaml
+**/out/
+**/.DS_Store
+**/*.ipr
+**/*.iws
