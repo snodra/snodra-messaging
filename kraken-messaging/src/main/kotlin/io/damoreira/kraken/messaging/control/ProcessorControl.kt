@@ -48,6 +48,9 @@ import io.damoreira.kraken.hub.v1.ResetTarget as WireTarget
  * reset operation holds its lock. Then every [pollInterval] the documents are read again and applied: a pause or resume made
  * through another instance, a lock taken (the consumer leaves its subscription) or cleared (it subscribes again), a lease that passed
  * (the instance clears the operation it held and resumes), and the replay ranges this instance consumed past (removed).
+ * A document is applied only when nothing changed the processor here since it was read: a poll that read it before a
+ * prepare, pause, resume, execute or finish of this instance answered leaves it to the next poll, which reads what that
+ * request wrote (otherwise it would undo the request: start the consumer again under the lock just taken, resume a pause).
  *
  * Requests run off the hub stream, one at a time per processor (a single thread each), except the renewal of the operation
  * this instance holds, which is answered at once, and the dead-letter requests while a reset of the processor executes here:
@@ -93,6 +96,11 @@ class ProcessorControl(
         @Volatile var executing: String? = null
         /** The operations that ended here, with the [System.nanoTime] until which they are remembered. */
         val finished = ConcurrentHashMap<String, Long>()
+        /**
+         * Counts the changes made to this processor here (by a request, or by applying a document; under the slot's lock): a
+         * document read at another count is stale, never applied ([converge]).
+         */
+        @Volatile var changes = 0L
     }
 
     /** Remembers that [op] ended on [slot] (see the class docs). */
@@ -125,7 +133,7 @@ class ProcessorControl(
         leases = Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "kraken-control-lease").apply { isDaemon = true } }
         slots = attached
         try {
-            if (docs != null) for (slot in attached.values) converge(slot, docs[slot.consumer.processor], now, failFast = true)
+            if (docs != null) for (slot in attached.values) converge(slot, docs[slot.consumer.processor], now, readAt = 0L, failFast = true)
         } catch (e: Exception) {
             detach()
             throw e
@@ -228,7 +236,10 @@ class ProcessorControl(
 
     private fun setPaused(slot: Slot, paused: Boolean, by: String) {
         runBlocking { store.setPaused(slot.consumer.processor, paused, by) }
-        synchronized(slot) { if (paused) slot.consumer.pause() else slot.consumer.resume() }
+        synchronized(slot) {
+            if (paused) slot.consumer.pause() else slot.consumer.resume()
+            slot.changes++
+        }
     }
 
     // --- reset ---
@@ -240,7 +251,10 @@ class ProcessorControl(
         val processor = slot.consumer.processor
         if (runBlocking { store.renew(processor, op, lease) }) return ok(request, "lease renewed")
         // Its lease passed and was cleared, or it finished meanwhile: a late renewal must not take the free lock (ADR 0023).
-        synchronized(slot) { if (slot.held?.id == op) slot.held = null }
+        synchronized(slot) {
+            if (slot.held?.id == op) slot.held = null
+            slot.changes++
+        }
         ended(slot, op, lease)
         return refused(request, ControlRefusal.CONTROL_REFUSAL_NOT_PREPARED, "lock lost: operation $op no longer holds the lock of processor $processor")
     }
@@ -263,6 +277,7 @@ class ProcessorControl(
                     slot.held = Held(op, lease)
                     slot.consumer.operationId = op
                     if (slot.consumer.isRunning) slot.consumer.stop() // finishes the record in hand, acknowledges it, leaves the subscription
+                    slot.changes++
                 }
                 ok(request, "stopped, left the subscription ${slot.consumer.subscription}")
             }
@@ -399,7 +414,10 @@ class ProcessorControl(
         }
         val deleted = done.markers
         val handlers = done.handlers
-        consumer.replay(replay)
+        synchronized(slot) {
+            consumer.replay(replay)
+            slot.changes++
+        }
         log.info(
             "Processor {} reset to {} by operation {}: positions {}, replay {}, {} markers deleted, {} reset handlers",
             processor, target, op, plan.map { "${it.segment}@${it.from}" }, ranges, deleted, handlers,
@@ -429,7 +447,10 @@ class ProcessorControl(
         ended(slot, op, slot.held?.takeIf { it.id == op }?.lease ?: Duration.ZERO)
         if (slot.held?.id == op) {
             runBlocking { store.release(processor, op) }
-            synchronized(slot) { slot.held = null }
+            synchronized(slot) {
+                slot.held = null
+                slot.changes++
+            }
             converge(slot)
             return ok(request, "released, consuming again")
         }
@@ -452,6 +473,7 @@ class ProcessorControl(
     private fun poll() {
         val current = slots
         if (current.isEmpty()) return
+        val readAt = current.mapValues { it.value.changes }
         val docs = try {
             runBlocking { store.read(current.keys) }
         } catch (e: Exception) {
@@ -461,7 +483,7 @@ class ProcessorControl(
         val now = clock.instant()
         for (slot in current.values) {
             try {
-                converge(slot, docs[slot.consumer.processor], now)
+                converge(slot, docs[slot.consumer.processor], now, readAt.getValue(slot.consumer.processor))
                 removePassed(slot)
             } catch (e: Exception) {
                 log.warn("Could not apply the control document of processor {}: {}", slot.consumer.processor, e.toString())
@@ -469,17 +491,24 @@ class ProcessorControl(
         }
     }
 
-    private fun converge(slot: Slot) = converge(slot, runBlocking { store.get(slot.consumer.processor) }, clock.instant())
+    private fun converge(slot: Slot) {
+        val readAt = slot.changes
+        converge(slot, runBlocking { store.get(slot.consumer.processor) }, clock.instant(), readAt)
+    }
 
     /**
      * Applies [doc] to [slot]'s consumer: replay ranges, pause, and whether it runs (not while an unexpired operation holds the
      * lock, its own included). A lease of the operation held here that passed is cleared (conditional on its id) and the
-     * consumer resumes. [failFast]: a consumer that cannot start throws (at start) instead of waiting for the next poll.
+     * consumer resumes. [readAt]: [Slot.changes] before [doc] was read; a change made here since then means [doc] may predate
+     * it, and it is left to the next read. [failFast]: a consumer that cannot start throws (at start) instead of waiting for
+     * the next poll.
      */
-    private fun converge(slot: Slot, doc: Control?, now: Instant, failFast: Boolean = false) = synchronized(slot) {
+    private fun converge(slot: Slot, doc: Control?, now: Instant, readAt: Long, failFast: Boolean = false) = synchronized(slot) {
         val consumer = slot.consumer
         val processor = consumer.processor
         if (slots[processor] !== slot) return@synchronized // detached: the consumer is its owner's to stop, never to start again
+        if (slot.changes != readAt) return@synchronized // read before a change made here: it would undo it
+        slot.changes++
         var operation = doc?.operation
         val held = slot.held
         if (held != null) {
