@@ -1,5 +1,6 @@
 package io.damoreira.kraken.messaging.test
 
+import com.github.dockerjava.api.model.Ulimit
 import org.testcontainers.DockerClientFactory
 import org.testcontainers.containers.GenericContainer
 import org.testcontainers.containers.wait.strategy.Wait
@@ -23,12 +24,19 @@ object KrakenContainers {
     const val MONGO_IMAGE = "mongo:8.3.13"
     const val POSTGRES_IMAGE = "postgres:17.7"
     const val MYSQL_IMAGE = "mysql:8.4.7"
+    private const val MONGO_OPEN_FILES = 64_000L
 
     private val hubImage: String get() = System.getenv("KRAKEN_HUB_IMAGE") ?: "kraken-hub:dev"
 
     fun kafka(): KafkaContainer = KafkaContainer(DockerImageName.parse(KAFKA_IMAGE)).withReuse(true)
 
+    /**
+     * MongoDB ([MONGO_IMAGE]) as a single-node replica set. Its open-file limit is MongoDB's recommended 64000: WiredTiger
+     * keeps a file open per collection and index, and the conformance tests create a database per test, which exhausts a
+     * Docker daemon's default of 1024 and leaves the server refusing connections.
+     */
     fun mongo(): MongoDBContainer = MongoDBContainer(DockerImageName.parse(MONGO_IMAGE)).withReplicaSet().withReuse(true)
+        .withCreateContainerCmdModifier { it.hostConfig!!.withUlimits(listOf(Ulimit("nofile", MONGO_OPEN_FILES, MONGO_OPEN_FILES))) }
 
     /**
      * PostgreSQL ([POSTGRES_IMAGE]) for the SQL message store (`kraken-messaging-jdbc`); test credentials only. Started once the
