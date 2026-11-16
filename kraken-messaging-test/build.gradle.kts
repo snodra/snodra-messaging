@@ -9,21 +9,29 @@ dependencies {
     api(libs.testcontainers.junit)
     api(libs.testcontainers.kafka)
     api(libs.testcontainers.mongodb)
+    api(libs.testcontainers.postgresql)
+    api(libs.testcontainers.mysql)
     implementation(platform("org.springframework.boot:spring-boot-dependencies:${libs.versions.spring.boot.get()}"))
     api("org.apache.kafka:kafka-clients")
     // InMemoryBuses synthesises a KrakenForwardedAuthentication (a Spring Security Authentication) for annotated handlers.
     implementation("org.springframework.security:spring-security-core")
-    // SagaTestFixture runs the library's SagaRuntime, whose ports speak the saga documents (bson) and TransactionOperations (spring-tx).
-    implementation(libs.spring.boot.starter.data.mongodb)
     api(libs.kotlinx.coroutines.core)
+    // MessageStoreConformanceTest and EventStoreConformanceTest are JUnit 5 classes that add-ons extend in their own tests.
+    api("org.junit.jupiter:junit-jupiter-api")
     api(libs.grpc.inprocess)
     implementation(libs.grpc.stub)
     implementation(libs.grpc.protobuf)
+    // @KrakenInMemory is a Spring test annotation (TestPropertySource, Import) for a service's @SpringBootTest.
+    implementation("org.springframework:spring-test")
+    implementation("org.springframework:spring-context")
+    implementation("org.springframework.boot:spring-boot-autoconfigure") // @KrakenInMemory enables auto-configuration with its exclusions
     // UnverifiedJwt reads the claims of a jwt credential.
     implementation("tools.jackson.core:jackson-databind")
     implementation(libs.grpc.kotlin.stub)
 
     testImplementation(libs.kotlin.test.junit5)
+    testImplementation(platform("org.springframework.boot:spring-boot-dependencies:${libs.versions.spring.boot.get()}"))
+    testImplementation(libs.spring.boot.starter.test)
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
     // The starter is a project dependency, so its BOM-managed (version-less) transitives need the BOM here too.
     testRuntimeOnly(platform("org.springframework.boot:spring-boot-dependencies:${libs.versions.spring.boot.get()}"))
@@ -45,7 +53,7 @@ publishing {
             artifactId = "kraken-messaging-test"
             pom {
                 name.set("kraken-messaging-test")
-                description.set("Testcontainers helpers for kraken services (Kafka, MongoDB, hub, RustFS)")
+                description.set("Test helpers for kraken services: the conformance kits, the zero-infrastructure mode (@KrakenInMemory), Testcontainers (Kafka, MongoDB, PostgreSQL, MySQL, hub)")
                 licenses { license { name.set("MIT") } }
             }
         }

@@ -179,7 +179,7 @@ class HubBus(
     private suspend fun rawTemplate(type: String, payload: ByteArray, options: SendOptions): Request {
         val headers = options.headers.toMutableMap()
         headers["correlationId"] = CorrelationContext.resolve(currentCoroutineContext())
-        traceHeaders.inject(headers)
+        traceHeaders.inject(headers, currentCoroutineContext())
         return Request.newBuilder()
             .setKind(RequestKind.COMMAND)
             .setType(type)

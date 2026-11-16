@@ -24,10 +24,8 @@ dependencies {
     api(project(":kraken-messaging-api"))
     api(libs.kotlinx.coroutines.core)
     implementation(libs.spring.boot.starter)
-    implementation(libs.spring.kafka)
-    // ExternalRecordTranslator.translate takes a Kafka ConsumerRecord: a service writing one needs the client on its compile classpath.
-    api("org.apache.kafka:kafka-clients")
-    implementation(libs.spring.boot.starter.data.mongodb)
+    // MessageStore.transactions is a PlatformTransactionManager: the store interfaces speak spring-tx.
+    api("org.springframework:spring-tx")
     implementation(libs.jackson.module.kotlin)
     implementation(libs.kotlin.reflect)
     // gRPC stubs generated from src/main/proto/hub.proto (see proto/README.md).
@@ -46,6 +44,7 @@ dependencies {
     testImplementation(libs.spring.boot.starter.test)
     testImplementation("org.springframework.boot:spring-boot-actuator")
     testImplementation("io.micrometer:micrometer-core")
+    testImplementation(libs.micrometer.tracing) // TraceFloorTest: with tracing present the propagator decides
     testImplementation("org.springframework.boot:spring-boot-micrometer-metrics") // Boot's registry in the end-to-end applications
     testImplementation(libs.kotlin.test.junit5)
     testImplementation(libs.mockk)
@@ -53,6 +52,10 @@ dependencies {
     testImplementation(libs.awaitility)
     testImplementation(libs.grpc.inprocess)
     testImplementation(project(":kraken-messaging-test"))
+    // The tests that need a real store run on MongoDB through the add-on (which depends on this module's main code).
+    testImplementation(project(":kraken-messaging-mongo"))
+    // ... and on Kafka through the event-store add-on (the core has no event-store client of its own, ADR 0027).
+    testImplementation(project(":kraken-messaging-kafka"))
     testImplementation(libs.spring.boot.testcontainers)
     testImplementation(libs.testcontainers.kafka)
     testImplementation(libs.testcontainers.mongodb)
@@ -102,7 +105,7 @@ publishing {
             artifactId = "kraken-messaging"
             pom {
                 name.set("kraken-messaging")
-                description.set("Spring Boot starter: EventBus, CommandBus, QueryBus over Kafka and the kraken hub")
+                description.set("Spring Boot starter: EventBus, CommandBus, QueryBus over an event-store add-on and the kraken hub")
                 licenses { license { name.set("MIT") } }
             }
         }

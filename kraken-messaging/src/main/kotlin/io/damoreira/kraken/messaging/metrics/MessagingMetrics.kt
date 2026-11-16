@@ -37,7 +37,7 @@ interface MessagingMetrics {
         /** Given up without a dead letter: mode `log`, or only the saga stage failed. */
         FAILED,
 
-        /** Handed to the dead letters (mode `collection` or `topic`). */
+        /** Handed to the dead letters (mode `collection` or `event-store`). */
         PARKED,
         ;
 
@@ -53,13 +53,13 @@ interface MessagingMetrics {
     /** One outbox send attempt, `kraken_outbox_published_total{outcome}`: [ok] when the broker acknowledged it. */
     fun outboxPublished(ok: Boolean) = Unit
 
-    /** The `createdAt` of the oldest unpublished outbox document as the relay's latest poll saw it (null: none). */
+    /** The `createdAt` of the oldest unpublished outbox entry as the relay last sampled it, whoever holds it (null: none). */
     fun outboxOldest(createdAt: Instant?) = Unit
 
     /** The unpublished (not sent, not given up) outbox documents, as the relay last counted them. */
     fun outboxPending(count: Long) = Unit
 
-    /** Whether [outboxPending] is wanted: the relay counts the outbox in the database only then. */
+    /** Whether [outboxPending] and [outboxOldest] are wanted: the relay samples the outbox in the database only then. */
     val countsOutbox: Boolean get() = false
 
     /** One unary command or query call of [type] through the hub ended with [outcome] after [nanos], retries included. */

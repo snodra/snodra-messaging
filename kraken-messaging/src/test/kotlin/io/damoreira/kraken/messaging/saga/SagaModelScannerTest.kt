@@ -4,7 +4,7 @@ import io.damoreira.kraken.messaging.CommandBus
 import io.damoreira.kraken.messaging.EventBus
 import io.damoreira.kraken.messaging.QueryBus
 import io.damoreira.kraken.messaging.hub.HubBus
-import io.damoreira.kraken.messaging.kafka.OutboxEventBus
+import io.damoreira.kraken.messaging.events.OutboxEventBus
 import io.damoreira.kraken.messaging.MessageContext
 import io.damoreira.kraken.messaging.api.Command
 import io.damoreira.kraken.messaging.api.Event

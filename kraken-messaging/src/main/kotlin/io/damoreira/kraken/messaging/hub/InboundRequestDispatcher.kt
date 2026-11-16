@@ -15,6 +15,7 @@ import io.damoreira.kraken.messaging.handler.SubscriptionAdmission
 import io.damoreira.kraken.messaging.security.ForwardedIdentityResolver
 import io.damoreira.kraken.messaging.security.Identity
 import io.damoreira.kraken.messaging.security.SecurityContextElement
+import io.damoreira.kraken.messaging.eventstore.EventHeaders
 import io.damoreira.kraken.messaging.tracing.CorrelationContext
 import kotlinx.coroutines.withContext
 import org.slf4j.LoggerFactory
@@ -100,7 +101,7 @@ class InboundRequestDispatcher(
         class Resolved(val ctx: MessageContext, val identity: Identity?, val securityContext: SecurityContext) : Caller {
             /** Runs [block] with the caller's identity in the Spring security context and its correlation id in the coroutine context. */
             suspend fun <T> run(req: Request, block: suspend (ByteArray, MessageContext, Identity?) -> T): T =
-                withContext(SecurityContextElement(securityContext) + CorrelationContext(ctx.correlationId)) {
+                withContext(SecurityContextElement(securityContext) + CorrelationContext(ctx.correlationId, ctx.headers[EventHeaders.TRACEPARENT])) {
                     block(req.payload.toByteArray(), ctx, identity)
                 }
         }

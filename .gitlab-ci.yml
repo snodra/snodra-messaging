@@ -39,6 +39,17 @@ test:
     reports:
       junit: "**/build/test-results/test/TEST-*.xml"
 
+# The throughput floors (tag `throughput`, excluded from `test`): on the same runner as the test job, after it.
+throughput:
+  stage: test
+  needs: ["test"]
+  script:
+    - ./gradlew throughputTest --no-daemon
+  artifacts:
+    when: always
+    reports:
+      junit: "**/build/test-results/throughputTest/TEST-*.xml"
+
 release:
   stage: release
   resource_group: release
@@ -108,11 +119,11 @@ release:
       else
         echo "Tag $NEXT already exists, skipping tag push"
       fi
-      ./gradlew :kraken-messaging-api:publish :kraken-messaging:publish :kraken-messaging-test:publish --no-daemon -Pversion="$VERSION"
+      ./gradlew :kraken-messaging-api:publish :kraken-messaging:publish :kraken-messaging-kafka:publish :kraken-messaging-rabbitmq:publish :kraken-messaging-mongo:publish :kraken-messaging-jdbc:publish :kraken-messaging-test:publish --no-daemon -Pversion="$VERSION"
       RELEASE=$(jq -n \
         --arg name "$CI_PROJECT_NAME $NEXT" \
         --arg tag "$NEXT" \
-        --arg desc "Maven release $VERSION: io.damoreira.kraken:kraken-messaging, kraken-messaging-api and kraken-messaging-test in Nexus maven-releases." \
+        --arg desc "Maven release $VERSION: io.damoreira.kraken:kraken-messaging-api, kraken-messaging, kraken-messaging-kafka, kraken-messaging-rabbitmq, kraken-messaging-mongo, kraken-messaging-jdbc and kraken-messaging-test in Nexus maven-releases." \
         '{name:$name,tag_name:$tag,description:$desc}')
       STATUS=$(curl --silent --output /dev/null --write-out '%{http_code}' \
         --request POST \

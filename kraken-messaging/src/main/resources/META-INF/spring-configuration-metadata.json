@@ -36,21 +36,33 @@
       "sourceMethod": "getTls()"
     },
     {
-      "name": "kraken.messaging.kafka",
-      "type": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Kafka",
+      "name": "kraken.messaging.store",
+      "type": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Store",
       "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties",
-      "sourceMethod": "getKafka()"
+      "sourceMethod": "getStore()"
     },
     {
-      "name": "kraken.messaging.kafka.consumer",
+      "name": "kraken.messaging.memory",
+      "type": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Memory",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties",
+      "sourceMethod": "getMemory()"
+    },
+    {
+      "name": "kraken.messaging.events",
+      "type": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Events",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties",
+      "sourceMethod": "getEvents()"
+    },
+    {
+      "name": "kraken.messaging.events.consumer",
       "type": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Consumer",
-      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Kafka",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Events",
       "sourceMethod": "getConsumer()"
     },
     {
-      "name": "kraken.messaging.kafka.dead-letter",
+      "name": "kraken.messaging.events.dead-letter",
       "type": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$DeadLetter",
-      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Kafka",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Events",
       "sourceMethod": "getDeadLetter()"
     },
     {
@@ -100,19 +112,13 @@
       "type": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$ExternalCalls",
       "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$External",
       "sourceMethod": "getCalls()"
-    },
-    {
-      "name": "kraken.messaging.external.kafka",
-      "type": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$ExternalKafka",
-      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$External",
-      "sourceMethod": "getKafka()"
     }
   ],
   "properties": [
     {
       "name": "kraken.messaging.service-name",
       "type": "java.lang.String",
-      "description": "Logical service name: Kafka consumer group, event source and hub registration name. Required.",
+      "description": "Logical service name: the prefix of the processors' subscriptions, event source and hub registration name. Required.",
       "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties"
     },
     {
@@ -191,7 +197,7 @@
     {
       "name": "kraken.messaging.hub.token-file",
       "type": "java.nio.file.Path",
-      "description": "File holding the hub token (a container secret): read at startup, where an unreadable file fails the startup, and again on every reconnect. Wins over kraken.messaging.hub.token when both are set. Environment variable KRAKEN_MESSAGING_HUB_TOKEN_FILE, or KRAKEN_HUB_TOKEN_FILE when this property is unset.",
+      "description": "File holding the hub token (a container secret), trimmed at both ends: read at startup, where an unreadable or empty file fails the startup, and again on every reconnect. Wins over kraken.messaging.hub.token when both are set. Environment variable KRAKEN_MESSAGING_HUB_TOKEN_FILE, or KRAKEN_HUB_TOKEN_FILE when this property is unset.",
       "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Hub"
     },
     {
@@ -215,7 +221,7 @@
     {
       "name": "kraken.messaging.hub.oauth2.client-secret-file",
       "type": "java.nio.file.Path",
-      "description": "File holding the client secret (a container secret): read at startup, where an unreadable file fails the startup, and again on every token fetch, so a rotated secret applies without a restart. Wins over client-secret. Environment variable KRAKEN_MESSAGING_HUB_OAUTH2_CLIENT_SECRET_FILE, or KRAKEN_HUB_OAUTH2_CLIENT_SECRET_FILE when this property is unset.",
+      "description": "File holding the client secret (a container secret), trimmed at both ends: read at startup, where an unreadable or empty file fails the startup, and again on every token fetch, so a rotated secret applies without a restart. Wins over client-secret. Environment variable KRAKEN_MESSAGING_HUB_OAUTH2_CLIENT_SECRET_FILE, or KRAKEN_HUB_OAUTH2_CLIENT_SECRET_FILE when this property is unset.",
       "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$OAuth2"
     },
     {
@@ -323,48 +329,60 @@
       "defaultValue": "2s"
     },
     {
-      "name": "kraken.messaging.kafka.bootstrap-servers",
+      "name": "kraken.messaging.event-store",
       "type": "java.lang.String",
-      "description": "Kafka bootstrap servers.",
-      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Kafka",
-      "defaultValue": "broker:19092"
+      "description": "The event store's name (kafka, rabbitmq-streams, memory): which one runs when two event-store add-ons are on the classpath, and the only way to run the in-memory one (memory: not durable, one JVM; tests, local runs, demos). Unset: the only one there is.",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties"
     },
     {
-      "name": "kraken.messaging.kafka.topic",
+      "name": "kraken.messaging.store.type",
       "type": "java.lang.String",
-      "description": "Events topic.",
-      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Kafka",
+      "description": "The message store's name (mongo, jdbc, memory): which one runs when two are available, and the only way to run the in-memory one (memory: not durable, one JVM; tests, local runs, demos). Unset: the only one there is.",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Store"
+    },
+    {
+      "name": "kraken.messaging.memory.segments",
+      "type": "java.lang.Integer",
+      "description": "The in-memory event store's segments per source (1 to 1024): a key always goes to the same one; the competing instances of a subscription share them.",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Memory",
+      "defaultValue": 4
+    },
+    {
+      "name": "kraken.messaging.events.source",
+      "type": "java.lang.String",
+      "description": "The source the service's events are published to and read from (a topic on Kafka).",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Events",
       "defaultValue": "kraken.events"
     },
     {
-      "name": "kraken.messaging.kafka.group-id",
+      "name": "kraken.messaging.events.subscription-prefix",
       "type": "java.lang.String",
-      "description": "The service's consumer group; unset: the service name. Every event processor, default included, uses <this group>.<name>.",
-      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Kafka"
+      "description": "The prefix of every event processor's subscription name; unset: the service name. Every processor, default included, uses <this prefix>.<name> (on Kafka the consumer group).",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Events"
     },
     {
-      "name": "kraken.messaging.kafka.consumer.enabled",
+      "name": "kraken.messaging.events.consumer.enabled",
       "type": "java.lang.Boolean",
-      "description": "Consume the events topic; set false in tools that only publish.",
+      "description": "Run the event processors; set false in tools that only publish.",
       "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Consumer",
       "defaultValue": true
     },
     {
-      "name": "kraken.messaging.kafka.consumer.max-attempts",
+      "name": "kraken.messaging.events.consumer.max-attempts",
       "type": "java.lang.Integer",
-      "description": "Handler invocations per record (first try included, 1 s apart) before the record goes to the dead letters (kafka.dead-letter.mode); shared by every event processor.",
+      "description": "Handler invocations per record (first try included, 1 s apart) before the record goes to the dead letters (events.dead-letter.mode); shared by every event processor.",
       "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Consumer",
       "defaultValue": 5
     },
     {
-      "name": "kraken.messaging.kafka.dead-letter.mode",
+      "name": "kraken.messaging.events.dead-letter.mode",
       "type": "io.damoreira.kraken.messaging.deadletter.DeadLetterMode",
-      "description": "What an event processor does with a record it cannot handle: collection (park it in dead_letters, the default), topic (produce it to <topic>.dlt) or log (log and skip).",
+      "description": "What an event processor does with a record it cannot handle: collection (park it in the message store's dead letters, the default), event-store (publish it to the event store's <source>.dlt; needs the capability native-dead-letter) or log (log and skip).",
       "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$DeadLetter",
       "defaultValue": "collection"
     },
     {
-      "name": "kraken.messaging.kafka.dead-letter.retention",
+      "name": "kraken.messaging.events.dead-letter.retention",
       "type": "java.time.Duration",
       "description": "A dead letter is deleted this long after it was parked (TTL index on expireAt), which also unblocks its key; at least 1s.",
       "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$DeadLetter",
@@ -373,7 +391,7 @@
     {
       "name": "kraken.messaging.outbox.enabled",
       "type": "java.lang.Boolean",
-      "description": "Run the outbox publisher that relays the outbox collection to Kafka.",
+      "description": "Run the outbox publisher that relays the outbox entries to the event store.",
       "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Outbox",
       "defaultValue": true
     },
@@ -404,6 +422,20 @@
       "description": "Send attempts per outbox document before it is marked failed (failedAt) and skipped.",
       "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Outbox",
       "defaultValue": 10
+    },
+    {
+      "name": "kraken.messaging.outbox.lease",
+      "type": "java.time.Duration",
+      "description": "How long a batch the outbox relay claimed stays its own; another instance relays it only after that. Longer than one send (45s).",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Outbox",
+      "defaultValue": "2m"
+    },
+    {
+      "name": "kraken.messaging.store.init-schema",
+      "type": "java.lang.Boolean",
+      "description": "Apply the message store's schema (indexes, tables) at startup. False when the service applies it itself.",
+      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Store",
+      "defaultValue": true
     },
     {
       "name": "kraken.messaging.idempotency.retention",
@@ -536,25 +568,19 @@
       "description": "external_calls documents older than this are deleted (TTL index on updatedAt). Must be positive.",
       "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$ExternalCalls",
       "defaultValue": "30d"
-    },
-    {
-      "name": "kraken.messaging.external.kafka.sources",
-      "type": "java.util.Map<java.lang.String,io.damoreira.kraken.messaging.config.KrakenMessagingProperties$Source>",
-      "description": "Partner Kafka topics consumed into local kraken events, by source name. Each source takes bootstrap-servers (default: kafka.bootstrap-servers), topic (required), group-id (default: <service-name>.external.<name>) and properties (extra consumer properties; servers, group id, deserializers and auto-commit are fixed). A bean named like the source implements ExternalRecordTranslator; a source without one fails the startup naming it. Records are dispatched locally (handlers and sagas), never republished to kraken.events.",
-      "sourceType": "io.damoreira.kraken.messaging.config.KrakenMessagingProperties$ExternalKafka"
     }
   ],
   "hints": [
     {
-      "name": "kraken.messaging.kafka.dead-letter.mode",
+      "name": "kraken.messaging.events.dead-letter.mode",
       "values": [
         {
           "value": "collection",
-          "description": "Park in dead_letters, sequence the key, DeadLetters admin API."
+          "description": "Park in the message store's dead letters, sequence the key, DeadLetters admin API."
         },
         {
-          "value": "topic",
-          "description": "Produce to <topic>.dlt."
+          "value": "event-store",
+          "description": "Publish to the event store's <source>.dlt (capability native-dead-letter)."
         },
         {
           "value": "log",

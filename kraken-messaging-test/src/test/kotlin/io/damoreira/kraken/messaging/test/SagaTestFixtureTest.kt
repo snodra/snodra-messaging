@@ -138,6 +138,22 @@ class FxUnserialisableSaga {
     }
 }
 
+@MessageType("fx.Huge")
+data class FxHuge(val orderId: String, val amount: java.math.BigInteger) : Event
+
+/** Publishes an event whose integer no store can hold (a signed 64-bit integer is the outbox payload contract). */
+@Saga(name = "fx.Huge")
+class FxHugeSaga {
+    var orderId: String? = null
+
+    @StartSaga
+    @SagaEventHandler(associationProperty = "orderId")
+    fun on(e: FxOrderPlaced, commands: SagaCommands) {
+        orderId = e.orderId
+        commands.publish(FxHuge(e.orderId, java.math.BigInteger.TWO.pow(64)))
+    }
+}
+
 @Saga(name = "fx.Throwing")
 class FxThrowingSaga {
     @StartSaga
@@ -246,6 +262,15 @@ class SagaTestFixtureTest {
             SagaTestFixture(FxThrowingSaga::class).whenEvent(FxOrderPlaced("o1", 1))
         }
         assertContains(e.message!!, "the handler is broken for o1")
+    }
+
+    @Test
+    fun `a saga event the outbox would refuse fails the step, as the store's record refuses it`() {
+        val e = assertFailsWith<IllegalStateException> {
+            SagaTestFixture(FxHugeSaga::class).whenEvent(FxOrderPlaced("o1", 1))
+        }
+        assertContains(e.message!!, "IllegalArgumentException")
+        assertContains(e.message!!, "outside the signed 64-bit range")
     }
 
     @Test

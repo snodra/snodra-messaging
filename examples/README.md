@@ -27,8 +27,8 @@ A disposable sandbox that shows cross-service messaging on the real `kraken-hub`
    letters](#event-processors-and-dead-letters)): its own consumer group, a failure switch, and example admin endpoints over
    the library's dead letters.
 
-Everything is anonymous, nothing is persisted by the apps (MongoDB is only there because the starter's outbox and
-idempotent consumer need it), and the modules are never published. They build against the starter as a project
+Everything is anonymous, nothing is persisted by the apps (MongoDB is only there because the message store add-on
+`kraken-messaging-mongo` keeps the outbox and the idempotent consumer's markers in it), and the modules are never published. They build against the starter as a project
 dependency, so they always exercise the current library. Wire classes live in `examples-api`.
 
 | Module | Role | Host port |
@@ -37,6 +37,8 @@ dependency, so they always exercise the current library. Wire classes live in `e
 | `examples/service-a` | REST caller + event listener; `GET /forbidden-send` sends a type outside its ACL on purpose ([Secure sandbox](#secure-sandbox)) | 8091 |
 | `examples/service-b` | the postcard saga, its printer adapter, webhook and topic translator (`GET /postcards/{jobId}`); owner of the greetings command and query, co-owner of the shared `Inventory`, the streaming `Rows`, the subscription `WatchCounter` and `OpenSubscriptions`; logs the text events; the `audit` processor and its `/audit/...` endpoints | 8092 (`POST /counters/{name}/increment`, `/audit/...` and actuator) |
 | `examples/fake-printer` | a partner, not a kraken service: the fake printer of [the postcard saga](#the-postcard-saga) and [the banner saga](#the-banner-saga) (`POST /jobs`, `GET /jobs/{id}`) | 8093 |
+| `examples/orders-sql` | not in the sandbox: a small service on PostgreSQL with the SQL message store (`kraken-messaging-jdbc`). The command `examples.orders.PlaceOrder` stores the order row and the outbox entry of `examples.orders.OrderPlaced` in one transaction; its event handler confirms the order. Events go to the in-memory event store. `OrdersEndToEndTest` runs it against PostgreSQL and the hub image | – |
+| `examples/conformance-service` | not in the sandbox: the conformance service of kraken `protocol/conformance.md` (contract version 1) on this library, which the conformance runner `kraken-conformance` (kraken-hub, `conformance/`) starts with its `CONFORMANCE_*` environment to prove level 1 of the Libraries guide. `ConformanceLevel1Test` runs the whole level against it on `KRAKEN_HUB_IMAGE` (one hub, then two) when `KRAKEN_CONFORMANCE_BIN` names the runner binary, and is skipped otherwise; it asserts the library's known failures exactly | – |
 | `kraken-messaging-rs/examples/service-c` | Rust: owner of `Shout`, `Reverse`, `IncrementCounter` and the banner saga's `PrintBanner` / `PollBannerJob`, co-owner of the shared `Inventory`, `Rows`, `WatchCounter` and `OpenSubscriptions`, publishes the text events, logs `GreetingDelivered`; the banner saga's webhook and `GET /banners/{jobId}`; `GET /greetings/{name}/count`, service-b's `CountGreetings` sent through the hub (the sandbox's call from Rust to Kotlin); the `audit` processor and its `/audit/...` endpoints | 8094 |
 
 ## Prerequisites

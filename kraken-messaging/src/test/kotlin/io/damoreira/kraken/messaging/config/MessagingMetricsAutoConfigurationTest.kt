@@ -1,14 +1,15 @@
 package io.damoreira.kraken.messaging.config
 
+import io.damoreira.kraken.messaging.events.LocalEventDispatcher
+import io.damoreira.kraken.messaging.events.OutboxPublisher
 import io.damoreira.kraken.messaging.hub.HubBus
 import io.damoreira.kraken.messaging.hub.HubChannelFactory
 import io.damoreira.kraken.messaging.hub.HubConnections
-import io.damoreira.kraken.messaging.kafka.LocalEventDispatcher
-import io.damoreira.kraken.messaging.kafka.OutboxPublisher
+import io.damoreira.kraken.messaging.kafka.KafkaEventStoreAutoConfiguration
+import io.damoreira.kraken.messaging.metrics.EventProcessorMetrics
 import io.damoreira.kraken.messaging.metrics.MessagingMetrics
 import io.damoreira.kraken.messaging.metrics.MicrometerMessagingMetrics
 import io.damoreira.kraken.messaging.metrics.NoopMessagingMetrics
-import io.damoreira.kraken.messaging.metrics.EventProcessorMetrics
 import io.damoreira.kraken.messaging.test.InProcessHub
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.junit.jupiter.api.AfterEach
@@ -32,12 +33,13 @@ class MessagingMetricsAutoConfigurationTest {
             AutoConfigurations.of(
                 KrakenMessagingAutoConfiguration::class.java,
                 HubAutoConfiguration::class.java,
-                KafkaEventsAutoConfiguration::class.java,
+                EventsAutoConfiguration::class.java,
                 MessagingMetricsAutoConfiguration::class.java,
                 TransactionAutoConfiguration::class.java,
+                KafkaEventStoreAutoConfiguration::class.java,
             ),
         )
-        .withUserConfiguration(MongoMockConfig::class.java)
+        .withUserConfiguration(MessageStoreMockConfig::class.java)
         .withBean("krakenHubChannelFactory", HubChannelFactory::class.java, { HubChannelFactory { hub.channel() } })
         .withPropertyValues(
             "kraken.messaging.service-name=orders",
@@ -62,7 +64,7 @@ class MessagingMetricsAutoConfigurationTest {
 
     @Test fun `the relay reports to them too`() {
         runner.withBean(SimpleMeterRegistry::class.java, { SimpleMeterRegistry() })
-            .withPropertyValues("kraken.messaging.outbox.enabled=true", "kraken.messaging.kafka.consumer.enabled=false")
+            .withPropertyValues("kraken.messaging.outbox.enabled=true", "kraken.messaging.events.consumer.enabled=false")
             .run { context ->
                 assertEquals(null, context.startupFailure)
                 assertSame(context.getBean(MessagingMetrics::class.java), field(context.getBean(OutboxPublisher::class.java), "metrics"))

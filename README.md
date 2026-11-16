@@ -5,7 +5,8 @@
 <h1 align="center">kraken-messaging</h1>
 
 <p align="center">
-  Messaging for Kotlin services: event, command and query buses over Kafka and the kraken hub, as a Spring Boot starter.
+  Messaging for Kotlin services, as a Spring Boot starter: commands and queries through the kraken hub, events through an event
+  store, the library's state in the service's own database (a message store).
 </p>
 
 <p align="center">
@@ -14,7 +15,6 @@
   <a href="https://gitlab.damoreira.ml/kraken-org/kraken-messaging/-/packages"><img alt="maven" src="https://img.shields.io/badge/maven-io.damoreira.kraken-C71A36?logo=apachemaven&logoColor=white"></a>
   <img alt="Kotlin" src="https://img.shields.io/badge/Kotlin-2.4.21-7F52FF?logo=kotlin&logoColor=white">
   <img alt="Spring Boot" src="https://img.shields.io/badge/Spring_Boot-4.1.2-6DB33F?logo=springboot&logoColor=white">
-  <img alt="Kafka" src="https://img.shields.io/badge/Kafka-4.4-231F20?logo=apachekafka&logoColor=white">
   <img alt="gRPC" src="https://img.shields.io/badge/gRPC-1.85-244c5a?logo=grpc&logoColor=white">
   <a href="https://gitlab.damoreira.ml/kraken-org/kraken/-/tree/main/docs"><img alt="kraken docs" src="https://img.shields.io/badge/kraken-umbrella%20docs-0B5FFF"></a>
   <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT-green"></a>
@@ -23,9 +23,11 @@
 ---
 
 Kotlin library for service-to-service messaging in the kraken platform. It provides the `EventBus`,
-`CommandBus` and `QueryBus` facades with `@EventHandler` / `@CommandHandler` / `@QueryHandler` annotations. Events travel
-over Kafka with a MongoDB transactional outbox and an idempotent consumer; commands and queries travel over a gRPC stream
-to the kraken hub. It ships as a Spring Boot 4.1 starter plus a test module.
+`CommandBus` and `QueryBus` facades with `@EventHandler` / `@CommandHandler` / `@QueryHandler` annotations, event processors,
+sagas and deadlines. Commands and queries travel over a gRPC stream to the kraken hub. Events leave through a transactional
+outbox in the service's **message store** and travel through an **event store**, read back by an idempotent consumer. Both
+stores are add-ons, one per technology (see [Modules](#modules)); the core ships in-memory ones for tests and local runs. It
+ships as a Spring Boot 4.1 starter, its add-ons and a test module.
 
 Design and wire protocol: `../kraken/docs/02-messaging.md`. Test strategy: `../kraken/docs/09-observability-and-testing.md`.
 Repo conventions: `../kraken/docs/04-repositories.md`.
@@ -36,6 +38,8 @@ Repo conventions: `../kraken/docs/04-repositories.md`.
 - [Requirements](#requirements)
 - [Build, test, publish](#build-test-publish)
 - [Using the starter](#using-the-starter)
+- [Message stores](#message-stores)
+- [In-memory event store and message store](#in-memory-event-store-and-message-store)
 - [Semantics worth knowing](#semantics-worth-knowing)
 - [Multiple hubs](#multiple-hubs)
 - [Scatter-gather](#scatter-gather)
@@ -48,6 +52,9 @@ Repo conventions: `../kraken/docs/04-repositories.md`.
 - [Metrics](#metrics)
 - [Test helpers (`kraken-messaging-test`)](#test-helpers-kraken-messaging-test)
 - [Examples](#examples)
+- [Kafka event store (`kraken-messaging-kafka`)](#kafka-event-store-kraken-messaging-kafka)
+- [MongoDB message store (`kraken-messaging-mongo`)](#mongodb-message-store-kraken-messaging-mongo)
+- [Moving from v0.3.2](#moving-from-v032)
 - [Known limitations](#known-limitations)
 - [CI/CD pipeline](#cicd-pipeline)
 - [Contributing](#contributing)
@@ -55,17 +62,25 @@ Repo conventions: `../kraken/docs/04-repositories.md`.
 
 ## Modules
 
+Every module is published at the same version: a release, the newest tag `vX.Y.Z` of this repository without its `v` (the
+[releases page](https://gitlab.damoreira.ml/kraken-org/kraken-messaging/-/releases) lists them). `<version>` below stands for it.
+
 | Module | Coordinates | Purpose |
 |---|---|---|
-| `kraken-messaging-api` | `io.damoreira.kraken:kraken-messaging-api:0.1.0-SNAPSHOT` | `@MessageType`, `Event`, `Command<R>`, `Query<R>`, `StreamingQuery<R>`. No Spring. Depended on by every `*-api` module. |
-| `kraken-messaging` | `io.damoreira.kraken:kraken-messaging:0.1.0-SNAPSHOT` | Spring Boot starter: buses, handler annotations, hub client, outbox, Kafka consumer, sagas, deadlines and the external-integration toolkit, auto-configuration. |
-| `kraken-messaging-test` | `io.damoreira.kraken:kraken-messaging-test:0.1.0-SNAPSHOT` | `InMemoryBuses`, `InProcessHub`, `KrakenContainers`, `KrakenTestKafka`, `SagaTestFixture`. |
-| `examples/examples-api`, `examples/service-a`, `examples/service-b` | not published | Two sample services talking through the hub; see [Examples](#examples). |
+| `kraken-messaging-api` | `io.damoreira.kraken:kraken-messaging-api:<version>` | `@MessageType`, `Event`, `Command<R>`, `Query<R>`, `StreamingQuery<R>`. No Spring. Depended on by every `*-api` module. |
+| `kraken-messaging` | `io.damoreira.kraken:kraken-messaging:<version>` | Spring Boot starter: buses, handler annotations, hub client, outbox, event processors, sagas, deadlines and the external-integration toolkit, auto-configuration. Its state goes through the message store interfaces (`io.damoreira.kraken.messaging.store`, ADR 0028) and its events through the event-store interfaces (`io.damoreira.kraken.messaging.eventstore`, ADR 0027); it depends on no database and no event-store client. It ships the in-memory event store and message store (not durable: tests, local runs, demos; see [In-memory event store and message store](#in-memory-event-store-and-message-store)). |
+| `kraken-messaging-kafka` | `io.damoreira.kraken:kraken-messaging-kafka:<version>` | The Kafka event store (`io.damoreira.kraken.messaging.eventstore`, ADR 0027): publish, competing subscriptions, replay, lag and dead-letter topics, over the plain Kafka clients; its settings `kraken.messaging.kafka.*` and the partner topics `kraken.messaging.external.kafka.sources.*`. Add it to publish or handle events on Kafka. |
+| `kraken-messaging-rabbitmq` | `io.damoreira.kraken:kraken-messaging-rabbitmq:<version>` | The RabbitMQ Streams event store (ADR 0027): publish, competing subscriptions (single active consumers), lag, a dead-letter stream, and replay with the management API, on RabbitMQ 3.13+ with the stream plugin, over the RabbitMQ Stream Java client; its settings `kraken.messaging.rabbitmq.*`. It shares the streams' layout with the Rust add-on. See [its README](kraken-messaging-rabbitmq/README.md). |
+| `kraken-messaging-mongo` | `io.damoreira.kraken:kraken-messaging-mongo:<version>` | The MongoDB message store: the outbox, processed events, dead letters, processor control, external calls and sagas in the service's MongoDB (a replica set), and its `MongoTransactionManager`. |
+| `kraken-messaging-jdbc` | `io.damoreira.kraken:kraken-messaging-jdbc:<version>` | The SQL message store: the same stores in `kraken_*` tables of the service's PostgreSQL (13+) or MySQL (8.0.17+) through plain JDBC, joining its `DataSourceTransactionManager` or `JpaTransactionManager` transaction; versioned schema files (also for Flyway). See [its README](kraken-messaging-jdbc/README.md). |
+| `kraken-messaging-test` | `io.damoreira.kraken:kraken-messaging-test:<version>` | The zero-infrastructure mode `@KrakenInMemory` with `InMemoryEvents`, the conformance kits of the event store and the message store (`EventStoreConformanceTest`, `MessageStoreConformanceTest`), `InMemoryBuses`, `InProcessHub`, `KrakenContainers`, `KrakenTestKafka`, `SagaTestFixture`. |
+| `examples/examples-api`, `examples/service-a`, `examples/service-b`, `examples/fake-printer`, `examples/orders-sql`, `examples/conformance-service` | not published | Sample services talking through the hub, and the conformance service of the Libraries guide; see [Examples](#examples). |
 
 ## Requirements
 
 - JDK 25 (Temurin), found on the PATH or by the Gradle toolchain resolver.
-- Docker for the container tests (Kafka, MongoDB, and the hub image for the end-to-end test).
+- Docker for the container tests (the add-ons' Kafka, RabbitMQ, MongoDB, PostgreSQL and MySQL, and the hub image for the end-to-end
+  tests).
 
 Rancher Desktop: Testcontainers needs two environment variables, otherwise it does not find the Docker socket.
 
@@ -85,12 +100,13 @@ testcontainers.docker.socket.override=/var/run/docker.sock
 
 ```bash
 ./gradlew build                  # compile + all tests (needs Docker, see above)
-./gradlew publishToMavenLocal    # installs 0.1.0-SNAPSHOT into ~/.m2 for the service repos
+./gradlew throughputTest         # the throughput floors (tag `throughput`), kept out of `test`
+./gradlew publishToMavenLocal    # installs every module into ~/.m2, at 0.1.0 (-Pversion=X.Y.Z for another)
 ```
 
-Publishing to the GitLab Package Registry happens in CI on tags matching `api/vX.Y.Z`: the `publish-api` job sets
-`KRAKEN_GITLAB_MAVEN_URL` and authenticates with `CI_JOB_TOKEN`, then publishes all three modules with the tag's version.
-Locally, set `KRAKEN_GITLAB_MAVEN_URL` and `KRAKEN_GITLAB_TOKEN` and run `./gradlew publish`.
+Releases are cut by CI ([CI/CD pipeline](#cicd-pipeline)): every merge to `main` tags the next version and publishes the seven
+modules at it to Nexus (`maven-releases`). Locally, `./gradlew publish -Pversion=X.Y.Z` publishes to `NEXUS_MAVEN_RELEASE_URL`
+(default `https://nexus.damoreira.ml/repository/maven-releases/`) as `NEXUS_USERNAME` / `NEXUS_PASSWORD`.
 
 The published POM and Gradle module metadata carry resolved versions for every dependency (Gradle `versionMapping`), and the
 POM also imports the Spring Boot BOM, so consumers do not need to manage them. Builder call.
@@ -102,17 +118,24 @@ POM also imports the Spring Boot BOM, so consumers do not need to manage them. B
 ```kotlin
 // settings.gradle.kts / build.gradle.kts
 repositories {
-    mavenLocal()   // until the GitLab registry is wired into the service repos
+    maven("https://nexus.damoreira.ml/repository/maven-public/")   // the releases
     mavenCentral()
 }
 
+val kraken = "0.4.0"   // a release: the newest tag vX.Y.Z of this repository, without the v
+
 dependencies {
-    implementation("io.damoreira.kraken:kraken-messaging:0.1.0-SNAPSHOT")
+    implementation("io.damoreira.kraken:kraken-messaging:$kraken")
+    // an event store and a message store: needed to publish or handle events and to run sagas; commands and queries alone need neither
+    implementation("io.damoreira.kraken:kraken-messaging-kafka:$kraken")   // or kraken-messaging-rabbitmq
+    implementation("io.damoreira.kraken:kraken-messaging-mongo:$kraken")   // or kraken-messaging-jdbc
     // a service's *-api module depends on the api artifact only:
-    // api("io.damoreira.kraken:kraken-messaging-api:0.1.0-SNAPSHOT")
-    testImplementation("io.damoreira.kraken:kraken-messaging-test:0.1.0-SNAPSHOT")
+    // api("io.damoreira.kraken:kraken-messaging-api:$kraken")
+    testImplementation("io.damoreira.kraken:kraken-messaging-test:$kraken")
 }
 ```
+
+An `@EventHandler`, a saga or a bean that injects the `EventBus`, without the stores they need, fails the startup naming the add-on to add.
 
 Kotlin version note (Builder call): a project that applies `io.spring.dependency-management` must set the Kotlin version
 in its build script, otherwise the Boot BOM pins the Kotlin compiler classpath to 2.3.x and `compileKotlin` fails with a
@@ -127,14 +150,14 @@ extra["kotlin.version"] = "2.4.21"   // the Kotlin version in your version catal
 ```yaml
 kraken:
   messaging:
-    service-name: workouts          # Kafka consumer group, event source, hub registration
+    service-name: workouts          # subscriptions' prefix, event source, hub registration
     type-prefix: workouts           # wire type prefix for classes without @MessageType
     hub:
       address: static://kraken-hub:7000
-    kafka:
+    kafka:                          # the event store's settings, here kraken-messaging-kafka's
       bootstrap-servers: broker:19092
 spring:
-  mongodb:
+  mongodb:                          # the message store's database, here kraken-messaging-mongo's
     uri: mongodb://mongo:27017/workouts   # Spring Boot 4 key; spring.data.mongodb.uri is no longer bound
   security:
     oauth2:
@@ -144,13 +167,14 @@ spring:
 ```
 
 The `issuer-uri` is only needed when the service also serves HTTP or wants forwarded tokens verified (see
-[Security](#security)); Kafka-only tools and services behind the hub start without any security configuration.
+[Security](#security)); publish-only tools and services behind the hub start without any security configuration.
 
-All keys (`kraken.messaging.*`; durations accept `200ms`, `5s`, `7d`; relaxed binding, e.g. `KRAKEN_MESSAGING_HUB_ADDRESS`):
+All keys (`kraken.messaging.*`; durations accept `200ms`, `5s`, `7d`; relaxed binding, e.g. `KRAKEN_MESSAGING_HUB_ADDRESS`). A
+setting that was removed and is still set fails the startup, naming its replacement ([Moving from v0.3.2](#moving-from-v032)):
 
 | Key | Default | Meaning |
 |---|---|---|
-| `service-name` | required | Kafka consumer group, event `source`, hub `Register.service_name`. |
+| `service-name` | required | The prefix of the processors' subscriptions, event `source`, hub `Register.service_name`. |
 | `type-prefix` | required | Prefix of the wire type name for message classes without `@MessageType`. |
 | `instance-id` | a fresh UUID per start | This instance's id: its hub `Register.instance_id` and the `service.instance.id` of its metrics ([Metrics](#metrics)). Set it to something stable per instance (a pod name) if you like; unique among the service's instances. |
 | `hub.enabled` | `true` | Connect to the hub and expose the hub-backed `CommandBus`/`QueryBus` (addition beyond the spec table). |
@@ -162,14 +186,14 @@ All keys (`kraken.messaging.*`; durations accept `200ms`, `5s`, `7d`; relaxed bi
 | `hub.max-subscriptions` | `1024` | Subscription queries this instance serves at once, over every hub (at least 1). The next one is refused with `RESOURCE_EXHAUSTED` ("subscription limit (N) reached"), which the subscriber sees as a `HandlerBusyException`. A subscription holds no handler permit, so `max-concurrent-handlers` does not bound it; the default equals the hub's own `KRAKEN_HUB_MAX_SUBSCRIPTIONS_PER_INSTANCE`. |
 | `hub.stream-credit-timeout` | `10m` | The longest a streaming handler of this instance waits for credit from the collector before it ends the stream with `TIMEOUT` ("no credit within ...") and frees its handler slot and hub permit (a hub that forgot the stream would otherwise leave them held forever). Must be positive; the default is the hub's default maximum stream duration (`KRAKEN_HUB_MAX_STREAM_DURATION`). |
 | `hub.token` | none | Static token sent in `Register.credentials.token` of **every** hub stream (hub access control, [Hub security](#hub-security-token-acl-and-tls)). Optional; an empty or blank value is the same as none. Never logged, redacted in `toString` and in the actuator's `configprops` and `env`. Environment: `KRAKEN_MESSAGING_HUB_TOKEN`, or `KRAKEN_HUB_TOKEN` when this key is unset. |
-| `hub.token-file` | none | File holding the token (a container secret such as `/run/secrets/kraken-hub-token`; surrounding whitespace ignored). Read at startup (an unreadable file fails it, naming the file) and **again on every reconnect**, so a rotated secret is picked up without a restart. After a first non-empty read, an unreadable or empty file (a non-atomic rotation caught half way) keeps the last token read and logs one `WARN`; at startup an empty file means no token. **Wins over `hub.token` when both are set.** Environment: `KRAKEN_MESSAGING_HUB_TOKEN_FILE`, or `KRAKEN_HUB_TOKEN_FILE` when this key is unset. |
+| `hub.token-file` | none | File holding the token (a container secret such as `/run/secrets/kraken-hub-token`; trimmed at both ends). Read at startup (an unreadable file, or one holding only whitespace, fails it, naming the setting and the file) and **again on every reconnect**, so a rotated secret is picked up without a restart. After a first non-empty read, an unreadable or empty file (a non-atomic rotation caught half way) keeps the last token read and logs one `WARN`. **Wins over `hub.token` when both are set.** Environment: `KRAKEN_MESSAGING_HUB_TOKEN_FILE`, or `KRAKEN_HUB_TOKEN_FILE` when this key is unset. |
 | `hub.tls.enabled` | `false` | Talk TLS to the hub, for every `hub.address` form (a list of targets and `dns:///`). Off: plain text. The hub must serve TLS on that port (`KRAKEN_HUB_TLS_CERT` / `KRAKEN_HUB_TLS_KEY`). |
 | `hub.tls.ca-file` | JVM system roots | PEM file with the CA certificate(s) that signed the hub's certificate (a self-signed hub certificate is its own CA). Read on every connection attempt; a file that cannot be used fails the startup. Set without `hub.tls.enabled` it is ignored with a warning. |
 | `hub.tls.server-name` | the address's host | Name to verify the hub's certificate against, for when the address is an IP or an alias the certificate does not list. |
 | `hub.oauth2.token-uri` | none | Setting it turns Keycloak client-credentials authentication on (P5b, [JWT](#authenticating-with-a-jwt-keycloak-client-credentials)): the token endpoint, for example `https://keycloak/realms/kraken/protocol/openid-connect/token`. `http` is allowed and warns once unless the host is loopback or a single-label name. Cannot be combined with `hub.token` or `hub.token-file` (the startup fails naming both). Environment: `KRAKEN_MESSAGING_HUB_OAUTH2_TOKEN_URI`, or `KRAKEN_HUB_OAUTH2_TOKEN_URI` when this key is unset. |
 | `hub.oauth2.client-id` | `kraken.messaging.service-name` | The confidential client's id; it is the token's `azp`, which the hub requires to equal the service name. Environment: `KRAKEN_HUB_OAUTH2_CLIENT_ID`. |
 | `hub.oauth2.client-secret` | none | The client secret (sent as HTTP Basic, `client_secret_basic`). Never logged, redacted in `toString` and in the actuator's `configprops` and `env`. Prefer the file. Environment: `KRAKEN_MESSAGING_HUB_OAUTH2_CLIENT_SECRET`, or `KRAKEN_HUB_OAUTH2_CLIENT_SECRET`. |
-| `hub.oauth2.client-secret-file` | none | File holding the client secret: read at startup (an unreadable or empty file fails it, naming the file) and **again on every token fetch**, so a rotated secret applies without a restart. Wins over `client-secret`. Environment: `KRAKEN_MESSAGING_HUB_OAUTH2_CLIENT_SECRET_FILE`, or `KRAKEN_HUB_OAUTH2_CLIENT_SECRET_FILE`. A token URI with neither secret fails the startup. |
+| `hub.oauth2.client-secret-file` | none | File holding the client secret, trimmed at both ends: read at startup (an unreadable or empty file fails it, naming the setting and the file) and **again on every token fetch**, so a rotated secret applies without a restart. Wins over `client-secret`. Environment: `KRAKEN_MESSAGING_HUB_OAUTH2_CLIENT_SECRET_FILE`, or `KRAKEN_HUB_OAUTH2_CLIENT_SECRET_FILE`. A token URI with neither secret fails the startup. |
 | `hub.oauth2.scope` | none | `scope` of the token request, sent as written (space-separated). Environment: `KRAKEN_HUB_OAUTH2_SCOPE`. |
 | `hub.oauth2.ca-file` | platform roots | PEM CA certificate(s) trusted **on top of** the platform roots for an `https` token URI (not the hub's CA, which is `hub.tls.ca-file`). A file that cannot be used fails the startup. Environment: `KRAKEN_HUB_OAUTH2_CA`. |
 | `hub.max-concurrent-handlers` | `256` | Incoming hub requests handled concurrently by this instance, over all hubs (at least 1, else the startup fails); further requests wait for a free slot. Also announced as `initial_permits` to a hub with flow control (split over N hubs: `ceil(max / N)` each), which then queues the excess on its side. |
@@ -181,22 +205,30 @@ All keys (`kraken.messaging.*`; durations accept `200ms`, `5s`, `7d`; relaxed bi
 | `hub.retry.initial-backoff` | `100ms` | Wait before the second attempt. Every wait is jittered by ±20 % and capped at `max-backoff` (at the cap: 80-100 % of it). |
 | `hub.retry.multiplier` | `2` | Growth of the wait per further attempt. |
 | `hub.retry.max-backoff` | `2s` | Upper bound of a single wait. |
-| `kafka.bootstrap-servers` | `broker:19092` | Kafka bootstrap servers. |
-| `kafka.topic` | `kraken.events` | Events topic. |
-| `kafka.consumer.enabled` | `true` | Set `false` in tools that only publish. |
-| `kafka.group-id` | `service-name` | The service's consumer group: every event processor, `default` included, uses `<this>.<name>`. See [Event processors](#event-processors). |
-| `kafka.consumer.max-attempts` | `5` | Handler invocations per record (first try included, 1 s apart) before the record goes to the dead letters; shared by every processor. |
-| `kafka.dead-letter.mode` | `collection` | What a processor does with a record it cannot handle: `collection` (park it in `dead_letters`, sequence its key, `DeadLetters` admin API), `topic` (produce it to `<topic>.dlt`) or `log` (log and skip: nothing is parked). Case-insensitive; anything else fails the startup. See [Dead letters](#dead-letters). |
-| `kafka.dead-letter.retention` | `30d` | A letter is deleted this long after it was parked (TTL index on `expireAt`), which also unblocks its key. At least `1s`. |
-| `outbox.enabled` | `true` | Run the outbox publisher that relays `outbox` documents to Kafka. |
+| `event-store` | the only one | The event store's name (`kafka`, `rabbitmq-streams`, `memory`) when two event-store add-ons are on the classpath; two without it, or a name no add-on provides, fail the startup. `memory` runs the in-memory event store, and is the only way to run it (an add-on on the classpath then steps back). |
+| `store.type` | the only one | The message store's name (`mongo`, `jdbc`, `memory`) when two are available; two without it, or a name the application lacks, fail the startup. `memory` runs the in-memory message store, and is the only way to run it (the database add-ons then step back). |
+| `store.init-schema` | `true` | Apply the message store's schema (indexes, tables) at startup; `false` when the service applies it itself. |
+| `memory.segments` | `4` | The in-memory event store's segments per source (1 to 1024): a key always goes to one of them; the competing instances of a subscription share them. |
+| `events.source` | `kraken.events` | The source the service's events are published to and read from. |
+| `events.consumer.enabled` | `true` | Set `false` in tools that only publish. |
+| `events.subscription-prefix` | `service-name` | The prefix of every processor's subscription: every event processor, `default` included, uses `<this>.<name>`. See [Event processors](#event-processors). |
+| `events.consumer.max-attempts` | `5` | Handler invocations per record (first try included, 1 s apart) before the record goes to the dead letters; shared by every processor. |
+| `events.dead-letter.mode` | `collection` | What a processor does with a record it cannot handle: `collection` (park it in the message store's dead letters, sequence its key, `DeadLetters` admin API), `event-store` (publish it to the event store's `<source>.dlt`; needs the capability `native-dead-letter`) or `log` (log and skip: nothing is parked). Case-insensitive; anything else fails the startup. See [Dead letters](#dead-letters). |
+| `events.dead-letter.retention` | `30d` | A letter is deleted this long after it was parked (at its `expireAt`), which also unblocks its key. At least `1s`. |
+| `kafka.bootstrap-servers` | `broker:19092` | `kraken-messaging-kafka`: Kafka bootstrap servers. |
+| `kafka.client-properties.*` | none | `kraken-messaging-kafka`: Kafka client properties for the producer, the consumers and the admin client (security, client ids, quotas); they never replace what the store depends on. Their values never appear in logs, and the actuator's `configprops` and `env` mask them (the partner sources' `properties` too). An invalid one does not fail the startup: the clients are built on first use, so a processor reads `FAILING` (its `last_error` names the problem) and subscribes again with backoff, and the relay retries its publishes. |
+| `kafka.admin-timeout`, `kafka.status-refresh`, `kafka.max-poll-records` | `10s`, `1s`, `100` | `kraken-messaging-kafka`: the longest call to the brokers, how often a subscription refreshes its lag, records per poll. |
+| `rabbitmq.*` | see the module | `kraken-messaging-rabbitmq`: hosts, credentials, TLS, offset storing and the management API of the RabbitMQ Streams event store; see [its README](kraken-messaging-rabbitmq/README.md#settings-krakenmessagingrabbitmq). |
+| `outbox.enabled` | `true` | Run the outbox publisher that relays the outbox entries to the event store. |
 | `outbox.poll-interval` | `200ms` | Outbox poll period. |
-| `outbox.batch-size` | `100` | Documents per poll. |
-| `outbox.retention` | `7d` | Sent outbox documents older than this are deleted (TTL index). |
-| `outbox.max-attempts` | `10` | Send attempts per outbox document before it is marked failed (`failedAt`) and skipped. |
-| `idempotency.retention` | `30d` | `processed_events` documents older than this are deleted (TTL index). |
+| `outbox.batch-size` | `100` | Entries per poll. |
+| `outbox.retention` | `7d` | Sent outbox entries older than this are deleted. |
+| `outbox.max-attempts` | `10` | Send attempts per outbox entry before it is marked failed and skipped. |
+| `outbox.lease` | `2m` | How long a batch a relay claimed stays its own: several instances relay one outbox, and another instance relays those entries only after this (their claimer crashed). Must be longer than one send (45 s), or the startup fails. |
+| `idempotency.retention` | `30d` | Processed-event markers older than this are deleted. |
 | `security.forward-jwt` | `true` | Put the current request's bearer token in the hub request's `authorization` header. |
 | `sagas.enabled` | `true` | Switch for the saga runtime, the dispatch relay and the deadline scheduler. They exist only when the application has a `@Saga` class (found by scanning its packages) anyway. See [Sagas](#sagas). |
-| `sagas.max-attempts` | `5` | Attempts per saga event (first try included) for **conflicts** (a version check, a start-key duplicate, a Mongo write conflict or transient transaction error) before the event is parked in `saga_failures`; also the bound for firing a deadline. Backoff 200 ms doubling to 5 s (not configurable). A **handler exception** is not cured by waiting: it gets two attempts in all, at most 50 ms apart, and the event is then parked. |
+| `sagas.max-attempts` | `5` | Attempts per saga event (first try included) for **conflicts** (a version check, a start-key duplicate, a write conflict between two transactions in the message store) before the event is parked in the saga failures; also the bound for firing a deadline. Backoff 200 ms doubling to 5 s (not configurable). A **handler exception** is not cured by waiting: it gets two attempts in all, at most 50 ms apart, and the event is then parked. |
 | `sagas.ended-retention` | `30d` | Ended sagas are deleted this long after they ended (TTL index on `sagas.endedAt`). Must be positive. |
 | `sagas.dispatch-retention` | `7d` | Dispatched `saga_dispatch` entries are deleted this long after they were sent (TTL index on `dispatchedAt`). Must be positive. |
 | `sagas.failed-retention` | `30d` | What failed for good is deleted this long after it failed: `saga_dispatch` entries given up on (TTL index on `failedAt`) and parked events in `saga_failures` (TTL index on `lastFailedAt`, which a retry that fails again moves on). Must be positive. |
@@ -212,10 +244,10 @@ All keys (`kraken.messaging.*`; durations accept `200ms`, `5s`, `7d`; relaxed bi
 | `external.calls.enabled` | unset | Whether the idempotency interceptor and the `external_calls` indexes exist. Unset: they exist when a class in the application's packages has an `@IdempotentHandler` method. `true` when the adapter lives outside those packages, `false` to switch it off. |
 | `external.calls.lease` | `5m` | How long an `IN_PROGRESS` external call may take before its outcome counts as unknown (a crash in the middle of the call). Must be positive. |
 | `external.calls.retention` | `30d` | `external_calls` documents older than this are deleted (TTL index on `updatedAt`). Must be positive. |
-| `external.kafka.sources.<name>.topic` | required | A partner's topic, consumed into local kraken events (never republished to `kraken.events`). Each source needs an `ExternalRecordTranslator` bean named `<name>`; a source without one fails the startup naming it. |
+| `external.kafka.sources.<name>.topic` | required | `kraken-messaging-kafka`: a partner's topic, consumed into local kraken events (never republished to the service's events; never created). Each source needs an `ExternalRecordTranslator` bean named `<name>`; a source without one fails the startup naming it. |
 | `external.kafka.sources.<name>.bootstrap-servers` | `kafka.bootstrap-servers` | The partner's cluster. |
 | `external.kafka.sources.<name>.group-id` | `<service-name>.external.<name>` | The source's consumer group. |
-| `external.kafka.sources.<name>.properties.*` | none | Extra consumer properties (for example `security.protocol`); bootstrap servers, group id, deserializers and auto-commit are fixed by the library: an entry for one of those keys fails the startup, naming it. `auto.offset.reset` is `earliest` unless set here. Record retries use `kafka.consumer.max-attempts`. |
+| `external.kafka.sources.<name>.properties.*` | none | Extra consumer properties (for example `security.protocol`); bootstrap servers, group id, deserializers and auto-commit are fixed by the library: an entry for one of those keys fails the startup, naming it. `auto.offset.reset` is `earliest` unless set here. Record retries use `events.consumer.max-attempts`. |
 
 ### Security
 
@@ -313,10 +345,10 @@ The token goes in `Register.credentials.token` of every stream (read once per st
 sanitization the application configured. An empty token is no token (a `Register` without credentials, which `off` and
 `permissive` hubs accept). **`token-file` wins when both are set** (it is the source that can rotate); the
 file is read at startup, where a missing file fails the startup, and on every reconnect, so replacing the secret and
-letting the connection reconnect (or fail once) is a rotation. **An empty file after a first good read** (a rotation that
+letting the connection reconnect (or fail once) is a rotation. The content is trimmed at both ends. **An empty file after a first good read** (a rotation that
 replaces the file non-atomically can be caught half way) is treated like an unreadable one: the last token read is kept
-and one `WARN` is logged, so a `Register` never goes out without its token just because of a race. At startup an empty
-file still means no token. A file that disappears later likewise keeps the last token read and logs one warning.
+and one `WARN` is logged, so a `Register` never goes out without its token just because of a race. At startup a file that
+holds only whitespace fails the startup, naming the setting and the file (as in the Rust library). A file that disappears later likewise keeps the last token read and logs one warning.
 
 **What the hub does with it**, and what you see:
 
@@ -328,12 +360,17 @@ file still means no token. A file that disappears later likewise keeps the last 
 | a request whose type is outside `send` (unary, scatter-gather, streaming, subscription) | an immediate `Error{PERMISSION_DENIED}`, nothing routed | `AccessDeniedException`, **never retried** |
 | a request after the token left the ACL | an immediate `Error{UNAUTHENTICATED}` | `UnauthenticatedException`, never retried |
 
-A **registration rejection** (`ALREADY_EXISTS`, `INVALID_ARGUMENT`, `UNAUTHENTICATED`, `PERMISSION_DENIED`, the last also for an instance id that belongs to another service): the status is
-in `HubConnection.lastRejection`, `awaitRegistered` throws `HubRegistrationRejectedException` naming the code and the hub's
+A **registration rejection** (`ALREADY_EXISTS`, `INVALID_ARGUMENT`, `UNAUTHENTICATED`, `PERMISSION_DENIED`, the last also for an instance id that belongs to another service):
+`awaitRegistered` throws `HubRegistrationRejectedException` naming the code and the hub's
 message, the connection reconnects at the backoff cap (80-100 % of `hub.reconnect-backoff.max`, no tight loop), logs at
 `ERROR` once per distinct message and then at `DEBUG`, and keeps retrying (a fixed ACL or token file heals it without a
-restart; `lastRejection` clears when a stream completes its handshake). The service keeps running; the hub counts every attempt as a
-violation. In `permissive` nothing is refused: the hub logs and counts what `enforce` would refuse (except an instance-id
+restart). The service keeps running; the hub counts every attempt as a violation.
+`HubConnections.latestRejection` (a `StateFlow<HubRejection?>`) holds the newest refusal by any hub: `hub` (its id when it
+registered this instance before, else the target dialled), `code` (`PERMISSION_DENIED`), the hub's `description` and `at`. It is
+set on every refusal, replaced only by a later one (in the order they were recorded, whatever the clock says; `at` is for
+display), and never cleared by a later acceptance, so a service can show why it was refused after it healed. The client's own
+check of an expired client certificate sets it too (`UNAUTHENTICATED`, the stream is not opened); a failure to get an access
+token does not (it is not a hub's refusal). In `permissive` nothing is refused: the hub logs and counts what `enforce` would refuse (except an instance-id
 takeover, below, which it refuses too).
 
 **Instance ids belong to a service.** A `Register` that names the instance id of a live session of *another* service is
@@ -405,7 +442,7 @@ without a token URI: a stray client id or secret would otherwise leave the servi
   `authStatus().tokenExpiresAt` is null meanwhile. `PERMISSION_DENIED` (wrong `azp`, no `[[service]]` entry) keeps it: a new token would not help
   and the identity provider is not asked again for every retry.
 - **No token, no stream.** When the endpoint cannot give a token (401 `invalid_client`, down, TLS, an unusable answer) the stream is
-  not opened: the attempt fails locally, `HubConnection.lastRejection` holds `UNAUTHENTICATED` and `awaitRegistered` throws
+  not opened: the attempt fails locally (not a hub's refusal: `latestRejection` keeps it out) and `awaitRegistered` throws
   `HubRegistrationRejectedException` ("no access token for ...: invalid_client: ..." with the endpoint's `error` and
   `error_description`, clipped to 200 characters), the connection retries with the normal reconnect back-off, logs `ERROR` once
   per distinct error and then `DEBUG`, and recovers by itself when the endpoint does. A hub that is not ready (`UNAVAILABLE`
@@ -556,7 +593,7 @@ data class LogWorkout(val name: String) : Command<LogWorkoutResult>
 val logged = commandBus.send(LogWorkout("legs"))                 // suspend
 val loggedNow = commandBus.sendBlocking(LogWorkout("legs"))      // blocking, for MVC controllers
 val workout = queryBus.send(GetWorkout(id))
-eventBus.publish(WorkoutLogged(id, owner, at), key = id)         // inside the caller's Mongo transaction
+eventBus.publish(WorkoutLogged(id, owner, at), key = id)         // inside the caller's transaction (the outbox)
 
 // Per call: priority, timeout (the total budget with retry), routing key, retry policy.
 val urgent = commandBus.send(
@@ -565,6 +602,75 @@ val urgent = commandBus.send(
 )
 val quick = queryBus.sendBlocking(GetWorkout(id), SendOptions(retry = RetryPolicy.NONE)) // no retry for this call
 ```
+
+## Message stores
+
+The library keeps its state (outbox, processed events, dead letters, processor control, external calls, sagas) in the service's
+own database, through one add-on per database (ADR 0028). Add the one that matches the service's database; a service with only
+command, query and subscription-query handlers needs none.
+
+| Add-on | Name (`store.type`) | For | Transactions it joins |
+|---|---|---|---|
+| `kraken-messaging-mongo` | `mongo` | MongoDB (a replica set) | `MongoTransactionManager` |
+| `kraken-messaging-jdbc` | `jdbc` | PostgreSQL 13+, MySQL 8.0.17+ ([README](kraken-messaging-jdbc/README.md)) | `DataSourceTransactionManager`, `JpaTransactionManager` |
+| the core | `memory` | tests, local runs, demos (not durable) | its own `MemoryTransactionManager` |
+
+The outbox entry and the processed marker commit in the same transaction as the service's own writes, whichever add-on. With
+two add-ons on the classpath, `kraken.messaging.store.type` chooses (without it the startup fails naming both; an add-on never
+wins silently, and an application's own `MessageStore` bean wins over every add-on); `kraken.messaging.store.init-schema` (default `true`) creates
+the add-on's indexes or tables at startup. Third parties add a database by implementing the store interfaces
+(`io.damoreira.kraken.messaging.store`) and passing `MessageStoreConformanceTest`.
+
+## In-memory event store and message store
+
+The core ships an event store and a message store that keep everything in the JVM's memory (ADR 0027, ADR 0028), for
+**tests, local runs and single-process demos**. They are **not durable**: everything is gone when the process ends, and only
+that JVM sees it (a second instance of the service has stores of its own). Each runs only when its setting names it, never
+because nothing else is there, and an add-on on the classpath steps back when the setting says `memory`:
+
+```yaml
+kraken:
+  messaging:
+    event-store: memory     # the in-memory event store
+    store:
+      type: memory          # the in-memory message store
+    memory:
+      segments: 4           # segments per source (default 4)
+```
+
+At startup each logs at `WARN`, naming the active Spring profiles (the default ones when none: `default` unless `spring.profiles.default` says otherwise), so a production profile that runs one
+by mistake shows it: `in-memory event store: not durable (profile local)` and `in-memory message store: not durable (profile
+local)`. Nothing stops a profile from using them: the warning is the guard.
+
+**The in-memory event store** (name `memory`; capabilities `replay`, `browse`, `lag`, not `native-dead-letter`):
+
+- Every source is a log of `memory.segments` segments, named `0` to `n - 1`; an event goes to the segment of its key (FNV-1a 64 of
+  the key's UTF-8 bytes, unsigned, modulo the segments), an event without a key to the next segment in turn. A position is the
+  event's index in its segment (`0`, `1`, ...), the timestamp the application clock's.
+- A subscription name keeps one committed position per segment; the instances of one name in the JVM share its segments round
+  robin, and a segment changes hands only once its holder gave it up, so two never read one segment at once. A new name starts at
+  the earliest position. A subscription wakes up at once on a publish, a resume or a reassignment.
+- Reset and replay work as on any event store with `replay` (while no instance reads the subscription); `lag` counts what is not
+  acknowledged. `browse` is the read access tests use (`MemoryEventStore.sources()`, `events(source, type, key)`,
+  `event(source, segment, position)`): there is no event browser for an in-process store.
+- Nothing is ever deleted: a long run keeps every event.
+
+**The in-memory message store** (name `memory`) implements every store (outbox, processed events, dead letters, processor control,
+external calls, the saga ports) with the semantics of the database add-ons:
+
+- Its transactions are Spring's (`MemoryTransactionManager`, also the application's transaction manager when it has none, so its
+  `@Transactional` methods and the outbox commit together): what joins a transaction is visible to others only at the commit and
+  dropped at a rollback; two live transactions writing one row conflict at the second write, and a commit over a row that changed
+  fails; both are a `ConcurrencyFailureException`, the transient conflict a retry resolves.
+- An event published inside a transaction of **another** transaction manager (the application's own database, with its JDBC or
+  JPA manager) is appended to the in-memory outbox after that transaction committed, and never when it rolled back: after the
+  commit, not atomically with it (the in-memory store cannot join another database's transaction).
+- The relay is woken up as soon as an append commits (no poll interval to wait), claims and leases follow the application clock,
+  dead letters expire at their `expireAt`; nothing else expires. Its cost grows with what it holds: every relay poll and every
+  query scans all the rows of its collection under one lock, and nothing is purged, so it suits test-sized and demo-sized loads.
+
+A service test that wants neither containers nor a hub uses both through `@KrakenInMemory` (see
+[Test helpers](#test-helpers-kraken-messaging-test)).
 
 ## Semantics worth knowing
 
@@ -577,7 +683,7 @@ val quick = queryBus.sendBlocking(GetWorkout(id), SendOptions(retry = RetryPolic
   Scatter-gather below), and so is a streaming query (see Streaming queries).
 - **Incoming hub requests** run on virtual threads, at most `hub.max-concurrent-handlers` at once, never on the threads
   that read the hub stream; a handler may block (for example on a nested `sendBlocking`).
-- **Correlation id.** Every message carries a `correlationId`. Messages sent while handling a hub request or a Kafka
+- **Correlation id.** Every message carries a `correlationId`. Messages sent while handling a hub request or an
   event reuse the incoming id (carried in the coroutine context and mirrored into the SLF4J MDC key `correlationId`);
   otherwise the MDC value is used, else a fresh UUID.
 - **Request ids.** `Request.id` is fresh per attempt. A retried command must carry its own business id in the payload.
@@ -586,22 +692,22 @@ val quick = queryBus.sendBlocking(GetWorkout(id), SendOptions(retry = RetryPolic
   `@RequiresAuthentication`. Builder call.
 - **Events** carry `userId` only, not the token. Events published from an `@EventHandler` carry an empty `userId`:
   the consumer has no forwarded token, only the incoming event's `userId` in `MessageContext`.
-- **Outbox ordering.** Events with the same key are published in order per publishing instance, using a `seq` field on the
-  outbox document. Builder call.
-- **Outbox failures.** A send failure that retrying cannot fix (record too large, serialization, invalid topic,
-  authorization) or the `outbox.max-attempts`-th failure marks the document failed (`failedAt`), logs it once at error and
-  moves on; other failures stop the batch and are retried on the next poll. Failed documents stay in `outbox` (the TTL
-  only removes sent ones); clear `failedAt` and `attempts` to re-queue one.
-- **Consumer idempotency.** The consumer records processed event ids in `processed_events` and skips duplicates. A handler
+- **Outbox ordering.** The relay sends the outbox in creation order (`created_at`, then a sequence), so events with the same key
+  leave in order; several instances relay one outbox under per-batch leases (`outbox.lease`). Builder call.
+- **Outbox failures.** A send failure that retrying cannot fix (the event store refused the event: too large, not allowed) or the
+  `outbox.max-attempts`-th failure marks the entry failed, logs it once at error (never the payload) and moves on; other failures
+  stop the batch and are retried on the next poll. Failed entries stay in the message store for inspection (the retention only
+  removes sent ones).
+- **Consumer idempotency.** The consumer records processed event ids in the message store and skips duplicates. A handler
   gets up to `max-attempts` invocations with a 1 s back-off; a record that still fails becomes a dead letter (see
   [Dead letters](#dead-letters)). A payload that does not decode into the handler's class is not retried.
-- **Transactions.** The library invokes `@EventHandler`s inside its own Mongo transaction (idempotency marker plus the
-  handler's writes), on the Kafka listener thread via `runBlocking`; a handler that relies on it must not switch threads.
-  The `MongoTransactionManager` is thread-bound: Spring only carries a transaction across suspensions for reactive
+- **Transactions.** The library invokes `@EventHandler`s inside a transaction of the message store (idempotency marker plus
+  the handler's writes), on the processor's thread via `runBlocking`; a handler that relies on it must not switch threads.
+  The message stores' transaction managers are thread-bound: Spring only carries a transaction across suspensions for reactive
   transaction managers, so a `@Transactional suspend` function loses its transaction at the first real suspension (an
   awaited `send`, `delay`, `withContext` to another dispatcher) and later writes are not part of it. Rules:
   - make `@Transactional` handlers non-suspend functions, or make sure they do not suspend before their last write;
-  - `eventBus.publish`/`publishBlocking` only insert into `outbox` and never suspend, so they are safe inside the
+  - `eventBus.publish`/`publishBlocking` only append to the outbox and never suspend, so they are safe inside the
     transaction;
   - to send a command or query as well, commit first and send afterwards, for example a non-suspend `@Transactional`
     service method that does the writes, called from the handler, followed by `commandBus.send(...)`:
@@ -613,7 +719,7 @@ val quick = queryBus.sendBlocking(GetWorkout(id), SendOptions(retry = RetryPolic
         commandBus.send(NotifyOwner(workout.ownerId))        // after the commit
     }
     ```
-- **Shutdown.** The hub connection, outbox publisher and Kafka consumer start before the web server accepts traffic and
+- **Shutdown.** The hub connection, outbox publisher and event processors start before the web server accepts traffic and
   stop after its graceful drain. On stop the instance first announces an empty registration so the hub stops routing to
   it, waits up to 5 s for incoming handlers still running, then closes the stream.
 - **Handshake.** `Register` carries `initial_permits` and `client_version` `kraken-messaging/<version>`. The hub answers
@@ -961,8 +1067,8 @@ result.updates.collect { change -> render(change) }   // completes when the hand
 
 ## Event processors
 
-Every `@EventHandler` belongs to an **event processor** (P6a, ADR 0022 in the umbrella repo). A processor is its own Kafka
-consumer, in its own consumer group, on the events topic: its own position, its own failure domain, its own idempotency markers
+Every `@EventHandler` belongs to an **event processor** (P6a, ADR 0022 in the umbrella repo). A processor is its own
+subscription to the events source on the event store: its own position, its own failure domain, its own idempotency markers
 and dead letters. A slow projection in one processor never holds a notifier in another.
 
 ```kotlin
@@ -982,64 +1088,61 @@ class Notifier {                         // no annotation: processor "default"
 - **Names.** `@ProcessingGroup("name")` on a handler class; the name matches `^[a-z0-9][a-z0-9-]{0,47}$` and is not `default`. A
   bad name fails the startup naming the handler. Classes without the annotation are in processor `default`. Command and query
   handlers of an annotated class are not affected.
-- **Groups.** Every processor, `default` included, uses `<service group>.<name>`, the service group being
-  `kraken.messaging.kafka.group-id`, else the service name (`orders-service.default`, `orders-service.orders`), so a processor
-  starts from the earliest offset the first time it runs.
-- **Markers.** Every processor, `default` included, writes `processor:<name>:<eventId>` in `processed_events`, so one event type
-  handled in two processors is handled by both, each exactly once. A marker a processor writes for a Kafka record also carries
-  `processor`, `topic`, `partition` (Int32) and `offset` (Int64): a reset deletes exactly the markers of its replay range
+- **Subscriptions.** Every processor, `default` included, uses the subscription `<prefix>.<name>`, the prefix being
+  `kraken.messaging.events.subscription-prefix`, else the service name (`orders-service.default`, `orders-service.orders`), so a processor
+  starts from the earliest position the first time it runs. Its instances compete: each segment of the source is read by one of
+  them at a time.
+- **Markers.** Every processor, `default` included, writes the marker `processor:<name>:<eventId>`, so one event type
+  handled in two processors is handled by both, each exactly once. A marker a processor writes for a record also carries its
+  processor, source, segment and position: a reset deletes exactly the markers of its replay range
   ([Processor control](#processor-control)).
 - **Sagas run only in `default`** (their stage 2 follows the default processor's stage 1). A named processor runs
   only its handlers.
-- **Which processors start.** At startup, one consumer per processor that has a handler; `default` also when sagas run. A
-  service with no `@EventHandler` and no saga starts no consumer.
-- **Attempts and back-off** (`kafka.consumer.max-attempts`, 1 s between attempts) are shared by all processors.
+- **Which processors start.** At startup, one subscription per processor that has a handler; `default` also when sagas run. A
+  service with no `@EventHandler` and no saga subscribes to nothing.
+- **Attempts and back-off** (`events.consumer.max-attempts`, 1 s between attempts) are shared by all processors.
 - **External sources and webhooks** dispatch locally to the handlers of every processor, each in its own transaction under its
   own marker (`processor:<name>:<dedupeId>`), and to the sagas once. Their records are never dead-lettered. The source names
   `processor`, `saga`, `ingress` and `failed` are refused (a partner source at startup, a webhook at the call): their markers
   would collide with the library's own.
 
-**Moving an existing handler into a named processor runs it again over the whole topic.** The named processor's group is new,
-so it starts at the earliest offset the topic still holds, and its markers (`processor:<name>:<eventId>`) are a new family,
-so none of those records is a duplicate to it: the handler runs once more for every event in the topic's retention. A
-projection that rebuilds idempotently may want exactly that; a handler with effects outside MongoDB (an email, a payment
-call) repeats every one of them. For such code either leave the handler where it is and put only new handlers in the named
-processor, or commit the new group's offsets at the end of the topic before you deploy it:
-`kafka-consumer-groups --bootstrap-server <broker> --group <group>.<name> --topic <events topic> --reset-offsets --to-latest --execute`
-(`<group>` is `kraken.messaging.kafka.group-id` or the service name; the group must have no running member). Records produced
-between that reset and the moment the old instances stop are handled twice, once by the old `default` and once by the new
-processor, so reset right before the rollout. Once it runs, a reset to `latest` through the hub does the same without a shell
-([Processor control](#processor-control)), but by then it has already run once over the topic.
+**Moving an existing handler into a named processor runs it again over the whole source.** The named processor's subscription
+is new, so it starts at the earliest position the source still holds, and its markers (`processor:<name>:<eventId>`) are a new
+family, so none of those records is a duplicate to it: the handler runs once more for every event the source retains. A
+projection that rebuilds idempotently may want exactly that; a handler with effects outside the service's database (an email, a
+payment call) repeats every one of them. For such code either leave the handler where it is and put only new handlers in the
+named processor, or move the new subscription to the end of the source with the event store's own tooling before you deploy it
+(on Kafka: [Kafka event store](#kafka-event-store-kraken-messaging-kafka)). Records published between that move and the moment
+the old instances stop are handled twice, once by the old `default` and once by the new processor, so move it right before the
+rollout. Once it runs, a reset to `latest` through the hub does the same without a shell
+([Processor control](#processor-control)), but by then it has already run once over the source.
 
 **Status at the hub.** Every status report (`hub.status-interval`, 5 s) carries one `ProcessorStatus` per started processor to
-every hub: name, group,
-topic, state, the partitions assigned to this instance with position, committed offset, high watermark and lag, records processed
-and failed since start, the dead-letter count, the last error (message only, never a payload), the event types and the
-dead-letter mode. The hub shows them in `GET /api/v1/topology`, `GET /api/v1/processors` and the dashboard's Processors page. The states:
+every hub: name, subscription, source, event store, state, the segments assigned to this instance with position, committed
+position, head and lag, records processed and failed since start, the dead-letter count, the last error (message only, never a
+payload), the event types and the dead-letter mode. The hub shows them in `GET /api/v1/topology`, `GET /api/v1/processors` and the dashboard's Processors page. The states:
 
 | State | When |
 |---|---|
-| `STARTING` | started, no assignment yet (an assignment of zero partitions counts: an idle group member is `RUNNING`), or between a revocation and the next assignment |
+| `STARTING` | started, before its first assignment (an assignment of zero segments counts: an idle competing instance is `RUNNING`; every event store announces a first assignment, possibly empty, soon after the subscription joins), or between a revocation and the next assignment |
 | `RUNNING` | otherwise |
-| `FAILING` | for 60 s after a record exhausted its attempts, or a record could not be acknowledged (its letter could not be parked, the DLT could not be reached); wins over `STARTING` and `RUNNING` |
-| `PAUSED` | paused through processor control (P6b): still in its group, consuming nothing; wins over `FAILING`, `STARTING` and `RUNNING` |
+| `FAILING` | for 60 s after a record exhausted its attempts, or a record could not be acknowledged (its letter could not be parked, the dead-letter source could not be reached), or the subscription failed and is subscribed again after a backoff; wins over `STARTING` and `RUNNING` |
+| `PAUSED` | paused through processor control (P6b): still subscribed, consuming nothing; wins over `FAILING`, `STARTING` and `RUNNING` |
 | `STOPPED` | the processor is stopping or stopped; also while a reset holds its lock (P6b), with `operation_id` set |
 
 A report also carries `operation_id` (the reset holding the processor's lock, empty when none), `replaying` (a replay
-range is open on this instance's partitions) and per partition `replay_until` (the end of its open replay range, 0 when none).
+range is open on this instance's segments) and per segment `replay_until` (the end of its open replay range, empty when none).
 
-The report is built from memory and never waits: the assignment comes from the rebalance listener, the position from the last
-acknowledged record (`-1` until one), the committed offsets and high watermarks from one Kafka `Admin` client (same connection
-settings as the consumers) refreshed at most every 5 s on a background thread, and the dead-letter count from
-`countDocuments({processor})` every 30 s and after a park. Lag is `high watermark - committed` (`- position` without a commit),
-`-1` when unknown, never negative. `EventProcessors.processorStatuses()` (bean `ProcessorStatusSource`) gives the same list to an
+The report is built from memory and never waits: the assignment, positions, heads and lag come from the subscription, which the
+event store keeps up to date on its own threads, and the dead-letter count from the message store every 30 s and after a park.
+Lag is `head - committed` (`- position` without a commit), `-1` when unknown, never negative. `EventProcessors.processorStatuses()` (bean `ProcessorStatusSource`) gives the same list to an
 application that wants it.
 
 ## Dead letters
 
-A record a processor cannot handle is not only logged: by default (`kraken.messaging.kafka.dead-letter.mode: collection`)
-it is **parked** in the service's MongoDB collection `dead_letters`, the later records of the same Kafka key wait behind it, and an
-operator retries or discards it through the `DeadLetters` bean.
+A record a processor cannot handle is not only logged: by default (`kraken.messaging.events.dead-letter.mode: collection`)
+it is **parked** in the service's message store, the later records of the same key wait behind it, and an operator retries or
+discards it through the `DeadLetters` bean.
 
 | Reason | What happened | Blocks its key | Retry |
 |---|---|---|---|
@@ -1049,17 +1152,17 @@ operator retries or discards it through the `DeadLetters` bean.
 
 A type the processor does not handle is skipped, not a letter. A record without a key is never sequenced. A record that
 only failed in the saga stage (stage 1 done, the saga store down on every attempt) is logged and skipped: stage 1 has nothing to
-retry, and parked saga events have their own `saga_failures`.
+retry, and parked saga events have their own saga failures ([Operating sagas](#operating-sagas)).
 
-**Never lost, parked once.** The letter is a single insert outside any transaction after the last attempt, `_id`
-`<processor>:<topic>:<partition>:<offset>`; the offset is acknowledged only once the letter exists. When MongoDB is down the record
-stays unacknowledged and is redelivered every second until the letter is written (the redelivery parks it, it does not run the
-handler again; after a rebalance the new owner may run it once more, which stage 1's marker makes harmless). A redelivery of a record
+**Never lost, parked once.** The letter is a single insert outside any transaction after the last attempt, id
+`<processor>:<source>:<segment>:<position>`; the record is acknowledged only once the letter exists. When the message store is
+down the record stays unacknowledged and is redelivered every second until the letter is written (the redelivery parks it, it does not run the
+handler again; after a reassignment the new holder may run it once more, which stage 1's marker makes harmless). A redelivery of a record
 already parked (a crash before the commit) finds its own letter and is acknowledged.
 
-**Sequencing.** Each processor keeps the keys of its letters on its assigned partitions in memory (loaded on assignment, added to
-on every park). A record whose key is in that set is checked against the collection: when the key still has a head letter (the
-lowest offset that is not `INVALID`), the record is parked `SEQUENCED`; otherwise (retried, discarded or expired, possibly on
+**Sequencing.** Each processor keeps the keys of its letters on its assigned segments in memory (loaded on assignment, added to
+on every park). A record whose key is in that set is checked against the message store: when the key still has a head letter (the
+lowest position that is not `INVALID`), the record is parked `SEQUENCED`; otherwise (retried, discarded or expired, possibly on
 another instance) the key is forgotten and the record handled. **A letter that expires** (`dead-letter.retention`, 30 days)
 **unblocks its key.**
 
@@ -1080,74 +1183,61 @@ class DeadLetterAdmin(private val deadLetters: DeadLetters) {
 | `list(processor: String? = null, limit: Int = 100): List<DeadLetter>` | sorted by `parkedAt`, then `_id` |
 | `get(id): DeadLetter?`, `count(processor: String? = null): Long` | |
 | `retry(id): RetryResult` | `Retried`, `Duplicate` (stage 1 had run: the letter is deleted), `Failed(message)` (the letter stays with `attempts + 1`, the new `error`, `lastAttemptAt`, reason `HANDLER_FAILED`), `Blocked(headId)` (retry the key's head first), `NotRetriable` (`INVALID`), `NotFound` |
-| `retryAll(processor): RetryAllResult(retried, failed, blocked, skipped)` | per key in offset order, a key stopping at its first failure (its later letters count as blocked); then the keyless letters; `INVALID` letters skipped |
+| `retryAll(processor): RetryAllResult(retried, failed, blocked, skipped)` | per key in position order, a key stopping at its first failure (its later letters count as blocked); then the keyless letters; `INVALID` letters skipped |
 | `discard(id): Boolean` | deletes the letter; discarding a key's head makes the next letter of the key retriable |
 
 A retry runs the processor's stage 1 (all its handlers for the type) once, **in the marker transaction, together with the letter's
 deletion**: handled and deleted commit together or not at all, so a retry is exactly-once with respect to stage 1, also when two
 instances retry the same letter. The sagas are not run again. A key stays blocked for new records until all its letters are retried
 or discarded. Any instance of the service can serve the calls for the processors it runs; a processor it does not run (or a letter
-of one) is an `IllegalArgumentException` naming it. In modes `topic` and `log` every call is an `IllegalStateException` naming the
-mode.
+of one) is an `IllegalArgumentException` naming it. In modes `event-store` and `log` every call is an `IllegalStateException`
+naming the mode.
 
-**Mode `topic`** produces the failed or `INVALID` record to `<topic>.dlt` (same key, value and headers, plus `kraken-dlt-processor`,
-`kraken-dlt-reason`, `kraken-dlt-error`, `kraken-dlt-original-topic`, `-partition` and `-offset`) and acknowledges it only after the
-broker did. Nothing is sequenced and there is no admin API: the topic belongs to your tooling. **The DLT must exist, or broker
-auto-creation must be on.** **Mode `log`** logs (never the payload) and skips: nothing is parked.
+**Mode `event-store`** publishes the failed or `INVALID` record to the event store's dead-letter source `<source>.dlt` (same key,
+value and headers, plus `kraken-dlt-processor`, `kraken-dlt-reason`, `kraken-dlt-error`, `kraken-dlt-original-topic`, `-partition`
+and `-offset`, which carry the source, segment and position) and acknowledges it only after the event store confirmed it. It needs
+an event store with the capability `native-dead-letter` (the startup fails otherwise). Nothing is sequenced and there is no admin
+API: the dead-letter source belongs to your tooling, and must exist (or the event store must create it). **Mode `log`** logs (never
+the payload) and skips: nothing is parked.
 
-The document (the same from the Rust library; no `_class`, an absent field is absent):
-
-| Field | Type | |
-|---|---|---|
-| `_id` | string | `<processor>:<topic>:<partition>:<offset>` |
-| `processor`, `topic` | string | |
-| `partition` / `offset` | Int32 / Int64 | |
-| `key` | string | absent without a key |
-| `eventId`, `eventType` | string | the `id` and `type` headers, absent when missing |
-| `headers` | document | every record header (lossy UTF-8; a repeated name keeps its last value) |
-| `payload` / `payloadBinary` | string / BinData | the value as text when it is UTF-8, else binary; both absent for an empty value |
-| `reason` | string | `HANDLER_FAILED`, `SEQUENCED`, `INVALID` |
-| `error` | `{type, message}` | exception simple name and message (at most 2000 characters); `Sequenced` / `InvalidMessage` |
-| `blockedBy` | string | `SEQUENCED` only: the head letter when it was parked |
-| `attempts` | Int32 | handler attempts so far |
-| `parkedAt`, `lastAttemptAt`, `expireAt` | Date | `expireAt = parkedAt + retention` (TTL index) |
-| `replay` | bool | `true` when parked while its processor replayed the record (P6b): its retry is a replay too; absent otherwise |
-
-Indexes: `dead_letters_processor_key_offset`, `dead_letters_processor_parked`, `dead_letters_expire` (TTL), created at startup.
+Each message store keeps the letters in its own layout, the same as the Rust library's: on MongoDB the `dead_letters` documents
+([MongoDB message store](#mongodb-message-store-kraken-messaging-mongo)), in SQL the `kraken_dead_letters` table
+([its README](kraken-messaging-jdbc/README.md#tables)).
 
 ## Processor control
 
 The hub (ADR 0023 in the umbrella repo) pauses, resumes and resets a processor of a service **on every
 instance**, and lists, retries and discards its dead letters, from its dashboard or HTTP API (writes need the hub's write token
 or an ACL credential with `control = true`; see the hub's documentation). The hub keeps nothing: the state of each processor is a
-document in the service's own MongoDB, `processor_control`, which every instance reads at start (before its consumers poll) and
+row in the service's own message store (its processor control), which every instance reads at start (before it consumes) and
 every 5 s, so a pause outlives every hub and restart and reaches instances that start later. A `ControlRequest` is only the fast
 path. The bean `ProcessorControl` does all of it; its `pause(processor)` and `resume(processor)` do the same from your own code
 (`pausedBy: "local"`).
 
-- **Pause** stops consuming every assigned partition **without leaving the consumer group** (no rebalance): the record in hand
-  finishes, nothing else starts, partitions assigned later start paused. The status says `PAUSED`. **Resume** undoes it. A pause
-  holds only Kafka consumption: the local dispatch of external sources, webhooks and saga notices still runs the processor's
+- **Pause** stops consuming every assigned segment **without leaving the subscription** (no reassignment): the record in hand
+  finishes, nothing else starts, segments assigned later start paused. The status says `PAUSED`. **Resume** undoes it. A pause
+  holds only what the processor reads from the event store: the local dispatch of external sources, webhooks and saga notices still runs the processor's
   handlers, and the `DeadLetters` admin calls keep working.
-- **Reset** moves the processor's consumer group to `earliest`, `latest`, a timestamp or explicit offsets per partition, as a
-  **leased operation**: every instance is prepared (it takes the processor's lock in `processor_control` for a 30 s lease, the hub
-  renews it every 10 s, and leaves the group: `STOPPED` with the operation id), one executes, every one is finished (it releases
+- **Reset** moves the processor's subscription to `earliest`, `latest`, a timestamp or explicit positions per segment, as a
+  **leased operation** (an event store with the capability `replay`; without it every reset is refused `UNSUPPORTED`): every instance is prepared (it takes the processor's lock
+  in the message store for a 30 s lease, the hub renews it every 10 s, and leaves the subscription: `STOPPED` with the operation id), one executes, every one is finished (it releases
   the lock and consumes again, still paused if it was). An instance whose lease passes without a renewal (the hub died) releases it
-  and resumes by itself; an instance that starts while the lock is held stays out of the group until it clears. A second reset
+  and resumes by itself; an instance that starts while the lock is held stays out of the subscription until it clears. A second reset
   while one holds the lock is refused (`LOCKED`). A renewal that arrives after the finish never takes the lock again: an
   operation that ended on an instance (finished, aborted, its lease passed, its lock lost) is remembered for at least
   max(2 x lease, 60 s), and a prepare of it, or a renewal whose lock is gone, is refused `NOT_PREPARED`. A prepare or renewal
   asking for a lease under 1000 ms is refused `INVALID` (the hub asks for 30 s).
-- **The execute** resolves the target per partition (Kafka `Admin.listOffsets`; a timestamp past the last record means the end),
-  reads the group's committed offsets ("before"), refuses while the group has any active member (`GROUP_NOT_EMPTY`, nothing
-  changed), runs the processor's `@ResetHandler`s, deletes the processor's markers in the replay ranges, writes the ranges to the
-  document and only then commits the target offsets (`Admin.alterConsumerGroupOffsets`). Right after the reset handlers and
+- **The execute** resolves the target per segment through the event store (a timestamp past the last record means the end),
+  reads the subscription's committed positions ("before"), refuses while the subscription has any active reader
+  (`SUBSCRIBERS_ACTIVE`, naming them; nothing changed), runs the processor's `@ResetHandler`s, deletes the processor's markers in the replay ranges,
+  writes the ranges to the message store and only then commits the target positions. Right after the reset handlers and
   again before the commit, the executor must still extend its lease (and be within 120 s): otherwise it stops with `FAILED`
-  "lease lost: ...", before touching markers or offsets. **A refusal after the reset handlers ran is not "nothing changed"**:
-  their effects stay, and the message says what else happened, e.g. `reset handlers ran (2), 37 markers deleted, offsets not
+  "lease lost: ...", before touching markers or positions. **A refusal after the reset handlers ran is not "nothing changed"**:
+  their effects stay, and the message says what else happened, e.g. `reset handlers ran (2), 37 markers deleted, positions not
   moved: retry the reset`. Retry the reset (the handlers run again), or check the projection.
-- **A reset to anything but `latest` is a replay**: per partition, the records from the target up to where the group was
-  (`[target, before)`) are handled again, by whichever instance owns the partition, exactly once overall (their markers were
+- **A reset to anything but `latest` is a replay**: per segment, the records from the target up to where the subscription was
+  (`[target, before)`) are handled again, by whichever instance holds the segment (also after the segments move between
+  instances), exactly once overall (their markers were
   deleted). In the range **the sagas never run** (stage 2 is skipped) and **handlers marked `@DisallowReplay` do not run**; past
   the range everything is as usual. Once an instance has consumed past the end of a range it removes the range; the status shows
   `replaying` until then. A reset does not touch the processor's dead letters. A record parked while it was replayed keeps that
@@ -1159,11 +1249,11 @@ path. The bean `ProcessorControl` does all of it; its `pause(processor)` and `re
 class OrdersProjection(private val orders: OrderRepository) {
     @EventHandler fun on(event: OrderPlaced) = orders.insert(event.toRow())
 
-    // Once per reset that replays something, on the instance that executes it, before any marker or offset changes.
-    // Throwing (an Error too) fails the reset (RESET_HANDLER_FAILED) before any marker or offset changes; what the handlers
+    // Once per reset that replays something, on the instance that executes it, before any marker or position changes.
+    // Throwing (an Error too) fails the reset (RESET_HANDLER_FAILED) before any marker or position changes; what the handlers
     // that ran did stays, and the refusal says how many ran. No parameter, or a ResetContext.
     @ResetHandler fun clear(ctx: ResetContext) {
-        if (ctx.target == ResetTarget.Earliest) orders.deleteAll() // the whole topic replays: rebuild from scratch
+        if (ctx.target == ResetTarget.Earliest) orders.deleteAll() // the whole source replays: rebuild from scratch
     }
 }
 
@@ -1175,21 +1265,15 @@ class OrderMails(private val mail: Mail) {
 }
 ```
 
-`ResetContext(processor, operationId, target, ranges)`: `target` is `ResetTarget.Earliest`, `Latest`, `Timestamp(timestampMs)` or
-`Offsets(map of partition to offset)`; `ranges` the `ReplayRange(topic, partition, from, until)` the reset replays (never empty: a
-reset that replays nothing runs no reset handler). A `@ResetHandler` belongs to its class's processor (`@ProcessingGroup`, else
+`ResetContext(processor, operationId, target, ranges)` (`ResetTarget` and `ReplayRange` are in
+`io.damoreira.kraken.messaging.eventstore`): `target` is `ResetTarget.Earliest`, `Latest`, `Timestamp(timestampMs)` or
+`Positions(map of segment to position)`; `ranges` the `ReplayRange(source, segment, from, until)` the reset replays, segments and
+positions as the event store writes them (never empty: a reset that replays nothing runs no reset handler). A `@ResetHandler` belongs to its class's processor (`@ProcessingGroup`, else
 `default`) and may suspend.
 
-The `processor_control` document (the same from the Rust library; every field is always written):
-
-| Field | Type | |
-|---|---|---|
-| `_id` | string | the processor name |
-| `paused` | bool | |
-| `pausedAt`, `pausedBy` | Date, string | null when not paused; `pausedBy` is the hub's control id, or `local` |
-| `operation` | `{id, kind: "reset", leaseUntil, preparedAt}` | the reset holding the lock, null when none; expired once `leaseUntil` passed |
-| `replay` | array of `{topic, partition: Int32, from: Int64, until: Int64}` | the open replay ranges, `[]` when none |
-| `updatedAt` | Date | |
+Each message store keeps the processor control in its own layout, the same as the Rust library's (on MongoDB the
+`processor_control` documents, [MongoDB message store](#mongodb-message-store-kraken-messaging-mongo); in SQL the
+`kraken_processor_control` table).
 
 Every control request is logged at INFO with its control id, processor, action and result. Requests run off the hub stream, one
 at a time per processor (a renewal of the lease this instance holds is answered at once, and the instance executing a reset
@@ -1203,7 +1287,7 @@ headers, `retry`, `retryAll`, `discard`); an instance answers only for the proce
 A saga is a long-running process that reacts to events, keeps its own state, sends commands and events, waits for an answer and
 handles the answer that never comes. It is the saga model (`@StartSaga`, `@SagaEventHandler` with association properties,
 `@EndSaga`, deadlines), built mainly to drive **integrations with external systems**. Sagas run inside your service, against its
-MongoDB and its Kafka consumer; the hub is not involved except to carry the commands a saga sends to another service.
+message store and its event store; the hub is not involved except to carry the commands a saga sends to another service.
 
 Everything starts and ends with kraken messages. A saga never calls an external system itself: it sends a command, an
 **adapter** in the same service (an ordinary `@CommandHandler` made idempotent) makes the call, and the external system's answer
@@ -1260,7 +1344,7 @@ class PaymentSaga {
   instance exists per start association otherwise.
 - Handler parameters after the event: `SagaLifecycle`, `SagaCommands`, `DeadlineManager`, `MessageContext` and any Spring bean by
   type, in any order. A `@DeadlineHandler`'s first parameter, when it is not one of those, receives the deadline's payload.
-- Handlers are plain (non-`suspend`) functions: they run inside the saga's thread-bound Mongo transaction. Several handlers of one
+- Handlers are plain (non-`suspend`) functions: they run inside the saga's thread-bound message-store transaction. Several handlers of one
   event type run in **method-name order**.
 - `commands.send` and `commands.publish` only record the message; it leaves **after** the transaction committed, in call order,
   at least once, with the header `idempotency-key = <sagaId>:<seq>`. A saga does not wait for a reply.
@@ -1321,9 +1405,9 @@ Use `@IdempotentHandler`, or make the effect idempotent on `headers['idempotency
 
 Two more things about the adapter:
 
-- The body of an `@IdempotentHandler` **`@EventHandler`** runs inside the ordinary handlers' stage-1 Mongo transaction, so a slow
-  call there holds that transaction open (MongoDB's lifetime limit, 60 s by default, applies). The `@CommandHandler` adapter the
-  relay calls runs in no Mongo transaction: prefer it for anything slow.
+- The body of an `@IdempotentHandler` **`@EventHandler`** runs inside the ordinary handlers' stage-1 transaction, so a slow
+  call there holds that transaction open (the database's own limit on a transaction's lifetime applies). The `@CommandHandler`
+  adapter the relay calls runs in no library transaction: prefer it for anything slow.
 - `idempotency-key` is just a header that any sender of the command can set, a hub client that is not a saga included. Keep
   adapters internal: do not expose their command types to services or clients you do not trust.
 
@@ -1340,7 +1424,8 @@ the saga's later steps.
 
 ### Hearing from the partner: a topic of its own
 
-When the partner produces to **its own Kafka topic** (not `kraken.events`):
+When the partner produces to **its own Kafka topic** (not `kraken.events`; with `kraken-messaging-kafka`, whatever the service's own
+event store is):
 
 ```yaml
 kraken:
@@ -1357,19 +1442,20 @@ kraken:
 ```kotlin
 @Component("printer")                    // the bean carries the source's name
 class PrinterTranslator(private val codec: JsonCodec) : ExternalRecordTranslator {
-    override fun translate(record: ConsumerRecord<String, ByteArray>): TranslatedEvent? {
-        val n = codec.decode(record.value(), PrinterNotification::class)
+    override fun translate(record: ExternalRecord): TranslatedEvent? {
+        val n = codec.decode(record.payload, PrinterNotification::class)
         return TranslatedEvent(PostcardPrinted(n.jobId, n.name), dedupeKey = n.deliveryId)    // null ignores the record
     }
 }
 ```
 
-The library runs one consumer per source (group `<service-name>.external.<name>`, `earliest` for a new group), translates each
-record and dispatches the event **locally**: the service's `@EventHandler`s and sagas, never `kraken.events`. The `dedupeKey` (the
-partner's own id) makes two records for one event apply once; without it the key is `<name>:<partition>:<offset>`. A translator
-exception retries the record up to `kafka.consumer.max-attempts` times, then logs and skips it. `properties` cannot set the
-servers, the group id, the deserializers or auto-commit: such an entry fails the startup, naming it. `kafka-clients` is an `api` dependency of the starter, so the
-translator's `ConsumerRecord` compiles without declaring it.
+The library reads each source in a subscription of its own (group `<service-name>.external.<name>`, `earliest` for a new group),
+translates each record (`ExternalRecord`: source, key, headers as text, payload, segment and position) and dispatches the event
+**locally**: the service's `@EventHandler`s and sagas, never the service's events. The `dedupeKey` (the partner's own id) makes
+two records for one event apply once; without it the key is `<name>:<segment>:<position>` (`<name>:<partition>:<offset>` on
+Kafka). A translator exception retries the record up to `events.consumer.max-attempts` times, then logs and skips it. A
+subscription that fails is subscribed again after a backoff. `properties` cannot set the servers, the group id, the deserializers
+or auto-commit: such an entry fails the startup, naming it. The partner's topic is never created.
 
 ### Hearing from the partner: a webhook
 
@@ -1424,9 +1510,9 @@ Give every waiting saga a timeout deadline of its own, so an answer that never c
 
 ### Testing a saga
 
-`SagaTestFixture` (in `kraken-messaging-test`, `testImplementation`) drives one saga with events and time, in memory: no Kafka,
-no MongoDB, no Spring context. It runs the library's own saga runtime over in-memory storage, so a saga that passes behaves the
-same on MongoDB; every step encodes and decodes the saga state as JSON, so state the codec cannot carry fails the test.
+`SagaTestFixture` (in `kraken-messaging-test`, `testImplementation`) drives one saga with events and time, in memory: no event
+store, no database, no Spring context. It runs the library's own saga runtime over the in-memory message store, so a saga that
+passes behaves the same on any message store; every step encodes and decodes the saga state as JSON, so state the codec cannot carry fails the test.
 
 ```kotlin
 class PaymentSagaTest {
@@ -1470,8 +1556,8 @@ adapter against a fake of the partner, the controller with a mock request and a 
 
 ### Operating sagas
 
-- **A parked event.** An event whose saga handler failed all its attempts is written to `saga_failures` (with its marker, so the
-  consumer moves on), counted in `kraken_saga_events_total{outcome="parked"}` and logged at error. Inject `SagaFailures` and call
+- **A parked event.** An event whose saga handler failed all its attempts is parked in the message store's saga failures (with its
+  marker, so the processor moves on), counted in `kraken_saga_events_total{outcome="parked"}` and logged at error. Inject `SagaFailures` and call
   `list(type?)`, `retry(id)`, `retryAll(type)` or `discard(id)` once the cause is fixed (a retry of a saga type this service does
   not run throws `IllegalStateException` and leaves the event as it was). Nothing retries a parked event by itself;
   one nobody retries or discards is deleted `sagas.failed-retention` (30 days) after its last failure, as is a `saga_dispatch`
@@ -1488,20 +1574,20 @@ adapter against a fake of the partner, the controller with a mock request and a 
 - **The translator bean carries the source's name** (`@Component("printer")` or a `@Bean` method named `printer`). A source with
   no such bean fails the startup naming it. For the same reason do not name another bean `printer` (the example's client bean is
   called `printerClient`).
-- **Partner topics are not created by the library**, and the sandbox's Kafka does not auto-create topics: create the partner's
-  topic first (the examples have a one-shot `printer-topic-init` for `printer.events`).
+- **Partner topics are not created by the library** (`kraken-messaging-kafka`), and the sandbox's Kafka does not auto-create
+  topics: create the partner's topic first (the examples have a one-shot `printer-topic-init` for `printer.events`).
 - **Use the library's `JsonCodec` bean** to read a webhook body or a partner record. It is the codec that writes your messages and
   your saga's state, with the same conventions; an `ObjectMapper` of your own may read the same JSON differently.
 - **A saga only sees events consumed after it is deployed.** There is no replay of past events into a new saga type.
 - **Ordinary `@EventHandler`s run first, and a failing one does not hide the event from the sagas.** The saga stage runs even
-  when an ordinary handler failed, and the failure is then thrown, so the consumer retries and then dead-letters the record by its
+  when an ordinary handler failed, and the failure is then thrown, so the processor retries and then dead-letters the record by its
   mode ([Dead letters](#dead-letters)); the sagas have applied the event once by then (their own markers make the redeliveries safe).
 - **A step that must not run after the step before it failed** is sent from the handler of the event that says the previous step
   succeeded, not recorded in the same handling: the relay sends a saga's later steps after a permanently failed one.
 - **Leases need synchronised clocks.** The relay, deadline and `external_calls` leases are timestamps compared across instances;
   keep the clocks in step (NTP).
-- **A partner that recreates its topic needs a `dedupeKey`.** Without one the dedupe id is `<name>:<partition>:<offset>`; a recreated
-  topic starts again at offset 0 and its records collide with the markers of the old ones for up to `idempotency.retention` (30
+- **A partner that recreates its topic needs a `dedupeKey`.** Without one the dedupe id is `<name>:<segment>:<position>`; a recreated
+  topic starts again at position 0 and its records collide with the markers of the old ones for up to `idempotency.retention` (30
   days) and are skipped silently.
 - **A saga sends through `SagaCommands` only.** A handler parameter of type `CommandBus`, `QueryBus`, `EventBus`, `RawCommandSender`,
   `RawEventPublisher` or `HubBus` (or a subclass or implementation of one) fails the startup: it would send at once, outside the
@@ -1524,12 +1610,12 @@ Histograms are `_bucket{le}`, `_sum` and `_count`, with the hub's bucket boundar
 
 | Series | Type | Labels | Meaning |
 |---|---|---|---|
-| `kraken_outbox_pending` | gauge | | Outbox documents not sent and not given up on, counted by the relay thread every 5 s. Every instance reports the same database: aggregate with `max by (job)`. |
+| `kraken_outbox_pending` | gauge | | Outbox entries not sent and not given up on, counted by the relay thread every 5 s. Every instance reports the same database: aggregate with `max by (job)`. |
 | `kraken_outbox_oldest_age_seconds` | gauge | | Age of the oldest of them as the relay's latest poll saw it (it grows while the relay is stuck), 0 when none. |
-| `kraken_outbox_published_total` | counter | `outcome` (`ok`, `failed`) | Send attempts; a retried document counts each attempt. |
-| `kraken_events_consumed_total` | counter | `processor`, `type`, `outcome` | Each record's final outcome in each processor: `handled`, `duplicate` (its marker existed, or its own dead letter did), `skipped` (a type the processor does not handle), `parked` (handed to the dead letters, mode `collection` or `topic`), `failed` (given up without a letter: mode `log`, or only the saga stage failed). `type` is `other` for a type the processor does not handle or a record without one. |
+| `kraken_outbox_published_total` | counter | `outcome` (`ok`, `failed`) | Send attempts; a retried entry counts each attempt. |
+| `kraken_events_consumed_total` | counter | `processor`, `type`, `outcome` | Each record's final outcome in each processor: `handled`, `duplicate` (its marker existed, or its own dead letter did), `skipped` (a type the processor does not handle), `parked` (handed to the dead letters, mode `collection` or `event-store`), `failed` (given up without a letter: mode `log`, or only the saga stage failed). `type` is `other` for a type the processor does not handle or a record without one. |
 | `kraken_event_handler_duration_seconds` | histogram | `processor`, `type` | One stage-1 run (the marker transaction with the processor's handlers) of a consumed record, every attempt; not the saga stage. |
-| `kraken_processor_lag` | gauge | `processor`, `partition` | The lag the processor status reports, per partition assigned to this instance; a partition whose lag is not known yet has no series. A partition that leaves the assignment (or whose processor goes) reads 0 until an export read it, then has no series. Prometheus keeps a series that stops at its last value for 5 minutes, so aggregate with the max per partition first: `sum by (job, processor) (max by (job, processor, partition) (kraken_processor_lag))`. |
+| `kraken_processor_lag` | gauge | `processor`, `segment` | The lag the processor status reports, per segment assigned to this instance; a segment whose lag is not known yet has no series. A segment that leaves the assignment (or whose processor goes) reads 0 until an export read it, then has no series. Prometheus keeps a series that stops at its last value for 5 minutes, so aggregate with the max per segment first: `sum by (job, processor) (max by (job, processor, segment) (kraken_processor_lag))`. |
 | `kraken_processor_state` | gauge | `processor`, `state` | 1 for the current state (`starting`, `running`, `paused`, `failing`, `stopped`), 0 for the other four. |
 | `kraken_dead_letters` | gauge | `processor` | The processor's dead letters as the status last counted them (mode `collection`; 0 otherwise). |
 | `kraken_hub_client_request_duration_seconds` | histogram | `kind` (`command`, `query`), `type`, `outcome` | One unary command or query call through the hub, from the call to its result, retries included (saga commands too). `outcome`: `ok`, the hub's `no_handler`, `timeout`, `handler_disconnected`, `handler_error`, `invalid_request`, `resource_exhausted`, `cancelled`, `denied`, or `unavailable` (no live hub, or the stream broke), `error` (also a request that cannot be encoded). Local handlers, scatter-gather, streaming and subscription queries are not observed. |
@@ -1542,14 +1628,14 @@ Histograms are `_bucket{le}`, `_sum` and `_count`, with the hub's bucket boundar
 | `kraken_sagas_active` | gauge | `type` | Live saga instances, counted every 15 s. |
 | `kraken_saga_events_total` | counter | `type`, `outcome` (`handled`, `no_match`, `conflict`, `parked`) | One (event, saga type) handling. |
 | `kraken_saga_dispatch_pending` | gauge | | Commands and events saga handlers recorded that the relay has not dispatched yet, counted every 15 s. |
-| `kraken_saga_command_failures_total` | counter | `type`, `reason` | A `SagaCommandFailed` nobody handled (`reason` as the wire enum, e.g. `NO_HANDLER`). |
+| `kraken_saga_command_failures_total` | counter | `type`, `reason` | A `SagaCommandFailed` nobody handled (`reason` as the wire enum, e.g. `NO_HANDLER`), or a saga's event the outbox refused (`reason` `INVALID`, `type` the event's). |
 | `kraken_deadlines_fired_total` | counter | `name` | Deadlines that ran their handler. |
 | `kraken_deadlines_due` | gauge | `name` | Scheduled deadlines past their due time. |
 | `kraken_external_calls_total` | counter | `handler`, `outcome` (`succeeded`, `replayed`, `failed`, `retryable`, `unknown`) | Calls of an `@IdempotentHandler`. |
 
 Nothing on the hot paths waits for a metric: the hooks count in memory, and the gauges read values a background thread
 already sampled (the outbox count on the relay's thread, the processor gauges every 5 s from the status the instance
-reports to the hub, which refreshes offsets and dead-letter counts on its own thread). An application's own
+reports to the hub, whose positions the event store and dead-letter counts the message store refresh on their own threads). An application's own
 `MessagingMetrics` bean replaces the Micrometer one.
 
 **Exporting.** Use Boot's OTLP metrics export: add `io.micrometer:micrometer-registry-otlp` and
@@ -1590,6 +1676,48 @@ service-a and service-b of the [examples](#examples) export this way when switch
 
 ## Test helpers (`kraken-messaging-test`)
 
+- `@KrakenInMemory` on a `@SpringBootTest`: the zero-infrastructure mode. The application runs on the in-memory event store and
+  message store (`kraken.messaging.event-store=memory`, `kraken.messaging.store.type=memory`), without a hub (`hub.enabled=false`: no
+  `CommandBus` or `QueryBus`; a service that injects one declares `InMemoryBuses` or an `InProcessHub` connection), and without the
+  auto-configurations in `@KrakenInMemory(exclude = ...)`: by default the Kafka add-on (no partner topics either) and Spring Boot's
+  MongoDB client and data ones (`KrakenInMemoryExclusions.DEFAULT`), so nothing connects to a broker or a database (the other
+  add-ons step back for `memory` by themselves). They are added
+  to the application's own exclusions, never in their place. An application that uses MongoDB itself keeps Boot's MongoDB
+  auto-configurations with `@KrakenInMemory(exclude = [KrakenInMemoryExclusions.KAFKA])` and provides or replaces that database
+  in its test. It is meant for `@SpringBootTest` (it enables auto-configuration on the test class), not slice tests. The test gets
+  an `InMemoryEvents` bean:
+  `publish(event, key)` hands an event to the service as another service would (its processors and sagas get it; returns its
+  id), `published()` / `published(Type::class)` / `awaitPublished(Type::class, count)` read what the service published,
+  `deadLetters(processor)` / `awaitDeadLetters(processor, count)` its processors' dead letters, and `processed(eventId,
+  processor)` / `awaitProcessed(eventId, processor)` whether a processor handled an event. service-b's `AuditInMemoryTest` is an
+  example: the real `audit` processor, its dead letters and their retry, over HTTP, with no container.
+
+```kotlin
+@SpringBootTest(properties = ["kraken.messaging.events.consumer.max-attempts=1"])
+@KrakenInMemory
+class ShippingInMemoryTest(@Autowired val events: InMemoryEvents) {
+    @Test fun `an order is shipped`() {
+        val id = events.publish(OrderPlaced("o-1"), key = "o-1")
+        events.awaitProcessed(id, processor = "shipping")
+        assertEquals(listOf(OrderShipped("o-1")), events.awaitPublished(OrderShipped::class))
+    }
+}
+```
+
+A service that keeps MongoDB for its own data (its repositories) leaves out only the Kafka add-on, and its test provides that
+database (a container, for example) or replaces those beans; the library's state stays in memory:
+
+```kotlin
+@SpringBootTest
+@KrakenInMemory(exclude = [KrakenInMemoryExclusions.KAFKA])
+class OrdersInMemoryTest(@Autowired val events: InMemoryEvents, @Autowired val orders: OrderRepository) {
+    // ...
+}
+```
+
+- `EventStoreConformanceTest` and `MessageStoreConformanceTest`: the behaviour every event-store and message-store add-on owes the
+  core, as JUnit classes an add-on subclasses in its own tests (the in-memory stores run them in the core's tests, with no
+  container).
 - `InMemoryBuses(typePrefix, userId)`: implements `EventBus`, `CommandBus` and `QueryBus` in memory for unit tests without
   Docker. Messages still pass through the JSON codec. `register(handlerBean)` adds handlers; `published` lists events.
   A scatter-gather returns one part from the registered handler (service and instance `in-memory`); a streaming query
@@ -1653,7 +1781,7 @@ service-a and service-b of the [examples](#examples) export this way when switch
 - `TestCertificates.generate(dir, names)`: a throwaway self-signed certificate made at test time with the JDK's `keytool`
   (PEM certificate, also the CA a client trusts, and PKCS#8 key; valid for `localhost` and `127.0.0.1` by default).
 - `KrakenContainers`: unstarted Testcontainers definitions. `kafka()`, `mongo()` (single-node replica set, needed for
-  transactions), `hub()` from the hub image under test, `kraken-hub:dev` or the one named by `KRAKEN_HUB_IMAGE`, with ports 7000 and 7001
+  transactions), `postgres()`, `mysql()`, `hub()` from the hub image under test, `kraken-hub:dev` or the one named by `KRAKEN_HUB_IMAGE`, with ports 7000 and 7001
   (every hub test runs on it: the hub and this library ship together), `hub(env)` for it with extra `KRAKEN_HUB_*`
   settings, `hubAcl(dir, acl, authMode, tls, env)` for it with access control and TLS (it writes the ACL file, with the
   SHA-256 of each token, into `dir` and copies it and the `TestCertificates` into the container, with
@@ -1668,7 +1796,8 @@ buses.register(WorkoutHandlers(repo, buses))   // the handler publishes events t
 val result = buses.sendBlocking(LogWorkout("legs"))
 ```
 
-The end-to-end test (`TwoServicesEndToEndTest`) starts Kafka, MongoDB, the real hub and two Spring Boot services. It is
+The end-to-end test (`TwoServicesEndToEndTest`) starts the event store and message store containers (Kafka, MongoDB), the real
+hub and two Spring Boot services. It is
 skipped when `kraken-hub:dev` (or the image named by `KRAKEN_HUB_IMAGE`) is not present in the local Docker daemon. Build the image from the kraken-hub repo:
 
 ```bash
@@ -1681,7 +1810,126 @@ docker build -t kraken-hub:dev .
 the hub and reacts to an event, service-b owns the command and the query and publishes the event. They run in
 Docker Compose from local builds together with the real `kraken-hub` image, Kafka and MongoDB, and are driven with
 `curl`. service-b also runs a saga against a fake partner (the postcard printer) over all three inbound channels; see
-[Sagas](#sagas) and [examples/README.md](examples/README.md).
+[Sagas](#sagas) and [examples/README.md](examples/README.md). `examples/orders-sql` is a small service on PostgreSQL with the SQL
+message store: its order row and the outbox entry of its event commit in one transaction (its end-to-end test runs it against the
+hub image). `examples/conformance-service` is the conformance service of the Libraries guide (level 1: commands, queries,
+streams and subscriptions, no store), run by the kraken-hub conformance runner (`ConformanceLevel1Test`, skipped without
+`KRAKEN_CONFORMANCE_BIN`).
+
+## Kafka event store (`kraken-messaging-kafka`)
+
+The event store on Apache Kafka (name `kafka`, all four capabilities), over the plain Kafka clients; its settings are the
+`kraken.messaging.kafka.*` rows of the [configuration table](#configuration), and it adds the partner topics
+(`kraken.messaging.external.kafka.sources.*`, [Hearing from the partner: a topic of its own](#hearing-from-the-partner-a-topic-of-its-own)).
+
+- **Source, segment, position.** A source is a topic (`kraken.events`), a segment one of its partitions (the partition number in
+  decimal), a position an offset (in decimal). A subscription is a consumer group (`<prefix>.<processor>`, as before the event store
+  existed): its instances share the partitions, and a new group starts at the earliest offset. The topics are the operator's: the
+  store neither creates nor changes them.
+- **Publish.** One record per event, keyed by the event's key, every header a record header, `acks=all` with an idempotent producer.
+  Records too large, not authorized or for an invalid topic are refused for good (the outbox marks the entry failed).
+- **Status and reset.** Lag is the end offsets (refreshed every `kafka.status-refresh`) against the group's committed offsets; a reset
+  moves the group's offsets with an `Admin` client.
+- **Dead letters, mode `event-store`.** The `.dlt` topic of the source (`kraken.events.dlt`): it must exist, or broker
+  auto-creation must be on.
+- **Markers and letters** carry the record's `topic`, `partition` and `offset` (the message store's own field names: unchanged since
+  v0.3.2).
+- **Moving a new processor to the end of the topic before its first run** ([Event processors](#event-processors)), with no member
+  of the group running:
+  `kafka-consumer-groups --bootstrap-server <broker> --group <prefix>.<name> --topic <events topic> --reset-offsets --to-latest --execute`
+  (`<prefix>` is `kraken.messaging.events.subscription-prefix` or the service name).
+
+## MongoDB message store (`kraken-messaging-mongo`)
+
+The message store on MongoDB (name `mongo`): the outbox, processed events, dead letters, processor control, external calls and
+sagas in the service's database through Spring Data MongoDB (`spring.mongodb.uri`), joining its `MongoTransactionManager`. MongoDB
+must run as a replica set (transactions). The collections and their fields are those of v0.3.2 and the Rust library's: `outbox`,
+`processed_events`, `dead_letters`, `processor_control`, `external_calls`, `sagas`, `saga_dispatch`, `saga_dispatch_leases`,
+`saga_failures`, `deadlines`;
+`store.init-schema` creates their indexes (retention by TTL indexes).
+
+A dead letter (no `_class`, an absent field is absent):
+
+| Field | Type | |
+|---|---|---|
+| `_id` | string | `<processor>:<topic>:<partition>:<offset>` |
+| `processor`, `topic` | string | |
+| `partition` / `offset` | Int32 / Int64 | |
+| `key` | string | absent without a key |
+| `eventId`, `eventType` | string | the `id` and `type` headers, absent when missing |
+| `headers` | document | every record header (lossy UTF-8; a repeated name keeps its last value) |
+| `payload` / `payloadBinary` | string / BinData | the value as text when it is UTF-8, else binary; both absent for an empty value |
+| `reason` | string | `HANDLER_FAILED`, `SEQUENCED`, `INVALID` |
+| `error` | `{type, message}` | exception simple name and message (at most 2000 characters); `Sequenced` / `InvalidMessage` |
+| `blockedBy` | string | `SEQUENCED` only: the head letter when it was parked |
+| `attempts` | Int32 | handler attempts so far |
+| `parkedAt`, `lastAttemptAt`, `expireAt` | Date | `expireAt = parkedAt + retention` (TTL index) |
+| `replay` | bool | `true` when parked while its processor replayed the record (P6b): its retry is a replay too; absent otherwise |
+
+Indexes: `dead_letters_processor_key_offset`, `dead_letters_processor_parked`, `dead_letters_expire` (TTL), created at startup.
+
+A processor's control (every field is always written):
+
+| Field | Type | |
+|---|---|---|
+| `_id` | string | the processor name |
+| `paused` | bool | |
+| `pausedAt`, `pausedBy` | Date, string | null when not paused; `pausedBy` is the hub's control id, or `local` |
+| `operation` | `{id, kind: "reset", leaseUntil, preparedAt}` | the reset holding the lock, null when none; expired once `leaseUntil` passed |
+| `replay` | array of `{topic, partition: Int32, from: Int64, until: Int64}` | the open replay ranges, `[]` when none |
+| `updatedAt` | Date | |
+
+## Moving from v0.3.2
+
+v0.4.0 makes the event store and the message store add-ons (ADR 0027, ADR 0028). Data on MongoDB and Kafka is read as it is: the
+collections, their fields, the outbox, the dead-letter and marker ids, the topic `kraken.events`, the consumer groups and the record
+headers are unchanged, so **no data migration**.
+
+1. **Upgrade the hub first.** The processor status now speaks of subscriptions, sources and segments (hub v0.4.0's `hub.proto`);
+   a hub of the earlier protocol does not read it.
+2. **Dependencies.** Add the add-ons the service used implicitly: `kraken-messaging-kafka` (the events) and `kraken-messaging-mongo`
+   (the outbox and every other store). A service with only command, query and subscription-query handlers needs neither.
+3. **Settings.** Renamed; the old names fail the startup, naming the new one (no alias):
+
+   | v0.3.2 | v0.4.0 |
+   |---|---|
+   | `kraken.messaging.kafka.topic` | `kraken.messaging.events.source` |
+   | `kraken.messaging.kafka.group-id` | `kraken.messaging.events.subscription-prefix` |
+   | `kraken.messaging.kafka.consumer.enabled` | `kraken.messaging.events.consumer.enabled` |
+   | `kraken.messaging.kafka.consumer.max-attempts` | `kraken.messaging.events.consumer.max-attempts` |
+   | `kraken.messaging.kafka.dead-letter.mode` | `kraken.messaging.events.dead-letter.mode` |
+   | `kraken.messaging.kafka.dead-letter.retention` | `kraken.messaging.events.dead-letter.retention` |
+   | dead-letter mode `topic` | `event-store` |
+
+   `kraken.messaging.kafka.bootstrap-servers` and `kraken.messaging.external.kafka.sources.*` keep their names (now the Kafka
+   add-on's).
+4. **Code.**
+   - `EventProcessors`, `ProcessorStatusSource`, `EventConsumer`, `LocalEventDispatcher`, `SagaStageException`, `OutboxEventBus`
+     and `OutboxPublisher` moved from `io.damoreira.kraken.messaging.kafka` to `io.damoreira.kraken.messaging.events`; `EventHeaders`
+     to `io.damoreira.kraken.messaging.eventstore`. `RecordPosition` moved there too (`events`), its `topic`, `partition: Int`,
+     `offset: Long` now `source`, `segment`, `position` (strings).
+   - The store interfaces live in `io.damoreira.kraken.messaging.store`: the saga ports (`SagaRepository`, `DeadlineStore`,
+     `SagaFailureStore`, `SagaMarkerStore`; `SagaDispatchRecorder` is now `SagaDispatchStore`) moved there from
+     `io.damoreira.kraken.messaging.saga`, beside the new `MessageStore`, `OutboxStore`, `ProcessedEventStore`, `DeadLetterStore`,
+     `ProcessorControlStore` and `ExternalCallStore`. The MongoDB implementations (`MongoDeadlineStore`, the former
+     `DeadLetterStore` and `ProcessorControlStore` classes, ...) are internal to `kraken-messaging-mongo` now.
+   - `KafkaEventsAutoConfiguration` is gone (the events are `EventsAutoConfiguration`, the Kafka event store
+     `KafkaEventStoreAutoConfiguration`): an application that names it in `exclude = [...]` no longer compiles. Without
+     `kraken-messaging-kafka` on the classpath nothing connects to Kafka anyway; to keep the add-on and leave the Kafka event store
+     out, exclude `KafkaEventStoreAutoConfiguration` (an `@EventHandler` or a saga then needs another event store).
+   - `ResetTarget` and `ReplayRange` moved to `io.damoreira.kraken.messaging.eventstore`: `ResetTarget.Offsets(Map<Int, Long>)` is
+     `ResetTarget.Positions(Map<String, String>)` (segment to position), `ReplayRange(topic, partition, from, until)` is
+     `ReplayRange(source, segment, from, until)`, all strings.
+   - `ExternalRecordTranslator.translate` takes an `ExternalRecord` (source, key, headers, payload, segment, position) instead of a
+     Kafka `ConsumerRecord`.
+   - `DeadLetter.topic`, `partition`, `offset` are `source`, `segment`, `position` (strings); `DeadLetterMode.TOPIC` is
+     `EVENT_STORE`.
+   - `HubConnection.lastRejection` is internal: read `HubConnections.latestRejection`.
+   - Anything else of the former `io.damoreira.kraken.messaging.kafka` package, and every class that touched MongoDB, moved to an
+     add-on or became internal: a type the compiler no longer finds is in `events`, `eventstore` or `store`, or in the add-on's
+     package (`io.damoreira.kraken.messaging.kafka` in `kraken-messaging-kafka`, `...mongo` in `kraken-messaging-mongo`).
+5. **Metrics.** `kraken_processor_lag` is labelled `segment` instead of `partition`: update the dashboards and alerts that select or
+   aggregate on it.
 
 ## Known limitations
 
@@ -1690,46 +1938,51 @@ Docker Compose from local builds together with the real `kraken-hub` image, Kafk
   it expires (minutes); a certificate until its `notAfter` or until the hub's `[[service]]` table is removed (no CRL, no OCSP: issue
   short-lived certificates). A client key must be unencrypted PKCS#8 PEM. With a single hub, a certificate rotation leaves the instance
   without a stream for a moment (see the rotation notes above).
-- Event processors (P6a) are observed, not controlled: no pause, resume, reset or replay, and retry or discard of dead letters only
-  through the service's own `DeadLetters` bean (the hub's control plane is P6b). Attempts and back-off are shared by all processors;
-  one consumer thread per processor and instance.
-- No leader election for the outbox publisher; with several instances delivery is at-least-once and ordering is per
-  publishing instance.
+- Event processors share their attempts and back-off; one subscription thread per processor and instance.
+- No leader election for the outbox relay: the instances share the outbox under per-batch leases (`outbox.lease`), so delivery is
+  at-least-once (a send whose answer was lost is sent again); events of one key leave in creation order.
 - A stream pins one handler instance for its whole life: a restart of that instance fails the stream
   (`HANDLER_DISCONNECTED`), and the library never resumes it. A subscription's update targets are fixed when it opens
   (at-most-once updates): an instance that starts later is never added and the library never resubscribes, so a
   subscriber that must hear every instance resubscribes itself (opt-in auto-resubscribe is future work).
-- Library metrics are limited to the credential counters of P5b and the saga toolkit's (see [Sagas](#sagas)), both Micrometer and optional; there are no metrics for the buses, the outbox or the consumer yet. OpenTelemetry comes from the application.
-- Configuration metadata is hand-maintained in `META-INF/spring-configuration-metadata.json`.
-- `TraceHeaders` is only active with Micrometer Tracing on the classpath.
+- Configuration metadata is hand-maintained in each module's `META-INF/spring-configuration-metadata.json`.
+- With Micrometer Tracing on the classpath its propagator writes the trace headers of outbound messages. Without it, the trace
+  floor: a request or an event sent while handling a message carries the handled message's `traceparent` unchanged (only a valid
+  W3C one: `00-<32 hex>-<16 hex>-<2 hex>`, lower case, ids not all zeros), and so does a command or an event a saga records while
+  handling an event, when its dispatch relay sends it later. Commands a deadline handler sends do not carry the trace of the event
+  that scheduled the deadline (a deadline record keeps no headers).
 - Trace context is injected on outbound messages (hub requests, outbox events) but not yet extracted on inbound hub
-  requests or Kafka records, so a handler's spans do not join the caller's trace.
+  requests or consumed events, so a handler's spans do not join the caller's trace.
 - No service-to-service identity yet: commands sent from event handlers, sagas or scheduled jobs carry no token, so they can
   only reach handlers without `@RequiresAuthentication` (a `kraken-system` client-credentials token is future work).
-- Sagas: Kotlin only (the Rust crate follows, S2); a new saga type does not see events from before its deployment (no replay);
+- Sagas: a new saga type does not see events from before its deployment (no replay);
   parked saga events are retried by a person through `SagaFailures`; a saga belongs to one service.
 - Sagas, reviewed and left as they are: the smoke test does not check that a restart replays nothing twice (the tests do).
 
 
 ## CI/CD pipeline
 
-Defined in [`.gitlab-ci.yml`](.gitlab-ci.yml); runs on every push and merge request on
-`eclipse-temurin:25-jdk`.
+Defined in [`.gitlab-ci.yml`](.gitlab-ci.yml); runs for merge requests and on `main`, on shell-executor runners with Java 25,
+Gradle and Docker (no job images or services: Testcontainers talks to the host's daemon).
 
 ```mermaid
 flowchart LR
-    build["build<br/>gradlew assemble"] --> test["test<br/>gradlew test (dind)"] --> publish["publish-api · tag api/vX.Y.Z<br/>Package Registry"]
+    build["build<br/>gradlew assemble"] --> test["test<br/>gradlew test"] --> throughput["throughput<br/>gradlew throughputTest"]
+    sync["proto-sync<br/>hub.proto = kraken's"] --> test
+    throughput --> release["release · main only<br/>tag vX.Y.Z, Nexus"]
 ```
 
 | Stage | Job | Runs | Produces |
 |---|---|---|---|
-| build | `build` | always | compiled modules |
-| test | `test` | always, with a `docker:dind` service; the hub end-to-end test is skipped when the hub image is not reachable | JUnit report |
-| publish | `publish-api` | only on tags `api/vX.Y.Z` | `kraken-messaging-api`, `kraken-messaging` and `kraken-messaging-test` at `X.Y.Z` in the Package Registry |
+| build | `build` | always | `./gradlew assemble` |
+| build | `proto-sync` | always | clones the umbrella repo and checks that `hub.proto` is byte-identical to its `protocol/hub.proto` (`scripts/check-proto-sync.sh`) |
+| test | `test` | always | `./gradlew test`: unit, container and end-to-end tests; the hub end-to-end tests need the hub image (`KRAKEN_HUB_IMAGE`, default `kraken-hub:dev`) on the runner and are skipped without it; JUnit report |
+| test | `throughput` | after `test` | `./gradlew throughputTest`: the throughput floors (tag `throughput`); a floor not reached fails the pipeline |
+| release | `release` | on `main` only, one at a time | the next tag `vX.Y.Z` (from the conventional commits since the last tag: a `!` or `BREAKING CHANGE` bumps the major, a `feat` the minor, anything else the patch; `RELEASE_VERSION` or `SEMVER_BUMP` override it, `DRY_RUN=true` stops before tagging), the seven modules at `X.Y.Z` in Nexus `maven-releases`, and a GitLab release |
 
 Consumers resolve the artifacts from the group endpoint
 `https://nexus.damoreira.ml/repository/maven-public/`. No Docker image is built: this
-is a library; the example services are built from source by the sandbox compose.
+is a library; the example services are built from source ([examples/Dockerfile](examples/Dockerfile)).
 
 ## Contributing
 

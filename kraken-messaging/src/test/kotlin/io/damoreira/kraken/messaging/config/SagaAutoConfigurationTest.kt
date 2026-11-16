@@ -6,16 +6,18 @@ import io.damoreira.kraken.messaging.config.idemscan.IdemBeanConfig
 import io.damoreira.kraken.messaging.config.idemscan.IdemScanConfig
 import io.damoreira.kraken.messaging.config.sagascan.SagaScanConfig
 import io.damoreira.kraken.messaging.deadline.DeadlineScheduler
-import io.damoreira.kraken.messaging.external.ExternalCallIndexes
+import io.damoreira.kraken.messaging.events.EventConsumer
+import io.damoreira.kraken.messaging.events.LocalEventDispatcher
 import io.damoreira.kraken.messaging.external.ExternalEventIngress
-import io.damoreira.kraken.messaging.external.ExternalKafkaSources
 import io.damoreira.kraken.messaging.external.ExternalRecordTranslator
+import io.damoreira.kraken.messaging.external.ExternalSourceProviders
+import io.damoreira.kraken.messaging.external.ExternalSources
 import io.damoreira.kraken.messaging.external.IdempotencyInterceptor
 import io.damoreira.kraken.messaging.external.WebhookSignatureVerifier
 import io.damoreira.kraken.messaging.handler.HandlerInvoker
 import io.damoreira.kraken.messaging.hub.HubBus
-import io.damoreira.kraken.messaging.kafka.EventConsumer
-import io.damoreira.kraken.messaging.kafka.LocalEventDispatcher
+import io.damoreira.kraken.messaging.kafka.KafkaEventStoreAutoConfiguration
+import io.damoreira.kraken.messaging.kafka.KafkaExternalSource
 import io.damoreira.kraken.messaging.saga.LocalRawCommandSender
 import io.damoreira.kraken.messaging.saga.MicrometerSagaMetrics
 import io.damoreira.kraken.messaging.saga.NoopSagaMetrics
@@ -23,7 +25,6 @@ import io.damoreira.kraken.messaging.saga.SagaCommandFailed
 import io.damoreira.kraken.messaging.saga.SagaDispatchRelay
 import io.damoreira.kraken.messaging.saga.SagaFailures
 import io.damoreira.kraken.messaging.saga.SagaGaugeSampler
-import io.damoreira.kraken.messaging.saga.SagaIndexes
 import io.damoreira.kraken.messaging.saga.SagaMetrics
 import io.damoreira.kraken.messaging.saga.SagaRuntime
 import io.damoreira.kraken.messaging.saga.SagaStage
@@ -50,22 +51,23 @@ class SagaAutoConfigurationTest {
             AutoConfigurations.of(
                 KrakenMessagingAutoConfiguration::class.java,
                 HubAutoConfiguration::class.java,
-                KafkaEventsAutoConfiguration::class.java,
+                EventsAutoConfiguration::class.java,
                 SagaAutoConfiguration::class.java,
                 ExternalAutoConfiguration::class.java,
                 SagaMetricsAutoConfiguration::class.java,
                 TransactionAutoConfiguration::class.java,
+                KafkaEventStoreAutoConfiguration::class.java,
             ),
         )
-        .withUserConfiguration(MongoMockConfig::class.java)
+        .withUserConfiguration(MessageStoreMockConfig::class.java)
         .withPropertyValues(
             "kraken.messaging.service-name=orders",
             "kraken.messaging.type-prefix=test",
             "kraken.messaging.hub.enabled=false",
             "kraken.messaging.kafka.bootstrap-servers=localhost:9",
-            "kraken.messaging.kafka.consumer.enabled=false",
+            "kraken.messaging.events.consumer.enabled=false",
             "kraken.messaging.outbox.enabled=false",
-            // the mocked Mongo answers the pollers with nothing useful: keep them from spinning
+            // the mocked store answers the pollers with nothing useful: keep them from spinning
             "kraken.messaging.sagas.relay.poll-interval=1h",
             "kraken.messaging.deadlines.poll-interval=1h",
         )
@@ -78,14 +80,13 @@ class SagaAutoConfigurationTest {
         for (r in listOf(runner, runner.withUserConfiguration(EmptyScanConfig::class.java))) {
             r.run { context ->
                 assertEquals(null, context.startupFailure)
-                for (type in listOf(SagaRuntime::class.java, SagaDispatchRelay::class.java, DeadlineScheduler::class.java, SagaIndexes::class.java, SagaFailures::class.java, SagaGaugeSampler::class.java)) {
+                for (type in listOf(SagaRuntime::class.java, SagaDispatchRelay::class.java, DeadlineScheduler::class.java, SagaFailures::class.java, SagaGaugeSampler::class.java)) {
                     assertTrue(context.getBeansOfType(type).isEmpty(), "no ${type.simpleName}")
                 }
                 assertTrue(context.getBeansOfType(SagaStage::class.java).isEmpty())
                 // the dispatcher stays the plain one: it takes no interest in a saga's event type
                 assertTrue(!context.getBean(LocalEventDispatcher::class.java).interested("scan.Started"))
                 assertTrue(context.getBeansOfType(IdempotencyInterceptor::class.java).isEmpty())
-                assertTrue(context.getBeansOfType(ExternalCallIndexes::class.java).isEmpty())
             }
         }
     }
@@ -95,7 +96,6 @@ class SagaAutoConfigurationTest {
             assertEquals(null, context.startupFailure)
             val runtime = context.getBean(SagaRuntime::class.java)
             assertTrue(runtime.interested("scan.Started"))
-            assertEquals(1, context.getBeansOfType(SagaIndexes::class.java).size)
             assertNotNull(context.getBean(SagaFailures::class.java))
             // the runtime is the dispatcher's saga stage: an event no ordinary handler wants still reaches it
             assertTrue(context.getBean(LocalEventDispatcher::class.java).interested("scan.Started"))
@@ -143,14 +143,12 @@ class SagaAutoConfigurationTest {
             assertTrue(context.getBeansOfType(SagaRuntime::class.java).isEmpty())
             assertTrue(context.getBeansOfType(SagaDispatchRelay::class.java).isEmpty())
             assertTrue(context.getBeansOfType(DeadlineScheduler::class.java).isEmpty())
-            assertTrue(context.getBeansOfType(SagaIndexes::class.java).isEmpty())
         }
     }
 
-    @Test fun `an @IdempotentHandler brings the external_calls indexes and interceptor`() {
+    @Test fun `an @IdempotentHandler brings the interceptor`() {
         runner.withUserConfiguration(IdemScanConfig::class.java).run { context ->
             assertEquals(null, context.startupFailure)
-            assertEquals(1, context.getBeansOfType(ExternalCallIndexes::class.java).size)
             val interceptor = context.getBean(IdempotencyInterceptor::class.java)
             // the invoker runs idempotent handlers through it, else such a handler fails at call time
             assertTrue(field(context.getBean(HandlerInvoker::class.java), "idempotency") === interceptor)
@@ -165,7 +163,6 @@ class SagaAutoConfigurationTest {
     @Test fun `external calls enabled forces the interceptor and false removes it`() {
         runner.withUserConfiguration(EmptyScanConfig::class.java).withPropertyValues("kraken.messaging.external.calls.enabled=true").run { context ->
             assertEquals(1, context.getBeansOfType(IdempotencyInterceptor::class.java).size)
-            assertEquals(1, context.getBeansOfType(ExternalCallIndexes::class.java).size)
         }
         runner.withUserConfiguration(IdemScanConfig::class.java).withPropertyValues("kraken.messaging.external.calls.enabled=false").run { context ->
             assertTrue(context.getBeansOfType(IdempotencyInterceptor::class.java).isEmpty())
@@ -198,11 +195,14 @@ class SagaAutoConfigurationTest {
             "kraken.messaging.external.kafka.sources.printer.bootstrap-servers=localhost:9",
         ).withBean("printer", ExternalRecordTranslator::class.java, { ExternalRecordTranslator { null } }).run { context ->
             assertEquals(null, context.startupFailure)
-            assertNotNull(context.getBean(ExternalKafkaSources::class.java))
-            assertEquals("orders.external.printer", context.getBean(ExternalKafkaSources::class.java).groupIdFor("printer"))
+            assertNotNull(context.getBean(ExternalSources::class.java))
+            val provider = context.getBean(ExternalSourceProviders::class.java).providers().getValue("printer")
+            assertIs<KafkaExternalSource>(provider)
+            assertEquals("orders.external.printer", provider.subscription)
+            assertEquals("printer.events", provider.source)
         }
         runner.run { context ->
-            assertTrue(context.getBeansOfType(ExternalKafkaSources::class.java).isEmpty())
+            assertTrue(context.getBeansOfType(ExternalSources::class.java).isEmpty())
             // the webhook side is always there: a verifier and the ingress over the local dispatcher
             assertNotNull(context.getBean(WebhookSignatureVerifier::class.java))
             assertNotNull(context.getBean(ExternalEventIngress::class.java))
@@ -255,7 +255,6 @@ class SagaAutoConfigurationTest {
         assertNull(p.external.calls.enabled)
         assertEquals(Duration.ofMinutes(5), p.external.calls.lease)
         assertEquals(Duration.ofDays(30), p.external.calls.retention)
-        assertTrue(p.external.kafka.sources.isEmpty())
     }
 
     @Test fun `the saga properties bind from the environment`() {
@@ -301,7 +300,7 @@ class SagaAutoConfigurationTest {
         }
     }
 
-    @Test fun `the configuration metadata describes every saga, deadline and external key`() {
+    @Test fun `the configuration metadata describes every saga, deadline, external and events key`() {
         val json = checkNotNull(javaClass.getResourceAsStream("/META-INF/spring-configuration-metadata.json")).use { io.damoreira.kraken.messaging.codec.JsonCodec().decodeTree(it.readAllBytes()) }
         val described = json["properties"].associate { it["name"].asString() to it["description"]?.asString() }
         val keys = listOf(
@@ -309,7 +308,8 @@ class SagaAutoConfigurationTest {
             "sagas.relay.poll-interval", "sagas.relay.lease", "sagas.relay.max-attempts", "sagas.relay.initial-backoff", "sagas.relay.max-backoff", "sagas.relay.send-timeout",
             "deadlines.poll-interval", "deadlines.lease", "deadlines.retention",
             "external.calls.enabled", "external.calls.lease", "external.calls.retention",
-            "external.kafka.sources",
+            "event-store", "events.source", "events.subscription-prefix", "events.consumer.enabled", "events.consumer.max-attempts",
+            "events.dead-letter.mode", "events.dead-letter.retention",
         )
         for (key in keys) {
             val name = "kraken.messaging.$key"
@@ -317,6 +317,6 @@ class SagaAutoConfigurationTest {
             assertTrue(!described[name].isNullOrBlank(), "$name has a description")
         }
         val groups = json["groups"].toList().map { it["name"].asString() }
-        assertTrue(listOf("sagas", "sagas.relay", "deadlines", "external", "external.calls", "external.kafka").all { "kraken.messaging.$it" in groups })
+        assertTrue(listOf("sagas", "sagas.relay", "deadlines", "external", "external.calls", "events", "events.consumer", "events.dead-letter").all { "kraken.messaging.$it" in groups })
     }
 }

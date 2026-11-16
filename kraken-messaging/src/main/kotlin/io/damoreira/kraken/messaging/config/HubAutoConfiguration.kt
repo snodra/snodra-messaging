@@ -21,7 +21,7 @@ import io.damoreira.kraken.messaging.hub.HubSettings
 import io.damoreira.kraken.messaging.hub.HubTargets
 import io.damoreira.kraken.messaging.hub.InboundRequestDispatcher
 import io.damoreira.kraken.messaging.hub.SubscriptionRegistry
-import io.damoreira.kraken.messaging.kafka.ProcessorStatusSource
+import io.damoreira.kraken.messaging.events.ProcessorStatusSource
 import io.damoreira.kraken.messaging.metrics.MessagingMetrics
 import io.damoreira.kraken.messaging.metrics.NoopMessagingMetrics
 import io.damoreira.kraken.messaging.control.ProcessorControl
@@ -146,7 +146,7 @@ class HubAutoConfiguration {
             inboundStream = dispatcher::dispatchStream,
             subscriptions = subscriptions,
             inboundSubscription = dispatcher::dispatchSubscription,
-            // Looked up per report: the event processors (KafkaEventsAutoConfiguration) may not exist, or not yet.
+            // Looked up per report: the event processors (EventsAutoConfiguration) may not exist, or not yet.
             processors = { processorStatus.getIfAvailable()?.processorStatuses().orEmpty() },
             // Looked up per request, as the status: an instance without event processors answers UNKNOWN_PROCESSOR.
             control = { request, reply -> (processorControl.getIfAvailable() ?: NO_PROCESSOR_CONTROL).handle(request, reply) },

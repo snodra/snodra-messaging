@@ -1,6 +1,6 @@
 package io.damoreira.kraken.messaging.config
 
-import io.damoreira.kraken.messaging.kafka.ProcessorStatusSource
+import io.damoreira.kraken.messaging.events.ProcessorStatusSource
 import io.damoreira.kraken.messaging.metrics.MessagingMetrics
 import io.damoreira.kraken.messaging.metrics.MicrometerMessagingMetrics
 import io.damoreira.kraken.messaging.metrics.EventProcessorMetrics
@@ -22,7 +22,7 @@ import org.springframework.context.annotation.Bean
  * the registry).
  */
 @AutoConfiguration(
-    after = [KafkaEventsAutoConfiguration::class, HubAutoConfiguration::class],
+    after = [EventsAutoConfiguration::class, HubAutoConfiguration::class],
     afterName = [
         "org.springframework.boot.micrometer.metrics.autoconfigure.MetricsAutoConfiguration",
         "org.springframework.boot.micrometer.metrics.autoconfigure.CompositeMeterRegistryAutoConfiguration",

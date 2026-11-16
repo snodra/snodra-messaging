@@ -1,27 +1,41 @@
 package io.damoreira.kraken.messaging.control
 
+import io.damoreira.kraken.hub.v1.ControlRefusal
 import io.damoreira.kraken.hub.v1.ControlReply
 import io.damoreira.kraken.hub.v1.ControlRequest
-import io.damoreira.kraken.hub.v1.ControlRefusal
 import io.damoreira.kraken.hub.v1.DeadLetterDiscard
 import io.damoreira.kraken.hub.v1.DeadLetterList
 import io.damoreira.kraken.hub.v1.DeadLetterRetry
 import io.damoreira.kraken.hub.v1.DeadLetterRetryAll
-import io.damoreira.kraken.hub.v1.PartitionOffset
-import io.damoreira.kraken.hub.v1.PartitionOffsets
 import io.damoreira.kraken.hub.v1.ProcessorPause
 import io.damoreira.kraken.hub.v1.ProcessorResume
 import io.damoreira.kraken.hub.v1.ProcessorState
 import io.damoreira.kraken.hub.v1.ProcessorStatus
 import io.damoreira.kraken.hub.v1.ResetExecute
 import io.damoreira.kraken.hub.v1.ResetFinish
+import io.damoreira.kraken.hub.v1.ResetOutcome
 import io.damoreira.kraken.hub.v1.ResetPrepare
-import io.damoreira.kraken.hub.v1.ResetTarget as WireTarget
+import io.damoreira.kraken.hub.v1.SegmentPosition
+import io.damoreira.kraken.hub.v1.SegmentPositions
+import io.damoreira.kraken.messaging.DEAD_LETTERS
 import io.damoreira.kraken.messaging.MessageContext
+import io.damoreira.kraken.messaging.PROCESSOR_CONTROL
 import io.damoreira.kraken.messaging.codec.MessageTypeResolver
+import io.damoreira.kraken.messaging.deadletter.DeadLetterFactory
 import io.damoreira.kraken.messaging.deadletter.DeadLetterMode
-import io.damoreira.kraken.messaging.deadletter.DeadLetterStore
 import io.damoreira.kraken.messaging.deadletter.DeadLetters
+import io.damoreira.kraken.messaging.events.DeadLetterSink
+import io.damoreira.kraken.messaging.events.EventConsumer
+import io.damoreira.kraken.messaging.events.EventProcessors
+import io.damoreira.kraken.messaging.events.KafkaMongoSupport
+import io.damoreira.kraken.messaging.events.LocalEventDispatcher
+import io.damoreira.kraken.messaging.eventstore.Capability
+import io.damoreira.kraken.messaging.eventstore.EventStore
+import io.damoreira.kraken.messaging.eventstore.EventStoreException
+import io.damoreira.kraken.messaging.eventstore.ReplayRange
+import io.damoreira.kraken.messaging.eventstore.ResetTarget
+import io.damoreira.kraken.messaging.eventstore.SubscriptionAdmin
+import io.damoreira.kraken.messaging.eventstore.SubscriptionSpec
 import io.damoreira.kraken.messaging.fixtures.Happened
 import io.damoreira.kraken.messaging.handler.DisallowReplay
 import io.damoreira.kraken.messaging.handler.EventHandler
@@ -30,12 +44,10 @@ import io.damoreira.kraken.messaging.handler.HandlerRegistry
 import io.damoreira.kraken.messaging.handler.ProcessingGroup
 import io.damoreira.kraken.messaging.handler.Processors
 import io.damoreira.kraken.messaging.handler.ResetHandler
-import io.damoreira.kraken.messaging.kafka.DeadLetterSink
-import io.damoreira.kraken.messaging.kafka.EventConsumer
-import io.damoreira.kraken.messaging.kafka.EventProcessors
-import io.damoreira.kraken.messaging.kafka.KafkaMongoSupport
-import io.damoreira.kraken.messaging.kafka.LocalEventDispatcher
 import io.damoreira.kraken.messaging.saga.SagaStage
+import io.damoreira.kraken.messaging.store.DeadLetterStore
+import io.damoreira.kraken.messaging.store.ProcessorControlStore
+import kotlinx.coroutines.runBlocking
 import org.awaitility.Awaitility.await
 import org.bson.Document
 import org.junit.jupiter.api.AfterAll
@@ -50,11 +62,13 @@ import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import io.damoreira.kraken.hub.v1.ResetTarget as WireTarget
 
 class ReplayedProjection {
     val seen = CopyOnWriteArrayList<String>()
@@ -112,6 +126,44 @@ class CountingSagas : SagaStage {
 }
 
 /**
+ * The control documents with their reads held on request: a poll that read the documents waits for a permit before it
+ * applies them, so a request lands between the poll's read and its apply.
+ */
+class HeldReads(private val store: ProcessorControlStore) : ProcessorControlStore by store {
+    @Volatile var holding = false
+    /** A permit per held read that has its documents. */
+    val read = Semaphore(0)
+    private val go = Semaphore(0)
+
+    override suspend fun read(processors: Collection<String>): Map<String, ProcessorControlStore.Control> {
+        val docs = store.read(processors)
+        if (holding) {
+            read.release()
+            go.acquire()
+        }
+        return docs
+    }
+
+    /** Lets the held read go on to its apply. */
+    fun proceed() = go.release()
+
+    /** Runs [change] between a poll's read and its apply; returns once that poll applied what it read (the next one waits). */
+    fun betweenReadAndApply(change: () -> Unit) {
+        holding = true
+        check(read.tryAcquire(10, TimeUnit.SECONDS)) { "no poll read the documents" }
+        change()
+        proceed()
+        check(read.tryAcquire(10, TimeUnit.SECONDS)) { "the poll did not come back: it never finished applying" }
+    }
+
+    /** Stops holding reads (the waiting one goes on). */
+    fun release() {
+        holding = false
+        proceed()
+    }
+}
+
+/**
  * Processor control against a real Kafka and MongoDB (P6b, ADR 0023): pause and resume, the leased reset (prepare, execute,
  * finish, expiry), replay ranges, reset handlers and the dead letters, driven by the control requests the hub sends.
  */
@@ -121,8 +173,8 @@ class ProcessorControlTest {
     private val mongo = support.mongo
     private lateinit var topic: String
     private lateinit var group: String
-    /** The consumer group of processor `default`. */
-    private val defaultGroup: String get() = Processors.groupId(group, Processors.DEFAULT)
+    /** The subscription (the consumer group) of processor `default`. */
+    private val defaultGroup: String get() = Processors.subscriptionName(group, Processors.DEFAULT)
     private lateinit var projection: ReplayedProjection
     private lateinit var once: OnceOnly
     private lateinit var resets: DefaultResets
@@ -134,7 +186,7 @@ class ProcessorControlTest {
     @AfterAll fun stop() = support.close()
 
     @BeforeEach fun setUp() {
-        for (c in listOf("processed_events", DeadLetterStore.COLLECTION, ProcessorControlStore.COLLECTION)) mongo.remove(Query(), c)
+        for (c in listOf("processed_events", DEAD_LETTERS, PROCESSOR_CONTROL)) mongo.remove(Query(), c)
         group = "svc-" + UUID.randomUUID()
         projection = ReplayedProjection()
         once = OnceOnly()
@@ -149,16 +201,18 @@ class ProcessorControlTest {
     }
 
     /** One instance of the service: its processors and their control, over the shared handler beans. */
-    private inner class Instance(beans: List<Any>, controlled: Boolean = true, executeLeaseLimit: Duration = Duration.ofSeconds(120)) {
+    private inner class Instance(
+        beans: List<Any>, controlled: Boolean = true, executeLeaseLimit: Duration = Duration.ofSeconds(120),
+        val events: EventStore = support.events,
+        controlStore: ProcessorControlStore = support.store.processorControl,
+    ) {
         val registry = HandlerRegistry(MessageTypeResolver("test")).also { r -> beans.forEach { r.register(it) } }
         val invoker = HandlerInvoker(registry, support.codec)
-        val dispatcher = LocalEventDispatcher(registry, invoker, support.tx, mongo, sagas)
-        val letters = DeadLetterStore(mongo, Duration.ofDays(30))
-        val deadLetters = DeadLetters(DeadLetterMode.COLLECTION, letters, dispatcher)
-        val adminConfig = mapOf<String, Any>("bootstrap.servers" to support.bootstrapServers, "request.timeout.ms" to 5000, "default.api.timeout.ms" to 5000)
+        val dispatcher = LocalEventDispatcher(registry, invoker, support.store, sagas)
+        val deadLetters = DeadLetters(DeadLetterMode.COLLECTION, support.store.deadLetters, dispatcher)
         val control = if (controlled) {
             ProcessorControl(
-                ProcessorControlStore(mongo), registry, deadLetters, adminConfig, pollInterval = Duration.ofMillis(300), executeLeaseLimit = executeLeaseLimit,
+                controlStore, registry, deadLetters, events, pollInterval = Duration.ofMillis(300), executeLeaseLimit = executeLeaseLimit,
             )
         } else {
             null
@@ -167,12 +221,11 @@ class ProcessorControlTest {
             dispatcher,
             consumerFor = { processor ->
                 EventConsumer(
-                    support.consumerFactory(), topic, Processors.groupId(group, processor), registry, invoker, support.tx, mongo,
-                    maxAttempts = 2, backOffMs = 50, codec = support.codec, dispatcher = dispatcher, processor = processor,
-                    deadLetters = DeadLetterSink.Collection(letters),
+                    events, SubscriptionSpec(Processors.subscriptionName(group, processor), topic), dispatcher,
+                    maxAttempts = 2, backOffMs = 50, codec = support.codec, processor = processor,
+                    deadLetters = DeadLetterSink.Collection(support.store.deadLetters, DeadLetterFactory(Duration.ofDays(30))),
                 )
             },
-            adminConfig = adminConfig,
             control = control,
         )
 
@@ -185,8 +238,10 @@ class ProcessorControlTest {
         }
     }
 
-    private fun instance(vararg beans: Any = arrayOf(projection, once, resets, audit), controlled: Boolean = true, executeLeaseLimit: Duration = Duration.ofSeconds(120)) =
-        Instance(beans.toList(), controlled, executeLeaseLimit).also { instances += it; it.processors.start() }
+    private fun instance(
+        vararg beans: Any = arrayOf(projection, once, resets, audit), controlled: Boolean = true, executeLeaseLimit: Duration = Duration.ofSeconds(120),
+        events: EventStore = support.events, controlStore: ProcessorControlStore = support.store.processorControl,
+    ) = Instance(beans.toList(), controlled, executeLeaseLimit, events, controlStore).also { instances += it; it.processors.start() }
 
     private fun request(processor: String, build: ControlRequest.Builder.() -> Unit): ControlRequest =
         ControlRequest.newBuilder().setControlId(UUID.randomUUID().toString()).setProcessor(processor).apply(build).build()
@@ -203,9 +258,11 @@ class ProcessorControlTest {
     private val earliest: WireTarget = WireTarget.newBuilder().setEarliest(true).build()
     private val latest: WireTarget = WireTarget.newBuilder().setLatest(true).build()
     private fun at(ms: Long): WireTarget = WireTarget.newBuilder().setTimestampMs(ms).build()
-    private fun offsets(vararg o: Pair<Int, Long>): WireTarget = WireTarget.newBuilder().setOffsets(
-        PartitionOffsets.newBuilder().addAllOffsets(o.map { PartitionOffset.newBuilder().setPartition(it.first).setOffset(it.second).build() }),
+    private fun offsets(vararg o: Pair<Int, Long>): WireTarget = WireTarget.newBuilder().setPositions(
+        SegmentPositions.newBuilder().addAllPositions(o.map { SegmentPosition.newBuilder().setSegment(it.first.toString()).setPosition(it.second.toString()).build() }),
     ).build()
+
+    private fun ResetOutcome.triples() = rangesList.map { Triple(it.segment.toInt(), it.from.toLong(), it.until.toLong()) }
 
     private fun members(group: String = defaultGroup): Int = support.admin().use {
         try {
@@ -218,7 +275,7 @@ class ProcessorControlTest {
 
     private fun markers(): Set<String> = mongo.findAll(Document::class.java, "processed_events").map { it.getString("_id") }.toSet()
 
-    private fun control(processor: String = "default") = ProcessorControlStore(mongo).get(processor)
+    private fun control(processor: String = "default") = runBlocking { support.store.processorControl.get(processor) }
 
     private fun ControlReply.refusal(): ControlRefusal? = if (hasRefused()) refused.code else null
 
@@ -243,7 +300,7 @@ class ProcessorControlTest {
 
         a.processors.stop()
         val b = instance(projection)
-        await().atMost(Duration.ofSeconds(30)).until { b.status().partitionsCount == 1 }
+        await().atMost(Duration.ofSeconds(30)).until { b.status().segmentsCount == 1 }
         assertEquals(ProcessorState.PROCESSOR_PAUSED, b.status().state)
         Thread.sleep(2000)
         assertFalse("e-2" in projection.seen, "a restarted instance starts paused")
@@ -259,7 +316,7 @@ class ProcessorControlTest {
         topic = support.newTopic("kraken.events.ctl", partitions = 2)
         val a = instance(projection)
         val b = instance(projection)
-        await().atMost(Duration.ofSeconds(30)).until { a.status().partitionsCount + b.status().partitionsCount == 2 }
+        await().atMost(Duration.ofSeconds(30)).until { a.status().segmentsCount + b.status().segmentsCount == 2 }
         assertTrue(a.ask(pause()).hasOk())
         await().atMost(Duration.ofSeconds(5)).until { b.status().state == ProcessorState.PROCESSOR_PAUSED }
         support.send(topic, "p-0", partition = 0)
@@ -300,7 +357,7 @@ class ProcessorControlTest {
 
     @Test fun `an instance that starts under a held lock stays out of the group until the lock clears`() {
         topic = support.newTopic("kraken.events.ctl", partitions = 1)
-        ProcessorControlStore(mongo).lock("default", "op-x", Duration.ofSeconds(4))
+        runBlocking { support.store.processorControl.lock("default", "op-x", Duration.ofSeconds(4)) }
         val a = instance(projection)
         assertEquals(ProcessorState.PROCESSOR_STOPPED, a.status().state)
         assertEquals("op-x", a.status().operationId)
@@ -315,7 +372,7 @@ class ProcessorControlTest {
     @Test fun `a reset of a group that never committed makes no range and commits the target`() {
         topic = support.newTopic("kraken.events.ctl", partitions = 1)
         repeat(2) { support.send(topic, "n-$it") }
-        ProcessorControlStore(mongo).lock("default", "op-1", Duration.ofSeconds(30)) // before any instance joined the group
+        runBlocking { support.store.processorControl.lock("default", "op-1", Duration.ofSeconds(30)) } // before any instance joined the group
         val a = instance(projection, resets)
         assertTrue(a.ask(prepare("op-1")).hasOk())
         val reply = a.ask(execute("op-1", latest))
@@ -344,7 +401,7 @@ class ProcessorControlTest {
         assertTrue(a.ask(finish("op-1")).hasOk(), "again: nothing held")
     }
 
-    @Test fun `execute while a consumer of the group is active is GROUP_NOT_EMPTY and changes nothing`() {
+    @Test fun `execute while a consumer of the group is active is SUBSCRIBERS_ACTIVE and changes nothing`() {
         topic = support.newTopic("kraken.events.ctl", partitions = 1)
         val a = instance(projection, resets)
         val old = instance(projection, controlled = false) // an instance without processor control keeps consuming
@@ -354,8 +411,8 @@ class ProcessorControlTest {
         assertTrue(a.ask(prepare("op-1")).hasOk())
         await().atMost(Duration.ofSeconds(30)).until { members() == 1 }
         val reply = a.ask(execute("op-1", earliest))
-        assertEquals(ControlRefusal.CONTROL_REFUSAL_GROUP_NOT_EMPTY, reply.refusal())
-        assertTrue("1 active member" in reply.refused.message, reply.refused.message)
+        assertEquals(ControlRefusal.CONTROL_REFUSAL_SUBSCRIBERS_ACTIVE, reply.refusal())
+        assertTrue("still has 1 subscriber(s)" in reply.refused.message, reply.refused.message)
         assertEquals(3L, support.committed(defaultGroup)[0])
         assertEquals(before, markers())
         assertEquals(emptyList(), control()!!.replay)
@@ -382,17 +439,17 @@ class ProcessorControlTest {
         assertEquals(0, members())
         val reply = a.ask(execute("op-1", earliest))
         assertTrue(reply.hasReset(), reply.toString())
-        assertEquals(listOf(Triple(0, 0L, 3L), Triple(1, 0L, 3L)), reply.reset.rangesList.map { Triple(it.partition, it.from, it.until) })
+        assertEquals(listOf(Triple(0, 0L, 3L), Triple(1, 0L, 3L)), reply.reset.triples())
         assertEquals(6, reply.reset.markersDeleted, "the six positioned markers of default in the range")
         assertEquals(1, reply.reset.resetHandlers)
         val ctx = resets.contexts.single()
         assertEquals(ResetTarget.Earliest, ctx.target)
         assertEquals("op-1", ctx.operationId)
-        assertEquals(listOf(ReplayRange(topic, 0, 0, 3), ReplayRange(topic, 1, 0, 3)), ctx.ranges)
+        assertEquals(listOf(ReplayRange(topic, "0", "0", "3"), ReplayRange(topic, "1", "0", "3")), ctx.ranges)
         assertEquals(0, audit.resets, "another processor's reset handler does not run")
         assertEquals(mapOf(0 to 0L, 1 to 0L), support.committed(defaultGroup))
         assertTrue(markers().containsAll(auditMarkers + others), "only default's markers in the range went")
-        assertEquals(listOf(ReplayRange(topic, 0, 0, 3), ReplayRange(topic, 1, 0, 3)), control()!!.replay)
+        assertEquals(listOf(ReplayRange(topic, "0", "0", "3"), ReplayRange(topic, "1", "0", "3")), control()!!.replay)
 
         assertTrue(a.ask(finish("op-1")).hasOk())
         assertTrue(b.ask(finish("op-1")).hasOk())
@@ -418,12 +475,12 @@ class ProcessorControlTest {
         assertTrue(a.ask(prepare("op-1")).hasOk())
         assertTrue(a.ask(execute("op-1", earliest)).hasReset())
         assertTrue(a.ask(finish("op-1")).hasOk())
-        await().atMost(Duration.ofSeconds(30)).until { a.status().partitionsCount == 2 }
+        await().atMost(Duration.ofSeconds(30)).until { a.status().segmentsCount == 2 }
         val status = a.status()
         assertEquals(ProcessorState.PROCESSOR_PAUSED, status.state, "finishing a reset keeps the pause")
         assertEquals("", status.operationId)
         assertTrue(status.replaying)
-        assertEquals(mapOf(0 to 2L, 1 to 0L), status.partitionsList.associate { it.partition to it.replayUntil })
+        assertEquals(mapOf("0" to "2", "1" to ""), status.segmentsList.associate { it.segment to it.replayUntil })
         Thread.sleep(1000)
         assertEquals(2, projection.seen.size, "nothing replays while paused")
         assertTrue(a.ask(resume()).hasOk())
@@ -447,19 +504,22 @@ class ProcessorControlTest {
         }
 
         val byTime = reset("op-t", at(cut))
-        assertEquals(listOf(Triple(0, 3L, 6L)), byTime.reset.rangesList.map { Triple(it.partition, it.from, it.until) })
+        assertTrue(byTime.hasReset(), byTime.toString())
+        assertEquals(listOf(Triple(0, 3L, 6L)), byTime.reset.triples())
         assertEquals(3, byTime.reset.markersDeleted)
         assertEquals(ResetTarget.Timestamp(cut), resets.contexts.last().target)
         await().atMost(Duration.ofSeconds(30)).until { projection.seen.size == 9 }
         await().atMost(Duration.ofSeconds(10)).until { control()!!.replay.isEmpty() }
 
         val byOffset = reset("op-o", offsets(0 to 5L))
-        assertEquals(listOf(Triple(0, 5L, 6L)), byOffset.reset.rangesList.map { Triple(it.partition, it.from, it.until) })
+        assertTrue(byOffset.hasReset(), byOffset.toString())
+        assertEquals(listOf(Triple(0, 5L, 6L)), byOffset.reset.triples())
         await().atMost(Duration.ofSeconds(30)).until { projection.seen.size == 10 }
         assertEquals("t-5", projection.seen.last())
 
         val handlers = resets.contexts.size
         val toEnd = reset("op-l", latest)
+        assertTrue(toEnd.hasReset(), toEnd.toString()) // a refusal has no outcome: its zero counts below would pass
         assertEquals(0, toEnd.reset.rangesCount)
         assertEquals(0, toEnd.reset.markersDeleted)
         assertEquals(0, toEnd.reset.resetHandlers)
@@ -475,6 +535,48 @@ class ProcessorControlTest {
         assertEquals(6L, support.committed(defaultGroup)[0])
     }
 
+    @Test fun `a poll that read the document before a prepare keeps the operation prepared`() {
+        topic = support.newTopic("kraken.events.ctl", partitions = 1)
+        val reads = HeldReads(support.store.processorControl)
+        val a = instance(projection, resets, controlStore = reads)
+        support.send(topic, "q-0")
+        await().atMost(Duration.ofSeconds(30)).until { support.committed(defaultGroup)[0] == 1L }
+        reads.betweenReadAndApply { assertTrue(a.ask(prepare("op-1")).hasOk()) }
+        assertEquals(ProcessorState.PROCESSOR_STOPPED, a.status().state, "a document without the lock does not start the consumer again")
+        assertEquals("op-1", a.status().operationId)
+        reads.release()
+        val reply = a.ask(execute("op-1", earliest))
+        assertTrue(reply.hasReset(), reply.toString())
+        assertTrue(a.ask(finish("op-1")).hasOk())
+    }
+
+    @Test fun `a poll that read the document before a pause keeps the processor paused`() {
+        topic = support.newTopic("kraken.events.ctl", partitions = 1)
+        val reads = HeldReads(support.store.processorControl)
+        val a = instance(projection, controlStore = reads)
+        awaitRunning(a)
+        reads.betweenReadAndApply { assertTrue(a.ask(pause()).hasOk()) }
+        assertEquals(ProcessorState.PROCESSOR_PAUSED, a.status().state, "a document without the pause does not resume")
+        reads.release()
+        support.send(topic, "q-1")
+        Thread.sleep(1500)
+        assertFalse("q-1" in projection.seen, "held while paused")
+    }
+
+    @Test fun `a poll that read the document before a finish keeps the processor consuming`() {
+        topic = support.newTopic("kraken.events.ctl", partitions = 1)
+        val reads = HeldReads(support.store.processorControl)
+        val a = instance(projection, controlStore = reads)
+        awaitRunning(a)
+        assertTrue(a.ask(prepare("op-1")).hasOk())
+        reads.betweenReadAndApply { assertTrue(a.ask(finish("op-1")).hasOk()) }
+        val state = a.status().state
+        assertTrue(state == ProcessorState.PROCESSOR_STARTING || state == ProcessorState.PROCESSOR_RUNNING, "a document with the released lock does not stop the consumer: $state")
+        assertEquals("", a.status().operationId)
+        reads.release()
+        awaitRunning(a)
+    }
+
     @Test fun `a failing reset handler fails the reset, says it ran, and touches no marker or offset`() {
         topic = support.newTopic("kraken.events.ctl", partitions = 1)
         val a = instance(projection, resets)
@@ -484,9 +586,9 @@ class ProcessorControlTest {
         resets.failing = true
         assertTrue(a.ask(prepare("op-1")).hasOk())
         val reply = a.ask(execute("op-1", earliest))
-        assertEquals(ControlRefusal.CONTROL_REFUSAL_RESET_HANDLER_FAILED, reply.refusal())
+        assertEquals(ControlRefusal.CONTROL_REFUSAL_RESET_HANDLER_FAILED, reply.refusal(), reply.toString())
         assertTrue("cannot clear the projection" in reply.refused.message, reply.refused.message)
-        assertTrue("reset handlers ran (1), no markers deleted, offsets not moved" in reply.refused.message, reply.refused.message)
+        assertTrue("reset handlers ran (1), no markers deleted, positions not moved" in reply.refused.message, reply.refused.message)
         assertEquals(2L, support.committed(defaultGroup)[0])
         assertEquals(before, markers())
         assertEquals(emptyList(), control()!!.replay)
@@ -578,9 +680,9 @@ class ProcessorControlTest {
         val byEvent = list.deadLetters.lettersList.associateBy { it.eventId }
         val head = byEvent.getValue("d-1")
         assertEquals("audit", head.processor)
-        assertEquals(topic, head.topic)
-        assertEquals(0, head.partition)
-        assertEquals(0L, head.offset)
+        assertEquals(topic, head.source)
+        assertEquals("0", head.segment)
+        assertEquals("0", head.position)
         assertEquals("k1", head.key)
         assertEquals("test.Happened", head.eventType)
         assertEquals("HANDLER_FAILED", head.reason)
@@ -629,7 +731,7 @@ class ProcessorControlTest {
 
         // The lock is cleared under the held operation (another instance cleared its passed lease).
         assertTrue(a.ask(prepare("op-2")).hasOk())
-        ProcessorControlStore(mongo).release("default", "op-2")
+        runBlocking { support.store.processorControl.release("default", "op-2") }
         val lost = a.ask(prepare("op-2"))
         assertEquals(ControlRefusal.CONTROL_REFUSAL_NOT_PREPARED, lost.refusal(), lost.toString())
         // Whichever notices the lost lock first answers (ADR 0023 ruling 19): the renewal ("lock lost"), or the 300 ms poll,
@@ -650,13 +752,13 @@ class ProcessorControlTest {
         repeat(2) { support.send(topic, "s-$it") }
         await().atMost(Duration.ofSeconds(30)).until { projection.seen.size == 2 && support.committed(defaultGroup)[0] == 2L }
         val before = markers()
-        val store = ProcessorControlStore(mongo)
+        val store = support.store.processorControl
         // Another instance cleared the passed lease and took the lock.
-        resets.during = { store.release("default", "op-1"); store.lock("default", "op-other", Duration.ofSeconds(60)) }
+        resets.during = { runBlocking { store.release("default", "op-1"); store.lock("default", "op-other", Duration.ofSeconds(60)) } }
         assertTrue(a.ask(prepare("op-1")).hasOk())
         val reply = a.ask(execute("op-1", earliest))
         assertEquals(ControlRefusal.CONTROL_REFUSAL_FAILED, reply.refusal(), reply.toString())
-        for (said in listOf("lease lost", "reset handlers ran (1)", "no markers deleted", "offsets not moved")) {
+        for (said in listOf("lease lost", "reset handlers ran (1)", "no markers deleted", "positions not moved")) {
             assertTrue(said in reply.refused.message, "$said: ${reply.refused.message}")
         }
         assertEquals(2L, support.committed(defaultGroup)[0])
@@ -705,8 +807,8 @@ class ProcessorControlTest {
         assertTrue(a.ask(execute("op-1", earliest)).hasReset())
         assertTrue(a.ask(finish("op-1")).hasOk())
         await().atMost(Duration.ofSeconds(30)).until { a.deadLetters.count("default") == 1L }
-        val id = DeadLetterStore.id("default", topic, 0, 0)
-        val parked = mongo.db.getCollection(DeadLetterStore.COLLECTION).find(Document("_id", id)).first()!!
+        val id = DeadLetterStore.id("default", topic, "0", "0")
+        val parked = mongo.db.getCollection(DEAD_LETTERS).find(Document("_id", id)).first()!!
         assertEquals(true, parked.getBoolean("replay"), parked.toJson())
         assertTrue(a.deadLetters.get(id)!!.replay)
         flaky.failing = null
@@ -714,5 +816,76 @@ class ProcessorControlTest {
         assertEquals("Retried", retried.result, retried.detail)
         assertEquals(4, flaky.seen.count { it == "x-1" }, "handled, failed twice in the replay, retried")
         assertEquals(1, once.seen.count { it == "x-1" }, "the retry of a replayed record is a replay")
+    }
+
+    /** The Kafka event store, declaring no `replay` (as an event store that cannot move positions would). */
+    private fun withoutReplay(): EventStore = object : EventStore by support.events {
+        override val capabilities: Set<Capability> = setOf(Capability.BROWSE, Capability.LAG)
+        override fun supports(capability: Capability): Boolean = capability in capabilities
+        override fun admin(spec: SubscriptionSpec): SubscriptionAdmin = throw EventStoreException.Unsupported(Capability.REPLAY)
+    }
+
+    @Test fun controlActionWithoutCapabilityIsUnsupported() {
+        topic = support.newTopic("kraken.events.ctl", partitions = 1)
+        val a = instance(projection, events = withoutReplay())
+        support.send(topic, "u-1")
+        await().atMost(Duration.ofSeconds(30)).until { "u-1" in projection.seen }
+        awaitRunning(a)
+        val status = a.status()
+        assertEquals("kafka", status.eventStore)
+        assertEquals(listOf("browse", "lag"), status.capabilitiesList)
+        assertEquals(defaultGroup, status.subscription)
+        assertEquals(topic, status.source)
+
+        val prepared = a.ask(prepare("op-u"))
+        assertEquals(ControlRefusal.CONTROL_REFUSAL_UNSUPPORTED, prepared.refusal(), prepared.toString())
+        assertTrue("replay" in prepared.refused.message, prepared.refused.message)
+        assertEquals(ControlRefusal.CONTROL_REFUSAL_UNSUPPORTED, a.ask(execute("op-u", earliest)).refusal())
+        assertNull(control()?.operation, "no lock was taken")
+        assertEquals(ProcessorState.PROCESSOR_RUNNING, a.status().state, "the processor keeps its subscription")
+        assertEquals("", a.status().operationId)
+        assertEquals(1, members(), "still a member of its subscription")
+        support.send(topic, "u-2")
+        await().atMost(Duration.ofSeconds(20)).until { "u-2" in projection.seen }
+        assertTrue(a.ask(pause()).hasOk(), "pause and resume need no capability")
+        assertTrue(a.ask(resume()).hasOk())
+    }
+
+    /**
+     * Instance A holds both segments and resets to earliest while paused; B joins and takes one segment: each reports the
+     * replay range of its own segment, replays only that one after the resume (without the DisallowReplay handler), the
+     * records published after the reset are no replay, nothing is handled twice elsewhere, and each owner removes its range.
+     */
+    @Test fun replayRangeSurvivesReassignment() {
+        topic = support.newTopic("kraken.events.ctl", partitions = 2)
+        val a = instance(projection, once)
+        for (p in 0..1) repeat(2) { support.send(topic, "n-$p-$it", key = "k$p", partition = p) }
+        await().atMost(Duration.ofSeconds(30)).until { projection.seen.size == 4 && support.committed(defaultGroup) == mapOf(0 to 2L, 1 to 2L) }
+        assertTrue(a.ask(pause()).hasOk())
+        assertTrue(a.ask(prepare("op-r")).hasOk())
+        val reset = a.ask(execute("op-r", earliest))
+        assertEquals(listOf(Triple(0, 0L, 2L), Triple(1, 0L, 2L)), reset.reset.triples())
+        assertTrue(a.ask(finish("op-r")).hasOk())
+        await().atMost(Duration.ofSeconds(30)).until { a.status().segmentsCount == 2 }
+
+        val b = instance(projection, once)
+        await().atMost(Duration.ofSeconds(40)).until { a.status().segmentsCount == 1 && b.status().segmentsCount == 1 }
+        val mine = a.status().segmentsList.single()
+        val theirs = b.status().segmentsList.single()
+        assertEquals(setOf("0", "1"), setOf(mine.segment, theirs.segment))
+        assertEquals("2", mine.replayUntil, "A shows the range of its own segment")
+        assertEquals("2", theirs.replayUntil, "B shows the range of the segment it took over")
+        assertEquals(ProcessorState.PROCESSOR_PAUSED, b.status().state, "B starts paused")
+
+        for (p in 0..1) support.send(topic, "after-$p", key = "k$p", partition = p)
+        assertTrue(b.ask(resume()).hasOk())
+        await().atMost(Duration.ofSeconds(30)).until { projection.seen.size == 10 }
+        Thread.sleep(1000)
+        assertEquals(10, projection.seen.size, "nothing more")
+        val counts = projection.seen.groupingBy { it }.eachCount()
+        assertEquals((0..1).flatMap { p -> (0..1).map { "n-$p-$it" } }.associateWith { 2 } + mapOf("after-0" to 1, "after-1" to 1), counts)
+        assertEquals(listOf("n-0-0", "n-0-1", "n-1-0", "n-1-1", "after-0", "after-1").sorted(), once.seen.sorted(), "DisallowReplay skipped the replay, not the later records")
+        await().atMost(Duration.ofSeconds(20)).until { control()!!.replay.isEmpty() }
+        await().atMost(Duration.ofSeconds(10)).until { !a.status().replaying && !b.status().replaying }
     }
 }

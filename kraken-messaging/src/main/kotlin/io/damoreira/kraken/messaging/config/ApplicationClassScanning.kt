@@ -81,14 +81,6 @@ internal class OnIdempotentHandlers : ConfigurationCondition {
     }
 }
 
-/** True when at least one `kraken.messaging.external.kafka.sources.<name>` is configured. */
-internal class OnExternalKafkaSources : org.springframework.context.annotation.Condition {
-    override fun matches(context: ConditionContext, metadata: AnnotatedTypeMetadata): Boolean =
-        Binder.get(context.environment)
-            .bind("kraken.messaging.external.kafka.sources", Bindable.mapOf(String::class.java, Any::class.java))
-            .map { it.isNotEmpty() }.orElse(false) == true
-}
-
 /** True when a saga runtime or an idempotency interceptor bean is defined: the toolkit is in use and its metrics make sense. */
 internal class OnSagaToolkitBeans : ConfigurationCondition {
     override fun getConfigurationPhase() = ConfigurationPhase.REGISTER_BEAN

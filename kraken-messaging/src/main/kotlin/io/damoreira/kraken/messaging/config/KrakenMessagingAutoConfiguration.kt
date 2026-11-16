@@ -10,10 +10,14 @@ import io.damoreira.kraken.messaging.handler.HandlerRegistry
 import io.damoreira.kraken.messaging.hub.HubQueryUpdateEmitter
 import io.damoreira.kraken.messaging.hub.SubscriptionRegistry
 import io.damoreira.kraken.messaging.security.ForwardedIdentityResolver
+import io.damoreira.kraken.messaging.store.MessageStore
 import io.damoreira.kraken.messaging.tracing.TraceHeaders
 import io.micrometer.tracing.Tracer
 import io.micrometer.tracing.propagation.Propagator
+import org.springframework.beans.factory.ListableBeanFactory
 import org.springframework.beans.factory.ObjectProvider
+import org.springframework.beans.factory.config.BeanFactoryPostProcessor
+import org.springframework.beans.factory.config.ConfigurableListableBeanFactory
 import org.springframework.boot.actuate.endpoint.SanitizingFunction
 import org.springframework.boot.autoconfigure.AutoConfiguration
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass
@@ -22,13 +26,14 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.boot.context.properties.bind.Binder
 import org.springframework.context.annotation.Bean
 import org.springframework.core.env.Environment
+import org.springframework.core.io.ResourceLoader
 import org.springframework.context.annotation.Configuration
 import org.springframework.security.oauth2.jwt.JwtDecoder
 
 /**
  * Transport-independent beans: type names, JSON codec, handler discovery and invocation, trace header injection and
- * forwarded-JWT validation. The hub and Kafka transports are wired by [HubAutoConfiguration] and
- * [KafkaEventsAutoConfiguration].
+ * forwarded-JWT validation. The hub transport and the events are wired by [HubAutoConfiguration] and
+ * [EventsAutoConfiguration].
  */
 @AutoConfiguration
 @EnableConfigurationProperties(KrakenMessagingProperties::class)
@@ -45,6 +50,20 @@ class KrakenMessagingAutoConfiguration {
     @Bean
     @ConditionalOnMissingBean
     fun handlerRegistry(typeResolver: MessageTypeResolver) = HandlerRegistry(typeResolver)
+
+    /** Fails the startup when an event handler, a saga or an idempotent handler has no message store to run on (ADR 0028). */
+    @Bean
+    fun krakenMessageStoreGuard(beanFactory: ListableBeanFactory, registry: HandlerRegistry, environment: Environment, resourceLoader: ResourceLoader) =
+        MessageStoreGuard(beanFactory, registry, environment, resourceLoader)
+
+    /** Fails the startup when an event handler or a saga has no event store to read from, or two event stores compete (ADR 0027). */
+    @Bean
+    fun krakenEventStoreGuard(beanFactory: ListableBeanFactory, registry: HandlerRegistry, environment: Environment, resourceLoader: ResourceLoader) =
+        EventStoreGuard(beanFactory, registry, environment, resourceLoader)
+
+    /** Applies the message store's schema at startup (`kraken.messaging.store.init-schema`, on by default). */
+    @Bean
+    fun krakenMessageStoreSchema(store: ObjectProvider<MessageStore>, properties: KrakenMessagingProperties) = MessageStoreSchema(store, properties)
 
     @Bean
     @ConditionalOnMissingBean
@@ -64,10 +83,6 @@ class KrakenMessagingAutoConfiguration {
     @ConditionalOnMissingBean
     fun queryUpdateEmitter(registry: SubscriptionRegistry, codec: JsonCodec, typeResolver: MessageTypeResolver): QueryUpdateEmitter =
         HubQueryUpdateEmitter(registry, codec, typeResolver)
-
-    /** Fails startup when a removed property is still configured (runs regardless of user-supplied beans). */
-    @Bean
-    fun krakenRemovedPropertiesGuard(environment: Environment): RemovedPropertiesGuard = RemovedPropertiesGuard(environment)
 
     @Bean
     @ConditionalOnMissingBean
@@ -107,19 +122,70 @@ class KrakenMessagingAutoConfiguration {
         @Bean
         fun krakenHandlerBeanPostProcessor(registry: ObjectProvider<HandlerRegistry>) =
             HandlerBeanPostProcessor { registry.getObject() }
+
+        /** Two message store add-ons without `kraken.messaging.store.type` fail the startup before any bean exists. */
+        @JvmStatic
+        @Bean
+        fun krakenMessageStoreAddOnsCheck(environment: Environment) = MessageStoreAddOnsCheck(environment)
+
+        /**
+         * A removed setting still configured fails the startup before any bean exists (whatever beans the application supplies), naming
+         * its replacement: silently ignoring a renamed group or source would re-handle or misroute events.
+         */
+        @JvmStatic
+        @Bean
+        fun krakenRemovedPropertiesGuard(environment: Environment) = RemovedPropertiesGuard(environment)
+
+        /** Two event-store add-ons without `kraken.messaging.event-store` fail the startup before any bean exists. */
+        @JvmStatic
+        @Bean
+        fun krakenEventStoreAddOnsCheck(environment: Environment) = EventStoreAddOnsCheck(environment)
     }
 }
 
-/** Rejects configuration keys that no longer exist, with a hint about their replacement. */
-class RemovedPropertiesGuard(environment: Environment) {
-    init {
-        check(!Binder.get(environment).bind(REQUIRE_JWT, String::class.java).isBound) {
-            "$REQUIRE_JWT was removed; requests are trusted by default, annotate handlers with @RequiresAuthentication"
-        }
+/**
+ * Rejects settings that no longer exist, all of them in one message, each with its replacement. No alias: a removed name is never
+ * read (ADR 0024).
+ */
+class RemovedPropertiesGuard(private val environment: Environment) : BeanFactoryPostProcessor {
+    override fun postProcessBeanFactory(beanFactory: ConfigurableListableBeanFactory) {
+        val problems = problems()
+        check(problems.isEmpty()) { problems.joinToString("; ") }
     }
+
+    /** One line per removed setting still set, with what replaces it. */
+    private fun problems(): List<String> {
+        val binder = Binder.get(environment)
+        fun value(name: String): String? = binder.bind(name, String::class.java).orElse(null)
+        val problems = mutableListOf<String>()
+        if (value(REQUIRE_JWT) != null) {
+            problems += "$REQUIRE_JWT was removed; requests are trusted by default, annotate handlers with @RequiresAuthentication"
+        }
+        RENAMED.forEach { (removed, replacement) ->
+            val old = value(removed) ?: return@forEach
+            problems += "$removed was removed, use $replacement" +
+                if (removed == KAFKA_DEAD_LETTER_MODE && old.isTopic()) " (the mode topic is now event-store)" else ""
+        }
+        if (value(DEAD_LETTER_MODE)?.isTopic() == true) problems += "$DEAD_LETTER_MODE=topic was removed, use event-store"
+        return problems
+    }
+
+    private fun String.isTopic() = trim().equals("topic", ignoreCase = true)
 
     companion object {
         const val REQUIRE_JWT = "kraken.messaging.security.require-jwt"
+        private const val KAFKA_DEAD_LETTER_MODE = "kraken.messaging.kafka.dead-letter.mode"
+        private const val DEAD_LETTER_MODE = "kraken.messaging.events.dead-letter.mode"
+
+        /** The settings removed in v0.4.0 (the event store became neutral, ADR 0027), with their replacements. */
+        internal val RENAMED: Map<String, String> = linkedMapOf(
+            "kraken.messaging.kafka.topic" to "kraken.messaging.events.source",
+            "kraken.messaging.kafka.group-id" to "kraken.messaging.events.subscription-prefix",
+            "kraken.messaging.kafka.consumer.enabled" to "kraken.messaging.events.consumer.enabled",
+            "kraken.messaging.kafka.consumer.max-attempts" to "kraken.messaging.events.consumer.max-attempts",
+            KAFKA_DEAD_LETTER_MODE to DEAD_LETTER_MODE,
+            "kraken.messaging.kafka.dead-letter.retention" to "kraken.messaging.events.dead-letter.retention",
+        )
     }
 }
 

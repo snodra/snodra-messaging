@@ -2,10 +2,10 @@ package io.damoreira.kraken.messaging.handler
 
 /**
  * Puts every `@EventHandler` method of the annotated class in the named event processor (P6a, ADR 0022). Each processor
- * is its own Kafka consumer in its own consumer group (`<group>.<name>`, where `<group>` is the service's group:
- * `kraken.messaging.kafka.group-id`, else the service name) on the same events topic, with its own position, its own
- * idempotency markers (`processor:<name>:<eventId>`) and its own dead letters, so a slow or failing handler group never
- * holds the others. Classes without it are in processor `default` (group `<group>.default`, markers
+ * reads the service's events in its own subscription of the event store (`<prefix>.<name>`, where `<prefix>` is
+ * `kraken.messaging.events.subscription-prefix`, else the service name; on Kafka the consumer group), with its own position,
+ * its own idempotency markers (`processor:<name>:<eventId>`) and its own dead letters, so a slow or failing handler group never
+ * holds the others. Classes without it are in processor `default` (subscription `<prefix>.default`, markers
  * `processor:default:<eventId>`), the only processor that runs sagas.
  *
  * [value] must match `^[a-z0-9][a-z0-9-]{0,47}$` and must not be `default`; a violation fails the startup naming the
@@ -27,8 +27,11 @@ object Processors {
     /** Whether [name] is a valid explicit processor name (the pattern, and not [DEFAULT]). */
     fun isValidName(name: String): Boolean = name != DEFAULT && NAME.matches(name)
 
-    /** The consumer group of [processor], [DEFAULT] included: `<serviceGroup>.<processor>`. */
-    fun groupId(serviceGroup: String, processor: String): String = "$serviceGroup.$processor"
+    /**
+     * The subscription name of [processor] on the event store, [DEFAULT] included: `<prefix>.<processor>` (the prefix is
+     * `kraken.messaging.events.subscription-prefix`, else the service name). On Kafka the consumer group, as it always was.
+     */
+    fun subscriptionName(prefix: String, processor: String): String = "$prefix.$processor"
 
     /** The stage-1 marker `_id` of [dedupeId] in [processor], [DEFAULT] included: `processor:<processor>:<dedupeId>`. */
     fun markerId(processor: String, dedupeId: String): String = "processor:$processor:$dedupeId"

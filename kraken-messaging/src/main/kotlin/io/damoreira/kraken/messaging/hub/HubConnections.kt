@@ -25,7 +25,9 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.slf4j.LoggerFactory
 import java.net.InetAddress
+import java.time.Clock
 import java.time.Duration
+import java.time.Instant
 import java.util.concurrent.ThreadLocalRandom
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -130,6 +132,8 @@ class HubConnections(
     private val processors: () -> List<ProcessorStatus> = { emptyList() },
     /** Serves the `ControlRequest`s of every hub (P6b, ADR 0023); see [HubConnection]. */
     private val control: ControlInbound = NO_PROCESSOR_CONTROL,
+    /** Stamps [HubRejection.at] (display only: refusals are ordered by when they were recorded, whatever the clock does). */
+    private val clock: Clock = Clock.systemUTC(),
 ) : HubTransport {
     private val log = LoggerFactory.getLogger(HubConnections::class.java)
 
@@ -159,6 +163,29 @@ class HubConnections(
 
     /** True while at least one hub is live. */
     val connected: StateFlow<Boolean> = anyLive.asStateFlow()
+
+    private val latest = MutableStateFlow<HubRejection?>(null)
+
+    /**
+     * The newest refusal of this instance's registration by any hub (`ALREADY_EXISTS`, `INVALID_ARGUMENT`, `UNAUTHENTICATED`,
+     * `PERMISSION_DENIED`): set on every refusal, replaced only by a newer one, never cleared by a later acceptance (nor when its
+     * hub leaves the targets); null while no hub ever refused. "Newer" is the order the refusals were recorded in, never the
+     * clock's (a clock stepped back does not hide a later refusal). The client's own check of an expired client certificate sets it
+     * too (`UNAUTHENTICATED`, see [HubRejection]). A failure to get an access token is not a hub's refusal and is not kept here
+     * ([awaitRegistered] and [authStatus] report it).
+     */
+    val latestRejection: StateFlow<HubRejection?> = latest.asStateFlow()
+
+    /** The [REJECTION_SEQ] of [latest]; guarded by [latest]'s monitor. */
+    private var latestSeq = -1L
+
+    /** Keeps [rejection] unless a refusal recorded after it is kept already: by [seq], never by [HubRejection.at] (a clock may step back). */
+    private fun keepNewer(seq: Long, rejection: HubRejection) = synchronized(latest) {
+        if (seq > latestSeq) {
+            latestSeq = seq
+            latest.value = rejection
+        }
+    }
 
     /** Incoming requests of every hub currently being handled (or waiting for a handler permit). */
     val inFlightHandlers: StateFlow<Int> get() = gate.inFlightHandlers
@@ -433,6 +460,8 @@ class HubConnections(
                     subscriptions = subscriptions,
                     inboundSubscription = inboundSubscription,
                     onCredentialsRefreshSent = { refreshesSent.incrementAndGet() },
+                    onRejected = ::keepNewer,
+                    clock = clock,
                     control = control,
                 )
                 self = connection
@@ -693,6 +722,19 @@ class HubConnections(
         connection.stop()
     }
 }
+
+/**
+ * A hub's refusal of this instance's registration ([HubConnections.latestRejection]): the [hub] (its id when it registered this
+ * instance before, else the target dialled, `host:port`: a refused `Register` carries no hub id), the gRPC status [code]'s name
+ * (`PERMISSION_DENIED`), the hub's [description] (null when it gave none) and when it was refused ([at], display only).
+ *
+ * The client's own check of an expired client certificate (mTLS) is recorded the same way, `UNAUTHENTICATED` with the
+ * certificate's fingerprint and end: the hub would refuse it, so the stream is not even opened.
+ */
+data class HubRejection(val hub: String, val code: String, val description: String?, val at: Instant)
+
+/** The order refusals were recorded in, over every connection of the process: what "newer" means for [HubConnections.latestRejection]. */
+internal val REJECTION_SEQ = java.util.concurrent.atomic.AtomicLong()
 
 /** The credential a service presents to the hub: nothing, a static token (P5a), a Keycloak access token (P5b) or a client certificate (P5c). */
 enum class HubAuthKind { NONE, TOKEN, JWT, CERTIFICATE }

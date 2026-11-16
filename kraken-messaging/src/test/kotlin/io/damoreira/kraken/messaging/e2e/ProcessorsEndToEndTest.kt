@@ -97,8 +97,8 @@ class ProcessorsEndToEndTest {
                 "kraken.messaging.hub.address=static://${hub.host}:${hub.getMappedPort(7000)}",
                 "kraken.messaging.hub.status-interval=500ms",
                 "kraken.messaging.kafka.bootstrap-servers=${kafka.bootstrapServers}",
-                "kraken.messaging.kafka.topic=$topic",
-                "kraken.messaging.kafka.consumer.max-attempts=2",
+                "kraken.messaging.events.source=$topic",
+                "kraken.messaging.events.consumer.max-attempts=2",
                 "kraken.messaging.outbox.enabled=false",
                 "spring.mongodb.uri=$mongoUri",
                 "spring.main.banner-mode=off",
@@ -128,7 +128,7 @@ class ProcessorsEndToEndTest {
 
     private fun JsonNode.nodes(): List<JsonNode> = (0 until size()).map { get(it) }
 
-    @Test fun `the hub shows both processors with their group, state, partitions and dead letters`() {
+    @Test fun `the hub shows both processors with their subscription, event store, state, segments and dead letters`() {
         val hub = startHub(KrakenContainers.hub())
         val ctx = service(hub, "svc-p6a")
         val connection = ctx.getBean(HubConnections::class.java).connections().single()
@@ -143,25 +143,27 @@ class ProcessorsEndToEndTest {
             val processors = service["processors"].nodes().associateBy { it["name"].asString() }
             assertEquals(setOf("default", "orders"), processors.keys)
             val orders = processors.getValue("orders")
-            assertEquals("svc-p6a.orders", orders["groupId"].asString())
-            assertEquals(topic, orders["topic"].asString())
+            assertEquals("svc-p6a.orders", orders["subscription"].asString(), "today's consumer group")
+            assertEquals(topic, orders["source"].asString())
+            assertEquals("kafka", orders["eventStore"].asString())
+            assertEquals(listOf("browse", "lag", "native-dead-letter", "replay"), orders["capabilities"].nodes().map { it.asString() })
             assertEquals("FAILING", orders["state"].asString())
             assertEquals("collection", orders["deadLetterMode"].asString())
             assertEquals(2, orders["deadLetters"].asInt())
             assertEquals(1, orders["failedTotal"].asInt())
-            assertEquals(2, orders["assignedPartitions"].asInt())
+            assertEquals(2, orders["assignedSegments"].asInt())
             assertEquals(listOf("p6a.OrderPlaced"), orders["eventTypes"].nodes().map { it.asString() })
             assertTrue(orders["lastError"]["message"].asString().contains("cannot project o-2"))
             val default = processors.getValue("default")
-            assertEquals("svc-p6a.default", default["groupId"].asString())
+            assertEquals("svc-p6a.default", default["subscription"].asString(), "default included, as deployed")
             assertEquals("RUNNING", default["state"].asString())
             assertEquals(3, default["processedTotal"].asInt())
             assertEquals(0, default["lag"].asInt())
-            val partitions = default["instances"].nodes().single()["partitions"]
-            assertEquals(listOf(0, 1), partitions.nodes().map { it["partition"].asInt() })
-            // A partition without any record of this test has no committed offset (-1).
-            assertEquals(3L, partitions.nodes().sumOf { it["committed"].asLong().coerceAtLeast(0) })
-            assertEquals(3L, partitions.nodes().sumOf { it["highWatermark"].asLong() })
+            val segments = default["instances"].nodes().single()["segments"]
+            assertEquals(listOf("0", "1"), segments.nodes().map { it["segment"].asString() })
+            // A segment without any record of this test has no committed position ("").
+            assertEquals(3L, segments.nodes().sumOf { it["committed"].asString().ifEmpty { "0" }.toLong() })
+            assertEquals(3L, segments.nodes().sumOf { it["head"].asString().toLong() })
         }
         // The raw report is in the topology as well.
         val instance = get(hub, "/api/v1/topology")["services"].nodes().single { it["serviceName"].asString() == "svc-p6a" }["instances"].nodes().single()
@@ -205,9 +207,9 @@ class ProcessorsEndToEndTest {
             assertEquals(1.0, registry.get("kraken.processor.state").tags("processor", "orders", "state", "failing").gauge().value())
             assertEquals(1.0, registry.get("kraken.processor.state").tags("processor", "default", "state", "running").gauge().value())
             assertEquals(1.0, registry.get("kraken.dead.letters").tag("processor", "orders").gauge().value())
-            // Partitions with a known lag (a partition that never had a record of this test has none yet).
+            // Segments with a known lag (labelled segment, formerly partition).
             val lags = registry.find("kraken.processor.lag").tag("processor", "default").gauges()
-            assertTrue(lags.isNotEmpty() && lags.all { it.id.getTag("partition") in setOf("0", "1") && it.value() == 0.0 }, lags.toString())
+            assertTrue(lags.isNotEmpty() && lags.all { it.id.getTag("segment") in setOf("0", "1") && it.value() == 0.0 }, lags.toString())
             assertEquals(1.0, registry.get("kraken.hub.client.connected.hubs").gauge().value())
             assertEquals(0.0, registry.get("kraken.hub.client.handlers.in.flight").gauge().value())
             assertEquals(1, registry.get("kraken.hub.client.request.duration").tags("kind", "command", "type", "test.Ping", "outcome", "no_handler").timer().count())

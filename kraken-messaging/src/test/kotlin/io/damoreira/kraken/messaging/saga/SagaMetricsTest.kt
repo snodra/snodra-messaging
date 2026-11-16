@@ -1,6 +1,7 @@
 package io.damoreira.kraken.messaging.saga
 
-import com.mongodb.client.MongoClients
+import io.damoreira.kraken.messaging.dispatchEntries
+import io.damoreira.kraken.messaging.store.memory.MemoryMessageStore
 import io.damoreira.kraken.messaging.MessageContext
 import io.damoreira.kraken.messaging.RetryPolicy
 import io.damoreira.kraken.messaging.api.Event
@@ -13,26 +14,17 @@ import io.damoreira.kraken.messaging.deadline.DlSaga
 import io.damoreira.kraken.messaging.deadline.DlSwitch
 import io.damoreira.kraken.messaging.external.ExPrint
 import io.damoreira.kraken.messaging.external.ExPrinterAdapter
-import io.damoreira.kraken.messaging.external.ExternalCallIndexes
 import io.damoreira.kraken.messaging.external.ExternalCallSettings
 import io.damoreira.kraken.messaging.external.IdempotencyInterceptor
 import io.damoreira.kraken.messaging.handler.HandlerInvoker
 import io.damoreira.kraken.messaging.handler.HandlerRegistry
-import io.damoreira.kraken.messaging.kafka.LocalEventDispatcher
-import io.damoreira.kraken.messaging.kafka.OutboxEventBus
-import io.damoreira.kraken.messaging.test.KrakenContainers
+import io.damoreira.kraken.messaging.events.LocalEventDispatcher
+import io.damoreira.kraken.messaging.events.OutboxEventBus
 import io.damoreira.kraken.messaging.tracing.TraceHeaders
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import kotlinx.coroutines.runBlocking
-import org.junit.jupiter.api.AfterAll
-import org.junit.jupiter.api.BeforeAll
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
-import org.junit.jupiter.api.TestInstance
-import org.springframework.data.mongodb.MongoTransactionManager
-import org.springframework.data.mongodb.core.MongoTemplate
-import org.springframework.data.mongodb.core.SimpleMongoClientDatabaseFactory
-import org.springframework.data.mongodb.core.query.Query
 import org.springframework.transaction.support.TransactionTemplate
 import java.time.Duration
 import java.time.Instant
@@ -45,14 +37,12 @@ import kotlin.test.assertNull
 
 /**
  * The Micrometer meters of the saga runtime, relay, deadline scheduler and idempotent adapters against a real runtime on
- * MongoDB: each meter of the spec's Observability list moves on the matching action. The first tests drive the hooks alone.
+ * the in-memory message store: each meter of the spec's Observability list moves on the matching action. The first tests drive
+ * the hooks alone.
  */
-@TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class SagaMetricsTest {
-    private val mongoContainer = KrakenContainers.mongo()
-    private lateinit var mongo: MongoTemplate
+    private lateinit var store: MemoryMessageStore
     private lateinit var tx: TransactionTemplate
-    private lateinit var txManager: MongoTransactionManager
     private val codec = JsonCodec()
     private val resolver = MessageTypeResolver("rt")
     private val start = Instant.parse("2026-11-03T10:00:00Z")
@@ -60,24 +50,10 @@ class SagaMetricsTest {
     private lateinit var registry: SimpleMeterRegistry
     private lateinit var metrics: MicrometerSagaMetrics
 
-    @BeforeAll
-    fun start() {
-        mongoContainer.start()
-        val factory = SimpleMongoClientDatabaseFactory(MongoClients.create(mongoContainer.connectionString + "/?directConnection=true"), "saga_metrics_test")
-        mongo = MongoTemplate(factory)
-        txManager = MongoTransactionManager(factory)
-        tx = TransactionTemplate(txManager)
-        SagaIndexes(mongo, Duration.ofDays(30), Duration.ofDays(7), Duration.ofDays(7), Duration.ofDays(30)).afterPropertiesSet()
-        ExternalCallIndexes(mongo, Duration.ofDays(30)).afterPropertiesSet()
-        listOf("processed_events", "saga_failures", "outbox", "external_calls").forEach { if (!mongo.collectionExists(it)) mongo.createCollection(it) }
-    }
-
-    @AfterAll
-    fun stop() = mongoContainer.stop()
-
     @BeforeEach
     fun setUp() {
-        listOf("sagas", "saga_dispatch", "saga_dispatch_leases", "deadlines", "saga_failures", "processed_events", "outbox", "external_calls").forEach { mongo.remove(Query(), it) }
+        store = MemoryMessageStore()
+        tx = TransactionTemplate(store.transactions)
         RtGate.reset()
         DlSwitch.broken.set(false)
         clock.now = start
@@ -86,7 +62,7 @@ class SagaMetricsTest {
     }
 
     private fun runtime(vararg classes: kotlin.reflect.KClass<*>) = SagaRuntime(
-        types = SagaModelScanner(resolver, codec).scan(classes.toList()), mongo = mongo, tx = tx, codec = codec, typeResolver = resolver,
+        types = SagaModelScanner(resolver, codec).scan(classes.toList()), ports = store.sagas, tx = tx, codec = codec, typeResolver = resolver,
         beans = { type -> if (type == RtBean::class) RtBean("the-bean") else error("no bean $type") },
         clock = clock,
         retry = SagaRetry(RetryPolicy(maxAttempts = 3, initialBackoff = Duration.ofMillis(2), multiplier = 1.0, maxBackoff = Duration.ofMillis(5))),
@@ -138,7 +114,7 @@ class SagaMetricsTest {
     fun `deadlines fired and overdue are metered`() {
         val runtime = runtime(DlSaga::class)
         deliver(runtime, DlPlaced("d1", seconds = 60))
-        val scheduler = DeadlineScheduler(mongo, runtime, clock, DeadlineSettings(pollInterval = Duration.ofMillis(50), lease = Duration.ofSeconds(30)), metrics)
+        val scheduler = DeadlineScheduler(store.sagas.deadlines, runtime, clock, DeadlineSettings(pollInterval = Duration.ofMillis(50), lease = Duration.ofSeconds(30)), metrics)
 
         clock.now = start.plusSeconds(61)
         DlSwitch.broken.set(true)
@@ -156,7 +132,7 @@ class SagaMetricsTest {
     @Test
     fun `the pending dispatch and active saga gauges follow the stored state`() {
         val runtime = runtime(RtOrderSaga::class)
-        val sampler = SagaGaugeSampler(mongo, metrics)
+        val sampler = SagaGaugeSampler(store.sagas, metrics)
         assertEquals(0.0, gauge("kraken.sagas.active", "type", "rt.Order"), "a known saga type has a gauge before its first instance")
 
         deliver(runtime, RtOrderPlaced("o4")) // records a command and an event
@@ -166,7 +142,7 @@ class SagaMetricsTest {
         assertEquals(4.0, gauge("kraken.saga.dispatch.pending"))
 
         deliver(runtime, RtFinish("o4"))
-        mongo.updateMulti(Query(), org.springframework.data.mongodb.core.query.Update().set("dispatchedAt", start), SagaDispatchDocument::class.java)
+        store.dispatchEntries().forEach { store.sagas.dispatch.markDispatched(it.id, start) }
         sampler.sampleOnce()
         assertEquals(1.0, gauge("kraken.sagas.active", "type", "rt.Order"))
         assertEquals(0.0, gauge("kraken.saga.dispatch.pending"), "dispatched entries are not pending")
@@ -178,8 +154,8 @@ class SagaMetricsTest {
         val handlers = HandlerRegistry(resolver) // nobody handles rt.DoIt
         val invoker = HandlerInvoker(handlers, codec)
         val relay = SagaDispatchRelay(
-            mongo, tx, LocalRawCommandSender(invoker), OutboxEventBus(mongo, codec, resolver, TraceHeaders(null, null)),
-            LocalEventDispatcher(handlers, invoker, tx, mongo, runtime), codec, resolver, clock,
+            store.sagas.dispatch, tx, LocalRawCommandSender(invoker), OutboxEventBus(store.outbox, codec, resolver, TraceHeaders(null, null)),
+            LocalEventDispatcher(handlers, invoker, store, runtime), codec, resolver, clock,
             RelaySettings(pollInterval = Duration.ofMillis(50), maxAttempts = 2), metrics,
         )
         deliver(runtime, RtOrderPlaced("o6"))
@@ -193,7 +169,7 @@ class SagaMetricsTest {
     fun `adapter calls are counted by handler and outcome`() {
         val adapter = ExPrinterAdapter()
         val handlers = HandlerRegistry(MessageTypeResolver("ex")).also { it.register(adapter) }
-        val interceptor = IdempotencyInterceptor(mongo, codec, txManager, clock, ExternalCallSettings(Duration.ofMinutes(5)), metrics)
+        val interceptor = IdempotencyInterceptor(store, codec, clock, ExternalCallSettings(Duration.ofMinutes(5)), metrics)
         val invoker = HandlerInvoker(handlers, codec, interceptor)
         val ctx = MessageContext("m-1", "ex.Print", "corr-1", null, emptySet(), null, mapOf("idempotency-key" to "k-1"))
 

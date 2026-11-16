@@ -1,10 +1,14 @@
 package io.damoreira.kraken.messaging.test
 
+import com.github.dockerjava.api.model.Ulimit
 import org.testcontainers.DockerClientFactory
 import org.testcontainers.containers.GenericContainer
 import org.testcontainers.containers.wait.strategy.Wait
+import org.testcontainers.containers.wait.strategy.WaitAllStrategy
 import org.testcontainers.kafka.KafkaContainer
 import org.testcontainers.mongodb.MongoDBContainer
+import org.testcontainers.mysql.MySQLContainer
+import org.testcontainers.postgresql.PostgreSQLContainer
 import org.testcontainers.utility.DockerImageName
 import org.testcontainers.utility.MountableFile
 import java.nio.file.Files
@@ -13,17 +17,40 @@ import java.security.MessageDigest
 
 /**
  * Shared Testcontainers definitions for kraken integration tests. Containers are returned unstarted;
- * callers start them. Kafka and MongoDB (single-node replica set) are marked reusable.
+ * callers start them. Kafka, MongoDB (single-node replica set), PostgreSQL and MySQL are marked reusable.
  */
 object KrakenContainers {
     const val KAFKA_IMAGE = "apache/kafka:4.4.0"
     const val MONGO_IMAGE = "mongo:8.3.13"
+    const val POSTGRES_IMAGE = "postgres:17.7"
+    const val MYSQL_IMAGE = "mysql:8.4.7"
+    private const val MONGO_OPEN_FILES = 64_000L
 
     private val hubImage: String get() = System.getenv("KRAKEN_HUB_IMAGE") ?: "kraken-hub:dev"
 
     fun kafka(): KafkaContainer = KafkaContainer(DockerImageName.parse(KAFKA_IMAGE)).withReuse(true)
 
+    /**
+     * MongoDB ([MONGO_IMAGE]) as a single-node replica set. Its open-file limit is MongoDB's recommended 64000: WiredTiger
+     * keeps a file open per collection and index, and the conformance tests create a database per test, which exhausts a
+     * Docker daemon's default of 1024 and leaves the server refusing connections.
+     */
     fun mongo(): MongoDBContainer = MongoDBContainer(DockerImageName.parse(MONGO_IMAGE)).withReplicaSet().withReuse(true)
+        .withCreateContainerCmdModifier { it.hostConfig!!.withUlimits(listOf(Ulimit("nofile", MONGO_OPEN_FILES, MONGO_OPEN_FILES))) }
+
+    /**
+     * PostgreSQL ([POSTGRES_IMAGE]) for the SQL message store (`kraken-messaging-jdbc`); test credentials only. Started once the
+     * server is ready and its port answers on the host (a VM's port forwarding can lag behind the server's log line).
+     */
+    fun postgres(): PostgreSQLContainer = PostgreSQLContainer(DockerImageName.parse(POSTGRES_IMAGE)).withReuse(true)
+        .waitingFor(
+            WaitAllStrategy()
+                .withStrategy(Wait.forLogMessage(".*database system is ready to accept connections.*\\s", 2))
+                .withStrategy(Wait.forListeningPort()),
+        )
+
+    /** MySQL ([MYSQL_IMAGE], InnoDB) for the SQL message store (`kraken-messaging-jdbc`); test credentials only. */
+    fun mysql(): MySQLContainer = MySQLContainer(DockerImageName.parse(MYSQL_IMAGE)).withReuse(true)
 
     /** The hub image under test: `KRAKEN_HUB_IMAGE`, default `kraken-hub:dev`; gRPC 7000 and HTTP 7001 exposed. */
     fun hub(): GenericContainer<*> = hub(hubImage).withExposedPorts(7000, 7001)

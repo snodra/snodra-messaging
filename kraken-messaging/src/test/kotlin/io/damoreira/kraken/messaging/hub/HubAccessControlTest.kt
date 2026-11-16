@@ -30,8 +30,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.awaitility.kotlin.atMost
 import org.awaitility.kotlin.await
 import org.awaitility.kotlin.until
@@ -43,6 +45,7 @@ import org.slf4j.LoggerFactory
 import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Duration
+import java.time.Instant
 import java.util.UUID
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -199,13 +202,13 @@ class HubAccessControlTest {
         assertEquals(token, source.current())
     }
 
-    @Test fun `an empty token file at startup is no token`(@TempDir dir: Path) {
+    @Test fun `a token file empty at startup, whitespace aside, fails naming the setting and the file`(@TempDir dir: Path) {
         val file = dir.resolve("hub-token")
-        Files.writeString(file, " \n")
-        val source = HubToken.of(null, file)
-        assertNull(source.current(), "an empty file at startup is no token")
-        Files.writeString(file, token)
-        assertEquals(token, source.current())
+        Files.writeString(file, " \t\r\n")
+        val e = assertFailsWith<IllegalStateException> { HubToken.of(null, file) }
+        assertTrue("kraken.messaging.hub.token-file" in e.message!! && file.toString() in e.message!! && "empty" in e.message!!, e.message)
+        Files.writeString(file, "\t $token \r\n\n")
+        assertEquals(token, HubToken.of(null, file).current(), "whitespace at both ends goes")
     }
 
     @Test fun `an empty token file read after a good one keeps the last token and warns once, a new token is then picked up`(@TempDir dir: Path) = runBlocking {
@@ -321,6 +324,78 @@ class HubAccessControlTest {
         try {
             val e = assertFailsWith<HubRegistrationRejectedException> { connections.awaitRegistered(wait) }
             assertTrue("UNAUTHENTICATED" in e.message!!, e.message)
+        } finally {
+            connections.stop()
+        }
+    }
+
+    @Test fun `the latest rejection survives a later acceptance and is replaced only by a newer refusal`(@TempDir dir: Path) = runBlocking {
+        hub.auth = HubAuth.enforce(acl)
+        val file = dir.resolve("hub-token")
+        Files.writeString(file, "stale-" + UUID.randomUUID())
+        val connections = HubConnections(
+            targets = HubTargets.parse("static://hub-a:7000"),
+            channelFactory = HubChannelFactory { InProcessChannelBuilder.forName(hub.name).build() },
+            serviceName = "svc-a",
+            instanceId = "l-1",
+            settings = settings(HubToken.of(null, file)),
+            inbound = { req -> Reply.newBuilder().setRequestId(req.id).build() },
+            scope = scope,
+        )
+        assertNull(connections.latestRejection.value, "nothing refused yet")
+        val before = Instant.now()
+        connections.start()
+        try {
+            // Never registered with this hub: the rejection names the target dialled.
+            val first = withTimeout(5_000) { connections.latestRejection.first { it != null } }!!
+            assertEquals("hub-a:7000", first.hub)
+            assertEquals("UNAUTHENTICATED", first.code)
+            assertNotNull(first.description)
+            assertFalse(first.at.isBefore(before), "${first.at} before $before")
+
+            Files.writeString(file, token)
+            await atMost wait until { connections.liveHubIds().isNotEmpty() }
+            val kept = assertNotNull(connections.latestRejection.value, "an acceptance does not clear it")
+            assertEquals("hub-a:7000", kept.hub)
+            assertEquals("UNAUTHENTICATED", kept.code)
+            delay(cap.toMillis() * 2) // past the next attempt: an accepted stream records nothing
+            assertEquals(kept, connections.latestRejection.value)
+
+            // A newer refusal replaces it, naming the hub that registered this instance before.
+            Files.writeString(file, "stale-again-" + UUID.randomUUID())
+            hub.dropInstance("l-1")
+            val second = withTimeout(5_000) { connections.latestRejection.first { it?.hub == hub.hubId } }!!
+            assertEquals("UNAUTHENTICATED", second.code)
+            assertTrue(second.at.isAfter(kept.at), "${second.at} after ${kept.at}")
+        } finally {
+            connections.stop()
+        }
+    }
+
+    @Test fun `a later refusal replaces the latest rejection even when the clock went backwards`() = runBlocking {
+        hub.auth = HubAuth.enforce(acl)
+        // Every reading is a minute earlier than the one before: wall-clock order is the reverse of the order of the refusals.
+        val readings = java.util.concurrent.atomic.AtomicLong()
+        val backwards = object : java.time.Clock() {
+            override fun getZone() = java.time.ZoneOffset.UTC
+            override fun withZone(zone: java.time.ZoneId?) = this
+            override fun instant(): Instant = Instant.parse("2026-11-15T12:00:00Z").minusSeconds(60 * readings.incrementAndGet())
+        }
+        val connections = HubConnections(
+            targets = HubTargets.parse("static://hub-a:7000"),
+            channelFactory = HubChannelFactory { InProcessChannelBuilder.forName(hub.name).build() },
+            serviceName = "svc-a",
+            instanceId = "b-1",
+            settings = settings(HubToken.NONE),
+            inbound = { req -> Reply.newBuilder().setRequestId(req.id).build() },
+            scope = scope,
+            clock = backwards,
+        )
+        connections.start()
+        try {
+            val first = withTimeout(5_000) { connections.latestRejection.first { it != null } }!!
+            val later = withTimeout(5_000) { connections.latestRejection.first { it != null && it.at.isBefore(first.at) } }!!
+            assertEquals("UNAUTHENTICATED", later.code, "the next refusal, stamped earlier by the clock, is the latest")
         } finally {
             connections.stop()
         }

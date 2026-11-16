@@ -1,6 +1,7 @@
 io.damoreira.kraken.messaging.config.KrakenMessagingAutoConfiguration
+io.damoreira.kraken.messaging.config.MemoryStoresAutoConfiguration
 io.damoreira.kraken.messaging.config.HubAutoConfiguration
-io.damoreira.kraken.messaging.config.KafkaEventsAutoConfiguration
+io.damoreira.kraken.messaging.config.EventsAutoConfiguration
 io.damoreira.kraken.messaging.config.SagaAutoConfiguration
 io.damoreira.kraken.messaging.config.ExternalAutoConfiguration
 io.damoreira.kraken.messaging.config.SagaMetricsAutoConfiguration

@@ -102,7 +102,9 @@ class LocalRawCommandSender(private val invoker: HandlerInvoker) : RawCommandSen
             headers = options.headers + ("correlationId" to correlationId),
         )
         // The caller's coroutine and thread, so nothing of a thread-bound transaction is lost; no identity on purpose.
-        return when (val result = withContext(CorrelationContext(correlationId)) { invoker.invokeCommand(type, payload, ctx, null) }) {
+        // The caller's trace too (a saga's command keeps the trace of its cause).
+        val trace = CorrelationContext(correlationId, CorrelationContext.currentTraceparent(currentCoroutineContext()))
+        return when (val result = withContext(trace) { invoker.invokeCommand(type, payload, ctx, null) }) {
             is InvocationResult.Success -> RawOutcome.Success
             is InvocationResult.Failure -> RawFailures.classify(HubErrors.toException(type, result.code, result.message, result.details))
         }

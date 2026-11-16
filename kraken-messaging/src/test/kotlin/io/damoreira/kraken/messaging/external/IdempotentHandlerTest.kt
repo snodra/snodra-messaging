@@ -1,8 +1,12 @@
 package io.damoreira.kraken.messaging.external
 
 import io.damoreira.kraken.messaging.saga.stateDoc
-import com.mongodb.client.MongoClient
-import com.mongodb.client.MongoClients
+import io.damoreira.kraken.messaging.changeExternalCallBehindTheStoresBack
+import io.damoreira.kraken.messaging.dispatchEntries
+import io.damoreira.kraken.messaging.externalCalls
+import io.damoreira.kraken.messaging.removeExternalCallBehindTheStoresBack
+import io.damoreira.kraken.messaging.sagas
+import io.damoreira.kraken.messaging.store.memory.MemoryMessageStore
 import io.damoreira.kraken.hub.v1.ErrorCode
 import io.damoreira.kraken.messaging.MessageContext
 import io.damoreira.kraken.messaging.RetryPolicy
@@ -16,11 +20,12 @@ import io.damoreira.kraken.messaging.handler.HandlerInvoker
 import io.damoreira.kraken.messaging.handler.HandlerRegistry
 import io.damoreira.kraken.messaging.handler.InvocationResult
 import io.damoreira.kraken.messaging.handler.QueryHandler
-import io.damoreira.kraken.messaging.kafka.LocalEventDispatcher
-import io.damoreira.kraken.messaging.kafka.OutboxEventBus
+import io.damoreira.kraken.messaging.events.LocalEventDispatcher
+import io.damoreira.kraken.messaging.events.OutboxEventBus
 import io.damoreira.kraken.messaging.saga.DispatchKind
 import io.damoreira.kraken.messaging.saga.LocalRawCommandSender
-import io.damoreira.kraken.messaging.saga.MarkFailingTemplate
+import io.damoreira.kraken.messaging.FaultyMessageStore
+import io.damoreira.kraken.messaging.store.ExternalCallRecord
 import io.damoreira.kraken.messaging.saga.RelaySettings
 import io.damoreira.kraken.messaging.saga.RlCharge
 import io.damoreira.kraken.messaging.saga.RlSaga
@@ -28,25 +33,15 @@ import io.damoreira.kraken.messaging.saga.RlStart
 import io.damoreira.kraken.messaging.saga.SagaDispatchDocument
 import io.damoreira.kraken.messaging.saga.SagaDispatchRelay
 import io.damoreira.kraken.messaging.saga.SagaDocument
-import io.damoreira.kraken.messaging.saga.SagaIndexes
 import io.damoreira.kraken.messaging.saga.SagaMetrics
 import io.damoreira.kraken.messaging.saga.SagaModelScanner
 import io.damoreira.kraken.messaging.saga.SagaRetry
 import io.damoreira.kraken.messaging.saga.SagaRuntime
 import io.damoreira.kraken.messaging.saga.SettableClock
-import io.damoreira.kraken.messaging.test.KrakenContainers
 import io.damoreira.kraken.messaging.tracing.TraceHeaders
 import kotlinx.coroutines.runBlocking
-import org.junit.jupiter.api.AfterAll
-import org.junit.jupiter.api.BeforeAll
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
-import org.junit.jupiter.api.TestInstance
-import org.springframework.data.mongodb.MongoTransactionManager
-import org.springframework.data.mongodb.core.SimpleMongoClientDatabaseFactory
-import org.springframework.data.mongodb.core.query.Criteria
-import org.springframework.data.mongodb.core.query.Query
-import org.springframework.data.mongodb.core.query.Update
 import org.springframework.transaction.support.TransactionTemplate
 import java.time.Duration
 import java.time.Instant
@@ -146,13 +141,11 @@ private class ExternalMetrics : SagaMetrics {
     override fun externalCall(handler: String, outcome: SagaMetrics.ExternalOutcome) { calls += handler to outcome }
 }
 
-@TestInstance(TestInstance.Lifecycle.PER_CLASS)
+/** Idempotent handlers (the interceptor and its external call records) over the in-memory message store (no container). */
 class IdempotentHandlerTest {
-    private val mongoContainer = KrakenContainers.mongo()
-    private lateinit var client: MongoClient
-    private lateinit var mongo: MarkFailingTemplate
+    private lateinit var memory: MemoryMessageStore
+    private lateinit var store: FaultyMessageStore
     private lateinit var tx: TransactionTemplate
-    private lateinit var txManager: MongoTransactionManager
     private val codec = JsonCodec()
     private val resolver = MessageTypeResolver("ex")
     private val start = Instant.parse("2026-11-03T10:00:00Z")
@@ -163,28 +156,11 @@ class IdempotentHandlerTest {
     private lateinit var invoker: HandlerInvoker
     private lateinit var metrics: ExternalMetrics
 
-    @BeforeAll
-    fun start() {
-        mongoContainer.start()
-        client = MongoClients.create(mongoContainer.connectionString + "/?directConnection=true")
-        val factory = SimpleMongoClientDatabaseFactory(client, "idempotent_handler_test")
-        mongo = MarkFailingTemplate(factory)
-        txManager = MongoTransactionManager(factory)
-        tx = TransactionTemplate(txManager)
-        SagaIndexes(mongo, Duration.ofDays(30), Duration.ofDays(7), Duration.ofDays(7), Duration.ofDays(30)).afterPropertiesSet()
-        ExternalCallIndexes(mongo, Duration.ofDays(30)).afterPropertiesSet()
-        listOf("processed_events", "saga_failures", "outbox", "external_calls").forEach { if (!mongo.collectionExists(it)) mongo.createCollection(it) }
-    }
-
-    @AfterAll
-    fun stop() {
-        client.close()
-        mongoContainer.stop()
-    }
-
     @BeforeEach
     fun setUp() {
-        listOf("sagas", "saga_dispatch", "saga_dispatch_leases", "deadlines", "saga_failures", "processed_events", "outbox", "external_calls").forEach { mongo.remove(Query(), it) }
+        memory = MemoryMessageStore()
+        store = FaultyMessageStore(memory)
+        tx = TransactionTemplate(store.transactions)
         clock.now = start
         adapter = ExPrinterAdapter()
         metrics = ExternalMetrics()
@@ -192,8 +168,7 @@ class IdempotentHandlerTest {
         invoker = HandlerInvoker(registry, codec, interceptor())
     }
 
-    private fun interceptor(txm: MongoTransactionManager? = txManager) =
-        IdempotencyInterceptor(mongo, codec, txm, clock, ExternalCallSettings(lease), metrics)
+    private fun interceptor() = IdempotencyInterceptor(store, codec, clock, ExternalCallSettings(lease), metrics)
 
     private fun call(type: String, payload: String, key: String? = "job-1", on: HandlerInvoker = invoker): InvocationResult {
         val headers = if (key == null) emptyMap() else mapOf("idempotency-key" to key)
@@ -202,7 +177,8 @@ class IdempotentHandlerTest {
     }
 
     private fun print(key: String? = "job-1", jobId: String = "j1") = call("ex.Print", """{"jobId":"$jobId","name":"hi"}""", key)
-    private fun record(key: String) = mongo.findById(key, ExternalCallDocument::class.java)
+    private fun record(key: String) = runBlocking { store.externalCalls.find(key) }
+    private fun insertCall(call: ExternalCallRecord) = runBlocking { store.externalCalls.insert(call) }
     private fun receipt(result: InvocationResult) = codec.decode((result as InvocationResult.Success).payload, ExReceipt::class)
     private fun failure(result: InvocationResult) = assertIs<InvocationResult.Failure>(result)
 
@@ -237,7 +213,8 @@ class IdempotentHandlerTest {
         assertTrue("printer refused hi" in second.message, second.message)
         val stored = record("job-1")!!
         assertEquals(ExternalCallStatus.FAILED, stored.status)
-        assertTrue("printer refused hi" in stored.error!!, stored.error)
+        val error = String(stored.error!!)
+        assertTrue("printer refused hi" in error, error)
         assertTrue(!ExternalFailureMarkers.isRetryable(second.details) && !ExternalFailureMarkers.isUnknownOutcome(second.details))
     }
 
@@ -271,7 +248,7 @@ class IdempotentHandlerTest {
 
     @Test
     fun `a failure to write SUCCEEDED after the body succeeded surfaces as an unknown outcome, never as a failed call`() {
-        mongo.failNextSucceededWrite.set(true)
+        store.failNextSucceededWrite.set(true)
 
         val first = failure(print())
 
@@ -285,7 +262,7 @@ class IdempotentHandlerTest {
 
     @Test
     fun `with externalIdempotent a failure to write SUCCEEDED is retryable, the partner de-duplicates the repeat`() {
-        mongo.failNextSucceededWrite.set(true)
+        store.failNextSucceededWrite.set(true)
 
         val first = failure(call("ex.PrintSafe", """{"jobId":"j1"}"""))
 
@@ -295,7 +272,7 @@ class IdempotentHandlerTest {
 
     @Test
     fun `an in-progress record past its lease becomes UNKNOWN and the call fails with UNKNOWN_OUTCOME`() {
-        mongo.insert(ExternalCallDocument("job-1", ExternalCallStatus.IN_PROGRESS, attempts = 1, updatedAt = start, leaseUntil = start.plus(lease)))
+        insertCall(ExternalCallRecord("job-1", ExternalCallStatus.IN_PROGRESS, attempts = 1, updatedAt = start, leaseUntil = start.plus(lease)))
         clock.now = start.plus(lease).plusSeconds(1) // the first call crashed mid-way, a lease ago
 
         val first = failure(print())
@@ -310,15 +287,13 @@ class IdempotentHandlerTest {
 
     @Test
     fun `a lapsed call that settles while its lease is given up is read again, so the caller gets its reply and not an unknown outcome`() {
-        mongo.insert(ExternalCallDocument("job-1", ExternalCallStatus.IN_PROGRESS, attempts = 1, updatedAt = start, leaseUntil = start.plus(lease)))
+        insertCall(ExternalCallRecord("job-1", ExternalCallStatus.IN_PROGRESS, attempts = 1, updatedAt = start, leaseUntil = start.plus(lease)))
         clock.now = start.plus(lease).plusSeconds(1)
         // The slow first call writes SUCCEEDED between this call's read of the record and its change of it to UNKNOWN.
-        mongo.afterNextExternalCallRead.set {
-            mongo.updateFirst(
-                Query(Criteria.where("_id").`is`("job-1")),
-                Update().set("status", ExternalCallStatus.SUCCEEDED).set("reply", String(codec.encode(ExReceipt("j1", 42)), Charsets.UTF_8)).unset("leaseUntil"),
-                ExternalCallDocument::class.java,
-            )
+        store.afterNextExternalCallRead.set {
+            memory.changeExternalCallBehindTheStoresBack("job-1") {
+                it.copy(status = ExternalCallStatus.SUCCEEDED, reply = codec.encode(ExReceipt("j1", 42)), leaseUntil = null)
+            }
         }
 
         val result = print()
@@ -332,11 +307,9 @@ class IdempotentHandlerTest {
     /** Inside call A's body: A's lease runs out and call B takes the record over (attempt 2, its own owner token, a fresh lease), as begin does. */
     private fun takenOverMeanwhile() {
         clock.now = start.plus(lease).plusSeconds(1)
-        mongo.updateFirst(
-            Query(Criteria.where("_id").`is`("job-1")),
-            Update().inc("attempts", 1).set("owner", "call-B").set("leaseUntil", clock.now.plus(lease)).set("updatedAt", clock.now),
-            ExternalCallDocument::class.java,
-        )
+        memory.changeExternalCallBehindTheStoresBack("job-1") {
+            it.copy(attempts = it.attempts + 1, owner = "call-B", leaseUntil = clock.now.plus(lease), updatedAt = clock.now)
+        }
     }
 
     private fun printSafe() = call("ex.PrintSafe", """{"jobId":"j1"}""")
@@ -399,8 +372,8 @@ class IdempotentHandlerTest {
             // Inside call A's body: A's lease runs out, B takes the record over and deletes it on a retryable failure, and C
             // inserts it afresh: attempts is 1 again, as it was when A began.
             clock.now = start.plus(lease).plusSeconds(1)
-            mongo.remove(Query(Criteria.where("_id").`is`("job-1")), ExternalCallDocument::class.java)
-            mongo.insert(ExternalCallDocument("job-1", ExternalCallStatus.IN_PROGRESS, attempts = 1, updatedAt = clock.now, leaseUntil = clock.now.plus(lease), owner = "call-C"))
+            memory.removeExternalCallBehindTheStoresBack("job-1")
+            insertCall(ExternalCallRecord("job-1", ExternalCallStatus.IN_PROGRESS, attempts = 1, updatedAt = clock.now, leaseUntil = clock.now.plus(lease), owner = "call-C"))
             ExReceipt(it.jobId, 1)
         }
 
@@ -416,10 +389,9 @@ class IdempotentHandlerTest {
     @Test
     fun `a call whose record another call turned UNKNOWN reports the unknown outcome, not a success it cannot record`() {
         adapter.behaviour = {
-            mongo.updateFirst(
-                Query(Criteria.where("_id").`is`("job-1")),
-                Update().set("status", ExternalCallStatus.UNKNOWN).unset("leaseUntil"), ExternalCallDocument::class.java,
-            ) // A's lease ran out and call B gave it up as UNKNOWN (and told its caller so)
+            memory.changeExternalCallBehindTheStoresBack("job-1") {
+                it.copy(status = ExternalCallStatus.UNKNOWN, leaseUntil = null)
+            } // A's lease ran out and call B gave it up as UNKNOWN (and told its caller so)
             ExReceipt(it.jobId, 1)
         }
 
@@ -432,7 +404,7 @@ class IdempotentHandlerTest {
 
     @Test
     fun `an in-progress record within its lease asks the caller to come back`() {
-        mongo.insert(ExternalCallDocument("job-1", ExternalCallStatus.IN_PROGRESS, attempts = 1, updatedAt = start, leaseUntil = start.plus(lease)))
+        insertCall(ExternalCallRecord("job-1", ExternalCallStatus.IN_PROGRESS, attempts = 1, updatedAt = start, leaseUntil = start.plus(lease)))
 
         val busy = failure(print())
 
@@ -443,7 +415,7 @@ class IdempotentHandlerTest {
 
     @Test
     fun `with externalIdempotent the expired call is retried`() {
-        mongo.insert(ExternalCallDocument("job-1", ExternalCallStatus.IN_PROGRESS, attempts = 1, updatedAt = start, leaseUntil = start.plus(lease)))
+        insertCall(ExternalCallRecord("job-1", ExternalCallStatus.IN_PROGRESS, attempts = 1, updatedAt = start, leaseUntil = start.plus(lease)))
         clock.now = start.plus(lease).plusSeconds(1)
 
         val result = call("ex.PrintSafe", """{"jobId":"j1"}""")
@@ -540,13 +512,13 @@ class IdempotentHandlerTest {
         val chargeInvoker = HandlerInvoker(chargeRegistry, codec, interceptor())
         val sagaResolver = MessageTypeResolver("rl")
         val runtime = SagaRuntime(
-            types = SagaModelScanner(sagaResolver, codec).scan(listOf(RlSaga::class)), mongo = mongo, tx = tx, codec = codec, typeResolver = sagaResolver,
+            types = SagaModelScanner(sagaResolver, codec).scan(listOf(RlSaga::class)), ports = store.sagas, tx = tx, codec = codec, typeResolver = sagaResolver,
             beans = { error("no beans") }, clock = clock,
             retry = SagaRetry(RetryPolicy(maxAttempts = 2, initialBackoff = Duration.ofMillis(1), multiplier = 1.0, maxBackoff = Duration.ofMillis(1))),
         )
-        val dispatcher = LocalEventDispatcher(chargeRegistry, chargeInvoker, tx, mongo, runtime)
+        val dispatcher = LocalEventDispatcher(chargeRegistry, chargeInvoker, store, runtime)
         val relay = SagaDispatchRelay(
-            mongo, tx, LocalRawCommandSender(chargeInvoker), OutboxEventBus(mongo, codec, sagaResolver, TraceHeaders(null, null)), dispatcher, codec, sagaResolver,
+            store.sagas.dispatch, tx, LocalRawCommandSender(chargeInvoker), OutboxEventBus(store.outbox, codec, sagaResolver, TraceHeaders(null, null)), dispatcher, codec, sagaResolver,
             clock, RelaySettings(maxAttempts = 3, initialBackoff = Duration.ofSeconds(1)),
         )
         val start = RlStart("o1")
@@ -554,13 +526,13 @@ class IdempotentHandlerTest {
         return Harness(relay, runtime, charge)
     }
 
-    private fun dispatchEntry() = mongo.findAll(SagaDispatchDocument::class.java).single { it.kind == DispatchKind.COMMAND }
+    private fun dispatchEntry() = memory.dispatchEntries().single { it.kind == DispatchKind.COMMAND }
 
     @Test
     fun `a crash between the send and marking it dispatched re-sends with the same key and the adapter runs its body once`() {
         val h = harness()
         val key = dispatchEntry().id
-        mongo.failNextMark.set(true)
+        store.failNextMark.set(true)
 
         h.relay.pollOnce()
         assertNull(dispatchEntry().dispatchedAt, "the mark was lost")
@@ -570,22 +542,22 @@ class IdempotentHandlerTest {
         assertEquals(1, h.charge.bodies.get(), "the same key: the stored reply, the body did not run again")
         assertNotNull(dispatchEntry().dispatchedAt)
         assertEquals(ExternalCallStatus.SUCCEEDED, record(key)!!.status)
-        assertEquals(listOf(key), mongo.findAll(ExternalCallDocument::class.java).map { it.id })
+        assertEquals(listOf(key), memory.externalCalls().map { it.id })
     }
 
     @Test
     fun `the relay maps UNKNOWN_OUTCOME to SagaCommandFailed(reason = UNKNOWN_OUTCOME)`() {
         val h = harness()
         val entry = dispatchEntry()
-        mongo.insert(ExternalCallDocument(entry.id, ExternalCallStatus.IN_PROGRESS, attempts = 1, updatedAt = start, leaseUntil = start.plus(lease)))
+        insertCall(ExternalCallRecord(entry.id, ExternalCallStatus.IN_PROGRESS, attempts = 1, updatedAt = start, leaseUntil = start.plus(lease)))
         clock.now = start.plus(lease).plusSeconds(1)
 
         h.relay.pollOnce()
 
-        val saga = mongo.findAll(SagaDocument::class.java).single()
+        val saga = memory.sagas().single()
         assertEquals(listOf("rl.Charge:UNKNOWN_OUTCOME"), saga.stateDoc.getList("failures", String::class.java))
         assertEquals(0, h.charge.bodies.get(), "an unknown outcome is not called again")
         assertNotNull(dispatchEntry().failedAt)
-        assertEquals(0, mongo.count(Query(Criteria.where("failedAt").`is`(null).and("dispatchedAt").`is`(null)), "saga_dispatch"), "nothing left pending")
+        assertEquals(0, memory.dispatchEntries().count { it.failedAt == null && it.dispatchedAt == null }, "nothing left pending")
     }
 }

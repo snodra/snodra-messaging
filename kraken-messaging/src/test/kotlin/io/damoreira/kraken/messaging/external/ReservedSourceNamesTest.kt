@@ -4,12 +4,11 @@ import io.damoreira.kraken.messaging.api.Event
 import io.damoreira.kraken.messaging.api.MessageType
 import io.damoreira.kraken.messaging.codec.JsonCodec
 import io.damoreira.kraken.messaging.codec.MessageTypeResolver
-import io.damoreira.kraken.messaging.config.KrakenMessagingProperties
-import io.damoreira.kraken.messaging.kafka.LocalEventDispatcher
+import io.damoreira.kraken.messaging.events.LocalEventDispatcher
 import io.mockk.mockk
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
-import org.springframework.data.mongodb.core.MongoTemplate
+import io.damoreira.kraken.messaging.store.ProcessedEventStore
 import kotlin.test.assertTrue
 
 @MessageType("rs.Thing")
@@ -22,23 +21,23 @@ data class RsThing(val id: String) : Event
 class ReservedSourceNamesTest {
     private val translator = ExternalRecordTranslator { null }
 
-    @Test fun `a partner Kafka source named like a marker family fails the startup naming it`() {
+    @Test fun `a partner source named like a marker family fails the startup naming it`() {
         for (name in listOf("processor", "saga", "ingress", "failed")) {
             val e = assertThrows<IllegalStateException> {
-                ExternalKafkaSources(
-                    sources = mapOf(name to KrakenMessagingProperties.Source(topic = "partner")),
+                ExternalSources(
+                    sources = mapOf(name to mockk<ExternalSourceProvider>(relaxed = true)),
                     translators = mapOf(name to translator),
                     dispatcher = mockk<LocalEventDispatcher>(relaxed = true),
-                    codec = JsonCodec(), typeResolver = MessageTypeResolver("rs"), serviceName = "svc", defaultBootstrapServers = "localhost:9",
+                    codec = JsonCodec(), typeResolver = MessageTypeResolver("rs"),
                 )
             }
-            assertTrue(e.message!!.contains("kraken.messaging.external.kafka.sources.$name"), e.message)
+            assertTrue(e.message!!.contains("external source '$name'"), e.message)
             assertTrue(e.message!!.contains("reserved"), e.message)
         }
     }
 
     @Test fun `a webhook source named like a marker family is refused`() {
-        val ingress = ExternalEventIngress(mockk<LocalEventDispatcher>(relaxed = true), mockk<MongoTemplate>(relaxed = true), JsonCodec(), MessageTypeResolver("rs"))
+        val ingress = ExternalEventIngress(mockk<LocalEventDispatcher>(relaxed = true), mockk<ProcessedEventStore>(relaxed = true), JsonCodec(), MessageTypeResolver("rs"))
         for (name in listOf("processor", "saga", "ingress", "failed")) {
             val e = assertThrows<IllegalArgumentException> { ingress.accept(name, "k-1", RsThing("1")) }
             assertTrue(e.message!!.contains(name) && e.message!!.contains("reserved"), e.message)

@@ -32,7 +32,7 @@ annotation class StartSaga(val forceNew: Boolean = false)
  * property may be left empty. [payloadType] narrows a handler declared on a supertype of the event.
  *
  * Besides the event (first parameter) a handler may take `SagaLifecycle`, `SagaCommands`, `DeadlineManager`,
- * `MessageContext` and any Spring bean by type. It must not be `suspend`: it runs inside the saga's Mongo transaction.
+ * `MessageContext` and any Spring bean by type. It must not be `suspend`: it runs inside the saga's thread-bound store transaction.
  */
 @Target(AnnotationTarget.FUNCTION)
 @Retention(AnnotationRetention.RUNTIME)

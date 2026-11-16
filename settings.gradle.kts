@@ -16,6 +16,10 @@ dependencyResolutionManagement {
 
 include("kraken-messaging-api")
 include("kraken-messaging")
+include("kraken-messaging-kafka")
+include("kraken-messaging-rabbitmq")
+include("kraken-messaging-mongo")
+include("kraken-messaging-jdbc")
 include("kraken-messaging-test")
 
 
@@ -24,3 +28,5 @@ include("examples:examples-api")
 include("examples:service-b")
 include("examples:service-a")
 include("examples:fake-printer")
+include("examples:orders-sql")
+include("examples:conformance-service")

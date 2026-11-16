@@ -60,9 +60,9 @@ class HubSecurityConfigTest {
 
     private fun starter() = ApplicationContextRunner()
         .withConfiguration(
-            AutoConfigurations.of(KrakenMessagingAutoConfiguration::class.java, HubAutoConfiguration::class.java, KafkaEventsAutoConfiguration::class.java),
+            AutoConfigurations.of(KrakenMessagingAutoConfiguration::class.java, HubAutoConfiguration::class.java, EventsAutoConfiguration::class.java),
         )
-        .withPropertyValues(*required, "kraken.messaging.hub.enabled=true", "kraken.messaging.kafka.consumer.enabled=false", "kraken.messaging.outbox.enabled=false")
+        .withPropertyValues(*required, "kraken.messaging.hub.enabled=true", "kraken.messaging.events.consumer.enabled=false", "kraken.messaging.outbox.enabled=false")
         .withBean("krakenHubChannelFactory", HubChannelFactory::class.java, { HubChannelFactory { hub.channel() } })
 
     // --- binding ---
@@ -216,9 +216,9 @@ class HubSecurityConfigTest {
     @Test fun `a CA file that cannot be used fails the startup naming tls ca-file`(@TempDir dir: Path) {
         val bad = dir.resolve("ca.pem").also { Files.writeString(it, "not a certificate") }
         ApplicationContextRunner()
-            .withConfiguration(AutoConfigurations.of(KrakenMessagingAutoConfiguration::class.java, HubAutoConfiguration::class.java, KafkaEventsAutoConfiguration::class.java))
+            .withConfiguration(AutoConfigurations.of(KrakenMessagingAutoConfiguration::class.java, HubAutoConfiguration::class.java, EventsAutoConfiguration::class.java))
             .withPropertyValues(*required, "kraken.messaging.hub.enabled=true", "kraken.messaging.hub.tls.enabled=true", "kraken.messaging.hub.tls.ca-file=$bad",
-                "kraken.messaging.kafka.consumer.enabled=false", "kraken.messaging.outbox.enabled=false")
+                "kraken.messaging.events.consumer.enabled=false", "kraken.messaging.outbox.enabled=false")
             .run { context ->
                 val chain = generateSequence(context.startupFailure as Throwable?) { it.cause }.joinToString(" | ") { it.message.orEmpty() }
                 assertTrue("kraken.messaging.hub.tls.ca-file" in chain, chain)
@@ -227,9 +227,9 @@ class HubSecurityConfigTest {
 
     @Test fun `the default channel factory is the starter's when no override is defined`() {
         ApplicationContextRunner()
-            .withConfiguration(AutoConfigurations.of(KrakenMessagingAutoConfiguration::class.java, HubAutoConfiguration::class.java, KafkaEventsAutoConfiguration::class.java))
+            .withConfiguration(AutoConfigurations.of(KrakenMessagingAutoConfiguration::class.java, HubAutoConfiguration::class.java, EventsAutoConfiguration::class.java))
             .withPropertyValues(*required, "kraken.messaging.hub.enabled=true", "kraken.messaging.hub.tls.enabled=true",
-                "kraken.messaging.kafka.consumer.enabled=false", "kraken.messaging.outbox.enabled=false")
+                "kraken.messaging.events.consumer.enabled=false", "kraken.messaging.outbox.enabled=false")
             .run { context ->
                 assertEquals(null, context.startupFailure)
                 assertTrue(context.getBean("krakenHubChannelFactory") is DefaultHubChannelFactory)

@@ -47,12 +47,14 @@ class DeadLetterError(type: String, message: String) {
  * is valid UTF-8, [payloadBinary] otherwise; both are null for an empty value ([value] gives the bytes either way).
  */
 data class DeadLetter(
-    /** `<processor>:<topic>:<partition>:<offset>`. */
+    /** `<processor>:<source>:<segment>:<position>`. */
     val id: String,
     val processor: String,
-    val topic: String,
-    val partition: Int,
-    val offset: Long,
+    /** The source the record was read from. */
+    val source: String,
+    /** The record's segment of [source] and its position there: the event store's opaque strings. */
+    val segment: String,
+    val position: String,
     /** The record's key (lossy UTF-8), null when it had none. */
     val key: String?,
     /** The `id` header, null when the record had none or a blank one. */
@@ -80,7 +82,7 @@ data class DeadLetter(
     fun value(): ByteArray = payload?.toByteArray(Charsets.UTF_8) ?: payloadBinary ?: ByteArray(0)
 
     override fun equals(other: Any?): Boolean = other is DeadLetter && id == other.id && processor == other.processor &&
-        topic == other.topic && partition == other.partition && offset == other.offset && key == other.key &&
+        source == other.source && segment == other.segment && position == other.position && key == other.key &&
         eventId == other.eventId && eventType == other.eventType && headers == other.headers && payload == other.payload &&
         (payloadBinary?.contentEquals(other.payloadBinary ?: return false) ?: (other.payloadBinary == null)) &&
         reason == other.reason && error == other.error && blockedBy == other.blockedBy && attempts == other.attempts &&
@@ -100,7 +102,7 @@ sealed interface RetryResult {
     /** Stage 1 failed again: the letter stays, with `attempts + 1`, the new `error`, `lastAttemptAt` and reason HANDLER_FAILED. */
     data class Failed(val message: String) : RetryResult
 
-    /** An earlier letter of its key ([headId], the lowest offset) is still parked: retry that one first. */
+    /** An earlier letter of its key ([headId], the earliest position) is still parked: retry that one first. */
     data class Blocked(val headId: String) : RetryResult
 
     /** An INVALID letter cannot be retried, only discarded. */

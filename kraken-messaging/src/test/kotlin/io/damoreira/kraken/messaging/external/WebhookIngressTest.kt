@@ -1,7 +1,9 @@
 package io.damoreira.kraken.messaging.external
 
+import io.damoreira.kraken.messaging.markerIds
+import io.damoreira.kraken.messaging.sagas
 import io.damoreira.kraken.messaging.saga.stateDoc
-import com.mongodb.client.MongoClients
+import io.damoreira.kraken.messaging.store.memory.MemoryMessageStore
 import io.damoreira.kraken.messaging.RetryPolicy
 import io.damoreira.kraken.messaging.api.Event
 import io.damoreira.kraken.messaging.api.MessageType
@@ -10,26 +12,15 @@ import io.damoreira.kraken.messaging.codec.MessageTypeResolver
 import io.damoreira.kraken.messaging.handler.EventHandler
 import io.damoreira.kraken.messaging.handler.HandlerInvoker
 import io.damoreira.kraken.messaging.handler.HandlerRegistry
-import io.damoreira.kraken.messaging.kafka.LocalEventDispatcher
+import io.damoreira.kraken.messaging.events.LocalEventDispatcher
 import io.damoreira.kraken.messaging.saga.Saga
-import io.damoreira.kraken.messaging.saga.SagaDocument
 import io.damoreira.kraken.messaging.saga.SagaEventHandler
-import io.damoreira.kraken.messaging.saga.SagaIndexes
 import io.damoreira.kraken.messaging.saga.SagaModelScanner
 import io.damoreira.kraken.messaging.saga.SagaRetry
 import io.damoreira.kraken.messaging.saga.SagaRuntime
 import io.damoreira.kraken.messaging.saga.StartSaga
-import io.damoreira.kraken.messaging.test.KrakenContainers
-import org.junit.jupiter.api.AfterAll
-import org.junit.jupiter.api.BeforeAll
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
-import org.junit.jupiter.api.TestInstance
-import org.springframework.data.mongodb.MongoTransactionManager
-import org.springframework.data.mongodb.core.MongoTemplate
-import org.springframework.data.mongodb.core.SimpleMongoClientDatabaseFactory
-import org.springframework.data.mongodb.core.query.Criteria
-import org.springframework.data.mongodb.core.query.Query
 import org.springframework.transaction.support.TransactionTemplate
 import java.time.Duration
 import java.util.concurrent.CopyOnWriteArrayList
@@ -69,43 +60,30 @@ class WhHandlers {
     }
 }
 
-@TestInstance(TestInstance.Lifecycle.PER_CLASS)
+/** The webhook ingress through the dispatcher and a saga, over the in-memory message store (no container). */
 class WebhookIngressTest {
-    private val mongoContainer = KrakenContainers.mongo()
-    private lateinit var mongo: MongoTemplate
+    private lateinit var store: MemoryMessageStore
     private lateinit var tx: TransactionTemplate
     private val codec = JsonCodec()
     private val resolver = MessageTypeResolver("wh")
     private lateinit var handlers: WhHandlers
     private lateinit var ingress: ExternalEventIngress
 
-    @BeforeAll
-    fun start() {
-        mongoContainer.start()
-        val factory = SimpleMongoClientDatabaseFactory(MongoClients.create(mongoContainer.connectionString + "/?directConnection=true"), "webhook_ingress_test")
-        mongo = MongoTemplate(factory)
-        tx = TransactionTemplate(MongoTransactionManager(factory))
-        SagaIndexes(mongo, Duration.ofDays(30), Duration.ofDays(7), Duration.ofDays(7), Duration.ofDays(30)).afterPropertiesSet()
-        listOf("processed_events", "saga_failures").forEach { if (!mongo.collectionExists(it)) mongo.createCollection(it) }
-    }
-
-    @AfterAll
-    fun stop() = mongoContainer.stop()
-
     @BeforeEach
     fun setUp() {
-        listOf("sagas", "saga_dispatch", "deadlines", "saga_failures", "processed_events").forEach { mongo.remove(Query(), it) }
+        store = MemoryMessageStore()
+        tx = TransactionTemplate(store.transactions)
         handlers = WhHandlers()
         val registry = HandlerRegistry(resolver).also { it.register(handlers) }
         val runtime = SagaRuntime(
-            types = SagaModelScanner(resolver, codec).scan(listOf(WhSaga::class)), mongo = mongo, tx = tx, codec = codec, typeResolver = resolver,
+            types = SagaModelScanner(resolver, codec).scan(listOf(WhSaga::class)), ports = store.sagas, tx = tx, codec = codec, typeResolver = resolver,
             beans = { error("no beans") },
             retry = SagaRetry(RetryPolicy(maxAttempts = 2, initialBackoff = Duration.ofMillis(1), multiplier = 1.0, maxBackoff = Duration.ofMillis(1))),
         )
-        ingress = ExternalEventIngress(LocalEventDispatcher(registry, HandlerInvoker(registry, codec), tx, mongo, runtime), mongo, codec, resolver)
+        ingress = ExternalEventIngress(LocalEventDispatcher(registry, HandlerInvoker(registry, codec), store, runtime), store.processedEvents, codec, resolver)
     }
 
-    private fun sagaOf(jobId: String) = mongo.findAll(SagaDocument::class.java).singleOrNull { it.stateDoc.getString("jobId") == jobId }
+    private fun sagaOf(jobId: String) = store.sagas().singleOrNull { it.stateDoc.getString("jobId") == jobId }
 
     @Test
     fun `an accepted webhook event reaches a saga`() {
@@ -115,8 +93,8 @@ class WebhookIngressTest {
         assertEquals(ExternalEventIngress.Result.ACCEPTED, result)
         assertEquals(1, sagaOf("j1")?.stateDoc?.getInteger("hooks"))
         assertEquals(listOf("j1"), handlers.seen.toList())
-        assertTrue(mongo.exists(Query(Criteria.where("_id").`is`("processor:default:printer:evt-1")), "processed_events"), "the dedupe id is <source>:<dedupeKey>")
-        assertTrue(mongo.exists(Query(Criteria.where("_id").`is`("saga:wh.Job:printer:evt-1")), "processed_events"))
+        assertTrue("processor:default:printer:evt-1" in store.markerIds(), "the dedupe id is <source>:<dedupeKey>")
+        assertTrue("saga:wh.Job:printer:evt-1" in store.markerIds())
     }
 
     @Test

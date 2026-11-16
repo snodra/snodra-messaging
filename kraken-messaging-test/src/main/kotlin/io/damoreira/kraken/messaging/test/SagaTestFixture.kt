@@ -9,25 +9,27 @@ import io.damoreira.kraken.messaging.codec.MessageTypeResolver
 import io.damoreira.kraken.messaging.saga.Association
 import io.damoreira.kraken.messaging.saga.DeadlineDocument
 import io.damoreira.kraken.messaging.saga.DeadlineStatus
-import io.damoreira.kraken.messaging.saga.DeadlineStore
 import io.damoreira.kraken.messaging.saga.DispatchKind
 import io.damoreira.kraken.messaging.saga.SagaCommandFailed
 import io.damoreira.kraken.messaging.saga.SagaDispatchDocument
-import io.damoreira.kraken.messaging.saga.SagaDispatchRecorder
 import io.damoreira.kraken.messaging.saga.SagaDocument
 import io.damoreira.kraken.messaging.saga.SagaFailureDocument
-import io.damoreira.kraken.messaging.saga.SagaFailureStore
-import io.damoreira.kraken.messaging.saga.SagaMarkerStore
 import io.damoreira.kraken.messaging.saga.SagaModelScanner
-import io.damoreira.kraken.messaging.saga.SagaPorts
-import io.damoreira.kraken.messaging.saga.SagaRepository
 import io.damoreira.kraken.messaging.saga.SagaRetry
 import io.damoreira.kraken.messaging.saga.SagaRuntime
+import io.damoreira.kraken.messaging.store.DeadlineStore
+import io.damoreira.kraken.messaging.store.SagaDispatchStore
+import io.damoreira.kraken.messaging.store.SagaFailureStore
+import io.damoreira.kraken.messaging.store.SagaMarkerStore
+import io.damoreira.kraken.messaging.store.SagaRepository
+import io.damoreira.kraken.messaging.store.SagaStores
 import org.springframework.dao.DuplicateKeyException
 import org.springframework.transaction.TransactionStatus
 import org.springframework.transaction.support.SimpleTransactionStatus
 import org.springframework.transaction.support.TransactionCallback
 import org.springframework.transaction.support.TransactionOperations
+import tools.jackson.databind.JsonNode
+import tools.jackson.databind.json.JsonMapper
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
@@ -252,14 +254,17 @@ private class FixtureClock(@Volatile var now: Instant) : Clock() {
 
 /**
  * The saga persistence ports in memory, and the transaction: a step that throws restores the state it started from, as
- * a rolled-back Mongo transaction would (the exactly-once marker included, so a failing event is parked, not skipped).
+ * a rolled-back store transaction would (the exactly-once marker included, so a failing event is parked, not skipped).
+ * The relay's and the scheduler's ports work too (the fixture itself fires deadlines and records dispatches only).
  */
 private class InMemorySagaStore : TransactionOperations {
     val sagas = LinkedHashMap<String, SagaDocument>()
     val dispatch = ArrayList<SagaDispatchDocument>()
+    val leases = HashMap<String, Pair<String, Instant>>()
     val deadlines = LinkedHashMap<String, DeadlineDocument>()
     val failures = LinkedHashMap<String, SagaFailureDocument>()
     val markers = HashSet<String>()
+    private val json = JsonMapper.builder().build()
 
     override fun <T> execute(action: TransactionCallback<T>): T {
         val before = Snapshot(LinkedHashMap(sagas), ArrayList(dispatch), LinkedHashMap(deadlines), LinkedHashMap(failures), HashSet(markers))
@@ -285,7 +290,20 @@ private class InMemorySagaStore : TransactionOperations {
         markers.clear(); markers.addAll(s.markers)
     }
 
-    fun ports() = SagaPorts(
+    /** Refuses what the outbox refuses (see `OutboxEntry`): anything but a JSON object whose integers fit in a signed 64-bit integer. */
+    private fun requireOutboxPayload(e: SagaDispatchDocument) {
+        val what = "saga event ${e.id} (${e.type})"
+        val tree = try {
+            json.readTree(e.payload)
+        } catch (x: RuntimeException) {
+            throw IllegalArgumentException("The payload of $what is not JSON: ${x.message}", x)
+        }
+        require(tree.isObject) { "The payload of $what is not a JSON object: ${e.payload}" }
+        fun fits(node: JsonNode): Boolean = if (node.isIntegralNumber) node.canConvertToLong() else node.values().all(::fits)
+        require(fits(tree)) { "The payload of $what has an integer outside the signed 64-bit range: ${e.payload}" }
+    }
+
+    fun ports() = SagaStores(
         sagas = object : SagaRepository {
             override fun findById(id: String) = sagas[id]
 
@@ -305,11 +323,72 @@ private class InMemorySagaStore : TransactionOperations {
                 sagas[saga.id] = saga
                 return true
             }
+
+            override fun countLiveByType() = sagas.values.filter { !it.ended }.groupingBy { it.type }.eachCount().mapValues { it.value.toLong() }
         },
-        dispatch = object : SagaDispatchRecorder {
+        dispatch = object : SagaDispatchStore {
             override fun record(entries: List<SagaDispatchDocument>) {
+                for (e in entries) if (e.kind == DispatchKind.EVENT) requireOutboxPayload(e)
                 dispatch += entries
             }
+
+            private fun pendingEntries() = dispatch.filter { it.dispatchedAt == null && it.failedAt == null }
+
+            override fun dueSagas(now: Instant, exclude: Collection<String>, limit: Int) =
+                pendingEntries().filter { it.sagaId !in exclude }.groupBy { it.sagaId }.mapValues { (_, entries) -> entries.minBy { it.seq } }
+                    .values.filter { it.nextAttemptAt?.isAfter(now) != true }
+                    .sortedWith(compareBy({ it.createdAt }, { it.sagaId })).take(limit).map { it.sagaId }
+
+            override fun nextPending(sagaId: String) = pendingEntries().filter { it.sagaId == sagaId }.minByOrNull { it.seq }
+
+            private fun update(id: String, change: (SagaDispatchDocument) -> SagaDispatchDocument) {
+                val i = dispatch.indexOfFirst { it.id == id }
+                if (i >= 0) dispatch[i] = change(dispatch[i])
+            }
+
+            override fun markDispatched(id: String, now: Instant) = update(id) { it.copy(dispatchedAt = now) }
+
+            override fun scheduleRetry(id: String, attempts: Int, nextAttemptAt: Instant) =
+                update(id) { it.copy(attempts = attempts, nextAttemptAt = nextAttemptAt) }
+
+            override fun markFailed(id: String, attempts: Int, reason: SagaCommandFailed.Reason, message: String, now: Instant, noticeNextAt: Instant) =
+                update(id) {
+                    it.copy(
+                        attempts = attempts, failedAt = now, failureReason = reason, failureMessage = message,
+                        noticePending = true, noticeAttempts = 0, noticeNextAt = noticeNextAt,
+                    )
+                }
+
+            override fun claimDueNotices(now: Instant, reserveUntil: Instant, limit: Int): List<SagaDispatchDocument> {
+                val due = dispatch.filter { it.noticePending == true && it.noticeNextAt?.isAfter(now) != true }
+                    .sortedBy { it.noticeNextAt ?: Instant.MIN }.take(limit)
+                due.forEach { entry -> update(entry.id) { it.copy(noticeNextAt = reserveUntil) } }
+                return due.map { it.copy(noticeNextAt = reserveUntil) }
+            }
+
+            override fun scheduleNoticeRetry(id: String, noticeAttempts: Int, noticeNextAt: Instant) =
+                update(id) { it.copy(noticeAttempts = noticeAttempts, noticeNextAt = noticeNextAt) }
+
+            override fun clearNotice(id: String) = update(id) { it.copy(noticePending = null, noticeAttempts = null, noticeNextAt = null) }
+
+            override fun claimLease(sagaId: String, owner: String, until: Instant, now: Instant): Boolean {
+                val held = leases[sagaId]
+                if (held != null && !held.second.isBefore(now)) return false
+                leases[sagaId] = owner to until
+                return true
+            }
+
+            override fun renewLease(sagaId: String, owner: String, until: Instant): Boolean {
+                if (leases[sagaId]?.first != owner) return false
+                leases[sagaId] = owner to until
+                return true
+            }
+
+            override fun releaseLease(sagaId: String, owner: String) {
+                if (leases[sagaId]?.first == owner) leases.remove(sagaId)
+            }
+
+            override fun pending() = pendingEntries().size.toLong()
         },
         deadlines = object : DeadlineStore {
             override fun insert(deadline: DeadlineDocument) {
@@ -335,6 +414,15 @@ private class InMemorySagaStore : TransactionOperations {
                 deadlines[id] = d.copy(status = DeadlineStatus.FIRED, finishedAt = now)
                 return true
             }
+
+            private fun due(now: Instant) = deadlines.values.filter { it.status == DeadlineStatus.SCHEDULED && !it.dueAt.isAfter(now) }
+
+            override fun claimDue(owner: String, now: Instant, leaseUntil: Instant): DeadlineDocument? {
+                val next = due(now).filter { it.claimedUntil?.isBefore(now) ?: true }.minByOrNull { it.dueAt } ?: return null
+                return next.copy(claimedBy = owner, claimedUntil = leaseUntil).also { deadlines[it.id] = it }
+            }
+
+            override fun countOverdueByName(now: Instant) = due(now).groupingBy { it.name }.eachCount().mapValues { it.value.toLong() }
         },
         failures = object : SagaFailureStore {
             override fun find(id: String) = failures[id]

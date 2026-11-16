@@ -1892,7 +1892,7 @@ start_intruder() { # <service name> <token>
     -e KRAKEN_KAFKA_BOOTSTRAP=kafka:19092 \
     -e KRAKEN_MONGODB_URI="mongodb://mongodb:27017/smoke-intruder?replicaSet=rs0" \
     -e SERVER_PORT=8080 \
-    -e KRAKEN_MESSAGING_KAFKA_CONSUMER_ENABLED=false -e KRAKEN_MESSAGING_OUTBOX_ENABLED=false \
+    -e KRAKEN_MESSAGING_EVENTS_CONSUMER_ENABLED=false -e KRAKEN_MESSAGING_OUTBOX_ENABLED=false \
     -e KRAKEN_MESSAGING_HUB_TOKEN="$2" \
     -e KRAKEN_MESSAGING_HUB_TLS_ENABLED=true -e KRAKEN_MESSAGING_HUB_TLS_CA_FILE=/etc/kraken/hub-ca.pem \
     -v "$SECRETS/ca.pem:/etc/kraken/hub-ca.pem:ro" \

@@ -1,22 +1,18 @@
 package io.damoreira.kraken.messaging.saga
 
-import com.mongodb.client.MongoClients
+import io.damoreira.kraken.messaging.dispatchEntries
+import io.damoreira.kraken.messaging.markerIds
+import io.damoreira.kraken.messaging.sagas
+import io.damoreira.kraken.messaging.store.memory.MemoryMessageStore
 import io.damoreira.kraken.messaging.MessageContext
 import io.damoreira.kraken.messaging.RetryPolicy
 import io.damoreira.kraken.messaging.api.Event
 import io.damoreira.kraken.messaging.codec.JsonCodec
 import io.damoreira.kraken.messaging.codec.MessageTypeResolver
-import io.damoreira.kraken.messaging.test.KrakenContainers
-import org.junit.jupiter.api.AfterAll
-import org.junit.jupiter.api.BeforeAll
+import io.damoreira.kraken.messaging.store.SagaFailureStore
+import io.damoreira.kraken.messaging.store.SagaStores
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
-import org.junit.jupiter.api.TestInstance
-import org.springframework.data.mongodb.MongoTransactionManager
-import org.springframework.data.mongodb.core.MongoTemplate
-import org.springframework.data.mongodb.core.SimpleMongoClientDatabaseFactory
-import org.springframework.data.mongodb.core.query.Criteria
-import org.springframework.data.mongodb.core.query.Query
 import org.springframework.transaction.support.TransactionSynchronization
 import org.springframework.transaction.support.TransactionSynchronizationManager
 import org.springframework.transaction.support.TransactionTemplate
@@ -53,7 +49,7 @@ class RtFlakySaga {
  * A failure store that plays a `discard` committed by someone else right after the [after]th rolled-back attempt of a
  * retry, i.e. between the last failed attempt and the bookkeeping that records it.
  */
-private class DiscardAfterRollbacks(private val inner: SagaFailureStore, private val plain: MongoTemplate, private val after: Int) : SagaFailureStore by inner {
+private class DiscardAfterRollbacks(private val inner: SagaFailureStore, private val after: Int) : SagaFailureStore by inner {
     val rollbacks = AtomicInteger()
 
     override fun delete(id: String): Boolean {
@@ -62,7 +58,7 @@ private class DiscardAfterRollbacks(private val inner: SagaFailureStore, private
             TransactionSynchronizationManager.registerSynchronization(object : TransactionSynchronization {
                 override fun afterCompletion(status: Int) {
                     if (status == TransactionSynchronization.STATUS_ROLLED_BACK && rollbacks.incrementAndGet() == after) {
-                        plain.remove(Query(Criteria.where("_id").`is`(id)), SagaFailureDocument::class.java)
+                        inner.delete(id) // the transaction ended: this one commits on its own, as another instance's would
                     }
                 }
             })
@@ -71,11 +67,8 @@ private class DiscardAfterRollbacks(private val inner: SagaFailureStore, private
     }
 }
 
-@TestInstance(TestInstance.Lifecycle.PER_CLASS)
+/** Parked saga events, their retry and discard, over the in-memory message store (no container). */
 class SagaFailuresTest {
-    private lateinit var plain: MongoTemplate
-    private val mongoContainer = KrakenContainers.mongo()
-    private lateinit var mongo: MongoTemplate
     private lateinit var tx: TransactionTemplate
     private val codec = JsonCodec()
     private val resolver = MessageTypeResolver("rt")
@@ -83,30 +76,18 @@ class SagaFailuresTest {
     private val clock = SettableClock(start)
     private lateinit var runtime: SagaRuntime
     private lateinit var failures: SagaFailures
-
-    @BeforeAll
-    fun start() {
-        mongoContainer.start()
-        val factory = SimpleMongoClientDatabaseFactory(MongoClients.create(mongoContainer.connectionString + "/?directConnection=true"), "saga_failures_test")
-        mongo = MongoTemplate(factory)
-        plain = MongoTemplate(SimpleMongoClientDatabaseFactory(MongoClients.create(mongoContainer.connectionString + "/?directConnection=true"), "saga_failures_test"))
-        tx = TransactionTemplate(MongoTransactionManager(factory))
-        SagaIndexes(mongo, Duration.ofDays(30), Duration.ofDays(7), Duration.ofDays(7), Duration.ofDays(30)).afterPropertiesSet()
-        listOf("processed_events", "saga_failures").forEach { if (!mongo.collectionExists(it)) mongo.createCollection(it) }
-    }
-
-    @AfterAll
-    fun stop() = mongoContainer.stop()
+    private lateinit var store: MemoryMessageStore
 
     @BeforeEach
     fun setUp() {
-        listOf("sagas", "saga_dispatch", "deadlines", "saga_failures", "processed_events").forEach { mongo.remove(Query(), it) }
+        store = MemoryMessageStore()
+        tx = TransactionTemplate(store.transactions)
         FlakySwitch.broken.set(true)
         clock.now = start
         RtGate.reset()
         runtime = SagaRuntime(
             types = SagaModelScanner(resolver, codec).scan(listOf(RtOrderSaga::class, RtFlakySaga::class)),
-            mongo = mongo,
+            ports = store.sagas,
             tx = tx,
             codec = codec,
             typeResolver = resolver,
@@ -114,7 +95,7 @@ class SagaFailuresTest {
             clock = clock,
             retry = SagaRetry(RetryPolicy(maxAttempts = 3, initialBackoff = Duration.ofMillis(5), multiplier = 1.0, maxBackoff = Duration.ofMillis(20))),
         )
-        failures = SagaFailures(mongo, runtime)
+        failures = SagaFailures(store.sagas.failures, runtime)
     }
 
     private fun deliver(event: Event, id: String) {
@@ -122,8 +103,8 @@ class SagaFailuresTest {
         runtime.process(type, codec.encode(event), MessageContext(id, type, "corr-$id", "u-1", emptySet(), null, mapOf("id" to id, "type" to type, "userId" to "u-1", "correlationId" to "corr-$id")))
     }
 
-    private fun sagas(type: String) = mongo.find(Query(Criteria.where("type").`is`(type)), SagaDocument::class.java)
-    private fun marker(id: String) = mongo.exists(Query(Criteria.where("_id").`is`(id)), "processed_events")
+    private fun sagas(type: String) = store.sagas().filter { it.type == type }
+    private fun marker(id: String) = id in store.markerIds()
 
     @Test
     fun `retry applies a parked event once and removes the failure`() {
@@ -138,7 +119,7 @@ class SagaFailuresTest {
         assertEquals(1, saga.stateDoc.getInteger("placed"))
         assertEquals("rt.Flaky|orderId=f1", saga.startKey)
         assertEquals(emptyList(), failures.list())
-        assertEquals(1, mongo.count(Query(Criteria.where("sagaId").`is`(saga.id)), "saga_dispatch"), "its command was recorded for the relay")
+        assertEquals(1, store.dispatchEntries().count { it.sagaId == saga.id }, "its command was recorded for the relay")
         assertEquals(1, sagas("rt.Order").single().stateDoc.getInteger("placed"), "the other saga type was not re-applied")
         assertTrue(marker("saga:rt.Flaky:e-f1"), "the marker of the parking stays")
         assertFalse(failures.retry("rt.Flaky:e-f1"), "applied once: a second retry finds nothing")
@@ -165,14 +146,14 @@ class SagaFailuresTest {
 
     @Test
     fun `a discard that lands during a failing retry is not undone by the retry's bookkeeping`() {
-        val discarding = DiscardAfterRollbacks(MongoSagaFailureStore(mongo), plain, after = 2)
-        val ports = SagaPorts.mongo(mongo).let { SagaPorts(it.sagas, it.dispatch, it.deadlines, discarding, it.markers) }
+        val discarding = DiscardAfterRollbacks(store.sagas.failures, after = 2)
+        val ports = store.sagas.let { SagaStores(it.sagas, it.dispatch, it.deadlines, discarding, it.markers) }
         val racing = SagaRuntime(
             types = SagaModelScanner(resolver, codec).scan(listOf(RtFlakySaga::class)), ports = ports, tx = tx, codec = codec, typeResolver = resolver,
             beans = { RtBean("the-bean") }, clock = clock,
             retry = SagaRetry(RetryPolicy(maxAttempts = 3, initialBackoff = Duration.ofMillis(5), multiplier = 1.0, maxBackoff = Duration.ofMillis(20))),
         )
-        val admin = SagaFailures(MongoSagaFailureStore(mongo), racing)
+        val admin = SagaFailures(store.sagas.failures, racing)
         val type = resolver.typeNameOf(RtOrderPlaced::class)
         racing.process(type, codec.encode(RtOrderPlaced("f9")), MessageContext("e-f9", type, "corr-e-f9", null, emptySet(), null, mapOf("id" to "e-f9", "type" to type)))
         assertEquals(1, admin.list().size)
@@ -189,7 +170,7 @@ class SagaFailuresTest {
         deliver(RtOrderPlaced("f3"), "e-f3")
         deliver(RtOrderPlaced("f4"), "e-f4")
         deliver(RtOrderPlaced("f5"), "e-f5")
-        mongo.save(failures.list("rt.Flaky").first().copy(id = "rt.Other:e-x", sagaType = "rt.Other")) // another type's failure
+        store.sagas.failures.save(failures.list("rt.Flaky").first().copy(id = "rt.Other:e-x", sagaType = "rt.Other")) // another type's failure
         FlakySwitch.broken.set(false)
 
         assertEquals(3, failures.retryAll("rt.Flaky"))
@@ -215,8 +196,8 @@ class SagaFailuresTest {
     fun `a retry of a saga type this service does not run is refused and leaves the parked event as it was`() {
         deliver(RtOrderPlaced("f7"), "e-f7")
         val parked = failures.list("rt.Flaky").single()
-        mongo.save(parked.copy(id = "rt.Other:e-f7", sagaType = "rt.Other")) // parked by another service, or before the type was removed
-        val before = mongo.findById("rt.Other:e-f7", SagaFailureDocument::class.java)!!
+        store.sagas.failures.save(parked.copy(id = "rt.Other:e-f7", sagaType = "rt.Other")) // parked by another service, or before the type was removed
+        val before = store.sagas.failures.find("rt.Other:e-f7")!!
         clock.now = start.plusSeconds(60)
 
         val one = assertFailsWith<IllegalStateException> { failures.retry("rt.Other:e-f7") }
@@ -224,7 +205,7 @@ class SagaFailuresTest {
 
         assertEquals("Saga type 'rt.Other' does not run in this service: parked event rt.Other:e-f7 is left as it was", one.message)
         assertEquals("Saga type 'rt.Other' does not run in this service: its parked events (1) are left as they were", all.message)
-        assertEquals(before, mongo.findById("rt.Other:e-f7", SagaFailureDocument::class.java), "its error, attempts and lastFailedAt are untouched")
+        assertEquals(before, store.sagas.failures.find("rt.Other:e-f7"), "its error, attempts and lastFailedAt are untouched")
     }
 
     @Test

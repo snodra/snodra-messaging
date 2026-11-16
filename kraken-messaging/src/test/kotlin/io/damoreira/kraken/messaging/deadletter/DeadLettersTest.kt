@@ -9,10 +9,13 @@ import io.damoreira.kraken.messaging.handler.EventHandler
 import io.damoreira.kraken.messaging.handler.HandlerInvoker
 import io.damoreira.kraken.messaging.handler.HandlerRegistry
 import io.damoreira.kraken.messaging.handler.ProcessingGroup
-import io.damoreira.kraken.messaging.kafka.LocalEventDispatcher
-import io.damoreira.kraken.messaging.kafka.ProcessedEventDocument
+import io.damoreira.kraken.messaging.events.LocalEventDispatcher
+import io.damoreira.kraken.messaging.DEAD_LETTERS
+import io.damoreira.kraken.messaging.mongo.MongoMessageStore
+import io.damoreira.kraken.messaging.store.DeadLetterStore
 import io.damoreira.kraken.messaging.test.KrakenContainers
-import org.apache.kafka.clients.consumer.ConsumerRecord
+import kotlinx.coroutines.runBlocking
+import io.damoreira.kraken.messaging.eventstore.Delivery
 import org.bson.Document
 import org.junit.jupiter.api.AfterAll
 import org.junit.jupiter.api.BeforeAll
@@ -24,7 +27,6 @@ import org.springframework.data.mongodb.MongoTransactionManager
 import org.springframework.data.mongodb.core.MongoTemplate
 import org.springframework.data.mongodb.core.SimpleMongoClientDatabaseFactory
 import org.springframework.data.mongodb.core.query.Query
-import org.springframework.transaction.support.TransactionTemplate
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
@@ -61,9 +63,10 @@ class OrdersHandler(private val mongo: MongoTemplate) {
 class DeadLettersTest {
     private val mongoContainer = KrakenContainers.mongo()
     private lateinit var mongo: MongoTemplate
-    private lateinit var tx: TransactionTemplate
     private val codec = JsonCodec()
     private lateinit var store: DeadLetterStore
+    private lateinit var letters: DeadLetterFactory
+    private lateinit var messageStore: MongoMessageStore
     private lateinit var handler: OrdersHandler
     private lateinit var deadLetters: DeadLetters
     private lateinit var dispatcher: LocalEventDispatcher
@@ -73,47 +76,51 @@ class DeadLettersTest {
         mongoContainer.start()
         val factory = SimpleMongoClientDatabaseFactory(MongoClients.create(mongoContainer.connectionString + "/?directConnection=true"), "dead_letters_admin")
         mongo = MongoTemplate(factory)
-        tx = TransactionTemplate(MongoTransactionManager(factory))
         mongo.createCollection("projection")
         mongo.createCollection("processed_events")
-        mongo.createCollection(DeadLetterStore.COLLECTION)
+        mongo.createCollection(DEAD_LETTERS)
     }
 
     @AfterAll fun stop() = mongoContainer.stop()
 
     @BeforeEach fun setUp() {
-        listOf("projection", "processed_events", DeadLetterStore.COLLECTION).forEach { mongo.remove(Query(), it) }
-        store = DeadLetterStore(mongo, Duration.ofDays(30), SteppingClock(Instant.parse("2026-11-04T10:00:00Z")))
+        listOf("projection", "processed_events", DEAD_LETTERS).forEach { mongo.remove(Query(), it) }
+        val clock = SteppingClock(Instant.parse("2026-11-04T10:00:00Z"))
+        messageStore = MongoMessageStore(mongo, MongoTransactionManager(mongo.mongoDatabaseFactory), clock = clock)
+        store = messageStore.deadLetters
+        letters = DeadLetterFactory(Duration.ofDays(30), clock)
         handler = OrdersHandler(mongo)
         val registry = HandlerRegistry(MessageTypeResolver("test")).also { it.register(handler) }
-        dispatcher = LocalEventDispatcher(registry, HandlerInvoker(registry, codec), tx, mongo)
+        dispatcher = LocalEventDispatcher(registry, HandlerInvoker(registry, codec), messageStore)
         deadLetters = DeadLetters(DeadLetterMode.COLLECTION, store, dispatcher)
     }
 
-    private fun record(offset: Long, key: String?, eventId: String?, type: String? = "test.Happened", partition: Int = 0): ConsumerRecord<String, ByteArray> {
-        val r = ConsumerRecord<String, ByteArray>(topic, partition, offset, key, codec.encode(Happened(eventId ?: "fallback-$offset", Instant.EPOCH)))
-        type?.let { r.headers().add("type", it.toByteArray()) }
-        eventId?.let { r.headers().add("id", it.toByteArray()) }
-        return r
+    private fun record(offset: Long, key: String?, eventId: String?, type: String? = "test.Happened", partition: Int = 0): Delivery {
+        val headers = LinkedHashMap<String, String>()
+        type?.let { headers["type"] = it }
+        eventId?.let { headers["id"] = it }
+        return Delivery(partition.toString(), offset.toString(), key, headers, codec.encode(Happened(eventId ?: "fallback-$offset", Instant.EPOCH)), 0L)
     }
 
     private fun failed(offset: Long, key: String?, eventId: String?, processor: String = "orders", type: String = "test.Happened"): String {
-        val doc = store.letter(processor, record(offset, key, eventId, type), DeadLetterReason.HANDLER_FAILED, DeadLetterError("IllegalStateException", "boom"), attempts = 5)
-        store.park(doc)
-        return doc.getString("_id")
+        val letter = letters.letter(processor, topic, record(offset, key, eventId, type), DeadLetterReason.HANDLER_FAILED, DeadLetterError("IllegalStateException", "boom"), attempts = 5)
+        runBlocking { store.park(letter) }
+        return letter.id
     }
 
     private fun sequenced(offset: Long, key: String, eventId: String, head: String): String {
-        val doc = store.sequenced("orders", record(offset, key, eventId), head)
-        store.park(doc)
-        return doc.getString("_id")
+        val letter = letters.sequenced("orders", topic, record(offset, key, eventId), head)
+        runBlocking { store.park(letter) }
+        return letter.id
     }
 
     private fun invalid(offset: Long, key: String?): String {
-        val doc = store.letter("orders", record(offset, key, null, type = null), DeadLetterReason.INVALID, DeadLetterError.invalid("record without type header"), 0)
-        store.park(doc)
-        return doc.getString("_id")
+        val letter = letters.letter("orders", topic, record(offset, key, null, type = null), DeadLetterReason.INVALID, DeadLetterError.invalid("record without type header"), 0)
+        runBlocking { store.park(letter) }
+        return letter.id
     }
+
+    private fun get(id: String) = runBlocking { store.get(id) }
 
     private fun markers() = mongo.findAll(Document::class.java, "processed_events").map { it.getString("_id") }.toSet()
     private fun rows() = mongo.findAll(Document::class.java, "projection").map { it.getString("_id") }.toSet()
@@ -123,7 +130,7 @@ class DeadLettersTest {
         assertEquals(RetryResult.Retried, deadLetters.retry(id))
         assertEquals(listOf("e-1"), handler.seen.toList())
         assertEquals(setOf("processor:orders:e-1"), markers())
-        assertNull(store.get(id))
+        assertNull(get(id))
     }
 
     @Test fun `a letter without an id header retries under the consumer's fallback id`() {
@@ -133,11 +140,11 @@ class DeadLettersTest {
     }
 
     @Test fun `Duplicate - the marker exists, the handler does not run and the letter is deleted`() {
-        mongo.insert(ProcessedEventDocument("processor:orders:e-2", "test.Happened", Instant.now()))
+        mongo.insert(Document("_id", "processor:orders:e-2").append("type", "test.Happened").append("processedAt", java.util.Date()), "processed_events")
         val id = failed(2, "k1", "e-2")
         assertEquals(RetryResult.Duplicate, deadLetters.retry(id))
         assertEquals(emptyList(), handler.seen.toList())
-        assertNull(store.get(id))
+        assertNull(get(id))
     }
 
     @Test fun `Failed - the letter stays with attempts + 1, the new error and reason HANDLER_FAILED, and nothing commits`() {
@@ -145,9 +152,9 @@ class DeadLettersTest {
         deadLetters.discard(head)
         val id = sequenced(4, "k9", "e-3", head)
         handler.failing += "e-3"
-        val before = store.get(id)!!
+        val before = get(id)!!
         assertEquals(RetryResult.Failed("still broken: e-3"), deadLetters.retry(id))
-        val after = store.get(id)!!
+        val after = get(id)!!
         assertEquals(DeadLetterReason.HANDLER_FAILED, after.reason)
         assertEquals(1, after.attempts)
         assertEquals(DeadLetterError("IllegalStateException", "still broken: e-3"), after.error)
@@ -160,7 +167,7 @@ class DeadLettersTest {
 
     @Test fun `a letter removed while it is retried is NotFound and its handling does not commit`() {
         val id = failed(5, "k1", "e-5")
-        handler.duringHandling = { store.delete(id) } // another instance discards it while this one handles it
+        handler.duringHandling = { runBlocking { store.delete(id) } } // another instance discards it while this one handles it
         assertEquals(RetryResult.NotFound, deadLetters.retry(id))
         assertEquals(emptySet(), markers(), "handling without the deletion never commits")
         assertEquals(emptySet(), rows())
@@ -174,7 +181,7 @@ class DeadLettersTest {
         assertEquals(RetryResult.NotFound, deadLetters.retry("orders:$topic:0:999"))
         val unknown = failed(13, "k2", "e-13", type = "test.Gone")
         assertEquals(RetryResult.Failed("no handler for test.Gone in processor orders"), deadLetters.retry(unknown))
-        assertEquals(1, store.get(unknown)!!.attempts - 5)
+        assertEquals(1, get(unknown)!!.attempts - 5)
         assertEquals(emptyList(), handler.seen.toList())
     }
 
@@ -232,8 +239,8 @@ class DeadLettersTest {
         assertEquals(1, deadLetters.count(null), "no processor: no check")
     }
 
-    @Test fun `in modes topic and log every call is an error naming the mode`() {
-        for (mode in listOf(DeadLetterMode.TOPIC, DeadLetterMode.LOG)) {
+    @Test fun `in modes event-store and log every call is an error naming the mode`() {
+        for (mode in listOf(DeadLetterMode.EVENT_STORE, DeadLetterMode.LOG)) {
             val off = DeadLetters(mode, null, dispatcher)
             for (call in listOf<() -> Any?>(
                 { off.list(null) }, { off.get("x") }, { off.count(null) }, { off.retry("x") }, { off.retryAll("orders") }, { off.discard("x") },

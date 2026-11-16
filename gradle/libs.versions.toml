@@ -11,6 +11,8 @@ grpc-kotlin = "1.5.0"
 protobuf = "4.36.2"
 protobuf-plugin = "0.10.0"
 testcontainers = "2.0.5"
+# Checked on Maven Central on 2026-11-14 (com.rabbitmq:stream-client, latest 1.13.1).
+rabbitmq-stream-client = "1.13.1"
 springdoc = "3.2.0"
 mockk = "1.14.5"
 kraken-messaging = "0.1.0-SNAPSHOT"
@@ -28,6 +30,10 @@ spring-boot-starter = { module = "org.springframework.boot:spring-boot-starter" 
 spring-boot-starter-webmvc = { module = "org.springframework.boot:spring-boot-starter-webmvc" }
 spring-boot-starter-webflux = { module = "org.springframework.boot:spring-boot-starter-webflux" }
 spring-boot-starter-data-mongodb = { module = "org.springframework.boot:spring-boot-starter-data-mongodb" }
+spring-boot-starter-jdbc = { module = "org.springframework.boot:spring-boot-starter-jdbc" }
+spring-boot-starter-data-jpa = { module = "org.springframework.boot:spring-boot-starter-data-jpa" }
+postgresql = { module = "org.postgresql:postgresql" }
+mysql-connector-j = { module = "com.mysql:mysql-connector-j" }
 spring-boot-starter-actuator = { module = "org.springframework.boot:spring-boot-starter-actuator" }
 spring-boot-starter-opentelemetry = { module = "org.springframework.boot:spring-boot-starter-opentelemetry" }
 spring-boot-starter-oauth2-client = { module = "org.springframework.boot:spring-boot-starter-oauth2-client" }
@@ -43,6 +49,7 @@ spring-security-oauth2-resource-server = { module = "org.springframework.securit
 micrometer-tracing = { module = "io.micrometer:micrometer-tracing" }
 nimbus-jose-jwt = { module = "com.nimbusds:nimbus-jose-jwt" }
 spring-kafka = { module = "org.springframework.kafka:spring-kafka" }
+rabbitmq-stream-client = { module = "com.rabbitmq:stream-client", version.ref = "rabbitmq-stream-client" }
 spring-kafka-test = { module = "org.springframework.kafka:spring-kafka-test" }
 
 # Spring Cloud
@@ -62,6 +69,8 @@ protobuf-kotlin = { module = "com.google.protobuf:protobuf-kotlin", version.ref 
 testcontainers-junit = { module = "org.testcontainers:testcontainers-junit-jupiter", version.ref = "testcontainers" }
 testcontainers-kafka = { module = "org.testcontainers:testcontainers-kafka", version.ref = "testcontainers" }
 testcontainers-mongodb = { module = "org.testcontainers:testcontainers-mongodb", version.ref = "testcontainers" }
+testcontainers-postgresql = { module = "org.testcontainers:testcontainers-postgresql", version.ref = "testcontainers" }
+testcontainers-mysql = { module = "org.testcontainers:testcontainers-mysql", version.ref = "testcontainers" }
 awaitility = { module = "org.awaitility:awaitility-kotlin" }
 mockk = { module = "io.mockk:mockk", version.ref = "mockk" }
 # Builds the test certificates of the mTLS tests (a URI SAN, a seconds-long validity); test scope only.

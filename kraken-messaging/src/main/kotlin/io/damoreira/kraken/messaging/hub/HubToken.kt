@@ -9,8 +9,8 @@ import java.nio.file.Path
  * The static hub token (P5a, ADR 0018) a service sends in `Register.credentials.token`, or none.
  *
  * [current] is asked once per stream, so a token that changes between reconnects (a rotated container secret) is picked
- * up by the next attempt. Surrounding whitespace is dropped (a secret file ends in a newline) and an empty token is no
- * token (but a token file that turns empty after a good read keeps the last good token: see [of]). The value is never logged and [toString] never shows it.
+ * up by the next attempt. Surrounding whitespace is dropped (a secret file ends in a newline) and an empty inline token is no
+ * token; a token file must hold one at startup and keeps the last good token when it turns empty later (see [of]). The value is never logged and [toString] never shows it.
  */
 class HubToken(private val source: () -> String?) {
     /** The token to send now, or null for none. */
@@ -25,12 +25,11 @@ class HubToken(private val source: () -> String?) {
 
         /**
          * The token of `kraken.messaging.hub.token` / `token-file`: when [file] is set it is the only source and wins over
-         * [inline] (it is the one that can rotate), read now and again at every [HubToken.current]; otherwise [inline]. Once the
-         * file has held a token, an empty (or unreadable) file keeps the last token and logs one WARN; at startup an empty
-         * file is no token.
+         * [inline] (it is the one that can rotate), read now and again at every [HubToken.current]; otherwise [inline]. Later, an
+         * empty (or unreadable) file keeps the last token and logs one WARN.
          *
-         * @throws IllegalStateException if [file] cannot be read now (a configured secret that is not there is a
-         *   deployment error, better at startup than as a stream of rejections)
+         * @throws IllegalStateException if [file] cannot be read now, or holds nothing but whitespace (a configured secret that
+         *   is not there is a deployment error, better at startup than as a stream of rejections; as kraken-messaging-rs)
          */
         fun of(inline: String?, file: Path?): HubToken =
             if (file != null) FileSource(file).also { it.readOrThrow() }.let { HubToken(it::read) }
@@ -44,22 +43,22 @@ class HubToken(private val source: () -> String?) {
         @Volatile private var lastProblem: String? = null
 
         fun readOrThrow() {
-            try {
-                // At startup an empty file is documented as "no token"; it is kept as read.
-                lastGood = Files.readString(path)
+            val content = try {
+                Files.readString(path)
             } catch (e: IOException) {
                 throw IllegalStateException("kraken.messaging.hub.token-file $path cannot be read: ${e.javaClass.simpleName}", e)
             }
+            check(content.isNotBlank()) { "kraken.messaging.hub.token-file $path is empty: it must hold the hub token" }
+            lastGood = content
         }
 
         /**
          * The file's content now; the last good content when it cannot be read or is empty (a rotation may replace the
-         * file non-atomically, and a Register without a token would be refused and wait for the back-off cap). Before
-         * any good (non-empty) read, an empty file stays "no token".
+         * file non-atomically, and a Register without a token would be refused and wait for the back-off cap).
          */
         fun read(): String? = try {
             val content = Files.readString(path)
-            if (content.isBlank() && !lastGood.isNullOrBlank()) {
+            if (content.isBlank()) {
                 problem("empty")
                 lastGood
             } else {

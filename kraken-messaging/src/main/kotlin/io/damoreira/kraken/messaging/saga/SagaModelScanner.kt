@@ -19,7 +19,7 @@ import kotlin.reflect.jvm.isAccessible
  * a state that round-trips through the library's JSON codec (checked on a fresh instance). A [SagaEventHandler] takes an
  * `Event` first (a concrete class, or the supertype narrowed by `payloadType`) whose association property exists; a
  * [DeadlineHandler] takes the payload or nothing first; neither is `suspend`, as they run inside the saga's thread-bound
- * Mongo transaction. [StartSaga] and [EndSaga] only go on those handlers. Handlers of one event type are ordered by
+ * store transaction. [StartSaga] and [EndSaga] only go on those handlers. Handlers of one event type are ordered by
  * method name then parameter types: reflection does not expose declaration order.
  */
 class SagaModelScanner(private val typeResolver: MessageTypeResolver, private val codec: JsonCodec) {
@@ -59,7 +59,7 @@ class SagaModelScanner(private val typeResolver: MessageTypeResolver, private va
                 continue
             }
             if (fn.isSuspend) {
-                throw IllegalStateException("Saga handler $where must not be suspend: it runs inside the saga's thread-bound Mongo transaction")
+                throw IllegalStateException("Saga handler $where must not be suspend: it runs inside the saga's thread-bound store transaction")
             }
             if (event != null) {
                 val handler = eventHandler(where, fn, event)

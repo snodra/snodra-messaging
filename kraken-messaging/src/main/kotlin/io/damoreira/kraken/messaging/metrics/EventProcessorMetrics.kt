@@ -1,8 +1,8 @@
 package io.damoreira.kraken.messaging.metrics
 
 import io.damoreira.kraken.hub.v1.ProcessorState
-import io.damoreira.kraken.messaging.kafka.EventConsumer
-import io.damoreira.kraken.messaging.kafka.ProcessorStatusSource
+import io.damoreira.kraken.messaging.events.EventConsumer
+import io.damoreira.kraken.messaging.events.ProcessorStatusSource
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.MultiGauge
 import io.micrometer.core.instrument.Tags
@@ -16,13 +16,13 @@ import java.util.concurrent.TimeUnit
 /**
  * The event processors' gauges (P9, ADR 0026), from the status this instance reports to the hub ([source]), sampled every
  * [interval] on a daemon thread (and on [sampleOnce]); the export only reads the sampled values. The status is built from
- * memory and asks its own background thread to refresh the committed offsets, high watermarks and dead-letter counts, so
- * sampling it also keeps those fresh when no hub is connected. One set per started processor, as Prometheus shows them:
+ * memory and what the subscriptions report, and asks its own background thread to refresh the dead-letter counts, so sampling it
+ * also keeps those fresh when no hub is connected. One set per started processor, as Prometheus shows them:
  *
  * - `kraken_processor_state{processor,state}`: `starting | running | paused | failing | stopped`, 1 for the current one;
  * - `kraken_dead_letters{processor}`: the sampled letter count (mode `collection`, else 0, as the status);
- * - `kraken_processor_lag{processor,partition}`: per partition assigned here whose lag is known (an unknown lag has no
- *   series: 0 means caught up). A partition that leaves the assignment (revoked, or its processor gone) reads 0 until an
+ * - `kraken_processor_lag{processor,segment}`: per segment assigned here whose lag is known (an unknown lag has no
+ *   series: 0 means caught up). A segment that leaves the assignment (revoked, or its processor gone) reads 0 until an
  *   export has read it, then its series goes away: Prometheus keeps a series that stops at its last value for minutes (no
  *   staleness over OTLP), which next to the new owner's would read as a lag nobody has.
  */
@@ -32,16 +32,16 @@ class EventProcessorMetrics(
     private val interval: Duration = Duration.ofSeconds(5),
 ) : SmartLifecycle {
     private val log = LoggerFactory.getLogger(EventProcessorMetrics::class.java)
-    private val lag = MultiGauge.builder("kraken.processor.lag").description("Records behind the high watermark per assigned partition").register(registry)
+    private val lag = MultiGauge.builder("kraken.processor.lag").description("Records behind the head per assigned segment").register(registry)
     private val state = MultiGauge.builder("kraken.processor.state").description("1 for the processor's current state").register(registry)
     private val deadLetters = MultiGauge.builder("kraken.dead.letters").description("Dead letters of the processor (mode collection)").register(registry)
     private var executor: ScheduledExecutorService? = null
     private val sampling = Any()
 
-    /** The partitions assigned at the last sample, by tags; guarded by [sampling]. */
+    /** The segments assigned at the last sample, by tags; guarded by [sampling]. */
     private var assigned = emptySet<Tags>()
 
-    /** Partitions that left the assignment, read as 0 until an export read them; guarded by [sampling]. */
+    /** Segments that left the assignment, read as 0 until an export read them; guarded by [sampling]. */
     private val departed = HashMap<Tags, Departed>()
 
     private class Departed {
@@ -56,14 +56,14 @@ class EventProcessorMetrics(
     fun sampleOnce() = synchronized(sampling) {
         try {
             val statuses = source.processorStatuses()
-            fun tags(processor: String, partition: Int) = Tags.of("processor", processor, "partition", partition.toString())
-            val now = statuses.flatMap { s -> s.partitionsList.map { tags(s.name, it.partition) } }.toSet()
+            fun tags(processor: String, segment: String) = Tags.of("processor", processor, "segment", segment)
+            val now = statuses.flatMap { s -> s.segmentsList.map { tags(s.name, it.segment) } }.toSet()
             departed.values.removeIf { it.read }
             departed.keys.removeAll(now)
             (assigned - now).forEach { departed.getOrPut(it) { Departed() } }
             assigned = now
             lag.register(
-                statuses.flatMap { s -> s.partitionsList.filter { it.lag >= 0 }.map { MultiGauge.Row.of(tags(s.name, it.partition), it.lag) } } +
+                statuses.flatMap { s -> s.segmentsList.filter { it.lag >= 0 }.map { MultiGauge.Row.of(tags(s.name, it.segment), it.lag) } } +
                     departed.map { (tags, d) -> MultiGauge.Row.of(tags, d) { it.read = true; 0.0 } },
                 true,
             )

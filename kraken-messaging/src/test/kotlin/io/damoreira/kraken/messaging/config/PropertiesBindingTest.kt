@@ -1,5 +1,6 @@
 package io.damoreira.kraken.messaging.config
 
+import io.damoreira.kraken.messaging.deadletter.DeadLetterMode
 import org.junit.jupiter.api.Test
 import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.boot.test.context.runner.ApplicationContextRunner
@@ -32,15 +33,16 @@ class PropertiesBindingTest {
             assertEquals(Duration.ofSeconds(5), p.hub.reconnectBackoff.max)
             assertEquals(Duration.ofMinutes(10), p.hub.streamCreditTimeout) // the hub's default max stream duration
             assertEquals(1024, p.hub.maxSubscriptions) // the hub's default per-instance subscription limit
-            assertEquals("broker:19092", p.kafka.bootstrapServers)
-            assertEquals("kraken.events", p.kafka.topic)
-            assertEquals(true, p.kafka.consumer.enabled)
-            assertEquals(5, p.kafka.consumer.maxAttempts)
+            assertEquals(null, p.eventStore)
+            assertEquals("kraken.events", p.events.source)
+            assertEquals(true, p.events.consumer.enabled)
+            assertEquals(5, p.events.consumer.maxAttempts)
             assertEquals(true, p.outbox.enabled)
             assertEquals(Duration.ofMillis(200), p.outbox.pollInterval)
             assertEquals(100, p.outbox.batchSize)
             assertEquals(10, p.outbox.maxAttempts)
             assertEquals(Duration.ofDays(7), p.outbox.retention)
+            assertEquals(Duration.ofMinutes(2), p.outbox.lease)
             assertEquals(Duration.ofDays(30), p.idempotency.retention)
             assertEquals(true, p.security.forwardJwt)
         }
@@ -174,6 +176,42 @@ class PropertiesBindingTest {
         }
     }
 
+    @Test fun `the store type, the event store and the in-memory segments bind, the type beside init-schema`() {
+        runner.withPropertyValues(*required).run { context ->
+            val p = context.getBean(KrakenMessagingProperties::class.java)
+            assertEquals(null, p.store.type)
+            assertEquals(true, p.store.initSchema)
+            assertEquals(4, p.memory.segments)
+        }
+        runner.withPropertyValues(
+            *required, "kraken.messaging.store.type=memory", "kraken.messaging.store.init-schema=false",
+            "kraken.messaging.event-store=memory", "kraken.messaging.memory.segments=8",
+        ).run { context ->
+            val p = context.getBean(KrakenMessagingProperties::class.java)
+            assertEquals("memory", p.store.type)
+            assertEquals(false, p.store.initSchema)
+            assertEquals("memory", p.eventStore)
+            assertEquals(8, p.memory.segments)
+            assertEquals("false", context.environment.getProperty("kraken.messaging.store.init-schema"))
+        }
+        runner.withPropertyValues(*required, "kraken.messaging.store.init-schema=false").run { context ->
+            assertEquals(null, context.getBean(KrakenMessagingProperties::class.java).store.type, "init-schema alone is no store name")
+        }
+        runner.withPropertyValues(*required, "kraken.messaging.memory.segments=0").run { context ->
+            assertTrue("kraken.messaging.memory.segments must be between 1 and 1024, was 0" in generateSequence(context.startupFailure) { it.cause }.joinToString { it.message.orEmpty() })
+        }
+    }
+
+    @Test fun `outbox lease binds and must be longer than a send`() {
+        runner.withPropertyValues(*required, "kraken.messaging.outbox.lease=90s").run { context ->
+            assertEquals(Duration.ofSeconds(90), context.getBean(KrakenMessagingProperties::class.java).outbox.lease)
+        }
+        for (value in listOf("45s", "10s")) {
+            val messages = startupFailure("kraken.messaging.outbox.lease=$value")
+            assertTrue("kraken.messaging.outbox.lease must be longer than a send" in messages, messages)
+        }
+    }
+
     @Test fun `max-concurrent-handlers below 1 fails at startup`() {
         for (value in listOf("0", "-4")) {
             val messages = startupFailure("kraken.messaging.hub.enabled=false", "kraken.messaging.hub.max-concurrent-handlers=$value")
@@ -223,31 +261,37 @@ class PropertiesBindingTest {
         }
     }
 
-    @Test fun `dead-letter mode and retention and the kafka group id default and bind (P6a)`() {
+    @Test fun `events settings, the dead-letter mode and retention and the subscription prefix default and bind (P6a, ADR 0027)`() {
         runner.withPropertyValues(*required).run { context ->
             val p = context.getBean(KrakenMessagingProperties::class.java)
-            assertEquals(null, p.kafka.groupId)
-            assertEquals("orders", p.kafka.serviceGroupId("orders"))
-            assertEquals(io.damoreira.kraken.messaging.deadletter.DeadLetterMode.COLLECTION, p.kafka.deadLetter.mode)
-            assertEquals(Duration.ofDays(30), p.kafka.deadLetter.retention)
+            assertEquals(null, p.events.subscriptionPrefix)
+            assertEquals("orders", p.events.subscriptionPrefix("orders"))
+            assertEquals(DeadLetterMode.COLLECTION, p.events.deadLetter.mode)
+            assertEquals(Duration.ofDays(30), p.events.deadLetter.retention)
         }
-        for (mode in listOf("topic", "TOPIC", "log")) {
-            runner.withPropertyValues(*required, "kraken.messaging.kafka.dead-letter.mode=$mode", "kraken.messaging.kafka.dead-letter.retention=1s",
-                "kraken.messaging.kafka.group-id=orders-v2").run { context ->
+        for (mode in listOf("event-store", "EVENT_STORE", "log")) {
+            runner.withPropertyValues(*required, "kraken.messaging.events.dead-letter.mode=$mode", "kraken.messaging.events.dead-letter.retention=1s",
+                "kraken.messaging.events.subscription-prefix=orders-v2", "kraken.messaging.events.source=orders.events",
+                "kraken.messaging.event-store=kafka").run { context ->
                 val p = context.getBean(KrakenMessagingProperties::class.java)
-                assertEquals(mode.lowercase(), p.kafka.deadLetter.mode.wireName)
-                assertEquals(Duration.ofSeconds(1), p.kafka.deadLetter.retention)
-                assertEquals("orders-v2", p.kafka.serviceGroupId("orders"))
+                assertEquals(if (mode == "log") "log" else "event-store", p.events.deadLetter.mode.wireName)
+                assertEquals(Duration.ofSeconds(1), p.events.deadLetter.retention)
+                assertEquals("orders-v2", p.events.subscriptionPrefix("orders"))
+                assertEquals("orders.events", p.events.source)
+                assertEquals("kafka", p.eventStore)
             }
+        }
+        runner.withPropertyValues(*required, "kraken.messaging.events.dead-letter.mode=topic").run { context ->
+            assertNotNull(context.startupFailure, "the mode topic is now event-store")
         }
     }
 
     @Test fun `a dead-letter retention below 1 s or an unknown mode fails at startup (P6a)`() {
-        runner.withPropertyValues(*required, "kraken.messaging.kafka.dead-letter.retention=999ms").run { context ->
+        runner.withPropertyValues(*required, "kraken.messaging.events.dead-letter.retention=999ms").run { context ->
             assertNotNull(context.startupFailure)
-            assertTrue(generateSequence(context.startupFailure) { it.cause }.any { it.message?.contains("kraken.messaging.kafka.dead-letter.retention") == true })
+            assertTrue(generateSequence(context.startupFailure) { it.cause }.any { it.message?.contains("kraken.messaging.events.dead-letter.retention") == true })
         }
-        runner.withPropertyValues(*required, "kraken.messaging.kafka.dead-letter.mode=queue").run { context ->
+        runner.withPropertyValues(*required, "kraken.messaging.events.dead-letter.mode=queue").run { context ->
             assertNotNull(context.startupFailure)
         }
     }

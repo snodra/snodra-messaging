@@ -46,7 +46,7 @@ class AuditControllerTest {
     @Autowired lateinit var deadLetters: DeadLetters
 
     private fun letter(id: String, key: String?, reason: DeadLetterReason, blockedBy: String? = null) = DeadLetter(
-        id = id, processor = "audit", topic = "kraken.events", partition = 0, offset = 7, key = key, eventId = "e-$id",
+        id = id, processor = "audit", source = "kraken.events", segment = "0", position = "7", key = key, eventId = "e-$id",
         eventType = "examples.AuditNote", headers = emptyMap(), payload = "{}", payloadBinary = null, reason = reason,
         error = DeadLetterError("IllegalStateException", "boom"), blockedBy = blockedBy,
         attempts = if (reason == DeadLetterReason.SEQUENCED) 0 else 5,
@@ -145,8 +145,8 @@ class AuditControllerTest {
     @Test fun `GET resets lists the resets of the audit processor and GET notified what the notifier sent once (P6b)`() {
         audit.onReset(
             io.damoreira.kraken.messaging.control.ResetContext(
-                "audit", "op-1", io.damoreira.kraken.messaging.control.ResetTarget.Earliest,
-                listOf(io.damoreira.kraken.messaging.control.ReplayRange("kraken.events", 0, 0, 3)),
+                "audit", "op-1", io.damoreira.kraken.messaging.eventstore.ResetTarget.Earliest,
+                listOf(io.damoreira.kraken.messaging.eventstore.ReplayRange("kraken.events", "0", "0", "3")),
             ),
         )
         assertThat(mvc.get().uri("/audit/resets")).hasStatus(HttpStatus.OK).bodyJson()
