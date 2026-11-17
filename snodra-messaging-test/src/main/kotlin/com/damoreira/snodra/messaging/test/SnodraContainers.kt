@@ -38,6 +38,8 @@ object SnodraContainers {
      */
     fun mongo(): MongoDBContainer = MongoDBContainer(DockerImageName.parse(MONGO_IMAGE)).withReplicaSet().withReuse(true)
         .withStartupTimeout(Duration.ofMinutes(3))
+        // When mongod dies at startup the reason only exists in its log; print it so a CI failure is diagnosable.
+        .withLogConsumer { frame -> System.err.println("[mongo] " + frame.utf8StringWithoutLineSeparators) }
         .withCreateContainerCmdModifier { it.hostConfig!!.withUlimits(listOf(Ulimit("nofile", MONGO_OPEN_FILES, MONGO_OPEN_FILES))) }
 
     /**
