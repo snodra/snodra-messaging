@@ -46,13 +46,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
         with:
-          repository: snodra/snodra-server
-          ref: ${{ vars.SNODRA_SERVER_REF || 'main' }}
-          path: server
-      - name: build the hub image the end-to-end tests need
-        run: docker build -t snodra-server:dev server
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: the server image the end-to-end tests need
+        run: |
+          docker pull "snodra/snodra-server:${{ vars.SNODRA_SERVER_VERSION || '0.5.0' }}"
+          docker tag "snodra/snodra-server:${{ vars.SNODRA_SERVER_VERSION || '0.5.0' }}" snodra-server:dev
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -65,12 +67,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
         with:
-          repository: snodra/snodra-server
-          ref: ${{ vars.SNODRA_SERVER_REF || 'main' }}
-          path: server
-      - run: docker build -t snodra-server:dev server
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: the server image the end-to-end tests need
+        run: |
+          docker pull "snodra/snodra-server:${{ vars.SNODRA_SERVER_VERSION || '0.5.0' }}"
+          docker tag "snodra/snodra-server:${{ vars.SNODRA_SERVER_VERSION || '0.5.0' }}" snodra-server:dev
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
