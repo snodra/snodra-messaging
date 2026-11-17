@@ -11,8 +11,9 @@ plugins {
 
 val releaseVersion = providers.gradleProperty("version")
     .orElse(providers.environmentVariable("CI_COMMIT_TAG").map { it.removePrefix("v") })
-    .orElse(providers.environmentVariable("GITHUB_REF_NAME").map { it.removePrefix("v") })
     .getOrElse("0.1.0")
+// The GitHub workflow passes -Pversion on a tag; GITHUB_REF_NAME is a branch name on ordinary
+// pushes and must not become a version (a slash in it collides the artifacts).
 
 val gpgKey = System.getenv("GPG_PRIVATE_KEY")
 val gpgPassphrase = System.getenv("GPG_PASSPHRASE")
