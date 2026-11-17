@@ -43,7 +43,7 @@ publishing {
             pom {
                 name.set("snodra-messaging-kafka")
                 description.set("Kafka event store add-on for snodra-messaging: publish, subscribe, replay, lag and dead-letter topics over Apache Kafka")
-                licenses { license { name.set("MIT") } }
+                licenses { license { name.set("The Apache License, Version 2.0"); url.set("https://www.apache.org/licenses/LICENSE-2.0.txt") } }
             }
         }
     }

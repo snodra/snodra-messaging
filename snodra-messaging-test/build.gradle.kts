@@ -54,7 +54,7 @@ publishing {
             pom {
                 name.set("snodra-messaging-test")
                 description.set("Test helpers for snodra services: the conformance kits, the zero-infrastructure mode (@SnodraInMemory), Testcontainers (Kafka, MongoDB, PostgreSQL, MySQL, hub)")
-                licenses { license { name.set("MIT") } }
+                licenses { license { name.set("The Apache License, Version 2.0"); url.set("https://www.apache.org/licenses/LICENSE-2.0.txt") } }
             }
         }
     }

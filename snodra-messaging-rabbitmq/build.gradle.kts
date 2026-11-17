@@ -45,7 +45,7 @@ publishing {
             pom {
                 name.set("snodra-messaging-rabbitmq")
                 description.set("RabbitMQ Streams event store add-on for snodra-messaging: publish, subscribe, replay, lag and a dead-letter stream over RabbitMQ 3.13+ with the stream plugin")
-                licenses { license { name.set("MIT") } }
+                licenses { license { name.set("The Apache License, Version 2.0"); url.set("https://www.apache.org/licenses/LICENSE-2.0.txt") } }
             }
         }
     }

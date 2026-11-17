@@ -106,7 +106,7 @@ publishing {
             pom {
                 name.set("snodra-messaging")
                 description.set("Spring Boot starter: EventBus, CommandBus, QueryBus over an event-store add-on and Snodra Server")
-                licenses { license { name.set("MIT") } }
+                licenses { license { name.set("The Apache License, Version 2.0"); url.set("https://www.apache.org/licenses/LICENSE-2.0.txt") } }
             }
         }
     }
