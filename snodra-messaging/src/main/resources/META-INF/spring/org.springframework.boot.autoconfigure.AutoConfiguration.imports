@@ -1,0 +1,8 @@
+com.damoreira.snodra.messaging.config.SnodraMessagingAutoConfiguration
+com.damoreira.snodra.messaging.config.MemoryStoresAutoConfiguration
+com.damoreira.snodra.messaging.config.HubAutoConfiguration
+com.damoreira.snodra.messaging.config.EventsAutoConfiguration
+com.damoreira.snodra.messaging.config.SagaAutoConfiguration
+com.damoreira.snodra.messaging.config.ExternalAutoConfiguration
+com.damoreira.snodra.messaging.config.SagaMetricsAutoConfiguration
+com.damoreira.snodra.messaging.config.MessagingMetricsAutoConfiguration

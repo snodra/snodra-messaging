@@ -16,7 +16,7 @@ dependencyManagement {
 
 dependencies {
     // Commands, queries, streams and subscriptions only: no event store, no message store (level 1).
-    implementation(project(":kraken-messaging"))
+    implementation(project(":snodra-messaging"))
     implementation(libs.spring.boot.starter)
     implementation(libs.jackson.module.kotlin)
     implementation(libs.kotlin.reflect)
@@ -26,7 +26,7 @@ dependencies {
 
     testImplementation(libs.kotlin.test.junit5)
     testImplementation(libs.testcontainers.junit)
-    testImplementation(project(":kraken-messaging-test"))
+    testImplementation(project(":snodra-messaging-test"))
     testImplementation("tools.jackson.core:jackson-databind")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
@@ -36,8 +36,8 @@ tasks.test {
     dependsOn(tasks.bootJar)
     systemProperty("conformance.jar", tasks.bootJar.get().archiveFile.get().asFile.absolutePath)
     systemProperty("conformance.work", layout.buildDirectory.dir("conformance").get().asFile.absolutePath)
-    // The runner binary (kraken-hub, conformance/): absent, the level-1 test is skipped saying so.
-    System.getenv("KRAKEN_CONFORMANCE_BIN")?.let { systemProperty("conformance.runner", it) }
+    // The runner binary (snodra-server, conformance/): absent, the level-1 test is skipped saying so.
+    System.getenv("SNODRA_CONFORMANCE_BIN")?.let { systemProperty("conformance.runner", it) }
     // The run is long (every check of level 1, then the two-hub part): its report is printed.
     testLogging { showStandardStreams = true }
 }

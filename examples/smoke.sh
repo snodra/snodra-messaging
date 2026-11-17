@@ -21,15 +21,15 @@
 #        in every mode);
 #        SKIP_BROWSER=1 skips the event browser steps 28-28f (search, record, payload rules, tail and consumer groups of
 #        kraken.events through both hubs' HTTP API, and the broker's own group list with the Kafka CLI in KAFKA_CONTAINER,
-#        default kraken-kafka; needs the docker CLI), ONLY_BROWSER=1 runs only them;
+#        default snodra-kafka; needs the docker CLI), ONLY_BROWSER=1 runs only them;
 #        SKIP_OBS=1 skips the metric and dashboard steps 29-29e (otel-lgtm's Prometheus and Grafana: the hub and library
-#        series, labels, and every panel query of the three kraken dashboards; they run last), ONLY_OBS=1 runs only them
-#        (after a full run), GRAFANA=http://localhost:3000 (or KRAKEN_GRAFANA_PORT) is Grafana's address, PROM its proxy of
+#        series, labels, and every panel query of the three snodra dashboards; they run last), ONLY_OBS=1 runs only them
+#        (after a full run), GRAFANA=http://localhost:3000 (or SNODRA_GRAFANA_PORT) is Grafana's address, PROM its proxy of
 #        Prometheus;
 #        SECURE=1 runs against the secure sandbox (kraken/infra/compose.secure.yaml, secrets from
 #        kraken/infra/scripts/dev-hub-pki.sh): the hub calls are https with the dev CA and carry the dashboard token, every
 #        other step runs unchanged, and the security steps 21 and 21b are added; SKIP_SECURE=1 skips those two, ONLY_SECURE=1
-#        runs only them; SECRETS_DIR names the secrets directory, default KRAKEN_SECRETS_DIR or INFRA_DIR/.secrets;
+#        runs only them; SECRETS_DIR names the secrets directory, default SNODRA_SECRETS_DIR or INFRA_DIR/.secrets;
 #        JWT=1 (needs SECURE=1) runs against the JWT overlay on top of it (kraken/infra/compose.jwt.yaml: service-b and
 #        service-c authenticate with Keycloak client-credentials tokens, service-a keeps its static token), every other
 #        step runs unchanged, and the JWT steps 22 and 22b are added; SKIP_JWT=1 skips those two, ONLY_JWT=1 runs only
@@ -69,7 +69,7 @@ COMPOSE_FILES=(-f compose.yaml -f compose.local.yaml)
 # and leaves every other call (service-a, service-b) alone.
 if [ "$SECURE" = "1" ]; then
   COMPOSE_FILES+=(-f compose.secure.yaml)
-  SECRETS=${SECRETS_DIR:-${KRAKEN_SECRETS_DIR:-$INFRA/.secrets}}
+  SECRETS=${SECRETS_DIR:-${SNODRA_SECRETS_DIR:-$INFRA/.secrets}}
   [ -f "$SECRETS/ca.pem" ] && [ -f "$SECRETS/dashboard.token" ] \
     || fail "SECURE=1 needs the dev secrets in '$SECRETS' (run kraken/infra/scripts/dev-hub-pki.sh, or set SECRETS_DIR)"
   SECRETS=$(cd "$SECRETS" && pwd)
@@ -214,7 +214,7 @@ flow_steps() {
 # instead of the 30 s it took before (and instead of burning a 5 s TIMEOUT: compose.local.yaml gives
 # examples.CountGreetings a 20 s per-type override). SKIP_PAUSE=1 skips this step; ONLY_PAUSE=1 runs only this step.
 pause_step() {
-  local b=${B_CONTAINER:-kraken-example-b}
+  local b=${B_CONTAINER:-snodra-example-b}
   command -v docker >/dev/null || fail "docker CLI needed for the pause step (or set SKIP_PAUSE=1)"
   docker inspect "$b" >/dev/null 2>&1 || fail "container $b not found (set B_CONTAINER)"
   echo "10. pausing $b during a CountGreetings call: expect HANDLER_DISCONNECTED (503) in about 10 s ..."
@@ -555,7 +555,7 @@ permits_on() { # <hub url> <service>
 }
 
 ha_steps() {
-  local h2=${HUB2_CONTAINER:-kraken-hub-2} secs peers p out stop t0 pid stopped_at gone_at total failed max late_failed after
+  local h2=${HUB2_CONTAINER:-snodra-server-2} secs peers p out stop t0 pid stopped_at gone_at total failed max late_failed after
   local share permits topped_at
   command -v docker >/dev/null || fail "docker CLI needed for the two-hub steps (or set SKIP_HA=1)"
   docker inspect "$h2" >/dev/null 2>&1 || fail "container $h2 not found (set HUB2_CONTAINER, or SKIP_HA=1)"
@@ -880,10 +880,10 @@ postcard_steps() {
   await_postcard "$id" PRINTED - 90
   body="{\"deliveryId\":\"printed-$id\",\"jobId\":\"$id\",\"name\":\"webhook-$run\"}"
   code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$B/printer/webhook" -H 'content-type: application/json' \
-    -H "X-Kraken-Webhook-Secret: $PRINTER_WEBHOOK_SECRET" -d "$body") || fail "replaying the webhook failed"
+    -H "X-Snodra-Webhook-Secret: $PRINTER_WEBHOOK_SECRET" -d "$body") || fail "replaying the webhook failed"
   [ "$code" = "200" ] || fail "a replayed webhook delivery should be answered 200, got $code"
   code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$B/printer/webhook" -H 'content-type: application/json' \
-    -H 'X-Kraken-Webhook-Secret: not-the-secret' -d "$body") || fail "posting a webhook with a wrong secret failed"
+    -H 'X-Snodra-Webhook-Secret: not-the-secret' -d "$body") || fail "posting a webhook with a wrong secret failed"
   [ "$code" = "401" ] || fail "a webhook with a wrong secret should be answered 401, got $code"
   echo "   replay -> 200, wrong secret -> 401"
 
@@ -953,10 +953,10 @@ banner_steps() {
   await_banner "$id" PRINTED - 90
   body="{\"deliveryId\":\"printed-$id\",\"jobId\":\"$id\",\"name\":\"webhook-$run\"}"
   code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$C/printer/webhook" -H 'content-type: application/json' \
-    -H "X-Kraken-Webhook-Secret: $PRINTER_WEBHOOK_SECRET" -d "$body") || fail "replaying the banner webhook failed"
+    -H "X-Snodra-Webhook-Secret: $PRINTER_WEBHOOK_SECRET" -d "$body") || fail "replaying the banner webhook failed"
   [ "$code" = "200" ] || fail "a replayed banner webhook delivery should be answered 200, got $code"
   code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$C/printer/webhook" -H 'content-type: application/json' \
-    -H 'X-Kraken-Webhook-Secret: not-the-secret' -d "$body") || fail "posting a banner webhook with a wrong secret failed"
+    -H 'X-Snodra-Webhook-Secret: not-the-secret' -d "$body") || fail "posting a banner webhook with a wrong secret failed"
   [ "$code" = "401" ] || fail "a banner webhook with a wrong secret should be answered 401, got $code"
   echo "   replay -> 200, wrong secret -> 401"
 
@@ -1213,7 +1213,7 @@ audit_steps() {
 # P6b (ADR 0023): the hub as control plane for event processors, through its HTTP API
 # ($HUB/api/v1/services/<service>/processors/audit/...) with the dashboard write token: kraken/infra/scripts/dev-hub-pki.sh
 # writes it to <secrets>/hub-control/dashboard-write.token and every sandbox mode mounts it into both hubs
-# (KRAKEN_HUB_DASHBOARD_WRITE_TOKEN_FILE). For the `audit` processor of service-b (Kotlin) and of service-c (Rust):
+# (SNODRA_SERVER_DASHBOARD_WRITE_TOKEN_FILE). For the `audit` processor of service-b (Kotlin) and of service-c (Rust):
 # 27: a write without a credential (or with a wrong one) is 401 on both hubs, with the dashboard token 403 (SECURE=1 only: the
 # plain hubs have no dashboard token); leftover letters are cleared and the processor resumed. 27b: pause: the hub shows PAUSED and notes published
 # meanwhile are not handled (the hub lists the processor's lag as at least 2); resume: they are, RUNNING again, lag 0.
@@ -1225,7 +1225,7 @@ audit_steps() {
 # 27e: dead letters through the hub: a poison note parked (the failure on), listed by the hub without a payload, retried
 # (Failed while failing, Retried with the failure off, its key handled), the list empty; another one discarded (a second
 # discard is a 404). 27f: a postcard (service-b) and a banner (service-c) of this run are printed once (the printer's log:
-# PRINTER_CONTAINER, default kraken-example-printer), then each service's `default` processor is paused, reset to the
+# PRINTER_CONTAINER, default snodra-example-printer), then each service's `default` processor is paused, reset to the
 # timestamp of the saga's start record (examples.GreetingDelivered / examples.TextShouted under the run's key, read from the
 # hub's event browser, so the host clock plays no part) and resumed: the replay runs (ok, replay) and ends, and 10 s later
 # the printer has still delivered the job once. That is the end-to-end outcome only: it is double-protected, since the replay
@@ -1272,7 +1272,7 @@ await_control_state() { # <service> <pattern> <seconds>
 
 # How often the fake printer delivered the webhook of job <id> (its log: "Printer: webhook of <id> delivered (attempt n)").
 printer_deliveries() { # <id>
-  { docker logs "${PRINTER_CONTAINER:-kraken-example-printer}" 2>&1 | grep -c -- "webhook of $1 delivered"; } || true
+  { docker logs "${PRINTER_CONTAINER:-snodra-example-printer}" 2>&1 | grep -c -- "webhook of $1 delivered"; } || true
 }
 
 # The texts the audit processor's notifier at <base> handled for <key>, comma-separated (as audit_handled).
@@ -1317,7 +1317,7 @@ control_off() {
 control_steps() {
   local run file secrets label base reply code h st op n resets id key reason attempts lag since start
   run=$(date +%s)
-  secrets=${SECRETS:-${SECRETS_DIR:-${KRAKEN_SECRETS_DIR:-$INFRA/.secrets}}}
+  secrets=${SECRETS:-${SECRETS_DIR:-${SNODRA_SECRETS_DIR:-$INFRA/.secrets}}}
   file=${WRITE_TOKEN_FILE:-$secrets/hub-control/dashboard-write.token}
   [ -s "$file" ] || fail "the control steps need the hubs' write token in '$file' (run kraken/infra/scripts/dev-hub-pki.sh, then recreate hub and hub-2; or set WRITE_TOKEN_FILE, or SKIP_CONTROL=1)"
   WRITE_TOKEN=$(cat "$file")
@@ -1463,7 +1463,7 @@ control_steps() {
   control_off
 }
 
-# P7 (ADR 0025, ADR 0027): the hubs' event browser, `kraken-event-browser`, a separate binary that reads kraken.events
+# P7 (ADR 0025, ADR 0027): the hubs' event browser, `snodra-event-browser`, a separate binary that reads kraken.events
 # from Kafka, read-only (kraken/infra/compose.yaml starts it next to both hubs; compose.secure.yaml, and with it the jwt
 # and mtls overlays, turns payloads on). The events are audit notes the smoke publishes through service-b (`POST
 # $B/audit/notes`: examples.AuditNote under the note's key, with a correlation id of its own that the library makes up and
@@ -1544,7 +1544,7 @@ browser_steps() {
   for h in "${hubs[@]}"; do
     v=$(curl -fsS "$h/api/v1/version" | reply_field eventBrowser | tr -d ' ')
     printf '%s' "$v" | grep -q '"installed":true' && printf '%s' "$v" | grep -q "\"payloads\":$want" \
-      || fail "$h/api/v1/version: expected eventBrowser installed, payloads $want, got '$v' (the kraken-event-browser service of kraken/infra/compose.yaml; recreate hub, hub-2 and the browser)"
+      || fail "$h/api/v1/version: expected eventBrowser installed, payloads $want, got '$v' (the snodra-event-browser service of kraken/infra/compose.yaml; recreate hub, hub-2 and the browser)"
     if [ "$SECURE" = "1" ]; then
       line=""
       for name in "events?limit=1" events/lag events/tail events/kraken.events/0/0; do
@@ -1652,25 +1652,25 @@ browser_steps() {
       [[ "${lag:-}" =~ ^[0-9]+$ ]] || fail "$h: the subscription $g should be listed with a lag, got: $rows"
       line="$line $g $state/$members lag $lag,"
     done
-    if printf '%s\n' "$rows" | grep -q '^kraken-event-browser'; then fail "$h lists a subscription of the event browser's own: $rows"; fi
+    if printf '%s\n' "$rows" | grep -q '^snodra-event-browser'; then fail "$h lists a subscription of the event browser's own: $rows"; fi
     echo "   $h: $(printf '%s\n' "$rows" | grep -c .) subscriptions;${line%,}; none of the browser's"
   done
   # The API lists every group the broker has; the broker's own list says the same without the hub in between.
-  local kafka=${KAFKA_CONTAINER:-kraken-kafka} listed
+  local kafka=${KAFKA_CONTAINER:-snodra-kafka} listed
   command -v docker >/dev/null || fail "docker CLI needed for the broker group check (or set SKIP_BROWSER=1)"
   listed=$(docker exec "$kafka" /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server kafka:19092 --list 2>/dev/null) \
     || fail "kafka-consumer-groups.sh --list failed in $kafka (set KAFKA_CONTAINER)"
   printf '%s\n' "$listed" | grep -q '^service-b\.default$' || fail "$kafka: the broker's group list lacks service-b.default: $listed"
-  if printf '%s\n' "$listed" | grep -q '^kraken-hub'; then fail "$kafka: the broker has a consumer group of the hub's own: $listed"; fi
-  echo "   $kafka (kafka-consumer-groups.sh --list): $(printf '%s\n' "$listed" | grep -c .) groups, none kraken-hub*"
+  if printf '%s\n' "$listed" | grep -q '^snodra-server'; then fail "$kafka: the broker has a consumer group of the hub's own: $listed"; fi
+  echo "   $kafka (kafka-consumer-groups.sh --list): $(printf '%s\n' "$listed" | grep -c .) groups, none snodra-server*"
 }
 
 # P9 (ADR 0026): metrics and dashboards. Both hubs and the examples export their metrics over OTLP to the sandbox's
 # otel-lgtm every 5 s (kraken/infra/compose.local.yaml); its Grafana (GRAFANA, default http://localhost:3000, or the port in
-# KRAKEN_GRAFANA_PORT) provisions the kraken dashboards from kraken/infra/grafana/, and Prometheus is read through Grafana's
+# SNODRA_GRAFANA_PORT) provisions the snodra dashboards from kraken/infra/grafana/, and Prometheus is read through Grafana's
 # proxy of the bundled data source (PROM; otel-lgtm does not publish Prometheus' port). These steps run last, once the
-# others made traffic. 29: Grafana lists the three dashboards, Overview, Hub and Messaging, in the folder Kraken. 29b: the
-# hub series of P9 come from both hubs (job kraken-hub, instance = the hub id each hub's topology gives). 29c: service-b
+# others made traffic. 29: Grafana lists the three dashboards, Overview, Hub and Messaging, in the folder Snodra. 29b: the
+# hub series of P9 come from both hubs (job snodra-server, instance = the hub id each hub's topology gives). 29c: service-b
 # (Kotlin) and service-c (Rust) export the library series under the same names with the same label names (the
 # hub-client histogram from the sandbox's senders, service-a and service-c, whose GET /greetings/{name}/count sends
 # examples.CountGreetings through the hub for it), and their instance label is the instance id the hubs list. 29d: no series has a label hub_id, and only the hub's streams and
@@ -1679,31 +1679,31 @@ browser_steps() {
 # $hub_seen (Hubs seen within) and $instance_seen (Instances seen within) at their default 3m,
 # except the panels in OBS_MAY_BE_EMPTY, which the sandbox may not drive in this mode (each with its reason), and those
 # whose series only steps skipped by a SKIP_* flag create (obs_skipped). Needs jq or python3; SKIP_OBS=1 skips these steps, ONLY_OBS=1 runs only them (on a sandbox that already carried traffic: a full run).
-GRAFANA=${GRAFANA:-http://localhost:${KRAKEN_GRAFANA_PORT:-3000}}
+GRAFANA=${GRAFANA:-http://localhost:${SNODRA_GRAFANA_PORT:-3000}}
 PROM=${PROM:-$GRAFANA/api/datasources/proxy/uid/prometheus}
 OBS_SINCE=$(( $(date +%s) - 120 ))
 
 # Panels whose series only exist after an event this sandbox does not cause in every mode: "<dashboard uid>|<panel title>|<why>".
 OBS_MAY_BE_EMPTY=(
-  "kraken-hub|Rejected for capacity|no queue or session buffer overflows in the sandbox (the flow steps queue, within the bounds)"
-  "kraken-hub|Session buffer full|as above"
-  "kraken-hub|Auth violations|only the secure modes refuse anyone (steps 21, 22, 23)"
-  "kraken-hub|JWT validations|JWT=1 only"
-  "kraken-hub|JWKS fetches|JWT=1 only"
-  "kraken-hub|JWKS keys|JWT=1 only"
-  "kraken-hub|Credential refreshes|JWT=1 only (a token refresh; the certificate sessions of MTLS=1 send none)"
-  "kraken-hub|Client certificates|MTLS=1 only"
-  "kraken-hub|TLS handshake failures|only the secure modes speak TLS, and only a bad client fails a handshake"
-  "kraken-hub|TLS handshakes shed|no handshake flood in the sandbox"
-  "kraken-hub|ACL and client CA reload errors|no broken ACL or CA file in the sandbox"
-  "kraken-hub|Control replies nobody waited for|every control reply in the sandbox arrives in time"
-  "kraken-hub|Payloads viewed|payloads are hidden in the plain sandbox (compose.secure.yaml shows them)"
-  "kraken-messaging|Token fetches|JWT=1 only (service-b and service-c)"
-  "kraken-messaging|Certificate rotations|MTLS=1 only, after step 23b rotated the certificates"
-  "kraken-messaging|Saga command failures|no saga command fails unhandled in the sandbox"
-  "kraken-messaging|Deadlines due|no deadline is overdue (the schedulers fire them on time; the gauge has only names with overdue ones)"
-  "kraken-hub|Streams open|the gauge holds only handler instances with a stream open: the steps' streams closed, and 5 minutes after its last 0 the series is gone"
-  "kraken-hub|Subscriptions open|as Streams open, for the subscription steps' targets"
+  "snodra-server|Rejected for capacity|no queue or session buffer overflows in the sandbox (the flow steps queue, within the bounds)"
+  "snodra-server|Session buffer full|as above"
+  "snodra-server|Auth violations|only the secure modes refuse anyone (steps 21, 22, 23)"
+  "snodra-server|JWT validations|JWT=1 only"
+  "snodra-server|JWKS fetches|JWT=1 only"
+  "snodra-server|JWKS keys|JWT=1 only"
+  "snodra-server|Credential refreshes|JWT=1 only (a token refresh; the certificate sessions of MTLS=1 send none)"
+  "snodra-server|Client certificates|MTLS=1 only"
+  "snodra-server|TLS handshake failures|only the secure modes speak TLS, and only a bad client fails a handshake"
+  "snodra-server|TLS handshakes shed|no handshake flood in the sandbox"
+  "snodra-server|ACL and client CA reload errors|no broken ACL or CA file in the sandbox"
+  "snodra-server|Control replies nobody waited for|every control reply in the sandbox arrives in time"
+  "snodra-server|Payloads viewed|payloads are hidden in the plain sandbox (compose.secure.yaml shows them)"
+  "snodra-messaging|Token fetches|JWT=1 only (service-b and service-c)"
+  "snodra-messaging|Certificate rotations|MTLS=1 only, after step 23b rotated the certificates"
+  "snodra-messaging|Saga command failures|no saga command fails unhandled in the sandbox"
+  "snodra-messaging|Deadlines due|no deadline is overdue (the schedulers fire them on time; the gauge has only names with overdue ones)"
+  "snodra-server|Streams open|the gauge holds only handler instances with a stream open: the steps' streams closed, and 5 minutes after its last 0 the series is gone"
+  "snodra-server|Subscriptions open|as Streams open, for the subscription steps' targets"
 )
 
 # Adds "<dashboard uid>|<panel title>" lines to OBS_MAY_BE_EMPTY when <flag> (SKIP_*) is 1: the steps it skips are what
@@ -1714,20 +1714,20 @@ obs_skipped() { # <flag> <dashboard uid>|<panel title> ...
   [ "${!flag:-0}" = "1" ] || return 0
   for panel in "$@"; do OBS_MAY_BE_EMPTY+=("$panel|$flag=1 skipped the steps that create its series"); done
 }
-obs_skipped SKIP_FLOW "kraken-hub|Queue depth" "kraken-hub|Queue wait p95"
-obs_skipped SKIP_SCATTER "kraken-hub|Scatter-gather targets"
-obs_skipped SKIP_STREAM "kraken-hub|Stream parts relayed"
-obs_skipped SKIP_SUBSCRIBE "kraken-hub|Subscription updates relayed"
-obs_skipped SKIP_CONTROL "kraken-hub|Processor control calls"
-obs_skipped SKIP_BROWSER "kraken-hub|Event browser requests" "kraken-hub|Records scanned per search" "kraken-hub|Event tails"
+obs_skipped SKIP_FLOW "snodra-server|Queue depth" "snodra-server|Queue wait p95"
+obs_skipped SKIP_SCATTER "snodra-server|Scatter-gather targets"
+obs_skipped SKIP_STREAM "snodra-server|Stream parts relayed"
+obs_skipped SKIP_SUBSCRIBE "snodra-server|Subscription updates relayed"
+obs_skipped SKIP_CONTROL "snodra-server|Processor control calls"
+obs_skipped SKIP_BROWSER "snodra-server|Event browser requests" "snodra-server|Records scanned per search" "snodra-server|Event tails"
 # Each of these pairs drives the series on its own (the pause a handler_disconnected, step 19c a handler_error; either
 # saga's steps polls, timeouts and printer calls): only both skipped leave them empty.
 if [ "${SKIP_PAUSE:-0}" = "1" ] && [ "${SKIP_STREAM:-0}" = "1" ]; then
-  OBS_MAY_BE_EMPTY+=("kraken-overview|Errors by outcome|SKIP_PAUSE=1 and SKIP_STREAM=1 skipped the steps whose requests fail")
+  OBS_MAY_BE_EMPTY+=("snodra-overview|Errors by outcome|SKIP_PAUSE=1 and SKIP_STREAM=1 skipped the steps whose requests fail")
 fi
 if [ "${SKIP_POSTCARD:-0}" = "1" ] && [ "${SKIP_BANNER:-0}" = "1" ]; then
   for title in "Sagas started and ended" "Saga events by outcome" "External calls" "Deadlines fired"; do
-    OBS_MAY_BE_EMPTY+=("kraken-messaging|$title|SKIP_POSTCARD=1 and SKIP_BANNER=1 skipped both sagas' steps")
+    OBS_MAY_BE_EMPTY+=("snodra-messaging|$title|SKIP_POSTCARD=1 and SKIP_BANNER=1 skipped both sagas' steps")
   done
 fi
 
@@ -1753,34 +1753,34 @@ obs_steps() {
   hubs=("$HUB")
   [ "${SKIP_HA:-0}" = "1" ] || hubs+=("$HUB2")
 
-  echo "29. Grafana ($GRAFANA) lists the dashboards kraken-overview, kraken-hub and kraken-messaging in the folder Kraken ..."
+  echo "29. Grafana ($GRAFANA) lists the dashboards snodra-overview, snodra-server and snodra-messaging in the folder Snodra ..."
   for i in $(seq 1 60); do
-    list=$(curl -fsS "$GRAFANA/api/search?tag=kraken&type=dash-db" 2>/dev/null | dashboard_list || true)
+    list=$(curl -fsS "$GRAFANA/api/search?tag=snodra&type=dash-db" 2>/dev/null | dashboard_list || true)
     bad=""
-    for uid in kraken-overview kraken-hub kraken-messaging; do
-      printf '%s\n' "$list" | grep -qx "$uid Kraken" || bad="$bad $uid"
+    for uid in snodra-overview snodra-server snodra-messaging; do
+      printf '%s\n' "$list" | grep -qx "$uid Snodra" || bad="$bad $uid"
     done
     [ -z "$bad" ] && break
-    [ "$i" -eq 60 ] && fail "$GRAFANA/api/search: not in the folder Kraken after 60 s:$bad (kraken/infra/grafana, mounted by compose.yaml's otel-lgtm); got: $list"
+    [ "$i" -eq 60 ] && fail "$GRAFANA/api/search: not in the folder Snodra after 60 s:$bad (kraken/infra/grafana, mounted by compose.yaml's otel-lgtm); got: $list"
     sleep 1
   done
-  echo "   $(printf '%s\n' "$list" | awk '$2 == "Kraken" { print $1 }' | sort | tr '\n' ' ')in the folder Kraken"
+  echo "   $(printf '%s\n' "$list" | awk '$2 == "Snodra" { print $1 }' | sort | tr '\n' ' ')in the folder Snodra"
 
-  echo "29b. the hub series come from both hubs (job kraken-hub, instance = hub id) ..."
+  echo "29b. the hub series come from both hubs (job snodra-server, instance = hub id) ..."
   ids=""
   for h in "${hubs[@]}"; do ids="$ids $(curl -fsS "$h/api/v1/topology" | hub_id_of)"; done
-  for m in kraken_hub_requests_total kraken_hub_request_duration_seconds_bucket kraken_hub_connected_instances \
-           kraken_hub_processor_lag kraken_hub_processor_state kraken_hub_processor_dead_letters \
-           kraken_hub_processor_processed; do
-    await_label_values "count by (instance) ($m{job=\"kraken-hub\"})" instance "$ids" 60 >/dev/null
+  for m in snodra_server_requests_total snodra_server_request_duration_seconds_bucket snodra_server_connected_instances \
+           snodra_server_processor_lag snodra_server_processor_state snodra_server_processor_dead_letters \
+           snodra_server_processor_processed; do
+    await_label_values "count by (instance) ($m{job=\"snodra-server\"})" instance "$ids" 60 >/dev/null
   done
   # The subscription lag comes from the event browser, a process of its own (ADR 0027): it lists the examples'
   # subscriptions, live instances or not.
-  await_label_values 'max by (subscription) (kraken_event_browser_subscription_lag)' subscription \
+  await_label_values 'max by (subscription) (snodra_event_browser_subscription_lag)' subscription \
     "service-b.default service-b.audit service-c.default service-c.audit" 60 >/dev/null
-  line=$(prom_query 'max by (service) (kraken_hub_connected_instances{service=~"service-[abc]"})' | prom_rows service)
+  line=$(prom_query 'max by (service) (snodra_server_connected_instances{service=~"service-[abc]"})' | prom_rows service)
   for svc in service-a service-b service-c; do
-    printf '%s\n' "$line" | grep -qx "$svc" || fail "kraken_hub_connected_instances has no series for $svc"
+    printf '%s\n' "$line" | grep -qx "$svc" || fail "snodra_server_connected_instances has no series for $svc"
   done
   echo "   requests, duration buckets, connected_instances, processor lag/state/dead letters/processed: each from$ids" \
        "the subscription lag from the event browser"
@@ -1795,16 +1795,16 @@ obs_steps() {
   for svc in service-b service-c; do
     want=$(curl -fsS "$HUB/api/v1/topology" | example_instances | awk -v s="$svc" '$1 == s { print $2 }' | tr '\n' ' ')
     [ -n "$want" ] || fail "$HUB/api/v1/topology lists no instance of $svc"
-    await_label_values "kraken_hub_client_connected_hubs{job=\"$svc\"}" instance "$want" 60 >/dev/null
+    await_label_values "snodra_hub_client_connected_hubs{job=\"$svc\"}" instance "$want" 60 >/dev/null
     printf '   %s: instance %s(as the hub lists it)\n' "$svc" "$want"
   done
   line=""
-  for m in kraken_events_consumed_total kraken_event_handler_duration_seconds_bucket kraken_outbox_pending \
-           kraken_outbox_oldest_age_seconds kraken_outbox_published_total kraken_processor_lag kraken_processor_state \
-           kraken_dead_letters kraken_hub_client_request_duration_seconds_bucket kraken_hub_client_handlers_in_flight \
-           kraken_hub_client_connected_hubs; do
+  for m in snodra_events_consumed_total snodra_event_handler_duration_seconds_bucket snodra_outbox_pending \
+           snodra_outbox_oldest_age_seconds snodra_outbox_published_total snodra_processor_lag snodra_processor_state \
+           snodra_dead_letters snodra_hub_client_request_duration_seconds_bucket snodra_hub_client_handlers_in_flight \
+           snodra_hub_client_connected_hubs; do
     kt=service-b
-    [ "$m" = kraken_hub_client_request_duration_seconds_bucket ] && kt=service-a
+    [ "$m" = snodra_hub_client_request_duration_seconds_bucket ] && kt=service-a
     for i in $(seq 1 60); do
       sb=$(prom_series "$m{job=\"$kt\"}"); sc=$(prom_series "$m{job=\"service-c\"}")
       bad=""
@@ -1816,22 +1816,22 @@ obs_steps() {
     done
     lb=$(printf '%s' "$sb" | series_labels); lc=$(printf '%s' "$sc" | series_labels)
     [ "$lb" = "$lc" ] || fail "$m: $kt has the labels {$lb}, service-c {$lc}"
-    line="$line ${m#kraken_}{$lb}"
+    line="$line ${m#snodra_}{$lb}"
   done
   echo "   the same names and labels:$line"
 
-  echo "29d. no series has a label hub_id; instance_id only on kraken_hub_streams_open and kraken_hub_subscriptions_open ..."
-  total=$(prom_series '{__name__=~"kraken_.+"}' | series_names | grep -c . || true)
-  [ "$total" -gt 0 ] || fail "no kraken_* series in Prometheus since $(date -r "$OBS_SINCE" +%T 2>/dev/null || echo "$OBS_SINCE")"
+  echo "29d. no series has a label hub_id; instance_id only on snodra_server_streams_open and snodra_server_subscriptions_open ..."
+  total=$(prom_series '{__name__=~"snodra_.+"}' | series_names | grep -c . || true)
+  [ "$total" -gt 0 ] || fail "no snodra_* series in Prometheus since $(date -r "$OBS_SINCE" +%T 2>/dev/null || echo "$OBS_SINCE")"
   bad=$(prom_series '{hub_id!=""}' | series_names | sort -u | tr '\n' ' ')
   [ -z "$bad" ] || fail "series with a hub_id label: $bad"
-  bad=$(prom_series '{instance_id!="", __name__!~"kraken_hub_(streams|subscriptions)_open"}' | series_names | sort -u | tr '\n' ' ')
+  bad=$(prom_series '{instance_id!="", __name__!~"snodra_server_(streams|subscriptions)_open"}' | series_names | sort -u | tr '\n' ' ')
   [ -z "$bad" ] || fail "series with an instance_id label besides the hub's streams/subscriptions open: $bad"
   n=$(prom_series '{instance_id!=""}' | series_names | grep -c . || true)
-  echo "   $total kraken series since the run started: none with hub_id, instance_id on $n (streams/subscriptions open)"
+  echo "   $total snodra series since the run started: none with hub_id, instance_id on $n (streams/subscriptions open)"
 
   echo "29e. every panel query of the three dashboards returns data (variables at All, \$__rate_interval 5m) ..."
-  for uid in kraken-overview kraken-hub kraken-messaging; do
+  for uid in snodra-overview snodra-server snodra-messaging; do
     dash=$(curl -fsS "$GRAFANA/api/dashboards/uid/$uid") || fail "GET $GRAFANA/api/dashboards/uid/$uid failed"
     queries=$(printf '%s' "$dash" | panel_queries)
     [ -n "$queries" ] || fail "$uid: no panel queries in $GRAFANA/api/dashboards/uid/$uid"
@@ -1874,7 +1874,7 @@ obs_steps() {
 # both hubs and logged by the client as a registration rejection (ERROR once per hub), and never listed on /api/v1/topology; a
 # request outside service-a's `send` patterns answers 403 AccessDeniedException. Step 21b: the dashboard API wants the
 # dashboard token. SKIP_SECURE=1 skips them, ONLY_SECURE=1 runs only them.
-INTRUDER=kraken-smoke-intruder
+INTRUDER=snodra-smoke-intruder
 
 remove_intruder() { docker rm -f "$INTRUDER" >/dev/null 2>&1 || true; }
 
@@ -1888,19 +1888,19 @@ refusals() { # <container> <pattern>
 # <token> and TLS to both hubs; the Kafka consumer and the outbox are off so it touches neither Kafka nor MongoDB.
 start_intruder() { # <service name> <token>
   local image
-  image=$(docker inspect --format '{{.Config.Image}}' "${A_CONTAINER:-kraken-example-a}" 2>/dev/null) \
-    || fail "container ${A_CONTAINER:-kraken-example-a} not found (set A_CONTAINER)"
+  image=$(docker inspect --format '{{.Config.Image}}' "${A_CONTAINER:-snodra-example-a}" 2>/dev/null) \
+    || fail "container ${A_CONTAINER:-snodra-example-a} not found (set A_CONTAINER)"
   remove_intruder
-  docker run -d --name "$INTRUDER" --network kraken \
-    -e KRAKEN_SERVICE_NAME="$1" \
-    -e KRAKEN_HUB_ADDRESS=static://hub:7000,hub-2:7000 \
-    -e KRAKEN_KAFKA_BOOTSTRAP=kafka:19092 \
-    -e KRAKEN_MONGODB_URI="mongodb://mongodb:27017/smoke-intruder?replicaSet=rs0" \
+  docker run -d --name "$INTRUDER" --network snodra \
+    -e SNODRA_SERVICE_NAME="$1" \
+    -e SNODRA_SERVER_ADDRESS=static://hub:7000,hub-2:7000 \
+    -e SNODRA_KAFKA_BOOTSTRAP=kafka:19092 \
+    -e SNODRA_MONGODB_URI="mongodb://mongodb:27017/smoke-intruder?replicaSet=rs0" \
     -e SERVER_PORT=8080 \
-    -e KRAKEN_MESSAGING_EVENTS_CONSUMER_ENABLED=false -e KRAKEN_MESSAGING_OUTBOX_ENABLED=false \
-    -e KRAKEN_MESSAGING_HUB_TOKEN="$2" \
-    -e KRAKEN_MESSAGING_HUB_TLS_ENABLED=true -e KRAKEN_MESSAGING_HUB_TLS_CA_FILE=/etc/kraken/hub-ca.pem \
-    -v "$SECRETS/ca.pem:/etc/kraken/hub-ca.pem:ro" \
+    -e SNODRA_MESSAGING_EVENTS_CONSUMER_ENABLED=false -e SNODRA_MESSAGING_OUTBOX_ENABLED=false \
+    -e SNODRA_MESSAGING_HUB_TOKEN="$2" \
+    -e SNODRA_MESSAGING_HUB_TLS_ENABLED=true -e SNODRA_MESSAGING_HUB_TLS_CA_FILE=/etc/snodra/hub-ca.pem \
+    -v "$SECRETS/ca.pem:/etc/snodra/hub-ca.pem:ro" \
     "$image" >/dev/null || fail "could not start the intruder container from $image"
 }
 
@@ -1908,7 +1908,7 @@ start_intruder() { # <service name> <token>
 await_refusals() { # <pattern> <before hub> <before hub-2> <attempts>
   local i n1=0 n2=0
   for i in $(seq 1 120); do
-    n1=$(refusals "${HUB_CONTAINER:-kraken-hub}" "$1"); n2=$(refusals "${HUB2_CONTAINER:-kraken-hub-2}" "$1")
+    n1=$(refusals "${HUB_CONTAINER:-snodra-server}" "$1"); n2=$(refusals "${HUB2_CONTAINER:-snodra-server-2}" "$1")
     if [ "$n1" -ge $(( $2 + $4 )) ] && [ "$n2" -ge $(( $3 + $4 )) ]; then return 0; fi
     sleep 1
   done
@@ -1923,7 +1923,7 @@ not_on_topology() { # <service name>
 }
 
 secure_steps() {
-  local h1=${HUB_CONTAINER:-kraken-hub} h2=${HUB2_CONTAINER:-kraken-hub-2} b1 b2 wrong log errors code body h path
+  local h1=${HUB_CONTAINER:-snodra-server} h2=${HUB2_CONTAINER:-snodra-server-2} b1 b2 wrong log errors code body h path
   command -v docker >/dev/null || fail "docker CLI needed for the security steps (or set SKIP_SECURE=1)"
   docker inspect "$h1" >/dev/null 2>&1 || fail "container $h1 not found (set HUB_CONTAINER, or SKIP_SECURE=1)"
   docker inspect "$h2" >/dev/null 2>&1 || fail "container $h2 not found (set HUB2_CONTAINER, or SKIP_SECURE=1)"
@@ -1995,7 +1995,7 @@ secure_steps() {
 # stream it registered on (connectedSinceMs), stay the same: the token was renewed and handed to the live stream as
 # ClientMessage.credentials, not by a reconnect (service-c's log has no new "registered with the hub" line either); the hubs
 # never logged "credentials expired". SKIP_JWT=1 skips them, ONLY_JWT=1 runs only them.
-# The hub's counters (kraken_hub_jwt_validations_total{result="ok"}, ...) go out over OTLP only, which the examples closure
+# The hub's counters (snodra_server_jwt_validations_total{result="ok"}, ...) go out over OTLP only, which the examples closure
 # does not run a collector for; authKind jwt on the topology is the hub saying it validated the token.
 
 # <service>'s first instance on <hub url>'s topology, from "instanceId" on, as one line (empty while it is not listed).
@@ -2034,7 +2034,7 @@ log_count() { # <container> <pattern> [<since>]
 }
 
 jwt_steps() {
-  local h1=${HUB_CONTAINER:-kraken-hub} h2=${HUB2_CONTAINER:-kraken-hub-2} c=${C_CONTAINER:-kraken-example-c}
+  local h1=${HUB_CONTAINER:-snodra-server} h2=${HUB2_CONTAINER:-snodra-server-2} c=${C_CONTAINER:-snodra-example-c}
   local h svc sess id since kind exp i k advanced registered_before registered_after expired jwt_started
   local ids=() sinces=() exps=()    # per (hub, service), in the order of the loops below (no associative arrays: macOS bash 3.2)
   command -v docker >/dev/null || fail "docker CLI needed for the JWT steps (or set SKIP_JWT=1)"
@@ -2095,8 +2095,8 @@ jwt_steps() {
 }
 
 # P5c (ADR 0020), only with SECURE=1 MTLS=1 against the mTLS sandbox (kraken/infra/compose.mtls.yaml): service-a (Kotlin) and
-# service-c (Rust) register with a client certificate (a dev client CA, exactly one URI SAN kraken://service/<name>), service-b
-# with its static token (the hubs run with KRAKEN_HUB_TLS_CLIENT_AUTH=optional). Step 23: both hubs list service-a and
+# service-c (Rust) register with a client certificate (a dev client CA, exactly one URI SAN snodra://service/<name>), service-b
+# with its static token (the hubs run with SNODRA_SERVER_TLS_CLIENT_AUTH=optional). Step 23: both hubs list service-a and
 # service-c with authKind certificate, the fingerprint of the certificate in the service's mounted directory and an
 # expiresAt, and service-b with token. Step 23b: the certificate of service-c (then of service-a) is replaced on disk by a new
 # one (new key; dev-hub-pki.sh --rotate) while a steady trickle of calls goes through service-a (alternating service-b and
@@ -2133,7 +2133,7 @@ await_cert() { # <hub url> <service> <fingerprint> <seconds>
 }
 
 mtls_steps() {
-  local h1=${HUB_CONTAINER:-kraken-hub} h2=${HUB2_CONTAINER:-kraken-hub-2}
+  local h1=${HUB_CONTAINER:-snodra-server} h2=${HUB2_CONTAINER:-snodra-server-2}
   local h svc sess id since kind fp fp2 exp k n started waited codes bad total mtls_started stop out loop_pid
   local ids=() sinces=()    # per hub, in the order of the loops below (no associative arrays: macOS bash 3.2)
   command -v docker >/dev/null || fail "docker CLI needed for the certificate steps (or set SKIP_MTLS=1)"

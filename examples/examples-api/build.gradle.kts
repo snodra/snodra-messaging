@@ -4,5 +4,5 @@ plugins {
 }
 
 dependencies {
-    api(project(":kraken-messaging-api"))
+    api(project(":snodra-messaging-api"))
 }

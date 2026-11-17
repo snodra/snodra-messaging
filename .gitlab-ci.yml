@@ -21,14 +21,14 @@ build:
   script:
     - ./gradlew assemble --no-daemon
 
-# src/main/proto/hub.proto must stay byte-identical to the umbrella's kraken/protocol/hub.proto.
+# src/main/proto/hub.proto must stay byte-identical to snodra-server's proto/hub.proto (the source of truth).
+# snodra-server is public, so the job clones it anonymously: no deploy token.
 proto-sync:
   stage: build
   script:
-    - git config --global url."https://${KRAKEN_UMBRELLA_DEPLOY_USER}:${KRAKEN_UMBRELLA_DEPLOY_TOKEN}@${CI_SERVER_HOST}/kraken-org/kraken.git".insteadOf "https://${CI_SERVER_HOST}/kraken-org/kraken.git"
-    - rm -rf "$CI_PROJECT_DIR/../kraken"
-    - git -c url."https://${KRAKEN_UMBRELLA_DEPLOY_USER}:${KRAKEN_UMBRELLA_DEPLOY_TOKEN}@${CI_SERVER_HOST}/kraken-org/kraken.git".insteadOf="https://${CI_SERVER_HOST}/kraken-org/kraken.git" clone --depth 1 "https://${CI_SERVER_HOST}/kraken-org/kraken.git" "$CI_PROJECT_DIR/../kraken"
-    - KRAKEN_PROTO_SYNC_REQUIRED=true KRAKEN_PROTO_SOURCE="$CI_PROJECT_DIR/../kraken/protocol/hub.proto" bash scripts/check-proto-sync.sh
+    - rm -rf "$CI_PROJECT_DIR/../snodra-server"
+    - git clone --depth 1 "https://gitlab.damoreira.ml/snodra/snodra-server.git" "$CI_PROJECT_DIR/../snodra-server"
+    - SNODRA_PROTO_SYNC_REQUIRED=true SNODRA_PROTO_SOURCE="$CI_PROJECT_DIR/../snodra-server/proto/hub.proto" bash scripts/check-proto-sync.sh
 
 test:
   stage: test
@@ -112,18 +112,18 @@ release:
         exit 0
       fi
       if ! git rev-parse "$NEXT" >/dev/null 2>&1; then
-        git config user.name "kraken-org CI"
+        git config user.name "snodra CI"
         git config user.email "ci@damoreira.ml"
         git tag -a "$NEXT" -m "$CI_PROJECT_NAME $NEXT"
         git push "$CI_REPOSITORY_URL" "$NEXT"
       else
         echo "Tag $NEXT already exists, skipping tag push"
       fi
-      ./gradlew :kraken-messaging-api:publish :kraken-messaging:publish :kraken-messaging-kafka:publish :kraken-messaging-rabbitmq:publish :kraken-messaging-mongo:publish :kraken-messaging-jdbc:publish :kraken-messaging-test:publish --no-daemon -Pversion="$VERSION"
+      ./gradlew :snodra-messaging-api:publish :snodra-messaging:publish :snodra-messaging-kafka:publish :snodra-messaging-rabbitmq:publish :snodra-messaging-mongo:publish :snodra-messaging-jdbc:publish :snodra-messaging-test:publish --no-daemon -Pversion="$VERSION"
       RELEASE=$(jq -n \
         --arg name "$CI_PROJECT_NAME $NEXT" \
         --arg tag "$NEXT" \
-        --arg desc "Maven release $VERSION: io.damoreira.kraken:kraken-messaging-api, kraken-messaging, kraken-messaging-kafka, kraken-messaging-rabbitmq, kraken-messaging-mongo, kraken-messaging-jdbc and kraken-messaging-test in Nexus maven-releases." \
+        --arg desc "Maven release $VERSION: com.damoreira.snodra:snodra-messaging-api, snodra-messaging, snodra-messaging-kafka, snodra-messaging-rabbitmq, snodra-messaging-mongo, snodra-messaging-jdbc and snodra-messaging-test in Nexus maven-releases." \
         '{name:$name,tag_name:$tag,description:$desc}')
       STATUS=$(curl --silent --output /dev/null --write-out '%{http_code}' \
         --request POST \

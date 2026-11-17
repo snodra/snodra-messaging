@@ -1,6 +1,6 @@
-# Examples: two services through the hub
+# Examples: two services through Snodra Server
 
-A disposable sandbox that shows cross-service messaging on the real `kraken-hub` image and Kafka, driven by `curl`:
+A disposable sandbox that shows cross-service messaging on the real `snodra-server` image and Kafka, driven by `curl`:
 
 1. **service-a** sends the command `examples.SendGreeting` over the hub;
 2. **service-b** handles it, counts the greeting in memory and publishes the event `examples.GreetingDelivered`
@@ -8,7 +8,7 @@ A disposable sandbox that shows cross-service messaging on the real `kraken-hub`
 3. **service-a** reacts to the event and remembers it;
 4. **service-a** sends the query `examples.CountGreetings` over the hub; **service-b** answers from its counts;
 5. **service-a** sends the command `examples.Shout` and the query `examples.Reverse` to **service-c**, a Rust
-   service built on `kraken-messaging-rs`; C publishes `examples.TextShouted` / `examples.TextReversed` while
+   service built on `snodra-messaging-rs`; C publishes `examples.TextShouted` / `examples.TextReversed` while
    handling them, and A and B log those events; C also logs B's `GreetingDelivered`;
 6. **service-b** and **service-c** both own the shared query `examples.Inventory` (ADR 0017): **service-a** sends it as
    a point query (one of them answers) and as a scatter-gather (both answer);
@@ -28,7 +28,7 @@ A disposable sandbox that shows cross-service messaging on the real `kraken-hub`
    the library's dead letters.
 
 Everything is anonymous, nothing is persisted by the apps (MongoDB is only there because the message store add-on
-`kraken-messaging-mongo` keeps the outbox and the idempotent consumer's markers in it), and the modules are never published. They build against the starter as a project
+`snodra-messaging-mongo` keeps the outbox and the idempotent consumer's markers in it), and the modules are never published. They build against the starter as a project
 dependency, so they always exercise the current library. Wire classes live in `examples-api`.
 
 | Module | Role | Host port |
@@ -36,16 +36,16 @@ dependency, so they always exercise the current library. Wire classes live in `e
 | `examples/examples-api` | `SendGreeting`, `GreetingAccepted`, `GreetingDelivered`, `CountGreetings`, `GreetingCount`; the texts types; the shared `Inventory` / `InventoryLevel`; the streaming `Rows` / `Row`; the subscription `WatchCounter` / `Counter` / `CounterChanged`, the command `IncrementCounter` and the shared query `OpenSubscriptions` / `SubscriptionCount` | – |
 | `examples/service-a` | REST caller + event listener; `GET /forbidden-send` sends a type outside its ACL on purpose ([Secure sandbox](#secure-sandbox)) | 8091 |
 | `examples/service-b` | the postcard saga, its printer adapter, webhook and topic translator (`GET /postcards/{jobId}`); owner of the greetings command and query, co-owner of the shared `Inventory`, the streaming `Rows`, the subscription `WatchCounter` and `OpenSubscriptions`; logs the text events; the `audit` processor and its `/audit/...` endpoints | 8092 (`POST /counters/{name}/increment`, `/audit/...` and actuator) |
-| `examples/fake-printer` | a partner, not a kraken service: the fake printer of [the postcard saga](#the-postcard-saga) and [the banner saga](#the-banner-saga) (`POST /jobs`, `GET /jobs/{id}`) | 8093 |
-| `examples/orders-sql` | not in the sandbox: a small service on PostgreSQL with the SQL message store (`kraken-messaging-jdbc`). The command `examples.orders.PlaceOrder` stores the order row and the outbox entry of `examples.orders.OrderPlaced` in one transaction; its event handler confirms the order. Events go to the in-memory event store. `OrdersEndToEndTest` runs it against PostgreSQL and the hub image | – |
-| `examples/conformance-service` | not in the sandbox: the conformance service of kraken `protocol/conformance.md` (contract version 1) on this library, which the conformance runner `kraken-conformance` (kraken-hub, `conformance/`) starts with its `CONFORMANCE_*` environment to prove level 1 of the Libraries guide. `ConformanceLevel1Test` runs the whole level against it on `KRAKEN_HUB_IMAGE` (one hub, then two) when `KRAKEN_CONFORMANCE_BIN` names the runner binary, and is skipped otherwise; it asserts the library's known failures exactly | – |
-| `kraken-messaging-rs/examples/service-c` | Rust: owner of `Shout`, `Reverse`, `IncrementCounter` and the banner saga's `PrintBanner` / `PollBannerJob`, co-owner of the shared `Inventory`, `Rows`, `WatchCounter` and `OpenSubscriptions`, publishes the text events, logs `GreetingDelivered`; the banner saga's webhook and `GET /banners/{jobId}`; `GET /greetings/{name}/count`, service-b's `CountGreetings` sent through the hub (the sandbox's call from Rust to Kotlin); the `audit` processor and its `/audit/...` endpoints | 8094 |
+| `examples/fake-printer` | a partner, not a Snodra service: the fake printer of [the postcard saga](#the-postcard-saga) and [the banner saga](#the-banner-saga) (`POST /jobs`, `GET /jobs/{id}`) | 8093 |
+| `examples/orders-sql` | not in the sandbox: a small service on PostgreSQL with the SQL message store (`snodra-messaging-jdbc`). The command `examples.orders.PlaceOrder` stores the order row and the outbox entry of `examples.orders.OrderPlaced` in one transaction; its event handler confirms the order. Events go to the in-memory event store. `OrdersEndToEndTest` runs it against PostgreSQL and the hub image | – |
+| `examples/conformance-service` | not in the sandbox: the conformance service of snodra `protocol/conformance.md` (contract version 1) on this library, which the conformance runner `snodra-conformance` (snodra-server, `conformance/`) starts with its `CONFORMANCE_*` environment to prove level 1 of the Libraries guide. `ConformanceLevel1Test` runs the whole level against it on `SNODRA_SERVER_IMAGE` (one hub, then two) when `SNODRA_CONFORMANCE_BIN` names the runner binary, and is skipped otherwise; it asserts the library's known failures exactly | – |
+| `snodra-messaging-rs/examples/service-c` | Rust: owner of `Shout`, `Reverse`, `IncrementCounter` and the banner saga's `PrintBanner` / `PollBannerJob`, co-owner of the shared `Inventory`, `Rows`, `WatchCounter` and `OpenSubscriptions`, publishes the text events, logs `GreetingDelivered`; the banner saga's webhook and `GET /banners/{jobId}`; `GET /greetings/{name}/count`, service-b's `CountGreetings` sent through the hub (the sandbox's call from Rust to Kotlin); the `audit` processor and its `/audit/...` endpoints | 8094 |
 
 ## Prerequisites
 
 - Docker (Rancher Desktop or Docker Desktop) with Compose v2.
 - The sibling checkouts `../kraken` (umbrella, provides `infra/compose.yaml` and `infra/compose.local.yaml`),
-  `../kraken-hub` and `../kraken-messaging-rs` next to this repo, as described in the umbrella's `docs/07-local-development.md`.
+  `../snodra-server` and `../snodra-messaging-rs` next to this repo, as described in the umbrella's `docs/07-local-development.md`.
 
 ## Start
 
@@ -55,17 +55,17 @@ From `kraken/infra`:
 docker compose -f compose.yaml -f compose.local.yaml --profile examples up --build -d service-a service-b service-c fake-printer
 ```
 
-This builds `kraken-examples-service-a:dev`, `kraken-examples-service-b:dev` and `kraken-examples-service-c:dev` from
+This builds `snodra-examples-service-a:dev`, `snodra-examples-service-b:dev` and `snodra-examples-service-c:dev` from
 source (the first build takes several minutes, Rust compiles librdkafka; later ones are cached) and starts only what the
-three apps need: both hubs from the released image (`hub`, `hub-2`, `KRAKEN_HUB_VERSION`), the event browser
-(`kraken-event-browser`), Kafka, the topic init job, MongoDB and otel-lgtm (Grafana on <http://localhost:3000/>, see
+three apps need: both hubs from the released image (`hub`, `hub-2`, `SNODRA_SERVER_VERSION`), the event browser
+(`snodra-event-browser`), Kafka, the topic init job, MongoDB and otel-lgtm (Grafana on <http://localhost:3000/>, see
 [Metrics](#metrics)). Keycloak and RustFS stay down. The hub's gRPC port is published on host
 **7002** (macOS AirPlay owns 7000) and its topology view and dashboard on **7001**; `hub-2` uses **7012** and
-**7011**. Every example connects to both hubs (`KRAKEN_HUB_ADDRESS=static://hub:7000,hub-2:7000`, ADR 0016): it
+**7011**. Every example connects to both hubs (`SNODRA_SERVER_ADDRESS=static://hub:7000,hub-2:7000`, ADR 0016): it
 registers on each, sends unkeyed requests round-robin over them and keeps working when one stops.
 
 If the repos are not siblings of `kraken`, point the build contexts at them:
-`KRAKEN_HUB_DIR=... KRAKEN_MESSAGING_DIR=... KRAKEN_MESSAGING_RS_DIR=... docker compose ...`.
+`SNODRA_SERVER_DIR=... SNODRA_MESSAGING_DIR=... SNODRA_MESSAGING_RS_DIR=... docker compose ...`.
 
 ## Drive it
 
@@ -166,12 +166,12 @@ what A exposes over HTTP: B's and C's log lines and the order in which the text 
 read them in the logs. Last, it freezes service-b with `docker pause` during a `CountGreetings` call and expects
 `503 HandlerDisconnectedException` after about 10 s: the hub evicts a session after 10 s without heartbeats, and the
 sandbox hub gives `examples.CountGreetings` a 20 s per-type timeout
-(`KRAKEN_HUB_TIMEOUT_OVERRIDES` in `compose.local.yaml`) so the call outlives the eviction instead of ending in a 5 s
+(`SNODRA_SERVER_TIMEOUT_OVERRIDES` in `compose.local.yaml`) so the call outlives the eviction instead of ending in a 5 s
 `TIMEOUT`. It then waits for service-b to answer again. Finally it checks flow control (P1). The sandbox runs every
 service with the libraries' default concurrency; the one-permit demo is the opt-in override
-`kraken/infra/compose.flow-demo.yaml` (service-b: `KRAKEN_MESSAGING_HUB_MAX_CONCURRENT_HANDLERS=1` and a slowed
+`kraken/infra/compose.flow-demo.yaml` (service-b: `SNODRA_MESSAGING_HUB_MAX_CONCURRENT_HANDLERS=1` and a slowed
 `CountGreetings`, `examples.count-delay` / env `EXAMPLES_COUNT_DELAY=200ms`; service-c (Rust):
-`KRAKEN_MAX_CONCURRENT_HANDLERS=1`). The smoke recreates service-b and service-c with it (step 11b), then step 12
+`SNODRA_MAX_CONCURRENT_HANDLERS=1`). The smoke recreates service-b and service-c with it (step 11b), then step 12
 sends 20 parallel counts: all must answer 200, one at a time (at least 4 s; about 4.5 s, since a one-permit instance
 gets each permit back at once), with the topology showing requests queued for service-b while they wait. Step 13
 sends 10 parallel shouts from Kotlin service-a to Rust service-c: all must answer 200. After each burst the topology
@@ -185,7 +185,7 @@ stays serialised (step 5b looks for its graph edge on either hub, since requests
 The two-hub steps (P3, ADR 0016) come last: step 15 waits up to 15 s until both hubs' `/api/v1/topology` list the same
 service-a, service-b and service-c instances, each reporting both hub ids in `connectedHubIds`; step 16 checks that
 hub-2's `/api/v1/version` lists both dashboards as peers; step 17 runs a loop of calls through service-a (alternating
-`CountGreetings` to service-b and `Reverse` to service-c), stops `kraken-hub-2` after 2 s and keeps calling for 4 s:
+`CountGreetings` to service-b and `Reverse` to service-c), stops `snodra-server-2` after 2 s and keeps calling for 4 s:
 at most `HA_MAX_FAILURES` (5) calls may fail (in flight on the stopped hub), none may take more than 6 s, and every
 call started a second after the hub was gone must succeed. It then starts the hub again and waits up to 15 s for every
 instance to be back on it (also on failure the hub is started again). They need `jq` or `python3`; `SKIP_HA=1` skips
@@ -227,12 +227,12 @@ docker compose -f compose.yaml -f compose.local.yaml -f compose.flow-demo.yaml -
 ```
 
 ```bash
-bash examples/smoke.sh          # from kraken-messaging; prints SMOKE OK
+bash examples/smoke.sh          # from snodra-messaging; prints SMOKE OK
 SKIP_PAUSE=1 bash examples/smoke.sh   # without the docker pause step
 SKIP_FLOW=1 bash examples/smoke.sh    # without the flow-control steps (they recreate service-b and service-c)
 ONLY_FLOW=1 bash examples/smoke.sh    # only the flow-control steps (needs the docker CLI)
 ONLY_PAUSE=1 bash examples/smoke.sh   # only the docker pause step (needs the docker CLI)
-SKIP_HA=1 bash examples/smoke.sh      # without the two-hub steps (they stop and start kraken-hub-2)
+SKIP_HA=1 bash examples/smoke.sh      # without the two-hub steps (they stop and start snodra-server-2)
 ONLY_HA=1 bash examples/smoke.sh      # only the two-hub steps (needs the docker CLI and jq or python3)
 SKIP_SCATTER=1 bash examples/smoke.sh # without the scatter-gather steps
 ONLY_SCATTER=1 bash examples/smoke.sh # only the scatter-gather steps (needs jq or python3)
@@ -270,7 +270,7 @@ The same sandbox with hub access control, TLS and a dashboard token (P5a, umbrel
 scripts/dev-hub-pki.sh        # dev CA, hub certificate (SANs hub, hub-2, localhost, 127.0.0.1), one token per service, the ACL
 docker compose -f compose.yaml -f compose.local.yaml -f compose.secure.yaml --profile examples \
   up -d --force-recreate hub hub-2 service-a service-b service-c
-# from kraken-messaging
+# from snodra-messaging
 SECURE=1 INFRA_DIR=../kraken/infra bash examples/smoke.sh     # every step, plus 21 and 21b; ends with SMOKE OK
 # from kraken/infra: back to the plain stack
 docker compose -f compose.yaml -f compose.local.yaml --profile examples \
@@ -278,7 +278,7 @@ docker compose -f compose.yaml -f compose.local.yaml --profile examples \
 docker compose -f compose.yaml -f compose.local.yaml -f compose.secure.yaml --profile examples down   # or tear everything down
 ```
 
-Both hubs run `enforce` (`KRAKEN_HUB_AUTH_MODE=permissive` in the environment of the `up` shows what would be refused instead).
+Both hubs run `enforce` (`SNODRA_SERVER_AUTH_MODE=permissive` in the environment of the `up` shows what would be refused instead).
 The ACL gives each example exactly what it registers and sends: service-a handles nothing and sends `SendGreeting`,
 `CountGreetings`, `Shout`, `Reverse`, `Inventory`, `Rows`, `WatchCounter`, `IncrementCounter` and `OpenSubscriptions`;
 service-b handles `SendGreeting`, `CountGreetings`, `Inventory`, `Rows`, `WatchCounter`, `OpenSubscriptions` and the
@@ -286,8 +286,8 @@ postcard adapter's `PrintPostcard` and `PollPrintJob` and sends nothing; service
 `IncrementCounter`, the same shared types and the banner adapter's `PrintBanner` and `PollBannerJob` and sends `CountGreetings`
 (its `GET /greetings/{name}/count`, see [Metrics](#metrics)); a
 `smoke-intruder` token may register as `smoke-intruder` and do nothing. The services read their token from a file
-(`KRAKEN_MESSAGING_HUB_TOKEN_FILE` for the Kotlin ones, `KRAKEN_HUB_TOKEN_FILE` for service-c) and trust the dev CA
-(`KRAKEN_MESSAGING_HUB_TLS_ENABLED` / `KRAKEN_MESSAGING_HUB_TLS_CA_FILE`, `KRAKEN_HUB_TLS` / `KRAKEN_HUB_TLS_CA`). The hub ports are
+(`SNODRA_MESSAGING_HUB_TOKEN_FILE` for the Kotlin ones, `SNODRA_SERVER_TOKEN_FILE` for service-c) and trust the dev CA
+(`SNODRA_MESSAGING_HUB_TLS_ENABLED` / `SNODRA_MESSAGING_HUB_TLS_CA_FILE`, `SNODRA_SERVER_TLS` / `SNODRA_SERVER_TLS_CA`). The hub ports are
 TLS-only, so by hand:
 
 ```bash
@@ -303,7 +303,7 @@ the plain sandbox the same call is the usual 503 `NoHandlerException`.
 `SECURE=1 bash examples/smoke.sh` makes the hub calls (`$HUB`, `$HUB2`) https with the dev CA and the dashboard token, and runs every
 existing step unchanged (the flow and HA steps recreate containers with the overlay as well). It adds, last:
 
-- **Step 21**: a throwaway container `kraken-smoke-intruder` from the service-a image (removed afterwards, also on failure), with
+- **Step 21**: a throwaway container `snodra-smoke-intruder` from the service-a image (removed afterwards, also on failure), with
   the Kafka consumer and the outbox off. First with a wrong token under the name `smoke-intruder`: both hubs log
   `register refused: unknown token` at least twice, the client logs `Hub rejected the registration of smoke-intruder ...
   UNAUTHENTICATED unknown token` once per hub (the registration rejection: ERROR once, DEBUG after) and `/api/v1/topology` of both hubs never
@@ -312,15 +312,15 @@ existing step unchanged (the flow and HA steps recreate containers with the over
 - **Step 21b**: `/api/v1/topology` and `/api/v1/types` on both hubs answer 401 without the dashboard token (and with a wrong one) and 200 with
   it, and plain-text HTTP to the TLS port gets no answer.
 
-`SECRETS_DIR` (default `KRAKEN_SECRETS_DIR`, else `INFRA_DIR/.secrets`) names the secrets directory; `HUB_CONTAINER`, `HUB2_CONTAINER` and
+`SECRETS_DIR` (default `SNODRA_SECRETS_DIR`, else `INFRA_DIR/.secrets`) names the secrets directory; `HUB_CONTAINER`, `HUB2_CONTAINER` and
 `A_CONTAINER` name the containers the steps read logs and the image from. `SKIP_SECURE=1` skips steps 21 and 21b, `ONLY_SECURE=1` runs
 only them (both need `SECURE=1`).
 
 ## JWT sandbox
 
 The secure sandbox with service-b (Kotlin) and service-c (Rust) authenticating by JWT (P5b, umbrella ADR 0019): the overlay
-`kraken/infra/compose.jwt.yaml` on top of the secure one, with a throwaway Keycloak (`hub-idp`, container `kraken-hub-idp`, its own
-realm `kraken-hub-dev`, tokens that live 30 s). service-a keeps its static token, so both credential kinds run side by side. The
+`kraken/infra/compose.jwt.yaml` on top of the secure one, with a throwaway Keycloak (`hub-idp`, container `snodra-server-idp`, its own
+realm `snodra-server-dev`, tokens that live 30 s). service-a keeps its static token, so both credential kinds run side by side. The
 identity provider, the realm and the client secrets are dev only; the secrets come from `dev-hub-pki.sh` into the git-ignored
 `kraken/infra/.secrets/`.
 
@@ -329,18 +329,18 @@ identity provider, the realm and the client secrets are dev only; the secrets co
 scripts/dev-hub-pki.sh
 docker compose -f compose.yaml -f compose.local.yaml -f compose.secure.yaml -f compose.jwt.yaml --profile examples \
   up -d --force-recreate hub hub-2 hub-idp service-a service-b service-c
-# from kraken-messaging
+# from snodra-messaging
 SECURE=1 JWT=1 INFRA_DIR=../kraken/infra bash examples/smoke.sh     # every step, plus 21, 21b, 22 and 22b; ends with SMOKE OK
 # from kraken/infra: back to the secure stack, and stop the identity provider
 docker compose -f compose.yaml -f compose.local.yaml -f compose.secure.yaml --profile examples \
   up -d --force-recreate hub hub-2 service-a service-b service-c
-docker rm -f kraken-hub-idp
+docker rm -f snodra-server-idp
 ```
 
-The hubs start without waiting for the provider (`KRAKEN_HUB_JWT_ISSUER=http://hub-idp:8080/realms/kraken-hub-dev`,
-`KRAKEN_HUB_JWT_AUDIENCE=kraken-hub`): until their first key fetch works a JWT register is answered `UNAVAILABLE` "jwks not loaded yet"
-and the clients retry, so the stack converges by itself. The services set `KRAKEN_HUB_OAUTH2_TOKEN_URI` (the provider's token endpoint)
-and `KRAKEN_HUB_OAUTH2_CLIENT_SECRET_FILE`; the client id defaults to the service name, which the hub checks against the token's `azp`.
+The hubs start without waiting for the provider (`SNODRA_SERVER_JWT_ISSUER=http://hub-idp:8080/realms/snodra-server-dev`,
+`SNODRA_SERVER_JWT_AUDIENCE=snodra-server`): until their first key fetch works a JWT register is answered `UNAVAILABLE` "jwks not loaded yet"
+and the clients retry, so the stack converges by itself. The services set `SNODRA_SERVER_OAUTH2_TOKEN_URI` (the provider's token endpoint)
+and `SNODRA_SERVER_OAUTH2_CLIENT_SECRET_FILE`; the client id defaults to the service name, which the hub checks against the token's `azp`.
 Their static token variables and mounts are removed, because a static token together with OAuth2 is a startup error. The ACL has a
 `[[service]]` table for service-b and service-c with the same `handle` / `send` as their `[[token]]` entries.
 
@@ -349,7 +349,7 @@ service-c with the JWT overlay as well) and adds, last:
 
 - **Step 22**: on both hubs' `/api/v1/topology`, service-b and service-c have `authKind` `jwt` and an `expiresAt` (epoch milliseconds) and
   service-a has `token` and none. (`authKind` `jwt` is the hub saying it validated the token; its
-  `kraken_hub_jwt_validations_total` shows on Grafana's Hub dashboard, JWT validations.)
+  `snodra_server_jwt_validations_total` shows on Grafana's Hub dashboard, JWT validations.)
 - **Step 22b**: within ~45 s `expiresAt` advances on both hubs for both services (a new 30 s token, renewed at about 80 % of its life)
   while the instance id and `connectedSinceMs` stay the same, so the token reached the live stream as `ClientMessage.credentials` and
   there was no reconnect. service-c's log has no new `registered with the hub` line and neither hub logged `credentials expired`.
@@ -361,8 +361,8 @@ service-c with the JWT overlay as well) and adds, last:
 
 The secure sandbox with service-a (Kotlin) and service-c (Rust) authenticating with a client certificate (P5c, umbrella ADR 0020): the
 overlay `kraken/infra/compose.mtls.yaml` on top of the secure one. service-b keeps its static token (the hubs run
-`KRAKEN_HUB_TLS_CLIENT_AUTH=optional`), so both kinds run side by side. It is not combined with the JWT overlay. The client CA, the
-certificates (EC P-256, 30 days, exactly one URI SAN `kraken://service/<name>`) and their keys come from `dev-hub-pki.sh` into the
+`SNODRA_SERVER_TLS_CLIENT_AUTH=optional`), so both kinds run side by side. It is not combined with the JWT overlay. The client CA, the
+certificates (EC P-256, 30 days, exactly one URI SAN `snodra://service/<name>`) and their keys come from `dev-hub-pki.sh` into the
 git-ignored `kraken/infra/.secrets/`.
 
 ```bash
@@ -370,15 +370,15 @@ git-ignored `kraken/infra/.secrets/`.
 scripts/dev-hub-pki.sh
 docker compose -f compose.yaml -f compose.local.yaml -f compose.secure.yaml -f compose.mtls.yaml --profile examples \
   up -d --force-recreate hub hub-2 service-a service-b service-c
-# from kraken-messaging
+# from snodra-messaging
 SECURE=1 MTLS=1 INFRA_DIR=../kraken/infra bash examples/smoke.sh    # every step, plus 21, 21b, 23 and 23b; ends with SMOKE OK
 # from kraken/infra: back to the secure stack
 docker compose -f compose.yaml -f compose.local.yaml -f compose.secure.yaml --profile examples \
   up -d --force-recreate hub hub-2 service-a service-b service-c
 ```
 
-service-a sets `KRAKEN_MESSAGING_HUB_TLS_CLIENT_CERT_FILE` / `KRAKEN_MESSAGING_HUB_TLS_CLIENT_KEY_FILE` (`kraken.messaging.hub.tls.client-cert-file`
-/ `client-key-file`), service-c `KRAKEN_HUB_TLS_CLIENT_CERT` / `KRAKEN_HUB_TLS_CLIENT_KEY`. Their token variables are emptied and their
+service-a sets `SNODRA_MESSAGING_HUB_TLS_CLIENT_CERT_FILE` / `SNODRA_MESSAGING_HUB_TLS_CLIENT_KEY_FILE` (`snodra.messaging.hub.tls.client-cert-file`
+/ `client-key-file`), service-c `SNODRA_SERVER_TLS_CLIENT_CERT` / `SNODRA_SERVER_TLS_CLIENT_KEY`. Their token variables are emptied and their
 token mounts removed (a token together with a certificate is a startup error). Each mounts its own **directory**
 (`.secrets/mtls/<service>/`, `client.pem` and `client.key`) and the hub CA, read-only: a rotation replaces the files by rename, which a
 single-file bind mount would not show. The ACL has a `[[service]]` table for service-a and service-c with the rights of their `[[token]]` entries.
@@ -402,41 +402,41 @@ service-b and service-c with the mTLS overlay as well) and adds, last:
 ## Metrics
 
 Everything in the sandbox exports its metrics over OTLP to otel-lgtm every 5 s (ADR 0026; `kraken/infra/compose.local.yaml`):
-both hubs (`KRAKEN_HUB_OTLP_ENDPOINT=http://otel-lgtm:4317`, `OTEL_METRIC_EXPORT_INTERVAL=5000`), service-a and service-b (the
+both hubs (`SNODRA_SERVER_OTLP_ENDPOINT=http://otel-lgtm:4317`, `OTEL_METRIC_EXPORT_INTERVAL=5000`), service-a and service-b (the
 library's metrics, listed in the [README](../README.md#metrics), and Boot's own, over OTLP/HTTP:
-`KRAKEN_OTLP_METRICS_ENABLED=true`, `KRAKEN_OTLP_METRICS_ENDPOINT=http://otel-lgtm:4318/v1/metrics`,
-`KRAKEN_OTLP_METRICS_STEP=5s`) and service-c (the Rust library's, over OTLP/gRPC: `KRAKEN_OTLP_ENDPOINT=http://otel-lgtm:4317`,
-`OTEL_METRIC_EXPORT_INTERVAL=5000`). Outside the sandbox the examples export nothing unless switched on (`KRAKEN_OTLP_METRICS_ENABLED`
-defaults to `false`, `KRAKEN_OTLP_METRICS_STEP` to `60s`; service-c installs no meter provider without `KRAKEN_OTLP_ENDPOINT`).
-Each series carries `job` = the service name (`kraken-hub` for the hubs) and `instance` = the instance id the hub shows on its
+`SNODRA_OTLP_METRICS_ENABLED=true`, `SNODRA_OTLP_METRICS_ENDPOINT=http://otel-lgtm:4318/v1/metrics`,
+`SNODRA_OTLP_METRICS_STEP=5s`) and service-c (the Rust library's, over OTLP/gRPC: `SNODRA_OTLP_ENDPOINT=http://otel-lgtm:4317`,
+`OTEL_METRIC_EXPORT_INTERVAL=5000`). Outside the sandbox the examples export nothing unless switched on (`SNODRA_OTLP_METRICS_ENABLED`
+defaults to `false`, `SNODRA_OTLP_METRICS_STEP` to `60s`; service-c installs no meter provider without `SNODRA_OTLP_ENDPOINT`).
+Each series carries `job` = the service name (`snodra-server` for the hubs) and `instance` = the instance id the hub shows on its
 topology (a hub's own id for the hubs).
 
-Grafana (<http://localhost:3000/>, anonymous admin; `KRAKEN_GRAFANA_PORT` when 3000 is taken) has the three kraken dashboards in
-the folder Kraken: [Overview](http://localhost:3000/d/kraken-overview), [Hub](http://localhost:3000/d/kraken-hub) and
-[Messaging](http://localhost:3000/d/kraken-messaging) (`kraken/infra/grafana/`). After a smoke run every panel has data except
+Grafana (<http://localhost:3000/>, anonymous admin; `SNODRA_GRAFANA_PORT` when 3000 is taken) has the three Snodra dashboards in
+the folder Snodra: [Overview](http://localhost:3000/d/snodra-overview), [Hub](http://localhost:3000/d/snodra-server) and
+[Messaging](http://localhost:3000/d/snodra-messaging) (`kraken/infra/grafana/`). After a smoke run every panel has data except
 those the sandbox mode does not drive. Prometheus is reached through Grafana's proxy:
 
 ```bash
 P=localhost:3000/api/datasources/proxy/uid/prometheus/api/v1
-curl -sG $P/query --data-urlencode 'query=max by (service) (kraken_hub_connected_instances)'      # instances per service
-curl -sG $P/query --data-urlencode 'query=sum by (job, processor, outcome) (kraken_events_consumed_total)'   # Kotlin and Rust alike
-curl -sG $P/query --data-urlencode 'query=max by (subscription) (kraken_event_browser_subscription_lag)'   # every subscription, idle ones too
+curl -sG $P/query --data-urlencode 'query=max by (service) (snodra_server_connected_instances)'      # instances per service
+curl -sG $P/query --data-urlencode 'query=sum by (job, processor, outcome) (snodra_events_consumed_total)'   # Kotlin and Rust alike
+curl -sG $P/query --data-urlencode 'query=max by (subscription) (snodra_event_browser_subscription_lag)'   # every subscription, idle ones too
 ```
 
-Smoke steps 29 to 29e check it, last, in every sandbox mode: 29 expects Grafana's API (`/api/search?tag=kraken`) to list
-`kraken-overview`, `kraken-hub` and `kraken-messaging` in the folder Kraken; 29b expects the hub series of P9
-(`kraken_hub_requests_total`, `kraken_hub_request_duration_seconds_bucket`, `kraken_hub_connected_instances`, the processor gauges
-`kraken_hub_processor_lag`, `_state`, `_dead_letters` and `_processed`) under `job="kraken-hub"`, and the subscription lag from `kraken-event-browser`
-from both hubs (`instance` = the `hubId` of each hub's topology) and `kraken_hub_connected_instances` for service-a, -b and -c;
+Smoke steps 29 to 29e check it, last, in every sandbox mode: 29 expects Grafana's API (`/api/search?tag=snodra`) to list
+`snodra-overview`, `snodra-server` and `snodra-messaging` in the folder Snodra; 29b expects the hub series of P9
+(`snodra_server_requests_total`, `snodra_server_request_duration_seconds_bucket`, `snodra_server_connected_instances`, the processor gauges
+`snodra_server_processor_lag`, `_state`, `_dead_letters` and `_processed`) under `job="snodra-server"`, and the subscription lag from `snodra-event-browser`
+from both hubs (`instance` = the `hubId` of each hub's topology) and `snodra_server_connected_instances` for service-a, -b and -c;
 29c sends `examples.CountGreetings` three times through service-c (`GET $C/greetings/Ada/count`, the sandbox's one call from Rust
 through the hub) and expects service-b (Kotlin) and service-c (Rust) to export the library series under the same names with the
 same label names (the hub-client histogram: service-a, the Kotlin sender, and service-c; the series:
-`kraken_events_consumed_total{outcome,processor,type}`, `kraken_event_handler_duration_seconds_bucket{le,processor,type}`, the
-outbox gauges and counter, `kraken_processor_lag{processor,segment}`, `kraken_processor_state{processor,state}`,
-`kraken_dead_letters{processor}`, `kraken_hub_client_request_duration_seconds_bucket{kind,le,outcome,type}`,
-`kraken_hub_client_handlers_in_flight`, `kraken_hub_client_connected_hubs`), with `instance` = the instance ids the hub lists for
-each; 29d expects no series with a `hub_id` label and `instance_id` only on `kraken_hub_streams_open` and
-`kraken_hub_subscriptions_open` (the handler instance); 29e reads the three dashboards from Grafana's API and runs every panel
+`snodra_events_consumed_total{outcome,processor,type}`, `snodra_event_handler_duration_seconds_bucket{le,processor,type}`, the
+outbox gauges and counter, `snodra_processor_lag{processor,segment}`, `snodra_processor_state{processor,state}`,
+`snodra_dead_letters{processor}`, `snodra_hub_client_request_duration_seconds_bucket{kind,le,outcome,type}`,
+`snodra_hub_client_handlers_in_flight`, `snodra_hub_client_connected_hubs`), with `instance` = the instance ids the hub lists for
+each; 29d expects no series with a `hub_id` label and `instance_id` only on `snodra_server_streams_open` and
+`snodra_server_subscriptions_open` (the handler instance); 29e reads the three dashboards from Grafana's API and runs every panel
 query against Prometheus, the variables at All (`.*`), `$__rate_interval` at `5m`, `$hub_seen` (Hubs seen within) and
 `$instance_seen` (Instances seen within) at `3m`, and expects each to return data, except
 the panels the smoke lists in `OBS_MAY_BE_EMPTY` with the reason this sandbox may not drive them (auth violations, JWT, JWKS,
@@ -449,7 +449,7 @@ gauges hold only handler instances with one open), and the panels whose series o
 updates for `SKIP_SUBSCRIBE`, processor control for `SKIP_CONTROL`, the event browser's for `SKIP_BROWSER`; errors by
 outcome with both `SKIP_PAUSE` and `SKIP_STREAM`; the saga counters and fired deadlines with both `SKIP_POSTCARD` and
 `SKIP_BANNER`). Exports arrive every 5 s, so the steps poll
-(up to 60 s). `GRAFANA` (default `http://localhost:${KRAKEN_GRAFANA_PORT:-3000}`) and `PROM` (Grafana's proxy) override the
+(up to 60 s). `GRAFANA` (default `http://localhost:${SNODRA_GRAFANA_PORT:-3000}`) and `PROM` (Grafana's proxy) override the
 addresses. They need `jq` or `python3`; `SKIP_OBS=1` skips them, `ONLY_OBS=1` runs only them (on a sandbox that already
 carried traffic, such as after a full run: the request and consumer series exist only after it).
 
@@ -489,7 +489,7 @@ carried traffic, such as after a full run: the request and consumer series exist
 
 `GreetingDeliverySaga` in service-b (the first saga of the sandbox, see `docs/02-messaging.md`, "Sagas and deadlines") gets
 the postcard of every delivered greeting printed by an external printer. The saga starts on `GreetingDelivered` (the
-greeting id is the job id), sends `PrintPostcard` and gives the printer 30 s. It speaks only kraken messages: the HTTP call
+greeting id is the job id), sends `PrintPostcard` and gives the printer 30 s. It speaks only Snodra messages: the HTTP call
 to the printer is made by the adapter, `PrinterAdapter`, an ordinary command handler made idempotent by `@IdempotentHandler`
 (the command's `idempotency-key` header goes to the printer as `Idempotency-Key`, and the printer prints once per key).
 
@@ -498,7 +498,7 @@ The fake printer answers by the greeting name's prefix, one prefix per way a rea
 | Name | The printer | The saga learns it by | Ends |
 |---|---|---|---|
 | `webhook-*` (and any name without a known prefix) | posts a signed webhook to `POST service-b:8080/printer/webhook` | `PrinterWebhookController`: `WebhookSignatureVerifier` + `ExternalEventIngress`, the five-line controller | `PostcardPrinted` |
-| `topic-*` | produces a record to its own topic `printer.events` | the `printer` `ExternalRecordTranslator` (`kraken.messaging.external.kafka.sources.printer.topic`) | `PostcardPrinted` |
+| `topic-*` | produces a record to its own topic `printer.events` | the `printer` `ExternalRecordTranslator` (`snodra.messaging.external.kafka.sources.printer.topic`) | `PostcardPrinted` |
 | `poll-*` | says nothing; `GET /jobs/{id}` is `PENDING` for 5 s, then `DONE` | a polling deadline every 2 s sends `PollPrintJob`; the adapter publishes `PostcardPrinted` when the job is done | `PostcardPrinted` |
 | `silent-*` | accepts and never answers | the 30 s deadline | `PostcardFailed` `TIMEOUT` |
 | `crash-*` | accepts, then exits before replying (compose restarts it) | the adapter's connection broke after the request went out: `SagaCommandFailed` `UNKNOWN_OUTCOME` | `PostcardFailed` `UNKNOWN_OUTCOME` |
@@ -524,7 +524,7 @@ the printer post its signed notifications to an address of its choosing.
 
 ## The banner saga
 
-`examples.Banner` in service-c (Rust, sagas S2: `kraken-messaging-rs/examples/service-c/src/banner.rs`) is the postcard saga
+`examples.Banner` in service-c (Rust, sagas S2: `snodra-messaging-rs/examples/service-c/src/banner.rs`) is the postcard saga
 in Rust with service-c's own types (a command type has one owner): it starts on `TextShouted` (the job id is
 `banner-<text in lower case>`), sends `PrintBanner` to service-c's own idempotent adapter (`idempotent_command`; the saga relay
 delivers it locally) and gives the printer 30 s. The printer prints the text in lower case and answers by its prefix as for
@@ -596,7 +596,7 @@ count to be back at 0. They need `jq` or `python3`; `SKIP_AUDIT=1` skips them, `
 
 **Processor control through the hub** (P6b, ADR 0023, `docs/02-messaging.md` "Processor control"). The hub pauses, resumes and
 resets a processor on every instance and works its dead letters, through its HTTP API with the write token
-(`KRAKEN_HUB_DASHBOARD_WRITE_TOKEN`; the dashboard token is refused on a write). The `audit` processor of each service also has a
+(`SNODRA_SERVER_DASHBOARD_WRITE_TOKEN`; the dashboard token is refused on a write). The `audit` processor of each service also has a
 reset handler (service-b: `@ResetHandler` `AuditHandler.onReset`; service-c: `builder.reset_handler("audit", ...)`) that records
 each reset, and a second handler that must not run again in a replay, a stand-in for a notification (service-b: `AuditNotifier`,
 `@DisallowReplay`; service-c: `EventOptions::new().processor("audit").disallow_replay()`): a reset of `audit` to `earliest` hands
@@ -609,12 +609,12 @@ every note to the first handler again (`/audit/handled` lists it twice) but not 
 
 **The write token in the sandbox.** `kraken/infra/scripts/dev-hub-pki.sh` writes it to the git-ignored
 `kraken/infra/.secrets/hub-control/dashboard-write.token`, and every sandbox mode gives it to both hubs as
-`KRAKEN_HUB_DASHBOARD_WRITE_TOKEN_FILE` (the plain one through `.secrets/hub-control.env`, read when it exists; the secure
+`SNODRA_SERVER_DASHBOARD_WRITE_TOKEN_FILE` (the plain one through `.secrets/hub-control.env`, read when it exists; the secure
 overlays set it themselves). Run the script once, also for the plain sandbox, and recreate `hub` and `hub-2`; without it the
 plain hubs answer every write `403 controls are disabled`. The smoke reads the same file (`WRITE_TOKEN_FILE` to override).
 
 ```bash
-# from kraken-messaging, against the plain sandbox (secure modes: https://localhost:7001, --cacert ../kraken/infra/.secrets/ca.pem,
+# from snodra-messaging, against the plain sandbox (secure modes: https://localhost:7001, --cacert ../kraken/infra/.secrets/ca.pem,
 # and the dashboard token on the GETs to the hub)
 W="Authorization: Bearer $(cat ../kraken/infra/.secrets/hub-control/dashboard-write.token)"
 HUB=http://localhost:7001/api/v1/services/service-b/processors/audit        # service-c: .../services/service-c/...
@@ -659,20 +659,20 @@ keys of the run. They need `jq` or `python3`; `SKIP_CONTROL=1` skips them, `ONLY
 
 ## Event browser
 
-The hub reads no event store (ADR 0027): `kraken-event-browser`, a separate binary that `kraken/infra/compose.yaml` starts
-next to both hubs, reads `kraken.events` from Kafka, read-only, and answers the hubs' `kraken.events.*` queries (P7,
+The hub reads no event store (ADR 0027): `snodra-event-browser`, a separate binary that `kraken/infra/compose.yaml` starts
+next to both hubs, reads `kraken.events` from Kafka, read-only, and answers the hubs' `snodra.events.*` queries (P7,
 ADR 0025, `kraken/docs/05-services/hub.md` "Event browser"). The search goes newest first (by key, type or a `type.*`
 prefix, source, correlation id, user id, event id, time range), a record shows every header, a tail streams new records
 as server-sent events, and the lag lists every subscription on the topic, members or not. The dashboard shows the Events
 page; without a browser connected the hubs answer 404 `event browser not installed`. The browser never joins a
 subscription and starts without Kafka (only these routes answer 503 while it is down).
 
-Payloads are shown only with `KRAKEN_HUB_EVENT_BROWSER_PAYLOADS=true` and a dashboard or write token presented by the request:
+Payloads are shown only with `SNODRA_SERVER_EVENT_BROWSER_PAYLOADS=true` and a dashboard or write token presented by the request:
 the secure overlay (and with it the JWT and mTLS ones) turns the switch on, so there the dashboard token sees them; the plain
 sandbox keeps them hidden (`"payload": {"hidden": "payloads-off", ...}`, and a payload search `q` is 403).
 
 ```bash
-# from kraken-messaging, against the plain sandbox (secure modes: https://localhost:7001, --cacert ../kraken/infra/.secrets/ca.pem
+# from snodra-messaging, against the plain sandbox (secure modes: https://localhost:7001, --cacert ../kraken/infra/.secrets/ca.pem
 # and the dashboard token on every call; hub-2 is localhost:7011)
 curl -s -X POST localhost:8092/audit/notes -H 'content-type: application/json' -d '{"key":"ada","text":"hello"}'
 curl -s 'localhost:7001/api/v1/events?key=ada&limit=5'          # {"results":[{"source":"kraken.events","segment":s,"position":p,"key":"ada","headers":{"type":"examples.AuditNote",...}}],...}
@@ -694,7 +694,7 @@ first note's text (`q`): found with `SECURE=1`, 403 `payloads-off` otherwise; 28
 `event: start`, publishes a third note and expects each tail to deliver it (a summary, no payload), then stops the tails; 28f
 lists the subscriptions and expects `service-b.default`, `service-b.audit`, `service-c.default` and `service-c.audit` with a lag,
 and no subscription of the browser's own, while the broker's own group list has no group of the hub's
-(`kafka-consumer-groups.sh --list` run in `kraken-kafka`, `KAFKA_CONTAINER` to name another). A note reaches Kafka through
+(`kafka-consumer-groups.sh --list` run in `snodra-kafka`, `KAFKA_CONTAINER` to name another). A note reaches Kafka through
 service-b's outbox relay, so the searches poll. They need `jq` or `python3` and the docker CLI; `SKIP_BROWSER=1` skips them,
 `ONLY_BROWSER=1` runs only them.
 

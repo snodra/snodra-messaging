@@ -1,4 +1,4 @@
-rootProject.name = "kraken-messaging"
+rootProject.name = "snodra-messaging"
 
 pluginManagement {
     repositories {
@@ -14,13 +14,13 @@ dependencyResolutionManagement {
     }
 }
 
-include("kraken-messaging-api")
-include("kraken-messaging")
-include("kraken-messaging-kafka")
-include("kraken-messaging-rabbitmq")
-include("kraken-messaging-mongo")
-include("kraken-messaging-jdbc")
-include("kraken-messaging-test")
+include("snodra-messaging-api")
+include("snodra-messaging")
+include("snodra-messaging-kafka")
+include("snodra-messaging-rabbitmq")
+include("snodra-messaging-mongo")
+include("snodra-messaging-jdbc")
+include("snodra-messaging-test")
 
 
 // Example services (never published): see examples/README.md

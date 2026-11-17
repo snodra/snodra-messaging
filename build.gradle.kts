@@ -12,7 +12,7 @@ val releaseVersion = providers.gradleProperty("version")
     .getOrElse("0.1.0")
 
 allprojects {
-    group = "io.damoreira.kraken"
+    group = "com.damoreira.snodra"
     version = releaseVersion
 }
 

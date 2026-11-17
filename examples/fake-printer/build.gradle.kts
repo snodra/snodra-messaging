@@ -14,7 +14,7 @@ dependencyManagement {
     }
 }
 
-// A partner, not a kraken service: it does not use the starter. Plain HTTP in, a webhook or a Kafka record out.
+// A partner, not a snodra service: it does not use the starter. Plain HTTP in, a webhook or a Kafka record out.
 dependencies {
     implementation(libs.spring.boot.starter.webmvc)
     implementation(libs.spring.boot.starter.actuator)

@@ -1,0 +1,5 @@
+org.springframework.boot.EnvironmentPostProcessor=\
+com.damoreira.snodra.messaging.metrics.MetricsDefaults
+
+org.springframework.boot.diagnostics.FailureAnalyzer=\
+com.damoreira.snodra.messaging.config.MissingMessageStoreFailureAnalyzer
