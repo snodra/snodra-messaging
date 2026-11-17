@@ -1,11 +1,9 @@
 package com.damoreira.snodra.messaging.kafka
 
-import com.mongodb.client.MongoClient
-import com.mongodb.client.MongoClients
 import com.damoreira.snodra.messaging.eventstore.EventStore
 import com.damoreira.snodra.messaging.eventstore.deadLetterSource
-import com.damoreira.snodra.messaging.mongo.MongoMessageStore
 import com.damoreira.snodra.messaging.store.MessageStore
+import com.damoreira.snodra.messaging.store.memory.MemoryMessageStore
 import com.damoreira.snodra.messaging.test.SnodraContainers
 import com.damoreira.snodra.messaging.test.eventstore.EventStoreConformanceTest
 import org.apache.kafka.clients.admin.Admin
@@ -14,21 +12,18 @@ import org.apache.kafka.clients.admin.NewTopic
 import org.junit.jupiter.api.AfterAll
 import org.junit.jupiter.api.BeforeAll
 import org.junit.jupiter.api.TestInstance
-import org.springframework.data.mongodb.core.MongoTemplate
-import org.springframework.data.mongodb.core.SimpleMongoClientDatabaseFactory
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.TimeUnit
 
 /**
  * The event store conformance kit against a real Kafka broker: a topic of two partitions and its `.dlt`, one
- * [KafkaEventStore] per service instance. The at-least-once check keeps its markers in the MongoDB add-on's message store.
+ * [KafkaEventStore] per service instance. The at-least-once check keeps its markers in the in-memory message store.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class KafkaEventStoreConformanceTest : EventStoreConformanceTest() {
     private val kafka = SnodraContainers.kafka()
-    private val mongo = SnodraContainers.mongo()
-    private lateinit var client: MongoClient
+    private val store = MemoryMessageStore()
     private val opened = mutableListOf<KafkaEventStore>()
     private val topic = "snodra.conformance." + UUID.randomUUID().toString().replace("-", "")
 
@@ -37,8 +32,6 @@ class KafkaEventStoreConformanceTest : EventStoreConformanceTest() {
     @BeforeAll
     fun start() {
         kafka.start()
-        mongo.start()
-        client = MongoClients.create(mongo.connectionString + "/?directConnection=true")
         Admin.create(mapOf(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG to kafka.bootstrapServers)).use { admin ->
             admin.createTopics(listOf(NewTopic(topic, 2, 1.toShort()), NewTopic(deadLetterSource(topic), 1, 1.toShort())))
                 .all().get(30, TimeUnit.SECONDS)
@@ -48,8 +41,6 @@ class KafkaEventStoreConformanceTest : EventStoreConformanceTest() {
     @AfterAll
     fun stop() {
         opened.forEach { it.close() }
-        client.close()
-        mongo.stop()
         kafka.stop()
     }
 
@@ -66,8 +57,6 @@ class KafkaEventStoreConformanceTest : EventStoreConformanceTest() {
             .also { synchronized(opened) { opened += it } }
     }
 
-    override fun messageStore(): MessageStore {
-        val template = MongoTemplate(SimpleMongoClientDatabaseFactory(client, "store_" + UUID.randomUUID().toString().replace("-", "")))
-        return MongoMessageStore(template).also { it.ensureIndexes() }
-    }
+    // The kit needs a message store for its markers, not a database: the MongoDB store has its own conformance test.
+    override fun messageStore(): MessageStore = store
 }
