@@ -1,0 +1,79 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.caching=true"
+  TESTCONTAINERS_RYUK_DISABLED: "true"
+  # The hub end-to-end tests use this image; the test job builds it from the public server repo.
+  SNODRA_SERVER_IMAGE: snodra-server:dev
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+      - uses: gradle/actions/setup-gradle@v4
+      - run: ./gradlew assemble --no-daemon
+
+  proto-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: snodra/snodra-server
+          ref: ${{ vars.SNODRA_SERVER_REF || 'main' }}
+          path: server
+      - name: hub.proto must equal the server's
+        run: SNODRA_PROTO_SYNC_REQUIRED=true SNODRA_PROTO_SOURCE="$GITHUB_WORKSPACE/server/proto/hub.proto" bash scripts/check-proto-sync.sh
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: snodra/snodra-server
+          ref: ${{ vars.SNODRA_SERVER_REF || 'main' }}
+          path: server
+      - name: build the hub image the end-to-end tests need
+        run: docker build -t snodra-server:dev server
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+      - uses: gradle/actions/setup-gradle@v4
+      - run: ./gradlew test --no-daemon
+
+  throughput:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: snodra/snodra-server
+          ref: ${{ vars.SNODRA_SERVER_REF || 'main' }}
+          path: server
+      - run: docker build -t snodra-server:dev server
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+      - uses: gradle/actions/setup-gradle@v4
+      - run: ./gradlew throughputTest --no-daemon

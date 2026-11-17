@@ -58,16 +58,4 @@ publishing {
             }
         }
     }
-    repositories {
-        maven {
-            name = "nexus"
-            url = uri(System.getenv("NEXUS_MAVEN_RELEASE_URL")
-                ?: "https://nexus.damoreira.ml/repository/maven-releases/")
-            isAllowInsecureProtocol = true
-            credentials {
-                username = System.getenv("NEXUS_USERNAME")
-                password = System.getenv("NEXUS_PASSWORD")
-            }
-        }
-    }
 }

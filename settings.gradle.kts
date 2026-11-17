@@ -1,9 +1,23 @@
-rootProject.name = "snodra-messaging"
+rootProject.name = "snodra-messaging-workspace"
 
 pluginManagement {
     repositories {
         gradlePluginPortal()
         mavenCentral()
+    }
+}
+
+plugins {
+    id("com.gradleup.nmcp.settings") version "1.6.2"
+}
+
+nmcpSettings {
+
+    centralPortal {
+        username = System.getenv("MAVEN_CENTRAL_USERNAME") ?: ""
+        password = System.getenv("MAVEN_CENTRAL_PASSWORD") ?: ""
+        // A tag is the human gate; the portal validates and releases the bundle.
+        publishingType = "AUTOMATIC"
     }
 }
 

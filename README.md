@@ -108,9 +108,11 @@ testcontainers.docker.socket.override=/var/run/docker.sock
 ./gradlew publishToMavenLocal    # installs every module into ~/.m2, at 0.1.0 (-Pversion=X.Y.Z for another)
 ```
 
-Releases are cut by CI ([CI/CD pipeline](#cicd-pipeline)): every merge to `main` tags the next version and publishes the seven
-modules at it to Nexus (`maven-releases`). Locally, `./gradlew publish -Pversion=X.Y.Z` publishes to `NEXUS_MAVEN_RELEASE_URL`
-(default `https://nexus.damoreira.ml/repository/maven-releases/`) as `NEXUS_USERNAME` / `NEXUS_PASSWORD`.
+Releases go to **Maven Central** from a tag ([CI/CD pipeline](#cicd-pipeline)): the release workflow runs
+`./gradlew publishAggregationToCentralPortal -Pversion=X.Y.Z`, which stages the seven modules (sources, javadoc and
+GPG signatures included) and uploads them through the Sonatype Central Portal publisher. The credentials are the
+Portal user token (`MAVEN_CENTRAL_USERNAME` / `MAVEN_CENTRAL_PASSWORD`) and a signing key
+(`GPG_PRIVATE_KEY` / `GPG_PASSPHRASE`); without the key a local build skips only the signatures.
 
 The published POM and Gradle module metadata carry resolved versions for every dependency (Gradle `versionMapping`), and the
 POM also imports the Spring Boot BOM, so consumers do not need to manage them. Builder call.
@@ -122,11 +124,10 @@ POM also imports the Spring Boot BOM, so consumers do not need to manage them. B
 ```kotlin
 // settings.gradle.kts / build.gradle.kts
 repositories {
-    maven("https://nexus.damoreira.ml/repository/maven-public/")   // the releases
     mavenCentral()
 }
 
-val snodra = "0.4.0"   // a release: the newest tag vX.Y.Z of this repository, without the v
+val snodra = "0.5.0"   // a release: the newest tag vX.Y.Z of this repository, without the v
 
 dependencies {
     implementation("com.damoreira.snodra:snodra-messaging:$snodra")
@@ -2028,32 +2029,40 @@ because the protocol package changed (a client and a server of different protoco
 
 ## CI/CD pipeline
 
-Defined in [`.gitlab-ci.yml`](.gitlab-ci.yml); runs for merge requests and on `main`, on shell-executor runners with Java 25,
-Gradle and Docker (no job images or services: Testcontainers talks to the host's daemon).
+Defined in [`.github/workflows/ci.yml`](.github/workflows/ci.yml) (every push and pull request) and
+[`.github/workflows/release.yml`](.github/workflows/release.yml) (tags `v*`), on GitHub-hosted Ubuntu runners with Java 25
+and Docker (Testcontainers talks to the runner's daemon).
 
 ```mermaid
 flowchart LR
     build["build<br/>gradlew assemble"] --> test["test<br/>gradlew test"] --> throughput["throughput<br/>gradlew throughputTest"]
     sync["proto-sync<br/>hub.proto = Snodra Server's"] --> test
-    throughput --> release["release · main only<br/>tag vX.Y.Z, Nexus"]
+    throughput --> release["release · tag v* only<br/>Maven Central + GitHub release"]
 ```
 
-| Stage | Job | Runs | Produces |
+| Workflow | Job | Runs | Produces |
 |---|---|---|---|
-| build | `build` | always | `./gradlew assemble` |
-| build | `proto-sync` | always | clones the umbrella repo and checks that `hub.proto` is byte-identical to its `protocol/hub.proto` (`scripts/check-proto-sync.sh`) |
-| test | `test` | always | `./gradlew test`: unit, container and end-to-end tests; the hub end-to-end tests need the hub image (`SNODRA_SERVER_IMAGE`, default `snodra-server:dev`) on the runner and are skipped without it; JUnit report |
-| test | `throughput` | after `test` | `./gradlew throughputTest`: the throughput floors (tag `throughput`); a floor not reached fails the pipeline |
-| release | `release` | on `main` only, one at a time | the next tag `vX.Y.Z` (from the conventional commits since the last tag: a `!` or `BREAKING CHANGE` bumps the major, a `feat` the minor, anything else the patch; `RELEASE_VERSION` or `SEMVER_BUMP` override it, `DRY_RUN=true` stops before tagging), the seven modules at `X.Y.Z` in Nexus `maven-releases`, and a GitLab release |
+| `ci` | `build` | every push and pull request | `./gradlew assemble` |
+| `ci` | `proto-sync` | every push and pull request | clones the public `snodra/snodra-server` and checks that `hub.proto` is byte-identical to its `proto/hub.proto` (`scripts/check-proto-sync.sh`) |
+| `ci` | `test` | every push and pull request | builds the server image (`snodra-server:dev`) from `snodra/snodra-server` at `vars.SNODRA_SERVER_REF` (default `main`), then `./gradlew test`: unit, container and end-to-end tests |
+| `ci` | `throughput` | after `test` | `./gradlew throughputTest`: the throughput floors (tag `throughput`); a floor not reached fails the run |
+| `release` | `publish` | tags `v*` only | the seven modules at `X.Y.Z` on Maven Central (Central Portal publisher, GPG-signed), then a GitHub release |
 
-Consumers resolve the artifacts from the group endpoint
-`https://nexus.damoreira.ml/repository/maven-public/`. No Docker image is built: this
-is a library; the example services are built from source ([examples/Dockerfile](examples/Dockerfile)).
+Releases are cut deliberately:
+
+```sh
+git switch main && git pull
+git tag vX.Y.Z && git push origin vX.Y.Z
+```
+
+Consumers resolve the artifacts from **Maven Central** (`mavenCentral()`); no repository credentials are needed. No Docker
+image is built: this is a library, and the example services are built from source
+([examples/Dockerfile](examples/Dockerfile)).
 
 ## Contributing
 
-Branches `feat/<topic>`, `fix/<topic>`, `chore/<topic>` off `main`, merged by merge request with a
-green pipeline; conventional commit messages. Design changes go to the umbrella repo first.
+Branches `feat/<topic>`, `fix/<topic>`, `chore/<topic>` off `main`, merged by pull request with a
+green workflow; conventional commit messages. Design changes go to the umbrella repo first.
 Conventions: [`../kraken/docs/04-repositories.md`](../kraken/docs/04-repositories.md).
 
 ## License

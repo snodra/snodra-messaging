@@ -1,6 +1,8 @@
+import org.gradle.plugins.signing.SigningExtension
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
+    signing
     alias(libs.plugins.kotlin.jvm) apply false
     alias(libs.plugins.kotlin.spring) apply false
     alias(libs.plugins.spring.boot) apply false
@@ -9,7 +11,11 @@ plugins {
 
 val releaseVersion = providers.gradleProperty("version")
     .orElse(providers.environmentVariable("CI_COMMIT_TAG").map { it.removePrefix("v") })
+    .orElse(providers.environmentVariable("GITHUB_REF_NAME").map { it.removePrefix("v") })
     .getOrElse("0.1.0")
+
+val gpgKey = System.getenv("GPG_PRIVATE_KEY")
+val gpgPassphrase = System.getenv("GPG_PASSPHRASE")
 
 allprojects {
     group = "com.damoreira.snodra"
@@ -17,6 +23,42 @@ allprojects {
 }
 
 subprojects {
+    // Everything published to Maven Central ships sources and a javadoc jar, is signed, and carries
+    // the coordinates' metadata; a local build without the GPG key skips only the signatures.
+    plugins.withId("maven-publish") {
+        apply(plugin = "signing")
+        extensions.configure<JavaPluginExtension> {
+            withSourcesJar()
+            withJavadocJar()
+        }
+        afterEvaluate {
+            extensions.configure<SigningExtension>("signing") {
+                if (!gpgKey.isNullOrBlank()) {
+                    useInMemoryPgpKeys(gpgKey, gpgPassphrase)
+                    sign(extensions.getByType<PublishingExtension>().publications)
+                }
+            }
+            extensions.configure<PublishingExtension>("publishing") {
+                publications.withType<MavenPublication>().configureEach {
+                    pom {
+                        url.set("https://snodra.damoreira.com/")
+                        scm {
+                            url.set("https://github.com/snodra/snodra-messaging")
+                            connection.set("scm:git:https://github.com/snodra/snodra-messaging.git")
+                        }
+                        developers {
+                            developer {
+                                id.set("gdamoreira")
+                                name.set("Guilherme D'Amoreira")
+                                email.set("snodra@damoreira.com.br")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     plugins.withId("org.jetbrains.kotlin.jvm") {
         extensions.configure<org.jetbrains.kotlin.gradle.dsl.KotlinJvmProjectExtension> {
             jvmToolchain(25)
