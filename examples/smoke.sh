@@ -304,20 +304,20 @@ if command -v jq >/dev/null; then
   reply_field() { jq -r --arg f "$1" 'if has($f) then .[$f] | tostring else empty end' 2>/dev/null || true; }
   # GET .../dead-letters through the hub -> one line per letter, oldest first: "<id> <key> <reason> <attempts>".
   hub_letters() { jq -r '.letters[] | "\(.id) \(.key) \(.reason) \(.attempts)"' 2>/dev/null || true; }
-  # GET /api/v1/events -> one line per result, in the order given: "<partition> <offset> <timestamp> <key> <type> <correlationId>
-  # <id>" ("-" for what the record lacks).
+  # GET /api/v1/events -> one line per result, in the order given: "<segment> <position> <timestamp> <key> <type>
+  # <correlationId> <id>" ("-" for what the record lacks).
   event_rows() {
-    jq -r '.results[] | "\(.partition) \(.offset) \(.timestamp // "-") \(.key // "-") \(.headers.type // "-") \(.headers.correlationId // "-") \(.headers.id // "-")"' 2>/dev/null || true
+    jq -r '.results[] | "\(.segment) \(.position) \(.timestamp // "-") \(.key // "-") \(.headers.type // "-") \(.headers.correlationId // "-") \(.headers.id // "-")"' 2>/dev/null || true
   }
-  # GET /api/v1/events/<topic>/<partition>/<offset> -> "header <name> <value>" per header in record order, then one payload line:
+  # GET /api/v1/events/<source>/<segment>/<position> -> "header <name> <value>" per header in record order, then one payload line:
   # "payload text <text, newlines as spaces>", "payload hidden <code>", "payload base64" or "payload null".
   event_detail() {
     jq -r '((.allHeaders // [])[] | "header \(.name) \(.value // "-")"),
       (if has("payloadBase64") then "payload base64" elif (.payload | type) == "object" then "payload hidden \(.payload.hidden)"
        elif (.payload | type) == "string" then "payload text \(.payload | gsub("\n"; " "))" else "payload null" end)' 2>/dev/null || true
   }
-  # GET /api/v1/consumer-groups -> one line per group, in the order given: "<groupId> <state> <members> <lag>".
-  group_rows() { jq -r '.groups[] | "\(.groupId) \(.state) \(.members) \(.lag)"' 2>/dev/null || true; }
+  # GET /api/v1/events/lag -> one line per subscription, in the order given: "<subscription> <state> <members> <lag>".
+  group_rows() { jq -r '.subscriptions[] | "\(.subscription) \(.state) \(.members) \(.lag)"' 2>/dev/null || true; }
   # Prometheus /api/v1/query -> one line per result: the values of the labels <label ...>, space-separated ("-" for a label the
   # result lacks; one "-" per result without labels).
   prom_rows() {
@@ -434,7 +434,7 @@ except Exception: pass' || true; }
 try:
     for r in json.load(sys.stdin).get("results", []):
         h = r.get("headers") or {}; d = lambda v: "-" if v is None else v
-        print(r["partition"], r["offset"], d(r.get("timestamp")), d(r.get("key")), d(h.get("type")), d(h.get("correlationId")), d(h.get("id")))
+        print(r["segment"], r["position"], d(r.get("timestamp")), d(r.get("key")), d(h.get("type")), d(h.get("correlationId")), d(h.get("id")))
 except Exception: pass' || true; }
   event_detail() { python3 -I -c 'import json,sys
 try:
@@ -1463,20 +1463,22 @@ control_steps() {
   control_off
 }
 
-# P7 (ADR 0025): the hubs' event browser, which reads kraken.events from Kafka, read-only (kraken/infra/compose.yaml gives both
-# hubs KRAKEN_HUB_KAFKA_BOOTSTRAP; compose.secure.yaml, and with it the jwt and mtls overlays, turns payloads on). The events
-# are audit notes the smoke publishes through service-b (`POST $B/audit/notes`: examples.AuditNote under the note's key, with
-# a correlation id of its own that the library makes up and the first search reads back). Step 28: both hubs have the browser
-# on (`/api/v1/version`), payloads only with SECURE=1, where a read without the dashboard token is 401 (the plain hubs' reads
-# are open). 28b: two notes under a key of this run: both hubs find them by key and by type (exact and `examples.Audit*`),
-# newest first (the second note first, timestamps not increasing), and each by its correlation id. 28c: the record shows the
-# library headers; its payload is hidden as `payloads-off` in the plain sandbox and is the note's JSON with the dashboard
-# token in the secure ones (the newest is the second note). 28d: a payload search (`q`) finds the first note by its text with
-# SECURE=1 and is 403 `payloads-off` otherwise. 28e: a tail opened on each hub before a third note is published delivers it.
-# 28f: both hubs list the examples' consumer groups on kraken.events (service-b.default, service-b.audit, service-c.default,
-# service-c.audit) with their lag, and no group of the hub's own, neither in the API (which lists every group the broker
-# has) nor in the broker's list read with kafka-consumer-groups.sh in the Kafka container. A search reads Kafka as it is: a note is there once
-# service-b's outbox relay published it, so the steps poll. SKIP_BROWSER=1 skips these steps, ONLY_BROWSER=1 runs only them.
+# P7 (ADR 0025, ADR 0027): the hubs' event browser, `kraken-event-browser`, a separate binary that reads kraken.events
+# from Kafka, read-only (kraken/infra/compose.yaml starts it next to both hubs; compose.secure.yaml, and with it the jwt
+# and mtls overlays, turns payloads on). The events are audit notes the smoke publishes through service-b (`POST
+# $B/audit/notes`: examples.AuditNote under the note's key, with a correlation id of its own that the library makes up and
+# the first search reads back). Step 28: both hubs report the browser installed (`/api/v1/version`), payloads only with
+# SECURE=1, where a read without the dashboard token is 401 (the plain hubs' reads are open). 28b: two notes under a key
+# of this run: both hubs find them by key and by type (exact and `examples.Audit*`), newest first (the second note first,
+# timestamps not increasing), and each by its correlation id. 28c: the record shows the library headers; its payload is
+# hidden as `payloads-off` in the plain sandbox and is the note's JSON with the dashboard token in the secure ones (the
+# newest is the second note). 28d: a payload search (`q`) finds the first note by its text with SECURE=1 and is 403
+# `payloads-off` otherwise. 28e: a tail opened on each hub before a third note is published delivers it. 28f: both hubs
+# list the examples' subscriptions on kraken.events (service-b.default, service-b.audit, service-c.default,
+# service-c.audit) with their lag, and no subscription of the browser's own, while the broker's own group list read with
+# kafka-consumer-groups.sh in the Kafka container has no group of the hub's. A search reads Kafka as it is: a note is
+# there once service-b's outbox relay published it, so the steps poll. SKIP_BROWSER=1 skips these steps, ONLY_BROWSER=1
+# runs only them.
 
 # The HTTP code of a GET on <hub>'s API without any credential (the curl wrapper would add the dashboard token).
 anonymous_code() { # <hub> <path and query>
@@ -1541,21 +1543,20 @@ browser_steps() {
   echo "28. both hubs have the event browser on, payloads $want; a read without the dashboard token is $([ "$SECURE" = "1" ] && echo 401 || echo 'open (no dashboard token in this mode)') ..."
   for h in "${hubs[@]}"; do
     v=$(curl -fsS "$h/api/v1/version" | reply_field eventBrowser | tr -d ' ')
-    printf '%s' "$v" | grep -q '"enabled":true' && printf '%s' "$v" | grep -q "\"payloads\":$want" \
-      && printf '%s' "$v" | grep -q '"topics":\["kraken.events"\]' \
-      || fail "$h/api/v1/version: expected eventBrowser enabled, payloads $want, topics [kraken.events], got '$v' (KRAKEN_HUB_KAFKA_BOOTSTRAP in kraken/infra/compose.yaml; recreate hub and hub-2)"
+    printf '%s' "$v" | grep -q '"installed":true' && printf '%s' "$v" | grep -q "\"payloads\":$want" \
+      || fail "$h/api/v1/version: expected eventBrowser installed, payloads $want, got '$v' (the kraken-event-browser service of kraken/infra/compose.yaml; recreate hub, hub-2 and the browser)"
     if [ "$SECURE" = "1" ]; then
       line=""
-      for name in "events?limit=1" consumer-groups events/tail events/kraken.events/0/0; do
+      for name in "events?limit=1" events/lag events/tail events/kraken.events/0/0; do
         code=$(anonymous_code "$h" "$name")
         [ "$code" = "401" ] || fail "$h/api/v1/$name without the dashboard token: expected 401, got $code"
         line="$line ${name%%\?*} 401,"
       done
-      echo "   $h: on, topics [kraken.events], payloads true; no token:${line%,}"
+      echo "   $h: installed, payloads true; no token:${line%,}"
     else
       code=$(anonymous_code "$h" "events?limit=1")
       [ "$code" = "200" ] || fail "$h/api/v1/events without a token: expected 200 (the plain hubs' reads are open), got $code"
-      echo "   $h: on, topics [kraken.events], payloads false; events without a token 200"
+      echo "   $h: installed, payloads false; events without a token 200"
     fi
   done
 
@@ -1636,27 +1637,27 @@ browser_steps() {
     done
     [ -n "$line" ] || fail "${hubs[$i]}: the tail did not deliver the note t$run within 60 s: $(head -c 500 "${files[$i]}")"
     printf '%s' "$line" | grep -q '"payload"' && fail "${hubs[$i]}: the tail carries a payload"
-    echo "   ${hubs[$i]}: start, then record $(printf '%s' "$line" | sed -n 's/.*"partition":\([0-9]*\),"offset":\([0-9]*\).*/p\1\/\2/p') key t$run"
+    echo "   ${hubs[$i]}: start, then record $(printf '%s' "$line" | sed -n 's/.*"segment":"\([0-9]*\)","position":"\([0-9]*\)".*/s\1\/\2/p') key t$run"
   done
   browser_off
 
-  echo "28f. both hubs list the examples' consumer groups with their lag, and none of their own ..."
+  echo "28f. both hubs list the examples' subscriptions with their lag, and none of their own ..."
   for h in "${hubs[@]}"; do
-    reply=$(curl -fsS --max-time 30 "$h/api/v1/consumer-groups") || fail "GET $h/api/v1/consumer-groups failed"
+    reply=$(curl -fsS --max-time 30 "$h/api/v1/events/lag") || fail "GET $h/api/v1/events/lag failed"
     rows=$(printf '%s' "$reply" | group_rows)
-    [ "$(printf '%s' "$reply" | reply_field truncated)" = "false" ] || fail "$h: the consumer groups are truncated"
+    [ "$(printf '%s' "$reply" | reply_field truncated)" = "false" ] || fail "$h: the subscriptions are truncated"
     line=""
     for g in service-b.default service-b.audit service-c.default service-c.audit; do
       read -r _ state members lag <<< "$(printf '%s\n' "$rows" | grep "^$g " || true)"
-      [[ "${lag:-}" =~ ^[0-9]+$ ]] || fail "$h: the group $g should be listed with a lag, got: $rows"
+      [[ "${lag:-}" =~ ^[0-9]+$ ]] || fail "$h: the subscription $g should be listed with a lag, got: $rows"
       line="$line $g $state/$members lag $lag,"
     done
-    if printf '%s\n' "$rows" | grep -q '^kraken-hub'; then fail "$h lists a consumer group of the hub's own: $rows"; fi
-    echo "   $h: $(printf '%s\n' "$rows" | grep -c .) groups;${line%,}; none kraken-hub*"
+    if printf '%s\n' "$rows" | grep -q '^kraken-event-browser'; then fail "$h lists a subscription of the event browser's own: $rows"; fi
+    echo "   $h: $(printf '%s\n' "$rows" | grep -c .) subscriptions;${line%,}; none of the browser's"
   done
   # The API lists every group the broker has; the broker's own list says the same without the hub in between.
   local kafka=${KAFKA_CONTAINER:-kraken-kafka} listed
-  command -v docker >/dev/null || fail "docker CLI needed for the consumer-group check (or set SKIP_BROWSER=1)"
+  command -v docker >/dev/null || fail "docker CLI needed for the broker group check (or set SKIP_BROWSER=1)"
   listed=$(docker exec "$kafka" /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server kafka:19092 --list 2>/dev/null) \
     || fail "kafka-consumer-groups.sh --list failed in $kafka (set KAFKA_CONTAINER)"
   printf '%s\n' "$listed" | grep -q '^service-b\.default$' || fail "$kafka: the broker's group list lacks service-b.default: $listed"
@@ -1770,15 +1771,19 @@ obs_steps() {
   for h in "${hubs[@]}"; do ids="$ids $(curl -fsS "$h/api/v1/topology" | hub_id_of)"; done
   for m in kraken_hub_requests_total kraken_hub_request_duration_seconds_bucket kraken_hub_connected_instances \
            kraken_hub_processor_lag kraken_hub_processor_state kraken_hub_processor_dead_letters \
-           kraken_hub_processor_processed kraken_hub_consumer_group_lag; do
+           kraken_hub_processor_processed; do
     await_label_values "count by (instance) ($m{job=\"kraken-hub\"})" instance "$ids" 60 >/dev/null
   done
+  # The subscription lag comes from the event browser, a process of its own (ADR 0027): it lists the examples'
+  # subscriptions, live instances or not.
+  await_label_values 'max by (subscription) (kraken_event_browser_subscription_lag)' subscription \
+    "service-b.default service-b.audit service-c.default service-c.audit" 60 >/dev/null
   line=$(prom_query 'max by (service) (kraken_hub_connected_instances{service=~"service-[abc]"})' | prom_rows service)
   for svc in service-a service-b service-c; do
     printf '%s\n' "$line" | grep -qx "$svc" || fail "kraken_hub_connected_instances has no series for $svc"
   done
-  echo "   requests, duration buckets, connected_instances, processor lag/state/dead letters/processed, consumer_group_lag:" \
-       "each from$ids"
+  echo "   requests, duration buckets, connected_instances, processor lag/state/dead letters/processed: each from$ids" \
+       "the subscription lag from the event browser"
 
   echo "29c. service-b (Kotlin) and service-c (Rust) export the library series under the same names and label names ..."
   # Only service-a (Kotlin) and service-c (Rust) send through the hub: service-c's GET /greetings/{name}/count sends
