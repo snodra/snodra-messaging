@@ -55,11 +55,11 @@ From `kraken/infra`:
 docker compose -f compose.yaml -f compose.local.yaml --profile examples up --build -d service-a service-b service-c fake-printer
 ```
 
-This builds `kraken-hub:dev`, `kraken-examples-service-a:dev`, `kraken-examples-service-b:dev` and
-`kraken-examples-service-c:dev` from source (the first build takes several minutes, Rust compiles librdkafka; later
-ones are cached) and starts only what the three apps need: both hubs (`hub`, `hub-2`), Kafka,
-the topic init job, MongoDB and otel-lgtm (Grafana on <http://localhost:3000/>, see [Metrics](#metrics)). Keycloak and
-RustFS stay down. The hub's gRPC port is published on host
+This builds `kraken-examples-service-a:dev`, `kraken-examples-service-b:dev` and `kraken-examples-service-c:dev` from
+source (the first build takes several minutes, Rust compiles librdkafka; later ones are cached) and starts only what the
+three apps need: both hubs from the released image (`hub`, `hub-2`, `KRAKEN_HUB_VERSION`), the event browser
+(`kraken-event-browser`), Kafka, the topic init job, MongoDB and otel-lgtm (Grafana on <http://localhost:3000/>, see
+[Metrics](#metrics)). Keycloak and RustFS stay down. The hub's gRPC port is published on host
 **7002** (macOS AirPlay owns 7000) and its topology view and dashboard on **7001**; `hub-2` uses **7012** and
 **7011**. Every example connects to both hubs (`KRAKEN_HUB_ADDRESS=static://hub:7000,hub-2:7000`, ADR 0016): it
 registers on each, sends unkeyed requests round-robin over them and keeps working when one stops.
@@ -420,19 +420,19 @@ those the sandbox mode does not drive. Prometheus is reached through Grafana's p
 P=localhost:3000/api/datasources/proxy/uid/prometheus/api/v1
 curl -sG $P/query --data-urlencode 'query=max by (service) (kraken_hub_connected_instances)'      # instances per service
 curl -sG $P/query --data-urlencode 'query=sum by (job, processor, outcome) (kraken_events_consumed_total)'   # Kotlin and Rust alike
-curl -sG $P/query --data-urlencode 'query=max by (group) (kraken_hub_consumer_group_lag)'          # every group, idle ones too
+curl -sG $P/query --data-urlencode 'query=max by (subscription) (kraken_event_browser_subscription_lag)'   # every subscription, idle ones too
 ```
 
 Smoke steps 29 to 29e check it, last, in every sandbox mode: 29 expects Grafana's API (`/api/search?tag=kraken`) to list
 `kraken-overview`, `kraken-hub` and `kraken-messaging` in the folder Kraken; 29b expects the hub series of P9
 (`kraken_hub_requests_total`, `kraken_hub_request_duration_seconds_bucket`, `kraken_hub_connected_instances`, the processor gauges
-`kraken_hub_processor_lag`, `_state`, `_dead_letters`, `_processed`, and `kraken_hub_consumer_group_lag`) under `job="kraken-hub"`
+`kraken_hub_processor_lag`, `_state`, `_dead_letters` and `_processed`) under `job="kraken-hub"`, and the subscription lag from `kraken-event-browser`
 from both hubs (`instance` = the `hubId` of each hub's topology) and `kraken_hub_connected_instances` for service-a, -b and -c;
 29c sends `examples.CountGreetings` three times through service-c (`GET $C/greetings/Ada/count`, the sandbox's one call from Rust
 through the hub) and expects service-b (Kotlin) and service-c (Rust) to export the library series under the same names with the
 same label names (the hub-client histogram: service-a, the Kotlin sender, and service-c; the series:
 `kraken_events_consumed_total{outcome,processor,type}`, `kraken_event_handler_duration_seconds_bucket{le,processor,type}`, the
-outbox gauges and counter, `kraken_processor_lag{partition,processor}`, `kraken_processor_state{processor,state}`,
+outbox gauges and counter, `kraken_processor_lag{processor,segment}`, `kraken_processor_state{processor,state}`,
 `kraken_dead_letters{processor}`, `kraken_hub_client_request_duration_seconds_bucket{kind,le,outcome,type}`,
 `kraken_hub_client_handlers_in_flight`, `kraken_hub_client_connected_hubs`), with `instance` = the instance ids the hub lists for
 each; 29d expects no series with a `hub_id` label and `instance_id` only on `kraken_hub_streams_open` and
@@ -659,12 +659,13 @@ keys of the run. They need `jq` or `python3`; `SKIP_CONTROL=1` skips them, `ONLY
 
 ## Event browser
 
-Both hubs read `kraken.events` from Kafka, read-only (P7, ADR 0025, `kraken/docs/05-services/hub.md` "Event browser"):
-`kraken/infra/compose.yaml` gives them `KRAKEN_HUB_KAFKA_BOOTSTRAP=kafka:19092` and `KRAKEN_HUB_EVENT_TOPICS=kraken.events`. They
-search events newest first (by key, type or a `type.*` prefix, source, correlation id, user id, event id, time range), show a
-record with every header, tail new records as server-sent events and list every consumer group on the topic with its lag,
-members or not. The dashboard shows it as the Events and Consumer groups pages. The hubs never join a group of their own and
-start without Kafka (only these routes answer 503 while it is down).
+The hub reads no event store (ADR 0027): `kraken-event-browser`, a separate binary that `kraken/infra/compose.yaml` starts
+next to both hubs, reads `kraken.events` from Kafka, read-only, and answers the hubs' `kraken.events.*` queries (P7,
+ADR 0025, `kraken/docs/05-services/hub.md` "Event browser"). The search goes newest first (by key, type or a `type.*`
+prefix, source, correlation id, user id, event id, time range), a record shows every header, a tail streams new records
+as server-sent events, and the lag lists every subscription on the topic, members or not. The dashboard shows the Events
+page; without a browser connected the hubs answer 404 `event browser not installed`. The browser never joins a
+subscription and starts without Kafka (only these routes answer 503 while it is down).
 
 Payloads are shown only with `KRAKEN_HUB_EVENT_BROWSER_PAYLOADS=true` and a dashboard or write token presented by the request:
 the secure overlay (and with it the JWT and mTLS ones) turns the switch on, so there the dashboard token sees them; the plain
@@ -674,26 +675,26 @@ sandbox keeps them hidden (`"payload": {"hidden": "payloads-off", ...}`, and a p
 # from kraken-messaging, against the plain sandbox (secure modes: https://localhost:7001, --cacert ../kraken/infra/.secrets/ca.pem
 # and the dashboard token on every call; hub-2 is localhost:7011)
 curl -s -X POST localhost:8092/audit/notes -H 'content-type: application/json' -d '{"key":"ada","text":"hello"}'
-curl -s 'localhost:7001/api/v1/events?key=ada&limit=5'          # {"results":[{"partition":p,"offset":o,"key":"ada","headers":{"type":"examples.AuditNote",...}}],...}
+curl -s 'localhost:7001/api/v1/events?key=ada&limit=5'          # {"results":[{"source":"kraken.events","segment":s,"position":p,"key":"ada","headers":{"type":"examples.AuditNote",...}}],...}
 curl -s 'localhost:7001/api/v1/events?type=examples.Audit*&limit=2'   # the newest two notes, newest first
 curl -s 'localhost:7001/api/v1/events?correlationId=<correlationId of a result>'
-curl -s localhost:7001/api/v1/events/kraken.events/<p>/<o>      # every header; "payload":{"hidden":"payloads-off",...} here
+curl -s localhost:7001/api/v1/events/kraken.events/<segment>/<position>   # every header; "payload":{"hidden":"payloads-off",...} here
 curl -sN 'localhost:7001/api/v1/events/tail?key=ada'            # event: start, then event: record for each new note of ada (Ctrl-C)
-curl -s localhost:7001/api/v1/consumer-groups                   # service-b.default, service-b.audit, service-c.default, ... with lag
+curl -s localhost:7001/api/v1/events/lag                        # service-b.default, service-b.audit, service-c.default, ... with lag
 ```
 
-Smoke steps 28 to 28f drive it on both hubs, in every sandbox mode: 28 expects the browser on (`/api/v1/version`
+Smoke steps 28 to 28f drive it on both hubs, in every sandbox mode: 28 expects the browser installed (`/api/v1/version`
 `eventBrowser`), payloads only with `SECURE=1`, and there a read without the dashboard token to be 401 (the plain hubs' reads are
 open); 28b publishes two audit notes under a key of the run through service-b and finds them by key and by type
-(`examples.AuditNote` and `examples.Audit*`) newest first (the second first, one partition, the higher offset first, timestamps
+(`examples.AuditNote` and `examples.Audit*`) newest first (the second first, one segment, the higher position first, timestamps
 not increasing), and each by its correlation id (the library makes one up per note, the first search reads it back); 28c reads
 the newest note's record: the library headers (`type`, `id`, `correlationId`, `timestamp`, `source`) and its payload, hidden as
 `payloads-off` in the plain sandbox, the note's JSON with the dashboard token in the secure ones; 28d searches the payloads for the
 first note's text (`q`): found with `SECURE=1`, 403 `payloads-off` otherwise; 28e opens a tail on each hub, waits for its
 `event: start`, publishes a third note and expects each tail to deliver it (a summary, no payload), then stops the tails; 28f
-lists the consumer groups and expects `service-b.default`, `service-b.audit`, `service-c.default` and `service-c.audit` with a lag,
-and no group whose id starts with `kraken-hub`, both in the API (which lists every group the broker has) and in the broker's own
-list (`kafka-consumer-groups.sh --list` run in `kraken-kafka`, `KAFKA_CONTAINER` to name another). A note reaches Kafka through
+lists the subscriptions and expects `service-b.default`, `service-b.audit`, `service-c.default` and `service-c.audit` with a lag,
+and no subscription of the browser's own, while the broker's own group list has no group of the hub's
+(`kafka-consumer-groups.sh --list` run in `kraken-kafka`, `KAFKA_CONTAINER` to name another). A note reaches Kafka through
 service-b's outbox relay, so the searches poll. They need `jq` or `python3` and the docker CLI; `SKIP_BROWSER=1` skips them,
 `ONLY_BROWSER=1` runs only them.
 
