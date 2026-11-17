@@ -60,6 +60,8 @@ jobs:
           distribution: temurin
           java-version: "25"
       - uses: gradle/actions/setup-gradle@v4
+      - name: diagnose mongod on this runner
+        run: docker run --rm mongo:8.3.13 mongod --version || true
       - run: ./gradlew test --no-daemon
 
   throughput:
