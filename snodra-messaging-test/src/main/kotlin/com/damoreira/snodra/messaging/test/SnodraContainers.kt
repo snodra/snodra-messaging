@@ -5,6 +5,7 @@ import org.testcontainers.DockerClientFactory
 import org.testcontainers.containers.GenericContainer
 import org.testcontainers.containers.wait.strategy.Wait
 import org.testcontainers.containers.wait.strategy.WaitAllStrategy
+import java.time.Duration
 import org.testcontainers.kafka.KafkaContainer
 import org.testcontainers.mongodb.MongoDBContainer
 import org.testcontainers.mysql.MySQLContainer
@@ -36,6 +37,7 @@ object SnodraContainers {
      * Docker daemon's default of 1024 and leaves the server refusing connections.
      */
     fun mongo(): MongoDBContainer = MongoDBContainer(DockerImageName.parse(MONGO_IMAGE)).withReplicaSet().withReuse(true)
+        .withStartupTimeout(Duration.ofMinutes(3))
         .withCreateContainerCmdModifier { it.hostConfig!!.withUlimits(listOf(Ulimit("nofile", MONGO_OPEN_FILES, MONGO_OPEN_FILES))) }
 
     /**
@@ -43,6 +45,7 @@ object SnodraContainers {
      * server is ready and its port answers on the host (a VM's port forwarding can lag behind the server's log line).
      */
     fun postgres(): PostgreSQLContainer = PostgreSQLContainer(DockerImageName.parse(POSTGRES_IMAGE)).withReuse(true)
+        .withStartupTimeout(Duration.ofMinutes(3))
         .waitingFor(
             WaitAllStrategy()
                 .withStrategy(Wait.forLogMessage(".*database system is ready to accept connections.*\\s", 2))
@@ -51,6 +54,7 @@ object SnodraContainers {
 
     /** MySQL ([MYSQL_IMAGE], InnoDB) for the SQL message store (`snodra-messaging-jdbc`); test credentials only. */
     fun mysql(): MySQLContainer = MySQLContainer(DockerImageName.parse(MYSQL_IMAGE)).withReuse(true)
+        .withStartupTimeout(Duration.ofMinutes(3))
 
     /** The hub image under test: `SNODRA_SERVER_IMAGE`, default `snodra-server:dev`; gRPC 7000 and HTTP 7001 exposed. */
     fun hub(): GenericContainer<*> = hub(hubImage).withExposedPorts(7000, 7001)
@@ -176,6 +180,7 @@ object SnodraContainers {
 
     private fun hub(image: String): GenericContainer<*> = GenericContainer(DockerImageName.parse(image))
         .withExposedPorts(7000)
+        .withStartupTimeout(Duration.ofMinutes(3))
         .waitingFor(Wait.forLogMessage(".*hub listening.*", 1))
 
     private fun imageAvailable(image: String): Boolean = try {
