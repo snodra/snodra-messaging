@@ -736,7 +736,7 @@ data class HubRejection(val hub: String, val code: String, val description: Stri
 /** The order refusals were recorded in, over every connection of the process: what "newer" means for [HubConnections.latestRejection]. */
 internal val REJECTION_SEQ = java.util.concurrent.atomic.AtomicLong()
 
-/** The credential a service presents to the hub: nothing, a static token (P5a), a Keycloak access token (P5b) or a client certificate (P5c). */
+/** The credential a service presents to the hub: nothing, a static token (P5a), an OAuth2 access token (P5b) or a client certificate (P5c). */
 enum class HubAuthKind { NONE, TOKEN, JWT, CERTIFICATE }
 
 /**

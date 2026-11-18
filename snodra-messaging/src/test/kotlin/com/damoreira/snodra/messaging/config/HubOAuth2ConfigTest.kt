@@ -240,12 +240,12 @@ class HubOAuth2ConfigTest {
             starter().withPropertyValues("snodra.messaging.hub.oauth2.token-uri=$uri", "snodra.messaging.hub.oauth2.client-secret=$secret").run { assertEquals(null, it.startupFailure) }
             return appender.list.count { it.level == Level.WARN && "http://" in it.formattedMessage }
         }
-        assertEquals(1, warnings("http://keycloak.example.com/realms/snodra/protocol/openid-connect/token"))
+        assertEquals(1, warnings("http://auth.example.com/realms/snodra/protocol/openid-connect/token"))
         assertEquals(1, warnings("http://10.1.2.3:8080/token"))
-        assertEquals(0, warnings("http://keycloak:8080/token"))
+        assertEquals(0, warnings("http://oauth2:8080/token"))
         assertEquals(0, warnings("http://localhost:8180/token"))
         assertEquals(0, warnings("http://127.0.0.1:8180/token"))
-        assertEquals(0, warnings("https://keycloak.example.com/token"))
+        assertEquals(0, warnings("https://auth.example.com/token"))
     }
 
     // --- redaction ---
