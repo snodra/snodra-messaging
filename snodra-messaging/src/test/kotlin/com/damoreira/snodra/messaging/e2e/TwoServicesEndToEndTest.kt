@@ -170,7 +170,7 @@ class TwoServicesEndToEndTest {
     }
 
     companion object {
-        private const val TOPIC = "kraken.events"
+        private const val TOPIC = "snodra.events"
         private var kafka: KafkaContainer? = null
         private var mongo: MongoDBContainer? = null
         private var hub: GenericContainer<*>? = null

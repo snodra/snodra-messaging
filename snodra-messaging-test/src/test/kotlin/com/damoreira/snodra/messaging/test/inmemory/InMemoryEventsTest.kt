@@ -17,9 +17,9 @@ class InMemoryEventsTest {
     fun aPublishedEventCarriesTheSevenHeadersStampedWithTheApplicationClock() {
         val clock = Clock.fixed(Instant.parse("2026-11-14T10:00:00.123Z"), ZoneOffset.UTC)
         val events = MemoryEventStore()
-        val probe = InMemoryEvents(events, MemoryMessageStore(), "orders", "kraken.events", JsonCodec(), MessageTypeResolver("orders"), clock)
+        val probe = InMemoryEvents(events, MemoryMessageStore(), "orders", "snodra.events", JsonCodec(), MessageTypeResolver("orders"), clock)
         val id = probe.publish(Ordered("o-1"), key = "o-1", from = "billing")
-        val stored = events.events("kraken.events").single()
+        val stored = events.events("snodra.events").single()
         assertEquals(EventHeaders.ALL.toSet(), stored.headers.keys)
         assertEquals("2026-11-14T10:00:00.123Z", stored.headers[EventHeaders.TIMESTAMP], "the application clock")
         assertEquals(id, stored.id)

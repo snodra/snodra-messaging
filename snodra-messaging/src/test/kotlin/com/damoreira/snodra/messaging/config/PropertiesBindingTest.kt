@@ -34,7 +34,7 @@ class PropertiesBindingTest {
             assertEquals(Duration.ofMinutes(10), p.hub.streamCreditTimeout) // the hub's default max stream duration
             assertEquals(1024, p.hub.maxSubscriptions) // the hub's default per-instance subscription limit
             assertEquals(null, p.eventStore)
-            assertEquals("kraken.events", p.events.source)
+            assertEquals("snodra.events", p.events.source)
             assertEquals(true, p.events.consumer.enabled)
             assertEquals(5, p.events.consumer.maxAttempts)
             assertEquals(true, p.outbox.enabled)

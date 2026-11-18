@@ -46,7 +46,7 @@ class EventConsumerSubscriptionTest {
     }
 
     private fun start(events: ScriptedEventStore, resubscribe: () -> Resubscribe = { Resubscribe() }) =
-        EventConsumer(events, SubscriptionSpec("svc.default", "kraken.events"), dispatcher, maxAttempts = 1, resubscribe = resubscribe)
+        EventConsumer(events, SubscriptionSpec("svc.default", "snodra.events"), dispatcher, maxAttempts = 1, resubscribe = resubscribe)
             .also { consumer = it; it.start() }
 
     private fun start(events: com.damoreira.snodra.messaging.eventstore.EventStore, spec: SubscriptionSpec) =
@@ -87,7 +87,7 @@ class EventConsumerSubscriptionTest {
         val events = ScriptedEventStore()
         events.failSubscribe.set(1)
         val c = EventConsumer(
-            events, SubscriptionSpec("svc.default", "kraken.events"), dispatcher, maxAttempts = 1,
+            events, SubscriptionSpec("svc.default", "snodra.events"), dispatcher, maxAttempts = 1,
             resubscribe = { Resubscribe(min = Duration.ofMillis(50)) },
         ).also { consumer = it }
         c.pause()
@@ -128,7 +128,7 @@ class EventConsumerSubscriptionTest {
         assertEquals(listOf("lag", "replay"), status.capabilitiesList)
         assertEquals(listOf("9", "10", "a"), status.segmentsList.map { it.segment }, "segment order; a name over 128 bytes is left out")
         assertEquals("svc.default", status.subscription)
-        assertEquals("kraken.events", status.source)
+        assertEquals("snodra.events", status.source)
         assertEquals(ProcessorState.PROCESSOR_RUNNING, status.state)
 
         sub.errors += "rebalance: could not read the committed offsets"
@@ -227,7 +227,7 @@ class EventConsumerSubscriptionTest {
         val registry = HandlerRegistry(MessageTypeResolver("test")).also { it.register(handlers) }
         val dispatcher = LocalEventDispatcher(registry, HandlerInvoker(registry, JsonCodec()), markingStore())
         consumer = EventConsumer(
-            events, SubscriptionSpec("svc.default", "kraken.events"), dispatcher, maxAttempts = 1, backOffMs = 50,
+            events, SubscriptionSpec("svc.default", "snodra.events"), dispatcher, maxAttempts = 1, backOffMs = 50,
             deadLetters = DeadLetterSink.EventStore(events), resubscribe = { Resubscribe(min = Duration.ofMillis(50)) },
         ).also { it.start() }
         events.failPublish = true
@@ -246,13 +246,13 @@ class EventConsumerSubscriptionTest {
         second.deliver("0", "0", "test.Happened", id = "p-1", payload = happened("p-1"))
         await().atMost(Duration.ofSeconds(10)).until { second.acks == listOf("0" to "0") }
         assertEquals(2, handlers.seen.size, "a new subscription starts afresh: the handlers run again, as on another instance")
-        assertEquals(listOf("kraken.events.dlt"), events.published.map { it.source })
+        assertEquals(listOf("snodra.events.dlt"), events.published.map { it.source })
     }
 
     @Test
     fun anIdleNewcomerOnTheInMemoryStoreReadsRunning() {
         val events = MemoryEventStore(MemoryEventStoreSettings(segments = 1))
-        val spec = SubscriptionSpec("svc.default", "kraken.events")
+        val spec = SubscriptionSpec("svc.default", "snodra.events")
         val first = EventConsumer(events, spec, dispatcher, maxAttempts = 1).also { it.start() }
         try {
             await().atMost(Duration.ofSeconds(10)).until { first.status().state == ProcessorState.PROCESSOR_RUNNING }
@@ -297,7 +297,7 @@ class EventConsumerSubscriptionTest {
         val registry = HandlerRegistry(MessageTypeResolver("test")).also { it.register(handlers) }
         val dispatcher = LocalEventDispatcher(registry, HandlerInvoker(registry, JsonCodec()), markingStore())
         val c = EventConsumer(
-            events, SubscriptionSpec("svc.default", "kraken.events"), dispatcher, maxAttempts = 1, stopTimeout = Duration.ofMillis(300),
+            events, SubscriptionSpec("svc.default", "snodra.events"), dispatcher, maxAttempts = 1, stopTimeout = Duration.ofMillis(300),
         ).also { consumer = it; it.start() }
         awaitSubscriptions(events, 1)
         events.subscriptions[0].assign("0")
@@ -324,7 +324,7 @@ class EventConsumerSubscriptionTest {
         val registry = HandlerRegistry(MessageTypeResolver("test")).also { it.register(handlers) }
         val dispatcher = LocalEventDispatcher(registry, HandlerInvoker(registry, JsonCodec()), markingStore())
         val c = EventConsumer(
-            events, SubscriptionSpec("svc.default", "kraken.events"), dispatcher, maxAttempts = 1, stopTimeout = Duration.ofMillis(300),
+            events, SubscriptionSpec("svc.default", "snodra.events"), dispatcher, maxAttempts = 1, stopTimeout = Duration.ofMillis(300),
         ).also { consumer = it; it.start() }
         awaitSubscriptions(events, 1)
         events.subscriptions[0].assign("0")

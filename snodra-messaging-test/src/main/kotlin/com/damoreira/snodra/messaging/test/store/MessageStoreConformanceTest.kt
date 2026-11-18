@@ -297,7 +297,7 @@ abstract class MessageStoreConformanceTest {
     @Test
     fun processedMarkerRecordsOnce() = runBlocking {
         val at = now()
-        val stage1 = marker("processor:default:evt-1", at.minus(Duration.ofHours(2)), processor = "default", topic = "kraken.events", partition = 3, offset = 42)
+        val stage1 = marker("processor:default:evt-1", at.minus(Duration.ofHours(2)), processor = "default", topic = "snodra.events", partition = 3, offset = 42)
         val saga = marker("saga:Order:evt-1", at)
         assertFalse(store.processedEvents.exists(stage1.id))
         assertTrue(store.processedEvents.record(stage1))
@@ -1002,7 +1002,7 @@ abstract class MessageStoreConformanceTest {
 
     private companion object {
         const val PROCESSOR = "billing"
-        const val TOPIC = "kraken.events"
+        const val TOPIC = "snodra.events"
         val json: JsonMapper = JsonMapper.builder().build()
     }
 }

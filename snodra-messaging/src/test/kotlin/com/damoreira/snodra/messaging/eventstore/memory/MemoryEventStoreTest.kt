@@ -22,7 +22,7 @@ import kotlin.test.assertNull
 class MemoryEventStoreTest {
     private val clock = Clock.fixed(Instant.parse("2026-11-14T10:00:00Z"), ZoneOffset.UTC)
 
-    private fun event(id: String, key: String?, type: String = "t.Happened", source: String = "kraken.events") =
+    private fun event(id: String, key: String?, type: String = "t.Happened", source: String = "snodra.events") =
         OutgoingEvent(source, id, type, key, mapOf(EventHeaders.TYPE to type, EventHeaders.ID to id), """{"id":"$id"}""".toByteArray())
 
     private suspend fun Subscription.nextWithin(ms: Long = 2_000): SubscriptionEvent? = withTimeoutOrNull(ms) { next() }
@@ -44,24 +44,24 @@ class MemoryEventStoreTest {
         events.publish(event("e-3", "order-1"))
         events.publish(event("x-1", "order-1", source = "other.source"))
 
-        assertEquals(listOf("kraken.events", "other.source"), events.sources())
-        assertEquals(listOf("e-1", "e-2", "e-3"), events.events("kraken.events").map { it.id })
-        assertEquals(listOf("e-1", "e-3"), events.events("kraken.events", type = "t.Happened").map { it.id })
-        assertEquals(listOf("e-1", "e-3"), events.events("kraken.events", key = "order-1").map { it.id })
-        val first = events.events("kraken.events").first()
+        assertEquals(listOf("other.source", "snodra.events"), events.sources())
+        assertEquals(listOf("e-1", "e-2", "e-3"), events.events("snodra.events").map { it.id })
+        assertEquals(listOf("e-1", "e-3"), events.events("snodra.events", type = "t.Happened").map { it.id })
+        assertEquals(listOf("e-1", "e-3"), events.events("snodra.events", key = "order-1").map { it.id })
+        val first = events.events("snodra.events").first()
         assertEquals(MemoryEventStore.segmentOf("order-1", 2).toString(), first.segment)
         assertEquals("0", first.position)
         assertEquals(clock.millis(), first.timestampMs)
-        assertEquals("e-3", events.event("kraken.events", first.segment, "1")?.id)
-        assertNull(events.event("kraken.events", first.segment, "2"))
-        assertNull(events.event("kraken.events", "01", "0"), "only the canonical segment names")
+        assertEquals("e-3", events.event("snodra.events", first.segment, "1")?.id)
+        assertNull(events.event("snodra.events", first.segment, "2"))
+        assertNull(events.event("snodra.events", "01", "0"), "only the canonical segment names")
         assertEquals(emptyList(), events.events("nothing"))
     }
 
     @Test
     fun aSegmentChangesHandsOnlyOnceItsHolderGaveItUp() = runBlocking {
         val events = MemoryEventStore(MemoryEventStoreSettings(segments = 2), clock)
-        val spec = SubscriptionSpec("svc.default", "kraken.events")
+        val spec = SubscriptionSpec("svc.default", "snodra.events")
         val a = events.subscribe(spec)
         assertEquals(SubscriptionEvent.Assigned(listOf("0", "1")), a.nextWithin())
         val b = events.subscribe(spec)
@@ -78,7 +78,7 @@ class MemoryEventStoreTest {
     @Test
     fun aDeliveryWaitsForAPublishAndAnAckedOneIsNotDeliveredToTheNextHolder() = runBlocking {
         val events = MemoryEventStore(MemoryEventStoreSettings(segments = 1), clock)
-        val spec = SubscriptionSpec("svc.default", "kraken.events")
+        val spec = SubscriptionSpec("svc.default", "snodra.events")
         val a = events.subscribe(spec)
         assertEquals(SubscriptionEvent.Assigned(listOf("0")), a.nextWithin())
         assertNull(a.nextWithin(200))
@@ -100,13 +100,13 @@ class MemoryEventStoreTest {
         val published = event("e-1", "k")
         events.publish(published)
         published.payload.fill(0) // the publisher's own array, changed after the publish
-        val spec = SubscriptionSpec("svc.default", "kraken.events")
+        val spec = SubscriptionSpec("svc.default", "snodra.events")
         val sub = events.subscribe(spec)
         sub.nextWithin()
         val delivered = sub.nextWithin() as Delivery
         delivered.payload.fill(0)
         runCatching { @Suppress("UNCHECKED_CAST") (delivered.headers as MutableMap<String, String>)[EventHeaders.ID] = "changed" }
-        val read = events.events("kraken.events").single()
+        val read = events.events("snodra.events").single()
         read.payload.fill(0)
         runCatching { @Suppress("UNCHECKED_CAST") (read.headers as MutableMap<String, String>)[EventHeaders.ID] = "changed" }
 
@@ -114,8 +114,8 @@ class MemoryEventStoreTest {
         val again = sub.nextWithin() as Delivery
         assertEquals("""{"id":"e-1"}""", String(again.payload), "the log's payload is the one published")
         assertEquals("e-1", again.headers[EventHeaders.ID])
-        assertEquals("""{"id":"e-1"}""", String(events.events("kraken.events").single().payload))
-        assertEquals("e-1", events.events("kraken.events").single().id)
+        assertEquals("""{"id":"e-1"}""", String(events.events("snodra.events").single().payload))
+        assertEquals("e-1", events.events("snodra.events").single().id)
         sub.close()
     }
 
@@ -127,7 +127,7 @@ class MemoryEventStoreTest {
         sub.nextWithin(100)
         assertEquals(emptyList(), events.sources(), "a subscription alone makes no source")
         events.publish(event("e-1", "k"))
-        assertEquals(listOf("kraken.events"), events.sources())
+        assertEquals(listOf("snodra.events"), events.sources())
         sub.close()
     }
 

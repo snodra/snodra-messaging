@@ -10,11 +10,11 @@ class RabbitConnectorTest {
     @Test
     fun `a stream without a leader the broker can name reads as a possible election, not as a missing stream`() {
         for (code in listOf(Constants.RESPONSE_CODE_STREAM_DOES_NOT_EXIST, Constants.RESPONSE_CODE_STREAM_NOT_AVAILABLE)) {
-            val message = RabbitConnector.noLeader("kraken.events-1", code)
-            assertTrue("kraken.events-1" in message && "no leader" in message && "election" in message && "retried" in message, message)
-            assertFalse(message.startsWith("rabbitmq: the stream kraken.events-1: the stream does not exist"), message)
+            val message = RabbitConnector.noLeader("snodra.events-1", code)
+            assertTrue("snodra.events-1" in message && "no leader" in message && "election" in message && "retried" in message, message)
+            assertFalse(message.startsWith("rabbitmq: the stream snodra.events-1: the stream does not exist"), message)
         }
-        val refused = RabbitConnector.noLeader("kraken.events-1", Constants.RESPONSE_CODE_ACCESS_REFUSED)
+        val refused = RabbitConnector.noLeader("snodra.events-1", Constants.RESPONSE_CODE_ACCESS_REFUSED)
         assertTrue("access refused" in refused, refused)
     }
 

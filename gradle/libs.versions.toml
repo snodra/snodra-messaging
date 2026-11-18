@@ -1,4 +1,4 @@
-# Versions verified on 2026-10-28 (see ../kraken/docs/03-tech-stack.md in the umbrella repo).
+# Versions verified together on 2026-10-28.
 [versions]
 kotlin = "2.4.21"
 kotlinx-coroutines = "1.10.2"
@@ -79,7 +79,7 @@ bouncycastle-pkix = { module = "org.bouncycastle:bcpkix-jdk18on", version = "1.8
 # API docs
 springdoc-openapi-webmvc-ui = { module = "org.springdoc:springdoc-openapi-starter-webmvc-ui", version.ref = "springdoc" }
 
-# Snodra (published to the GitLab Package Registry from the snodra-messaging repo)
+# Snodra (published to Maven Central)
 snodra-messaging-api = { module = "com.damoreira.snodra:snodra-messaging-api", version.ref = "snodra-messaging" }
 snodra-messaging = { module = "com.damoreira.snodra:snodra-messaging", version.ref = "snodra-messaging" }
 snodra-messaging-test = { module = "com.damoreira.snodra:snodra-messaging-test", version.ref = "snodra-messaging" }

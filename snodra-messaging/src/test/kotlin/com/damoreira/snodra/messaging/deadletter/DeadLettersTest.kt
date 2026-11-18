@@ -70,7 +70,7 @@ class DeadLettersTest {
     private lateinit var handler: OrdersHandler
     private lateinit var deadLetters: DeadLetters
     private lateinit var dispatcher: LocalEventDispatcher
-    private val topic = "kraken.events"
+    private val topic = "snodra.events"
 
     @BeforeAll fun start() {
         mongoContainer.start()

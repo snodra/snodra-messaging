@@ -2,7 +2,8 @@
 # Smoke test for the examples sandbox: drives service-a over HTTP and checks the hub topology.
 # Usage: bash examples/smoke.sh      (A=http://localhost:8091 HUB=http://localhost:7001 HUB2=http://localhost:7011 to
 #        override; SKIP_PAUSE=1 skips the docker-pause step, ONLY_PAUSE=1 runs only it, B_CONTAINER names service-b;
-#        SKIP_FLOW=1 skips the flow-control steps, ONLY_FLOW=1 runs only them; INFRA_DIR names kraken/infra;
+#        SKIP_FLOW=1 skips the flow-control steps, ONLY_FLOW=1 runs only them; INFRA_DIR must name the directory holding the
+#        sandbox compose files (compose.yaml, compose.local.yaml and the overlays);
 #        SKIP_HA=1 skips the two-hub steps, ONLY_HA=1 runs only them, HUB2_CONTAINER names the second hub;
 #        SKIP_SCATTER=1 skips the scatter-gather steps, ONLY_SCATTER=1 runs only them;
 #        SKIP_STREAM=1 skips the streaming-query steps, ONLY_STREAM=1 runs only them;
@@ -17,27 +18,27 @@
 #        SKIP_CONTROL=1 skips the processor-control steps 27-27f (pause, resume, reset and dead letters of both `audit`
 #        processors, and a reset of both `default` processors past a saga's start, through the hub's HTTP API with the write
 #        token), ONLY_CONTROL=1 runs only them; WRITE_TOKEN_FILE names
-#        the write token, default <secrets directory>/hub-control/dashboard-write.token (kraken/infra/scripts/dev-hub-pki.sh,
+#        the write token, default <secrets directory>/hub-control/dashboard-write.token (scripts/dev-hub-pki.sh,
 #        in every mode);
 #        SKIP_BROWSER=1 skips the event browser steps 28-28f (search, record, payload rules, tail and consumer groups of
-#        kraken.events through both hubs' HTTP API, and the broker's own group list with the Kafka CLI in KAFKA_CONTAINER,
+#        snodra.events through both hubs' HTTP API, and the broker's own group list with the Kafka CLI in KAFKA_CONTAINER,
 #        default snodra-kafka; needs the docker CLI), ONLY_BROWSER=1 runs only them;
 #        SKIP_OBS=1 skips the metric and dashboard steps 29-29e (otel-lgtm's Prometheus and Grafana: the hub and library
 #        series, labels, and every panel query of the three snodra dashboards; they run last), ONLY_OBS=1 runs only them
 #        (after a full run), GRAFANA=http://localhost:3000 (or SNODRA_GRAFANA_PORT) is Grafana's address, PROM its proxy of
 #        Prometheus;
-#        SECURE=1 runs against the secure sandbox (kraken/infra/compose.secure.yaml, secrets from
-#        kraken/infra/scripts/dev-hub-pki.sh): the hub calls are https with the dev CA and carry the dashboard token, every
+#        SECURE=1 runs against the secure sandbox (compose.secure.yaml, secrets from
+#        scripts/dev-hub-pki.sh): the hub calls are https with the dev CA and carry the dashboard token, every
 #        other step runs unchanged, and the security steps 21 and 21b are added; SKIP_SECURE=1 skips those two, ONLY_SECURE=1
 #        runs only them; SECRETS_DIR names the secrets directory, default SNODRA_SECRETS_DIR or INFRA_DIR/.secrets;
-#        JWT=1 (needs SECURE=1) runs against the JWT overlay on top of it (kraken/infra/compose.jwt.yaml: service-b and
+#        JWT=1 (needs SECURE=1) runs against the JWT overlay on top of it (compose.jwt.yaml: service-b and
 #        service-c authenticate with Keycloak client-credentials tokens, service-a keeps its static token), every other
 #        step runs unchanged, and the JWT steps 22 and 22b are added; SKIP_JWT=1 skips those two, ONLY_JWT=1 runs only
 #        them, C_CONTAINER names service-c's container;
 #        MTLS=1 (needs SECURE=1, excludes JWT=1) runs against the mTLS overlay on top of the secure sandbox
-#        (kraken/infra/compose.mtls.yaml: service-a and service-c authenticate with a client certificate, service-b keeps
+#        (compose.mtls.yaml: service-a and service-c authenticate with a client certificate, service-b keeps
 #        its static token), every other step runs unchanged, and the certificate steps 23 and 23b are added (23b rotates
-#        service-c's and service-a's certificates on disk with kraken/infra/scripts/dev-hub-pki.sh --rotate while calls
+#        service-c's and service-a's certificates on disk with scripts/dev-hub-pki.sh --rotate while calls
 #        flow); SKIP_MTLS=1 skips those two, ONLY_MTLS=1 runs only them, A_CONTAINER names service-a's container)
 set -euo pipefail
 
@@ -56,11 +57,15 @@ B=${B:-http://localhost:8092}
 
 fail() { echo "SMOKE FAILED: $*" >&2; exit 1; }
 
-# F3 (P1): flow control. The steps recreate service-b and service-c with kraken/infra/compose.flow-demo.yaml (one
+# F3 (P1): flow control. The steps recreate service-b and service-c with compose.flow-demo.yaml (one
 # permit each, a 200 ms CountGreetings), so parallel calls queue in the hub and come back as latency, not timeouts
 # or 503s, and revert them to the default concurrency afterwards (also when a step fails). Needs the docker CLI.
 # SKIP_FLOW=1 skips these steps; ONLY_FLOW=1 runs only them. Timings in ms need perl (Time::HiRes).
-INFRA=${INFRA_DIR:-$(cd "$(dirname "$0")/../../kraken/infra" 2>/dev/null && pwd || true)}
+INFRA=${INFRA_DIR:-}
+require_infra() {
+  [ -n "$INFRA" ] || fail "INFRA_DIR must name the directory holding the sandbox compose files"
+  [ -d "$INFRA" ] || fail "INFRA_DIR='$INFRA' is not a directory"
+}
 COMPOSE_FILES=(-f compose.yaml -f compose.local.yaml)
 
 # SECURE=1: the hubs speak TLS with the dev CA and want the dashboard token on /api/v1/*, and the
@@ -69,9 +74,9 @@ COMPOSE_FILES=(-f compose.yaml -f compose.local.yaml)
 # and leaves every other call (service-a, service-b) alone.
 if [ "$SECURE" = "1" ]; then
   COMPOSE_FILES+=(-f compose.secure.yaml)
-  SECRETS=${SECRETS_DIR:-${SNODRA_SECRETS_DIR:-$INFRA/.secrets}}
-  [ -f "$SECRETS/ca.pem" ] && [ -f "$SECRETS/dashboard.token" ] \
-    || fail "SECURE=1 needs the dev secrets in '$SECRETS' (run kraken/infra/scripts/dev-hub-pki.sh, or set SECRETS_DIR)"
+  SECRETS=${SECRETS_DIR:-${SNODRA_SECRETS_DIR:-${INFRA:+$INFRA/.secrets}}}
+  [ -f "${SECRETS:-/nonexistent}/ca.pem" ] && [ -f "${SECRETS:-/nonexistent}/dashboard.token" ] \
+    || fail "SECURE=1 needs the dev secrets in '${SECRETS:-<secrets directory>}' (run scripts/dev-hub-pki.sh in the compose directory, and set INFRA_DIR or SECRETS_DIR)"
   SECRETS=$(cd "$SECRETS" && pwd)
   DASHBOARD_TOKEN=$(cat "$SECRETS/dashboard.token")
   curl() {
@@ -87,14 +92,14 @@ if [ "$SECURE" = "1" ]; then
   }
 fi
 
-# JWT=1: the JWT overlay (kraken/infra/compose.jwt.yaml) on top of the secure one. It matters here because the flow steps
+# JWT=1: the JWT overlay (compose.jwt.yaml) on top of the secure one. It matters here because the flow steps
 # recreate service-b and service-c with these files: without it they would come back with static tokens.
 if [ "$JWT" = "1" ]; then
   [ "$SECURE" = "1" ] || fail "JWT=1 needs SECURE=1 (the JWT overlay sits on top of the secure sandbox)"
   COMPOSE_FILES+=(-f compose.jwt.yaml)
 fi
 
-# MTLS=1: the mTLS overlay (kraken/infra/compose.mtls.yaml) on top of the secure one; the flow steps recreate service-b and
+# MTLS=1: the mTLS overlay (compose.mtls.yaml) on top of the secure one; the flow steps recreate service-b and
 # service-c with these files, and service-c must come back with its certificate. It is not combinable with JWT=1: both
 # overlays rewrite service-c's credentials.
 if [ "$MTLS" = "1" ]; then
@@ -127,7 +132,8 @@ recreate_b_and_c() { # <permits pattern> [extra compose file ...]
 
 flow_demo_on() {
   command -v docker >/dev/null || fail "docker CLI needed for the flow steps (or set SKIP_FLOW=1)"
-  [ -n "$INFRA" ] && [ -f "$INFRA/compose.flow-demo.yaml" ] || fail "kraken/infra not found (set INFRA_DIR)"
+  require_infra
+  [ -f "$INFRA/compose.flow-demo.yaml" ] || fail "compose.flow-demo.yaml not found in INFRA_DIR"
   echo "11b. recreating service-b and service-c with compose.flow-demo.yaml (one permit each, 200 ms counts) ..."
   trap flow_demo_off EXIT
   recreate_b_and_c 1 compose.flow-demo.yaml
@@ -581,7 +587,8 @@ ha_steps() {
   p=$(permits_on "$HUB2" service-b)
   if [ -n "$share" ] && [ -n "$p" ] && [ "$share" -gt $(( p + 2 )) ]; then
     echo "   service-b holds $share permits on $HUB but $p on $HUB2 (topped up by an earlier failover); recreating it ..."
-    [ -n "$INFRA" ] && [ -f "$INFRA/compose.local.yaml" ] || fail "kraken/infra not found (set INFRA_DIR)"
+    require_infra
+    [ -f "$INFRA/compose.local.yaml" ] || fail "compose.local.yaml not found in INFRA_DIR"
     (cd "$INFRA" && docker compose "${COMPOSE_FILES[@]}" --profile examples \
       up -d --no-deps --no-build --force-recreate service-b) >/dev/null 2>&1 || fail "docker compose could not recreate service-b"
     secs=$(await_both_hubs 90)
@@ -838,7 +845,7 @@ subscribe_steps() {
 }
 
 # S1 (sagas, ADR 0021): service-b's GreetingDeliverySaga gets every delivered greeting printed by the fake printer
-# (kraken/infra, localhost:8093), which answers by the greeting name's prefix. Each step greets with a name of its
+# (the sandbox's `fake-printer`, localhost:8093), which answers by the greeting name's prefix. Each step greets with a name of its
 # kind through service-a, then reads `GET $B/postcards/<id>` (service-b's projection of PostcardPrinted/PostcardFailed,
 # 404 while the postcard is in flight) until it is printed or failed. Step 24: webhook-* (the printer posts a signed
 # webhook; replaying it is a 200 no-op and a wrong secret is a 401). 24b: topic-* (the printer produces to printer.events).
@@ -1211,7 +1218,7 @@ audit_steps() {
 }
 
 # P6b (ADR 0023): the hub as control plane for event processors, through its HTTP API
-# ($HUB/api/v1/services/<service>/processors/audit/...) with the dashboard write token: kraken/infra/scripts/dev-hub-pki.sh
+# ($HUB/api/v1/services/<service>/processors/audit/...) with the dashboard write token: scripts/dev-hub-pki.sh
 # writes it to <secrets>/hub-control/dashboard-write.token and every sandbox mode mounts it into both hubs
 # (SNODRA_SERVER_DASHBOARD_WRITE_TOKEN_FILE). For the `audit` processor of service-b (Kotlin) and of service-c (Rust):
 # 27: a write without a credential (or with a wrong one) is 401 on both hubs, with the dashboard token 403 (SECURE=1 only: the
@@ -1317,9 +1324,9 @@ control_off() {
 control_steps() {
   local run file secrets label base reply code h st op n resets id key reason attempts lag since start
   run=$(date +%s)
-  secrets=${SECRETS:-${SECRETS_DIR:-${SNODRA_SECRETS_DIR:-$INFRA/.secrets}}}
+  secrets=${SECRETS:-${SECRETS_DIR:-${SNODRA_SECRETS_DIR:-${INFRA:+$INFRA/.secrets}}}}
   file=${WRITE_TOKEN_FILE:-$secrets/hub-control/dashboard-write.token}
-  [ -s "$file" ] || fail "the control steps need the hubs' write token in '$file' (run kraken/infra/scripts/dev-hub-pki.sh, then recreate hub and hub-2; or set WRITE_TOKEN_FILE, or SKIP_CONTROL=1)"
+  [ -s "$file" ] || fail "the control steps need the hubs' write token in '$file' (run scripts/dev-hub-pki.sh, then recreate hub and hub-2; or set WRITE_TOKEN_FILE, or SKIP_CONTROL=1)"
   WRITE_TOKEN=$(cat "$file")
   trap control_off EXIT
 
@@ -1329,7 +1336,7 @@ control_steps() {
     for h in "$HUB" "$HUB2"; do
       reply=$(control_call "$h" none POST "$label" pause) || fail "POST $h .../$label/processors/audit/pause failed"
       code=${reply##*$'\n'}
-      [ "$code" != "403" ] || fail "$h answers 403 to a write without a credential (${reply%$'\n'*}): the hubs have no write token; run kraken/infra/scripts/dev-hub-pki.sh and recreate hub and hub-2"
+      [ "$code" != "403" ] || fail "$h answers 403 to a write without a credential (${reply%$'\n'*}): the hubs have no write token; run scripts/dev-hub-pki.sh and recreate hub and hub-2"
       [ "$code" = "401" ] || fail "$h: a pause of $label's audit without a credential should be 401, got $code"
       control_expect 401 "$h" wrong POST "$label" pause >/dev/null
       if [ "$SECURE" = "1" ]; then
@@ -1463,8 +1470,8 @@ control_steps() {
   control_off
 }
 
-# P7 (ADR 0025, ADR 0027): the hubs' event browser, `snodra-event-browser`, a separate binary that reads kraken.events
-# from Kafka, read-only (kraken/infra/compose.yaml starts it next to both hubs; compose.secure.yaml, and with it the jwt
+# P7 (ADR 0025, ADR 0027): the hubs' event browser, `snodra-event-browser`, a separate binary that reads snodra.events
+# from Kafka, read-only (compose.yaml starts it next to both hubs; compose.secure.yaml, and with it the jwt
 # and mtls overlays, turns payloads on). The events are audit notes the smoke publishes through service-b (`POST
 # $B/audit/notes`: examples.AuditNote under the note's key, with a correlation id of its own that the library makes up and
 # the first search reads back). Step 28: both hubs report the browser installed (`/api/v1/version`), payloads only with
@@ -1474,7 +1481,7 @@ control_steps() {
 # hidden as `payloads-off` in the plain sandbox and is the note's JSON with the dashboard token in the secure ones (the
 # newest is the second note). 28d: a payload search (`q`) finds the first note by its text with SECURE=1 and is 403
 # `payloads-off` otherwise. 28e: a tail opened on each hub before a third note is published delivers it. 28f: both hubs
-# list the examples' subscriptions on kraken.events (service-b.default, service-b.audit, service-c.default,
+# list the examples' subscriptions on snodra.events (service-b.default, service-b.audit, service-c.default,
 # service-c.audit) with their lag, and no subscription of the browser's own, while the broker's own group list read with
 # kafka-consumer-groups.sh in the Kafka container has no group of the hub's. A search reads Kafka as it is: a note is
 # there once service-b's outbox relay published it, so the steps poll. SKIP_BROWSER=1 skips these steps, ONLY_BROWSER=1
@@ -1544,10 +1551,10 @@ browser_steps() {
   for h in "${hubs[@]}"; do
     v=$(curl -fsS "$h/api/v1/version" | reply_field eventBrowser | tr -d ' ')
     printf '%s' "$v" | grep -q '"installed":true' && printf '%s' "$v" | grep -q "\"payloads\":$want" \
-      || fail "$h/api/v1/version: expected eventBrowser installed, payloads $want, got '$v' (the snodra-event-browser service of kraken/infra/compose.yaml; recreate hub, hub-2 and the browser)"
+      || fail "$h/api/v1/version: expected eventBrowser installed, payloads $want, got '$v' (the snodra-event-browser service of compose.yaml; recreate hub, hub-2 and the browser)"
     if [ "$SECURE" = "1" ]; then
       line=""
-      for name in "events?limit=1" events/lag events/tail events/kraken.events/0/0; do
+      for name in "events?limit=1" events/lag events/tail events/snodra.events/0/0; do
         code=$(anonymous_code "$h" "$name")
         [ "$code" = "401" ] || fail "$h/api/v1/$name without the dashboard token: expected 401, got $code"
         line="$line ${name%%\?*} 401,"
@@ -1586,7 +1593,7 @@ browser_steps() {
 
   echo "28c. the newest note's record: the library headers, and the payload $([ "$SECURE" = "1" ] && echo 'with the dashboard token' || echo 'hidden (payloads-off)') ..."
   for h in "${hubs[@]}"; do
-    detail=$(curl -fsS "$h/api/v1/events/kraken.events/$p/$o" | event_detail)
+    detail=$(curl -fsS "$h/api/v1/events/snodra.events/$p/$o" | event_detail)
     for name in "type examples.AuditNote" "id $id" "correlationId $corr" "source service-b" "timestamp "; do
       printf '%s\n' "$detail" | grep -q "^header $name" || fail "$h: the record p$p/$o should have the header '$name', got: $detail"
     done
@@ -1597,7 +1604,7 @@ browser_steps() {
         "payloadtext"*"\"key\":\"$key\""*"\"text\":\"second-$run\""*) ;;
         *) fail "$h: the record p$p/$o should show the second note's JSON to the dashboard token, got: $line" ;;
       esac
-      line=$(curl -fsS "$h/api/v1/events/kraken.events/$p2/$o2" | event_detail | grep '^payload ' || true)
+      line=$(curl -fsS "$h/api/v1/events/snodra.events/$p2/$o2" | event_detail | grep '^payload ' || true)
       case "$(printf '%s' "$line" | tr -d ' ')" in *"\"text\":\"first-$run\""*) ;; *) fail "$h: the record p$p2/$o2 should be the first note, got: $line" ;; esac
       echo "   $h: p$p/$o headers type, id, correlationId, timestamp, source; payload second-$run (and p$p2/$o2 first-$run)"
     else
@@ -1666,8 +1673,8 @@ browser_steps() {
 }
 
 # P9 (ADR 0026): metrics and dashboards. Both hubs and the examples export their metrics over OTLP to the sandbox's
-# otel-lgtm every 5 s (kraken/infra/compose.local.yaml); its Grafana (GRAFANA, default http://localhost:3000, or the port in
-# SNODRA_GRAFANA_PORT) provisions the snodra dashboards from kraken/infra/grafana/, and Prometheus is read through Grafana's
+# otel-lgtm every 5 s (compose.local.yaml); its Grafana (GRAFANA, default http://localhost:3000, or the port in
+# SNODRA_GRAFANA_PORT) provisions the snodra dashboards from grafana/, and Prometheus is read through Grafana's
 # proxy of the bundled data source (PROM; otel-lgtm does not publish Prometheus' port). These steps run last, once the
 # others made traffic. 29: Grafana lists the three dashboards, Overview, Hub and Messaging, in the folder Snodra. 29b: the
 # hub series of P9 come from both hubs (job snodra-server, instance = the hub id each hub's topology gives). 29c: service-b
@@ -1744,7 +1751,7 @@ await_label_values() { # <query> <label> <want, space-separated> <seconds>
     [ -z "$missing" ] && { echo "${got# }"; return 0; }
     sleep 1
   done
-  fail "$1: no result for$missing in $4 s (got:${got:- none}; is otel-lgtm up and the export on? kraken/infra/compose.local.yaml)"
+  fail "$1: no result for$missing in $4 s (got:${got:- none}; is otel-lgtm up and the export on? compose.local.yaml)"
 }
 
 obs_steps() {
@@ -1761,7 +1768,7 @@ obs_steps() {
       printf '%s\n' "$list" | grep -qx "$uid Snodra" || bad="$bad $uid"
     done
     [ -z "$bad" ] && break
-    [ "$i" -eq 60 ] && fail "$GRAFANA/api/search: not in the folder Snodra after 60 s:$bad (kraken/infra/grafana, mounted by compose.yaml's otel-lgtm); got: $list"
+    [ "$i" -eq 60 ] && fail "$GRAFANA/api/search: not in the folder Snodra after 60 s:$bad (grafana, mounted by compose.yaml's otel-lgtm); got: $list"
     sleep 1
   done
   echo "   $(printf '%s\n' "$list" | awk '$2 == "Snodra" { print $1 }' | sort | tr '\n' ' ')in the folder Snodra"
@@ -1869,7 +1876,7 @@ obs_steps() {
   done
 }
 
-# P5a (ADR 0018), only with SECURE=1 against the secure sandbox (kraken/infra/compose.secure.yaml). Step 21: a service
+# P5a (ADR 0018), only with SECURE=1 against the secure sandbox (compose.secure.yaml). Step 21: a service
 # with a token the ACL does not know, and one with a valid token that grants only another service name, are refused by
 # both hubs and logged by the client as a registration rejection (ERROR once per hub), and never listed on /api/v1/topology; a
 # request outside service-a's `send` patterns answers 403 AccessDeniedException. Step 21b: the dashboard API wants the
@@ -1988,7 +1995,7 @@ secure_steps() {
   trap - EXIT
 }
 
-# P5b (ADR 0019), only with SECURE=1 JWT=1 against the JWT sandbox (kraken/infra/compose.jwt.yaml): service-b (Kotlin) and
+# P5b (ADR 0019), only with SECURE=1 JWT=1 against the JWT sandbox (compose.jwt.yaml): service-b (Kotlin) and
 # service-c (Rust) register with a Keycloak access token (a dev identity provider, tokens that live 30 s), service-a with its
 # static token. Step 22: both hubs list service-b and service-c with authKind jwt and an expiresAt, and service-a with
 # authKind token. Step 22b: within ~40 s the expiresAt of both services advances on both hubs while the instance, and the
@@ -2094,7 +2101,7 @@ jwt_steps() {
   echo "   neither hub logged 'credentials expired' since $jwt_started"
 }
 
-# P5c (ADR 0020), only with SECURE=1 MTLS=1 against the mTLS sandbox (kraken/infra/compose.mtls.yaml): service-a (Kotlin) and
+# P5c (ADR 0020), only with SECURE=1 MTLS=1 against the mTLS sandbox (compose.mtls.yaml): service-a (Kotlin) and
 # service-c (Rust) register with a client certificate (a dev client CA, exactly one URI SAN snodra://service/<name>), service-b
 # with its static token (the hubs run with SNODRA_SERVER_TLS_CLIENT_AUTH=optional). Step 23: both hubs list service-a and
 # service-c with authKind certificate, the fingerprint of the certificate in the service's mounted directory and an
@@ -2138,7 +2145,7 @@ mtls_steps() {
   local ids=() sinces=()    # per hub, in the order of the loops below (no associative arrays: macOS bash 3.2)
   command -v docker >/dev/null || fail "docker CLI needed for the certificate steps (or set SKIP_MTLS=1)"
   command -v openssl >/dev/null || fail "openssl needed for the certificate steps (or set SKIP_MTLS=1)"
-  [ -f "$INFRA/scripts/dev-hub-pki.sh" ] || fail "kraken/infra/scripts/dev-hub-pki.sh not found (set INFRA_DIR)"
+  [ -f "$INFRA/scripts/dev-hub-pki.sh" ] || fail "scripts/dev-hub-pki.sh not found in INFRA_DIR"
   docker inspect "$h1" >/dev/null 2>&1 || fail "container $h1 not found (set HUB_CONTAINER, or SKIP_MTLS=1)"
   docker inspect "$h2" >/dev/null 2>&1 || fail "container $h2 not found (set HUB2_CONTAINER, or SKIP_MTLS=1)"
   mtls_started=$(date -u +%Y-%m-%dT%H:%M:%SZ)

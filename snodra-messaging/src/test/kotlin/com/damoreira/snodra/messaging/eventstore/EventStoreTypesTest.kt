@@ -13,7 +13,7 @@ class EventStoreTypesTest {
 
     @Test
     fun `the dead-letter source is the source with dlt`() {
-        assertEquals("kraken.events.dlt", deadLetterSource("kraken.events"))
+        assertEquals("snodra.events.dlt", deadLetterSource("snodra.events"))
     }
 
     @Test

@@ -21,8 +21,8 @@ import kotlin.coroutines.cancellation.CancellationException
  * **The layout on the wire** is shared with the Rust add-on (`snodra-messaging-rabbitmq`, `rabbitmq-stream-client`): both read
  * and write the same streams the same way. These are rules:
  *
- * - **A source is a super stream** (`kraken.events`, partition streams `kraken.events-0` to `-N`), created by the infrastructure,
- *   never by the library (`rabbitmq-streams add_super_stream kraken.events --partitions 6`); a source that is a plain stream (the
+ * - **A source is a super stream** (`snodra.events`, partition streams `snodra.events-0` to `-N`), created by the infrastructure,
+ *   never by the library (`rabbitmq-streams add_super_stream snodra.events --partitions 6`); a source that is a plain stream (the
  *   dead-letter stream) is read and written as one segment `0`. A source that is neither fails the publish and the subscription,
  *   naming the command that creates it.
  * - **Routing** is the stream clients' hash routing: murmur3 x86_32 of the routing key's UTF-8 bytes, seed 104729, as an
@@ -43,7 +43,7 @@ import kotlin.coroutines.cancellation.CancellationException
  *   ([RabbitEventStoreSettings.offsetStoreMessages], [RabbitEventStoreSettings.offsetStoreInterval]), and always on deactivation and
  *   at close.
  * - **The native dead letter** is the plain stream `<source>.dlt`, created by the infrastructure (a queue of type stream:
- *   `rabbitmqadmin declare queue --name kraken.events.dlt --type stream --durable true`).
+ *   `rabbitmqadmin declare queue --name snodra.events.dlt --type stream --durable true`).
  * - Connections are named `snodra-messaging`.
  *
  * **Capabilities**: [Capability.BROWSE] (the event browser can read the streams; it is a separate program), [Capability.LAG] and

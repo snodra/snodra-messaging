@@ -1,6 +1,6 @@
 package com.damoreira.snodra.messaging.api
 
-/** A fact that happened; published to Kafka topic `kraken.events`. */
+/** A fact that happened; published to Kafka topic `snodra.events`. */
 interface Event
 
 /** An intent handled by exactly one service; routed through the hub. [R] is the reply type. */

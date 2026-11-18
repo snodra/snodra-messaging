@@ -47,13 +47,13 @@ The library never creates them. The source as a super stream, with as many parti
 default, as Kafka's topic), and its dead-letter stream when the dead-letter mode is `event-store`:
 
 ```bash
-rabbitmq-streams add_super_stream kraken.events --partitions 6
-rabbitmqadmin declare queue --name kraken.events.dlt --type stream --durable true
+rabbitmq-streams add_super_stream snodra.events --partitions 6
+rabbitmqadmin declare queue --name snodra.events.dlt --type stream --durable true
 ```
 
 `rabbitmq-streams` has no command for a plain stream on RabbitMQ 4.x: the dead-letter stream is a queue of type `stream`, declared
 with `rabbitmqadmin` (v2, shipped in the `rabbitmq:4.4.0-management` image; on a node it talks to the local management API, from
-elsewhere add `--host`, `--port`, `--username`, `--password`), through the management API (`PUT /api/queues/%2F/kraken.events.dlt`
+elsewhere add `--host`, `--port`, `--username`, `--password`), through the management API (`PUT /api/queues/%2F/snodra.events.dlt`
 with `{"durable":true,"arguments":{"x-queue-type":"stream"}}`) or by any AMQP client with `x-queue-type=stream`.
 
 A missing super stream fails the publish (the outbox relay retries it) and the processors' subscriptions (subscribed again after
@@ -80,7 +80,7 @@ The Rust add-on reads the same settings as `SNODRA_RABBITMQ_*`.
 | `management.username` / `password` / `password-file` | the stream user's | the file wins over the password (trimmed at both ends; an empty one fails the startup); the password is masked in the actuator's output |
 | `management.ca-file` | none | PEM CA certificates of an `https` management API |
 
-The source and its dead-letter stream are the core's: `snodra.messaging.events.source` (`kraken.events`) and `<source>.dlt`.
+The source and its dead-letter stream are the core's: `snodra.messaging.events.source` (`snodra.events`) and `<source>.dlt`.
 The Rust add-on's `SNODRA_RABBITMQ_KNOWN_SUBSCRIPTIONS` belongs to its event browser and has no Kotlin counterpart.
 
 ## What it covers
@@ -108,7 +108,7 @@ These are rules both libraries follow; a program writing snodra's streams must f
 
 | What | Rule |
 |---|---|
-| Source | a super stream (`kraken.events`, partitions `kraken.events-0` .. `-N`, binding keys `0` .. `N-1`), created by the infrastructure; a plain stream source (the dead letter) is one partition, segment `0` |
+| Source | a super stream (`snodra.events`, partitions `snodra.events-0` .. `-N`, binding keys `0` .. `N-1`), created by the infrastructure; a plain stream source (the dead letter) is one partition, segment `0` |
 | Routing | murmur3 x86_32 of the routing key's UTF-8 bytes, seed 104729, as an **unsigned** number modulo the partition count, over the partitions in the broker's order (the Java client's default hash routing). Routing key = the event's key, else its id. With 6 partitions: `order-1` 0, `order-2` 2, `customer-123` 5, `order-7` 3, `""` 4 |
 | Message | one AMQP 1.0 message per event, **no sub-entry batching, no compression** (the Rust client cannot read them): exactly one `data` section = the JSON payload; `message-id` = the event id (string); `content-type` = the symbol `application/json`; message annotation `x-routing-key` (symbol) = the key (string), absent without one; every header (`type`, `id`, `correlationId`, `timestamp`, `source`, `userId`, `traceparent`, and any other, a dead letter's `snodra-dlt-*`) an application property with a string value |
 | Segment / position | the partition's suffix after `<source>-` (`3`); the offset in decimal; an event's time is its chunk's timestamp |
