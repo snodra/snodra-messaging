@@ -27,7 +27,7 @@ data class TokenRequest(val method: String, val contentType: String?, val user: 
 data class TokenResponse(val status: Int, val body: String, val contentType: String = "application/json", val headers: Map<String, String> = emptyMap())
 
 /**
- * A stand-in for Keycloak in tests: `POST /token` (the client-credentials grant, `client_secret_basic`) issues RS256 access
+ * A stand-in for an OAuth2 provider in tests: `POST /token` (the client-credentials grant, `client_secret_basic`) issues RS256 access
  * tokens whose `azp` is the Basic user, `GET /certs` serves the JWKS of the signing key. The key pair is made once per JVM at test
  * time; nothing is stored. Listens on every interface (a hub container reaches it through `host.testcontainers.internal`).
  */
@@ -96,7 +96,7 @@ class TestOAuth2Server : AutoCloseable {
         return TokenResponse(200, fields.joinToString(",", "{", "}"))
     }
 
-    /** An access token shaped like Keycloak's client-credentials one (`typ` Bearer, `azp`), signed by this server's key. */
+    /** An access token shaped like a client-credentials one (`typ` Bearer, `azp`), signed by this server's key. */
     fun sign(azp: String, expiresInSeconds: Int, issuer: String = this.issuer, typ: String? = "Bearer"): String {
         val now = System.currentTimeMillis()
         val claims = JWTClaimsSet.Builder()

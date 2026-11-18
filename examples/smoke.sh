@@ -32,7 +32,7 @@
 #        other step runs unchanged, and the security steps 21 and 21b are added; SKIP_SECURE=1 skips those two, ONLY_SECURE=1
 #        runs only them; SECRETS_DIR names the secrets directory, default SNODRA_SECRETS_DIR or INFRA_DIR/.secrets;
 #        JWT=1 (needs SECURE=1) runs against the JWT overlay on top of it (compose.jwt.yaml: service-b and
-#        service-c authenticate with Keycloak client-credentials tokens, service-a keeps its static token), every other
+#        service-c authenticate with OAuth2 client-credentials tokens, service-a keeps its static token), every other
 #        step runs unchanged, and the JWT steps 22 and 22b are added; SKIP_JWT=1 skips those two, ONLY_JWT=1 runs only
 #        them, C_CONTAINER names service-c's container;
 #        MTLS=1 (needs SECURE=1, excludes JWT=1) runs against the mTLS overlay on top of the secure sandbox
@@ -1996,7 +1996,7 @@ secure_steps() {
 }
 
 # P5b (ADR 0019), only with SECURE=1 JWT=1 against the JWT sandbox (compose.jwt.yaml): service-b (Kotlin) and
-# service-c (Rust) register with a Keycloak access token (a dev identity provider, tokens that live 30 s), service-a with its
+# service-c (Rust) register with an OAuth2 access token (a dev identity provider, tokens that live 30 s), service-a with its
 # static token. Step 22: both hubs list service-b and service-c with authKind jwt and an expiresAt, and service-a with
 # authKind token. Step 22b: within ~40 s the expiresAt of both services advances on both hubs while the instance, and the
 # stream it registered on (connectedSinceMs), stay the same: the token was renewed and handed to the live stream as

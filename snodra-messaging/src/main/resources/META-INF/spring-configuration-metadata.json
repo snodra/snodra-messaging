@@ -203,7 +203,7 @@
     {
       "name": "snodra.messaging.hub.oauth2.token-uri",
       "type": "java.net.URI",
-      "description": "OAuth2 token endpoint (Keycloak: https://<host>/realms/<realm>/protocol/openid-connect/token). Setting it turns Keycloak client-credentials authentication on (P5b, ADR 0019): the service registers with the access token as a jwt credential and renews it before it expires. http is allowed and warns unless the host is loopback or a single-label name. Cannot be combined with hub.token or hub.token-file. Environment variable SNODRA_MESSAGING_HUB_OAUTH2_TOKEN_URI, or SNODRA_SERVER_OAUTH2_TOKEN_URI when this property is unset.",
+      "description": "OAuth2 token endpoint (for example https://<host>/realms/<realm>/protocol/openid-connect/token on an OpenID Connect provider). Setting it turns OAuth2 client-credentials authentication on (P5b, ADR 0019): the service registers with the access token as a jwt credential and renews it before it expires. http is allowed and warns unless the host is loopback or a single-label name. Cannot be combined with hub.token or hub.token-file. Environment variable SNODRA_MESSAGING_HUB_OAUTH2_TOKEN_URI, or SNODRA_SERVER_OAUTH2_TOKEN_URI when this property is unset.",
       "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$OAuth2"
     },
     {

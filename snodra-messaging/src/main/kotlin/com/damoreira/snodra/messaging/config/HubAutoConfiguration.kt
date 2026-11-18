@@ -233,7 +233,7 @@ class HubAutoConfiguration {
     }
 
     /**
-     * The Keycloak client-credentials settings (P5b): `hub.oauth2.*`, each falling back to the plain `SNODRA_SERVER_OAUTH2_*` variable
+     * The OAuth2 client-credentials settings (P5b): `hub.oauth2.*`, each falling back to the plain `SNODRA_SERVER_OAUTH2_*` variable
      * when its property is unset; null when no token URI is set. Checked here so a mistake fails the startup naming the setting:
      * a static token as well, an OAuth2 setting without a token URI, no secret, a secret file that cannot be read, a CA file that cannot be used, a URI that is not http(s).
      */

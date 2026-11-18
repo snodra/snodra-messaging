@@ -59,7 +59,7 @@ This builds `snodra-examples-service-a:dev`, `snodra-examples-service-b:dev` and
 source (the first build takes several minutes, Rust compiles librdkafka; later ones are cached) and starts only what the
 three apps need: both hubs from the released image (`hub`, `hub-2`, `SNODRA_SERVER_VERSION`), the event browser
 (`snodra-event-browser`), Kafka, the topic init job, MongoDB and otel-lgtm (Grafana on <http://localhost:3000/>, see
-[Metrics](#metrics)). Keycloak and RustFS stay down. The hub's gRPC port is published on host
+[Metrics](#metrics)). The identity provider and RustFS stay down. The hub's gRPC port is published on host
 **7002** (macOS AirPlay owns 7000) and its topology view and dashboard on **7001**; `hub-2` uses **7012** and
 **7011**. Every example connects to both hubs (`SNODRA_SERVER_ADDRESS=static://hub:7000,hub-2:7000`, ADR 0016): it
 registers on each, sends unkeyed requests round-robin over them and keeps working when one stops.
@@ -319,7 +319,7 @@ only them (both need `SECURE=1`).
 ## JWT sandbox
 
 The secure sandbox with service-b (Kotlin) and service-c (Rust) authenticating by JWT (P5b, ADR 0019): the overlay
-`compose.jwt.yaml` on top of the secure one, with a throwaway Keycloak (`hub-idp`, container `snodra-server-idp`, its own
+`compose.jwt.yaml` on top of the secure one, with a throwaway identity provider (`hub-idp`, container `snodra-server-idp`, its own
 realm `snodra-server-dev`, tokens that live 30 s). service-a keeps its static token, so both credential kinds run side by side. The
 identity provider, the realm and the client secrets are dev only; the secrets come from `dev-hub-pki.sh` into the git-ignored
 `.secrets/` directory next to the compose files.

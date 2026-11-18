@@ -110,7 +110,7 @@ data class SnodraMessagingProperties(
         /** TLS towards the hub (P5a): off by default (plain text). */
         val tls: Tls = Tls(),
         /**
-         * Keycloak client-credentials authentication (P5b, ADR 0019): the service gets an access token from [OAuth2.tokenUri] and
+         * OAuth2 client-credentials authentication (P5b, ADR 0019): the service gets an access token from [OAuth2.tokenUri] and
          * registers with it as a `jwt` credential, renewing it before it expires. Off unless a token URI is set (here or as
          * `SNODRA_SERVER_OAUTH2_TOKEN_URI`); cannot be combined with [token] or [tokenFile].
          */
@@ -187,7 +187,7 @@ data class SnodraMessagingProperties(
      * gives `SNODRA_MESSAGING_HUB_OAUTH2_*` as well.
      */
     data class OAuth2(
-        /** The token endpoint (Keycloak: `https://<host>/realms/<realm>/protocol/openid-connect/token`). `http` is allowed (a compose network) and warns unless the host is loopback or a single-label name. */
+        /** The provider's token endpoint (OpenID Connect, for example `https://<host>/realms/<realm>/protocol/openid-connect/token`). `http` is allowed (a compose network) and warns unless the host is loopback or a single-label name. */
         val tokenUri: URI? = null,
         /** The confidential client's id, which is the `azp` of its tokens and so must be the service name; defaults to `snodra.messaging.service-name`. */
         val clientId: String? = null,
@@ -336,7 +336,7 @@ data class SnodraMessagingProperties(
         val forwardJwt: Boolean = true,
         /**
          * Where a forwarded token's roles are read (`snodra.messaging.security.roles-claim`): a dotted claim path,
-         * or `scope`. `roles` by default; `realm_access.roles` for Keycloak, `groups` for providers that put them there.
+         * or `scope`. `roles` by default; `realm_access.roles` for providers that nest them there, `groups` for those that use groups.
          */
         val rolesClaim: String = "roles",
     )

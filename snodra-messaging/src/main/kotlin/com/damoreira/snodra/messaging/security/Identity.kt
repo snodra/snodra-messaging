@@ -7,7 +7,7 @@ import org.springframework.security.oauth2.server.resource.authentication.Bearer
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken
 
 /**
- * The caller of a command or query as seen by the receiving handler: the Keycloak subject, the realm roles and
+ * The caller of a command or query as seen by the receiving handler: the token's subject, the roles and
  * whether the identity was cryptographically verified by this service ([verified]) or trusted as forwarded by a peer.
  * This is also what `principal` resolves to in `@RequiresAuthentication` expressions.
  */
@@ -22,7 +22,7 @@ data class Identity(val principal: MessagePrincipal, val authentication: Authent
 /**
  * Where a forwarded token's roles come from (`snodra.messaging.security.roles-claim`): a dotted claim path, or
  * `scope` for space-separated OAuth2 scopes. Providers disagree, so it is configuration: `roles` by default,
- * `realm_access.roles` for Keycloak, `groups` for Okta or Dex.
+ * `realm_access.roles` for providers that nest them there, `groups` for those that use groups.
  */
 object RolesClaim {
     @Volatile

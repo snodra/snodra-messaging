@@ -31,7 +31,7 @@ import javax.net.ssl.X509TrustManager
 
 /**
  * Where and as whom a service gets its hub access token (P5b, ADR 0019): the OAuth2 client credentials grant against [tokenUri]
- * (Keycloak: `<realm>/protocol/openid-connect/token`), the client authenticated with [clientId] and the secret [clientSecret]
+ * (OpenID Connect: `<realm>/protocol/openid-connect/token`), the client authenticated with [clientId] and the secret [clientSecret]
  * returns (HTTP Basic, `client_secret_basic`). [clientSecret] is called for every fetch, so a rotated secret file applies without a
  * restart; it throws [IOException] when the secret cannot be read. [scope] is sent as it is (space-separated). [caFile] adds CA
  * certificates (PEM) to the platform roots for an `https` [tokenUri]. The secret never appears in [toString].

@@ -51,7 +51,7 @@ import kotlin.test.assertTrue
 
 /**
  * JWT authentication (P5b, ADR 0019) against the real hub image (`SNODRA_SERVER_IMAGE`, default `snodra-server:dev`) in mode `enforce`
- * with `[[service]]` tables. A [TestOAuth2Server] on the host plays Keycloak: it issues the access tokens (RS256, a key made at test
+ * with `[[service]]` tables. A [TestOAuth2Server] on the host plays the identity provider: it issues the access tokens (RS256, a key made at test
  * time) and serves the JWKS the hub container fetches through `host.testcontainers.internal`. Leeway 0 s and expiry grace 2 s, so
  * `exp` is exact. The tests skip when the image is not built.
  */
@@ -130,7 +130,7 @@ class HubJwtEndToEndTest {
             it.start()
         }
 
-    @Test fun `a service that registers with a Keycloak-style access token serves a query from another JWT service`() = runBlocking {
+    @Test fun `a service that registers with an OAuth2-style access token serves a query from another JWT service`() = runBlocking {
         val hub = hub()
         val owner = startOwner(hub)
         val sender = connection(hub, "billing-service").also { it.start() }
