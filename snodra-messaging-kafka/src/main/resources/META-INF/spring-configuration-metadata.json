@@ -1,0 +1,57 @@
+{
+  "groups": [
+    {
+      "name": "snodra.messaging.kafka",
+      "type": "com.damoreira.snodra.messaging.kafka.KafkaProperties",
+      "sourceType": "com.damoreira.snodra.messaging.kafka.KafkaProperties"
+    },
+    {
+      "name": "snodra.messaging.external.kafka",
+      "type": "com.damoreira.snodra.messaging.kafka.KafkaExternalProperties",
+      "sourceType": "com.damoreira.snodra.messaging.kafka.KafkaExternalProperties"
+    }
+  ],
+  "properties": [
+    {
+      "name": "snodra.messaging.kafka.bootstrap-servers",
+      "type": "java.lang.String",
+      "description": "Kafka bootstrap servers of the Kafka event store.",
+      "sourceType": "com.damoreira.snodra.messaging.kafka.KafkaProperties",
+      "defaultValue": "broker:19092"
+    },
+    {
+      "name": "snodra.messaging.kafka.client-properties",
+      "type": "java.util.Map<java.lang.String,java.lang.String>",
+      "description": "Kafka client properties added to the producer's, the consumers' and the admin client's configuration (security, client ids, quotas). They never replace what the store depends on (the group, the deserializers, manual commits, acks and idempotence); their values never appear in logs.",
+      "sourceType": "com.damoreira.snodra.messaging.kafka.KafkaProperties"
+    },
+    {
+      "name": "snodra.messaging.kafka.admin-timeout",
+      "type": "java.time.Duration",
+      "description": "The most one call to the brokers waits (an admin call, a commit, the offsets a status refresh reads).",
+      "sourceType": "com.damoreira.snodra.messaging.kafka.KafkaProperties",
+      "defaultValue": "10s"
+    },
+    {
+      "name": "snodra.messaging.kafka.status-refresh",
+      "type": "java.time.Duration",
+      "description": "How often a subscription refreshes the end offsets its lag is counted against.",
+      "sourceType": "com.damoreira.snodra.messaging.kafka.KafkaProperties",
+      "defaultValue": "1s"
+    },
+    {
+      "name": "snodra.messaging.kafka.max-poll-records",
+      "type": "java.lang.Integer",
+      "description": "The most records one poll of a subscription takes from the brokers.",
+      "sourceType": "com.damoreira.snodra.messaging.kafka.KafkaProperties",
+      "defaultValue": 100
+    },
+    {
+      "name": "snodra.messaging.external.kafka.sources",
+      "type": "java.util.Map<java.lang.String,com.damoreira.snodra.messaging.kafka.KafkaExternalProperties$Source>",
+      "description": "Partner Kafka topics consumed into local snodra events, by source name. Each source takes bootstrap-servers (default: snodra.messaging.kafka.bootstrap-servers), topic (required), group-id (default: <service-name>.external.<name>) and properties (extra consumer properties; servers, group id, deserializers and auto-commit are fixed). A bean named like the source implements ExternalRecordTranslator; a source without one fails the startup naming it. Records are dispatched locally (handlers and sagas), never republished to the service's events; a partner's topic is never created.",
+      "sourceType": "com.damoreira.snodra.messaging.kafka.KafkaExternalProperties"
+    }
+  ],
+  "hints": []
+}

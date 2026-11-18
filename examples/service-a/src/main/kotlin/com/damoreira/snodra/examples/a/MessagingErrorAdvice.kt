@@ -1,0 +1,35 @@
+package com.damoreira.snodra.examples.a
+
+import com.damoreira.snodra.messaging.AccessDeniedException
+import com.damoreira.snodra.messaging.HandlerBusyException
+import com.damoreira.snodra.messaging.HandlerDisconnectedException
+import com.damoreira.snodra.messaging.MessageTimeoutException
+import com.damoreira.snodra.messaging.MessagingException
+import com.damoreira.snodra.messaging.NoHandlerException
+import com.damoreira.snodra.messaging.StreamCancelledException
+import org.springframework.http.HttpStatus
+import org.springframework.http.ResponseEntity
+import org.springframework.web.bind.annotation.ExceptionHandler
+import org.springframework.web.bind.annotation.RestControllerAdvice
+
+data class ErrorBody(val error: String, val message: String)
+
+/**
+ * Maps hub failures to HTTP: nobody owns the type (503), the owner vanished (503), the owner's hub queue is full (503),
+ * no reply in time (504), a stream the hub ended for outliving its maximum duration (502: the upstream ended it, the caller did not), a request the hub's access control refuses (`PERMISSION_DENIED`: the token's `send`
+ * patterns do not list the type: 403), else 502.
+ */
+@RestControllerAdvice
+class MessagingErrorAdvice {
+    @ExceptionHandler(MessagingException::class)
+    fun handle(e: MessagingException): ResponseEntity<ErrorBody> {
+        val status = when (e) {
+            is NoHandlerException, is HandlerDisconnectedException, is HandlerBusyException -> HttpStatus.SERVICE_UNAVAILABLE
+            is MessageTimeoutException -> HttpStatus.GATEWAY_TIMEOUT
+            is StreamCancelledException -> HttpStatus.BAD_GATEWAY
+            is AccessDeniedException -> HttpStatus.FORBIDDEN
+            else -> HttpStatus.BAD_GATEWAY
+        }
+        return ResponseEntity.status(status).body(ErrorBody(e::class.simpleName ?: "MessagingException", e.message ?: ""))
+    }
+}

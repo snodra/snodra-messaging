@@ -1,5 +1,0 @@
-org.springframework.boot.EnvironmentPostProcessor=\
-io.damoreira.kraken.messaging.metrics.MetricsDefaults
-
-org.springframework.boot.diagnostics.FailureAnalyzer=\
-io.damoreira.kraken.messaging.config.MissingMessageStoreFailureAnalyzer

@@ -15,9 +15,9 @@ dependencyManagement {
 }
 
 dependencies {
-    implementation(project(":kraken-messaging"))
+    implementation(project(":snodra-messaging"))
     // The message store: the outbox, the processed events, the dead letters and the sagas in the service's PostgreSQL (ADR 0028).
-    implementation(project(":kraken-messaging-jdbc"))
+    implementation(project(":snodra-messaging-jdbc"))
     implementation(libs.jackson.module.kotlin)
     implementation(libs.kotlin.reflect)
     runtimeOnly(libs.postgresql)
@@ -25,6 +25,6 @@ dependencies {
     testImplementation(libs.spring.boot.starter.test)
     testImplementation(libs.kotlin.test.junit5)
     testImplementation(libs.awaitility)
-    testImplementation(project(":kraken-messaging-test"))
+    testImplementation(project(":snodra-messaging-test"))
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }

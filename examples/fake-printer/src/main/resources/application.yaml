@@ -1,4 +1,4 @@
-# The fake postcard printer of the sandbox (a partner, not a kraken service). compose.local.yaml sets these in-network.
+# The fake postcard printer of the sandbox (a partner, not a snodra service). compose.local.yaml sets these in-network.
 server:
   port: ${SERVER_PORT:8093}
 spring:

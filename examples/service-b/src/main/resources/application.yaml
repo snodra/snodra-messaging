@@ -1,13 +1,13 @@
 # Defaults point at the published ports of the umbrella compose (kraken/infra), so `bootRun` works from the IDE;
 # compose.local.yaml overrides them with in-network addresses.
-kraken:
+snodra:
   messaging:
-    service-name: ${KRAKEN_SERVICE_NAME:service-b}
-    type-prefix: ${KRAKEN_SERVICE_NAME:service-b}
+    service-name: ${SNODRA_SERVICE_NAME:service-b}
+    type-prefix: ${SNODRA_SERVICE_NAME:service-b}
     hub:
-      address: ${KRAKEN_HUB_ADDRESS:static://localhost:7002}
+      address: ${SNODRA_SERVER_ADDRESS:static://localhost:7002}
     kafka:
-      bootstrap-servers: ${KRAKEN_KAFKA_BOOTSTRAP:localhost:9092}
+      bootstrap-servers: ${SNODRA_KAFKA_BOOTSTRAP:localhost:9092}
     external:
       kafka:
         sources:
@@ -20,9 +20,9 @@ examples:
     webhook-secret: ${PRINTER_WEBHOOK_SECRET:dev-only-printer-webhook-secret}
 spring:
   application:
-    name: ${KRAKEN_SERVICE_NAME:service-b}
+    name: ${SNODRA_SERVICE_NAME:service-b}
   mongodb:
-    uri: ${KRAKEN_MONGODB_URI:mongodb://localhost:27017/service-b?replicaSet=rs0&directConnection=true}
+    uri: ${SNODRA_MONGODB_URI:mongodb://localhost:27017/service-b?replicaSet=rs0&directConnection=true}
 management:
   otlp:
     metrics:
@@ -30,11 +30,11 @@ management:
         # Metrics over OTLP/HTTP (the sandbox's otel-lgtm) only when switched on: without a collector the export would log a
         # failure every step. The library makes the export's time unit seconds and its resource the service and the
         # instance id the hub sees (ADR 0026).
-        enabled: ${KRAKEN_OTLP_METRICS_ENABLED:false}
-        url: ${KRAKEN_OTLP_METRICS_ENDPOINT:http://localhost:4318/v1/metrics}
-        step: ${KRAKEN_OTLP_METRICS_STEP:60s}
+        enabled: ${SNODRA_OTLP_METRICS_ENABLED:false}
+        url: ${SNODRA_OTLP_METRICS_ENDPOINT:http://localhost:4318/v1/metrics}
+        step: ${SNODRA_OTLP_METRICS_STEP:60s}
 server:
   port: ${SERVER_PORT:8092}
 logging:
   level:
-    io.damoreira.kraken: INFO
+    com.damoreira.snodra: INFO
