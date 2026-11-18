@@ -1,0 +1,592 @@
+{
+  "groups": [
+    {
+      "name": "snodra.messaging",
+      "type": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties"
+    },
+    {
+      "name": "snodra.messaging.hub",
+      "type": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Hub",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties",
+      "sourceMethod": "getHub()"
+    },
+    {
+      "name": "snodra.messaging.hub.reconnect-backoff",
+      "type": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Backoff",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Hub",
+      "sourceMethod": "getReconnectBackoff()"
+    },
+    {
+      "name": "snodra.messaging.hub.retry",
+      "type": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Retry",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Hub",
+      "sourceMethod": "getRetry()"
+    },
+    {
+      "name": "snodra.messaging.hub.oauth2",
+      "type": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$OAuth2",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Hub",
+      "sourceMethod": "getOauth2()"
+    },
+    {
+      "name": "snodra.messaging.hub.tls",
+      "type": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Tls",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties",
+      "sourceMethod": "getTls()"
+    },
+    {
+      "name": "snodra.messaging.store",
+      "type": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Store",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties",
+      "sourceMethod": "getStore()"
+    },
+    {
+      "name": "snodra.messaging.memory",
+      "type": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Memory",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties",
+      "sourceMethod": "getMemory()"
+    },
+    {
+      "name": "snodra.messaging.events",
+      "type": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Events",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties",
+      "sourceMethod": "getEvents()"
+    },
+    {
+      "name": "snodra.messaging.events.consumer",
+      "type": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Consumer",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Events",
+      "sourceMethod": "getConsumer()"
+    },
+    {
+      "name": "snodra.messaging.events.dead-letter",
+      "type": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$DeadLetter",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Events",
+      "sourceMethod": "getDeadLetter()"
+    },
+    {
+      "name": "snodra.messaging.outbox",
+      "type": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Outbox",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties",
+      "sourceMethod": "getOutbox()"
+    },
+    {
+      "name": "snodra.messaging.idempotency",
+      "type": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Idempotency",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties",
+      "sourceMethod": "getIdempotency()"
+    },
+    {
+      "name": "snodra.messaging.security",
+      "type": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Security",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties",
+      "sourceMethod": "getSecurity()"
+    },
+    {
+      "name": "snodra.messaging.sagas",
+      "type": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Sagas",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties",
+      "sourceMethod": "getSagas()"
+    },
+    {
+      "name": "snodra.messaging.sagas.relay",
+      "type": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$SagaRelay",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Sagas",
+      "sourceMethod": "getRelay()"
+    },
+    {
+      "name": "snodra.messaging.deadlines",
+      "type": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Deadlines",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties",
+      "sourceMethod": "getDeadlines()"
+    },
+    {
+      "name": "snodra.messaging.external",
+      "type": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$External",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties",
+      "sourceMethod": "getExternal()"
+    },
+    {
+      "name": "snodra.messaging.external.calls",
+      "type": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$ExternalCalls",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$External",
+      "sourceMethod": "getCalls()"
+    }
+  ],
+  "properties": [
+    {
+      "name": "snodra.messaging.service-name",
+      "type": "java.lang.String",
+      "description": "Logical service name: the prefix of the processors' subscriptions, event source and hub registration name. Required.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties"
+    },
+    {
+      "name": "snodra.messaging.type-prefix",
+      "type": "java.lang.String",
+      "description": "Prefix of the wire type name of message classes without @MessageType. Required.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties"
+    },
+    {
+      "name": "snodra.messaging.instance-id",
+      "type": "java.lang.String",
+      "description": "This instance's id: its hub registration's instance id and the service.instance.id of its metrics. A fresh UUID per start unless set (a pod name, for example); unique among the instances of the service.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties"
+    },
+    {
+      "name": "snodra.messaging.hub.enabled",
+      "type": "java.lang.Boolean",
+      "description": "Connect to the hub and expose the hub-backed CommandBus and QueryBus.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Hub",
+      "defaultValue": true
+    },
+    {
+      "name": "snodra.messaging.hub.address",
+      "type": "java.lang.String",
+      "description": "The hub or hubs: one gRPC target (host:port, optional static:// prefix), a comma-separated list of them (one connection per hub), or one dns:///name:port re-resolved every 30 s.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Hub",
+      "defaultValue": "static://snodra-server:7000"
+    },
+    {
+      "name": "snodra.messaging.hub.status-interval",
+      "type": "java.time.Duration",
+      "description": "Period of the InstanceStatus report sent to every hub (must be positive).",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Hub",
+      "defaultValue": "5s"
+    },
+    {
+      "name": "snodra.messaging.hub.request-timeout",
+      "type": "java.time.Duration",
+      "description": "Per-request timeout sent as timeout_ms. Unset: the hub applies its default or per-type override. 0s counts as unset.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Hub"
+    },
+    {
+      "name": "snodra.messaging.hub.reconnect-backoff.min",
+      "type": "java.time.Duration",
+      "description": "Initial reconnect delay when the hub stream drops; doubles per failed attempt, resets once an attempt reached the hub's handshake.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Backoff",
+      "defaultValue": "500ms"
+    },
+    {
+      "name": "snodra.messaging.hub.reconnect-backoff.max",
+      "type": "java.time.Duration",
+      "description": "Maximum reconnect delay when the hub stream drops; every wait is jittered by +-20 % and capped at this value (at the cap: 80-100 % of it).",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Backoff",
+      "defaultValue": "5s"
+    },
+    {
+      "name": "snodra.messaging.hub.stream-credit-timeout",
+      "type": "java.time.Duration",
+      "description": "Longest a streaming handler waits for credit from the collector before it ends the stream with TIMEOUT and frees its handler slot and hub permit. Must be positive; the default is the hub's default maximum stream duration.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Hub",
+      "defaultValue": "10m"
+    },
+    {
+      "name": "snodra.messaging.hub.max-subscriptions",
+      "type": "java.lang.Integer",
+      "description": "Subscription queries this instance serves at once, over every hub (at least 1); the next one is refused with RESOURCE_EXHAUSTED. A subscription holds no handler permit, so max-concurrent-handlers does not bound it.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Hub",
+      "defaultValue": 1024
+    },
+    {
+      "name": "snodra.messaging.hub.token",
+      "type": "java.lang.String",
+      "description": "Static token sent in Register.credentials.token of every hub stream (hub access control, P5a). Optional; empty is the same as none. Never logged and redacted in toString and in the actuator configprops and env output. Environment variable SNODRA_MESSAGING_HUB_TOKEN, or SNODRA_SERVER_TOKEN when this property is unset.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Hub"
+    },
+    {
+      "name": "snodra.messaging.hub.token-file",
+      "type": "java.nio.file.Path",
+      "description": "File holding the hub token (a container secret), trimmed at both ends: read at startup, where an unreadable or empty file fails the startup, and again on every reconnect. Wins over snodra.messaging.hub.token when both are set. Environment variable SNODRA_MESSAGING_HUB_TOKEN_FILE, or SNODRA_SERVER_TOKEN_FILE when this property is unset.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Hub"
+    },
+    {
+      "name": "snodra.messaging.hub.oauth2.token-uri",
+      "type": "java.net.URI",
+      "description": "OAuth2 token endpoint (Keycloak: https://<host>/realms/<realm>/protocol/openid-connect/token). Setting it turns Keycloak client-credentials authentication on (P5b, ADR 0019): the service registers with the access token as a jwt credential and renews it before it expires. http is allowed and warns unless the host is loopback or a single-label name. Cannot be combined with hub.token or hub.token-file. Environment variable SNODRA_MESSAGING_HUB_OAUTH2_TOKEN_URI, or SNODRA_SERVER_OAUTH2_TOKEN_URI when this property is unset.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$OAuth2"
+    },
+    {
+      "name": "snodra.messaging.hub.oauth2.client-id",
+      "type": "java.lang.String",
+      "description": "The confidential client's id, which is the azp of its tokens and must be the service name. Defaults to snodra.messaging.service-name. Environment variable SNODRA_SERVER_OAUTH2_CLIENT_ID when this property is unset.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$OAuth2"
+    },
+    {
+      "name": "snodra.messaging.hub.oauth2.client-secret",
+      "type": "java.lang.String",
+      "description": "The client secret. Never logged and redacted in toString and in the actuator configprops and env output; prefer client-secret-file. Environment variable SNODRA_MESSAGING_HUB_OAUTH2_CLIENT_SECRET, or SNODRA_SERVER_OAUTH2_CLIENT_SECRET when this property is unset.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$OAuth2"
+    },
+    {
+      "name": "snodra.messaging.hub.oauth2.client-secret-file",
+      "type": "java.nio.file.Path",
+      "description": "File holding the client secret (a container secret), trimmed at both ends: read at startup, where an unreadable or empty file fails the startup, and again on every token fetch, so a rotated secret applies without a restart. Wins over client-secret. Environment variable SNODRA_MESSAGING_HUB_OAUTH2_CLIENT_SECRET_FILE, or SNODRA_SERVER_OAUTH2_CLIENT_SECRET_FILE when this property is unset.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$OAuth2"
+    },
+    {
+      "name": "snodra.messaging.hub.oauth2.scope",
+      "type": "java.lang.String",
+      "description": "scope of the token request, as sent (space-separated); none by default. Environment variable SNODRA_SERVER_OAUTH2_SCOPE when this property is unset.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$OAuth2"
+    },
+    {
+      "name": "snodra.messaging.hub.oauth2.ca-file",
+      "type": "java.nio.file.Path",
+      "description": "PEM file with CA certificates to trust on top of the platform roots for an https token-uri (not the hub's CA: that is hub.tls.ca-file). Environment variable SNODRA_SERVER_OAUTH2_CA when this property is unset.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$OAuth2"
+    },
+    {
+      "name": "snodra.messaging.hub.tls.enabled",
+      "type": "java.lang.Boolean",
+      "description": "Talk TLS to the hub, for every address form (static list and dns:///). Off: plain text.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Tls",
+      "defaultValue": false
+    },
+    {
+      "name": "snodra.messaging.hub.tls.ca-file",
+      "type": "java.nio.file.Path",
+      "description": "PEM file with the CA certificate(s) that signed the hub's certificate; the JVM's system roots when absent. Read on every connection attempt.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Tls"
+    },
+    {
+      "name": "snodra.messaging.hub.tls.server-name",
+      "type": "java.lang.String",
+      "description": "Name the hub's certificate is verified against instead of the address's host.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Tls"
+    },
+    {
+      "name": "snodra.messaging.hub.tls.client-cert-file",
+      "type": "java.nio.file.Path",
+      "description": "PEM file with the client certificate chain (leaf first) presented to the hub (mTLS). The leaf needs exactly one URI SAN snodra://service/<name> equal to the service name. Needs hub.tls.client-key-file, implies TLS, cannot be combined with a static token or OAuth2. Read at startup and on every reconnect; a renewed pair is adopted without a restart.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Tls"
+    },
+    {
+      "name": "snodra.messaging.hub.tls.client-key-file",
+      "type": "java.nio.file.Path",
+      "description": "PEM file with the private key of hub.tls.client-cert-file: unencrypted PKCS#8 (BEGIN PRIVATE KEY).",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Tls"
+    },
+    {
+      "name": "snodra.messaging.hub.max-concurrent-handlers",
+      "type": "java.lang.Integer",
+      "description": "Incoming hub requests handled concurrently by this instance; further requests wait for a free slot. Also announced as initial_permits to a hub with flow control, which queues the excess.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Hub",
+      "defaultValue": 256
+    },
+    {
+      "name": "snodra.messaging.hub.load-factor",
+      "type": "java.lang.Integer",
+      "description": "Relative capacity of this instance (Register.load_factor, 100 = normal); weights its share of the hub's routing.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Hub",
+      "defaultValue": 100
+    },
+    {
+      "name": "snodra.messaging.hub.tags",
+      "type": "java.util.Map<java.lang.String,java.lang.String>",
+      "description": "Labels announced in Register.tags, for example zone=eu-1; unkeyed requests prefer instances whose tags match the sender's.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Hub"
+    },
+    {
+      "name": "snodra.messaging.hub.priorities",
+      "type": "java.util.Map<java.lang.String,java.lang.Integer>",
+      "description": "Default Request.priority per message type name (types not listed send 0); higher is served first when the hub queues requests.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Hub"
+    },
+    {
+      "name": "snodra.messaging.hub.retry.enabled",
+      "type": "java.lang.Boolean",
+      "description": "Retry failed sends that are safe to retry (see RetryClassification).",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Retry",
+      "defaultValue": false
+    },
+    {
+      "name": "snodra.messaging.hub.retry.max-attempts",
+      "type": "java.lang.Integer",
+      "description": "Total attempts including the first.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Retry",
+      "defaultValue": 3
+    },
+    {
+      "name": "snodra.messaging.hub.retry.initial-backoff",
+      "type": "java.time.Duration",
+      "description": "Wait before the second attempt.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Retry",
+      "defaultValue": "100ms"
+    },
+    {
+      "name": "snodra.messaging.hub.retry.multiplier",
+      "type": "java.lang.Double",
+      "description": "Growth of the wait per further attempt.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Retry",
+      "defaultValue": 2.0
+    },
+    {
+      "name": "snodra.messaging.hub.retry.max-backoff",
+      "type": "java.time.Duration",
+      "description": "Upper bound of a single wait; all attempts stay within the caller's timeout budget.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Retry",
+      "defaultValue": "2s"
+    },
+    {
+      "name": "snodra.messaging.event-store",
+      "type": "java.lang.String",
+      "description": "The event store's name (kafka, rabbitmq-streams, memory): which one runs when two event-store add-ons are on the classpath, and the only way to run the in-memory one (memory: not durable, one JVM; tests, local runs, demos). Unset: the only one there is.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties"
+    },
+    {
+      "name": "snodra.messaging.store.type",
+      "type": "java.lang.String",
+      "description": "The message store's name (mongo, jdbc, memory): which one runs when two are available, and the only way to run the in-memory one (memory: not durable, one JVM; tests, local runs, demos). Unset: the only one there is.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Store"
+    },
+    {
+      "name": "snodra.messaging.memory.segments",
+      "type": "java.lang.Integer",
+      "description": "The in-memory event store's segments per source (1 to 1024): a key always goes to the same one; the competing instances of a subscription share them.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Memory",
+      "defaultValue": 4
+    },
+    {
+      "name": "snodra.messaging.events.source",
+      "type": "java.lang.String",
+      "description": "The source the service's events are published to and read from (a topic on Kafka).",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Events",
+      "defaultValue": "kraken.events"
+    },
+    {
+      "name": "snodra.messaging.events.subscription-prefix",
+      "type": "java.lang.String",
+      "description": "The prefix of every event processor's subscription name; unset: the service name. Every processor, default included, uses <this prefix>.<name> (on Kafka the consumer group).",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Events"
+    },
+    {
+      "name": "snodra.messaging.events.consumer.enabled",
+      "type": "java.lang.Boolean",
+      "description": "Run the event processors; set false in tools that only publish.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Consumer",
+      "defaultValue": true
+    },
+    {
+      "name": "snodra.messaging.events.consumer.max-attempts",
+      "type": "java.lang.Integer",
+      "description": "Handler invocations per record (first try included, 1 s apart) before the record goes to the dead letters (events.dead-letter.mode); shared by every event processor.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Consumer",
+      "defaultValue": 5
+    },
+    {
+      "name": "snodra.messaging.events.dead-letter.mode",
+      "type": "com.damoreira.snodra.messaging.deadletter.DeadLetterMode",
+      "description": "What an event processor does with a record it cannot handle: collection (park it in the message store's dead letters, the default), event-store (publish it to the event store's <source>.dlt; needs the capability native-dead-letter) or log (log and skip).",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$DeadLetter",
+      "defaultValue": "collection"
+    },
+    {
+      "name": "snodra.messaging.events.dead-letter.retention",
+      "type": "java.time.Duration",
+      "description": "A dead letter is deleted this long after it was parked (TTL index on expireAt), which also unblocks its key; at least 1s.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$DeadLetter",
+      "defaultValue": "30d"
+    },
+    {
+      "name": "snodra.messaging.outbox.enabled",
+      "type": "java.lang.Boolean",
+      "description": "Run the outbox publisher that relays the outbox entries to the event store.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Outbox",
+      "defaultValue": true
+    },
+    {
+      "name": "snodra.messaging.outbox.poll-interval",
+      "type": "java.time.Duration",
+      "description": "Outbox publisher poll period.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Outbox",
+      "defaultValue": "200ms"
+    },
+    {
+      "name": "snodra.messaging.outbox.batch-size",
+      "type": "java.lang.Integer",
+      "description": "Outbox documents per poll.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Outbox",
+      "defaultValue": 100
+    },
+    {
+      "name": "snodra.messaging.outbox.retention",
+      "type": "java.time.Duration",
+      "description": "Sent outbox documents older than this are deleted.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Outbox",
+      "defaultValue": "7d"
+    },
+    {
+      "name": "snodra.messaging.outbox.max-attempts",
+      "type": "java.lang.Integer",
+      "description": "Send attempts per outbox document before it is marked failed (failedAt) and skipped.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Outbox",
+      "defaultValue": 10
+    },
+    {
+      "name": "snodra.messaging.outbox.lease",
+      "type": "java.time.Duration",
+      "description": "How long a batch the outbox relay claimed stays its own; another instance relays it only after that. Longer than one send (45s).",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Outbox",
+      "defaultValue": "2m"
+    },
+    {
+      "name": "snodra.messaging.store.init-schema",
+      "type": "java.lang.Boolean",
+      "description": "Apply the message store's schema (indexes, tables) at startup. False when the service applies it itself.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Store",
+      "defaultValue": true
+    },
+    {
+      "name": "snodra.messaging.idempotency.retention",
+      "type": "java.time.Duration",
+      "description": "processed_events documents older than this are deleted.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Idempotency",
+      "defaultValue": "30d"
+    },
+    {
+      "name": "snodra.messaging.security.forward-jwt",
+      "type": "java.lang.Boolean",
+      "description": "Put the current request's bearer token in the hub request's authorization header.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Security",
+      "defaultValue": true
+    },
+    {
+      "name": "snodra.messaging.sagas.enabled",
+      "type": "java.lang.Boolean",
+      "description": "Switch for the saga runtime, the dispatch relay and the deadline scheduler. They exist only when the application has a @Saga class (found by scanning its packages) anyway.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Sagas",
+      "defaultValue": true
+    },
+    {
+      "name": "snodra.messaging.sagas.max-attempts",
+      "type": "java.lang.Integer",
+      "description": "Attempts per saga event (first try included, >= 1) for version conflicts, start-key duplicates and handler exceptions before the event is parked in saga_failures.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Sagas",
+      "defaultValue": 5
+    },
+    {
+      "name": "snodra.messaging.sagas.ended-retention",
+      "type": "java.time.Duration",
+      "description": "Ended sagas are deleted this long after they ended (TTL index on sagas.endedAt). Must be positive.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Sagas",
+      "defaultValue": "30d"
+    },
+    {
+      "name": "snodra.messaging.sagas.dispatch-retention",
+      "type": "java.time.Duration",
+      "description": "Dispatched saga_dispatch entries are deleted this long after they were sent (TTL index on dispatchedAt). Must be positive.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Sagas",
+      "defaultValue": "7d"
+    },
+    {
+      "name": "snodra.messaging.sagas.failed-retention",
+      "type": "java.time.Duration",
+      "description": "What failed for good is deleted this long after it failed: saga_dispatch entries given up on (TTL index on failedAt) and parked events in saga_failures (TTL index on lastFailedAt). Must be positive.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Sagas",
+      "defaultValue": "30d"
+    },
+    {
+      "name": "snodra.messaging.sagas.relay.poll-interval",
+      "type": "java.time.Duration",
+      "description": "How often the dispatch relay looks for entries that saga handlers recorded. Must be positive.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$SagaRelay",
+      "defaultValue": "500ms"
+    },
+    {
+      "name": "snodra.messaging.sagas.relay.lease",
+      "type": "java.time.Duration",
+      "description": "How long a relay instance holds one saga's dispatch order before another instance may take over (a crashed instance's lease expires). Must be positive.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$SagaRelay",
+      "defaultValue": "30s"
+    },
+    {
+      "name": "snodra.messaging.sagas.relay.max-attempts",
+      "type": "java.lang.Integer",
+      "description": "Attempts per command for transient failures (first try included, >= 1) before it becomes SagaCommandFailed(EXHAUSTED).",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$SagaRelay",
+      "defaultValue": 10
+    },
+    {
+      "name": "snodra.messaging.sagas.relay.initial-backoff",
+      "type": "java.time.Duration",
+      "description": "Wait before the second attempt of a command; doubles per attempt up to max-backoff.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$SagaRelay",
+      "defaultValue": "1s"
+    },
+    {
+      "name": "snodra.messaging.sagas.relay.max-backoff",
+      "type": "java.time.Duration",
+      "description": "Upper bound of one wait between attempts of a command.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$SagaRelay",
+      "defaultValue": "5m"
+    },
+    {
+      "name": "snodra.messaging.sagas.relay.send-timeout",
+      "type": "java.time.Duration",
+      "description": "How long a command send may take. One with no answer by then (a local adapter that hangs) is abandoned, its thread interrupted, and retried later with the same idempotency key as a transient failure. A send through the hub waits at least the hub's deadline for the command (its per-type override, else the request timeout or the hub's clamp) plus 10 s, so it is never sent again while the hub may still run it. Must be positive.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$SagaRelay",
+      "defaultValue": "1m"
+    },
+    {
+      "name": "snodra.messaging.deadlines.poll-interval",
+      "type": "java.time.Duration",
+      "description": "How often the deadline scheduler looks for due deadlines. Must be positive.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Deadlines",
+      "defaultValue": "1s"
+    },
+    {
+      "name": "snodra.messaging.deadlines.lease",
+      "type": "java.time.Duration",
+      "description": "How long a claimed deadline stays reserved for the instance that claimed it; an expired claim lets it fire again (at-least-once). Must be positive.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Deadlines",
+      "defaultValue": "30s"
+    },
+    {
+      "name": "snodra.messaging.deadlines.retention",
+      "type": "java.time.Duration",
+      "description": "Fired and cancelled deadlines are deleted this long after (TTL index on deadlines.finishedAt). Must be positive.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Deadlines",
+      "defaultValue": "7d"
+    },
+    {
+      "name": "snodra.messaging.external.calls.enabled",
+      "type": "java.lang.Boolean",
+      "description": "Whether the idempotency interceptor and the external_calls indexes exist. Unset: they exist when a class in the application's packages has an @IdempotentHandler method. Set true when the adapter lives outside those packages, false to switch it off.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$ExternalCalls"
+    },
+    {
+      "name": "snodra.messaging.external.calls.lease",
+      "type": "java.time.Duration",
+      "description": "How long an IN_PROGRESS external call may take before its outcome counts as unknown (a crash in the middle of the call). Must be positive.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$ExternalCalls",
+      "defaultValue": "5m"
+    },
+    {
+      "name": "snodra.messaging.external.calls.retention",
+      "type": "java.time.Duration",
+      "description": "external_calls documents older than this are deleted (TTL index on updatedAt). Must be positive.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$ExternalCalls",
+      "defaultValue": "30d"
+    }
+  ],
+  "hints": [
+    {
+      "name": "snodra.messaging.events.dead-letter.mode",
+      "values": [
+        {
+          "value": "collection",
+          "description": "Park in the message store's dead letters, sequence the key, DeadLetters admin API."
+        },
+        {
+          "value": "event-store",
+          "description": "Publish to the event store's <source>.dlt (capability native-dead-letter)."
+        },
+        {
+          "value": "log",
+          "description": "Log and skip: nothing is parked."
+        }
+      ]
+    }
+  ]
+}

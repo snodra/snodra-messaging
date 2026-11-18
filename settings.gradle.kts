@@ -1,9 +1,23 @@
-rootProject.name = "kraken-messaging"
+rootProject.name = "snodra-messaging-workspace"
 
 pluginManagement {
     repositories {
         gradlePluginPortal()
         mavenCentral()
+    }
+}
+
+plugins {
+    id("com.gradleup.nmcp.settings") version "1.6.2"
+}
+
+nmcpSettings {
+
+    centralPortal {
+        username = System.getenv("MAVEN_CENTRAL_USERNAME") ?: ""
+        password = System.getenv("MAVEN_CENTRAL_PASSWORD") ?: ""
+        // A tag is the human gate; the portal validates and releases the bundle.
+        publishingType = "AUTOMATIC"
     }
 }
 
@@ -14,13 +28,13 @@ dependencyResolutionManagement {
     }
 }
 
-include("kraken-messaging-api")
-include("kraken-messaging")
-include("kraken-messaging-kafka")
-include("kraken-messaging-rabbitmq")
-include("kraken-messaging-mongo")
-include("kraken-messaging-jdbc")
-include("kraken-messaging-test")
+include("snodra-messaging-api")
+include("snodra-messaging")
+include("snodra-messaging-kafka")
+include("snodra-messaging-rabbitmq")
+include("snodra-messaging-mongo")
+include("snodra-messaging-jdbc")
+include("snodra-messaging-test")
 
 
 // Example services (never published): see examples/README.md

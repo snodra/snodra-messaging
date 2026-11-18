@@ -1,0 +1,370 @@
+package com.damoreira.snodra.messaging.deadline
+
+import com.damoreira.snodra.messaging.deadlines
+import com.damoreira.snodra.messaging.dispatchEntries
+import com.damoreira.snodra.messaging.sagas
+import com.damoreira.snodra.messaging.store.memory.MemoryMessageStore
+import com.damoreira.snodra.messaging.saga.payloadDoc
+import com.damoreira.snodra.messaging.saga.stateDoc
+import com.damoreira.snodra.messaging.MessageContext
+import com.damoreira.snodra.messaging.RetryPolicy
+import com.damoreira.snodra.messaging.api.Command
+import com.damoreira.snodra.messaging.api.Event
+import com.damoreira.snodra.messaging.api.MessageType
+import com.damoreira.snodra.messaging.codec.JsonCodec
+import com.damoreira.snodra.messaging.codec.MessageTypeResolver
+import com.damoreira.snodra.messaging.saga.DeadlineDocument
+import com.damoreira.snodra.messaging.saga.DeadlineHandler
+import com.damoreira.snodra.messaging.saga.DeadlineManager
+import com.damoreira.snodra.messaging.saga.DeadlineStatus
+import com.damoreira.snodra.messaging.saga.DispatchKind
+import com.damoreira.snodra.messaging.saga.EndSaga
+import com.damoreira.snodra.messaging.saga.Saga
+import com.damoreira.snodra.messaging.saga.SagaCommands
+import com.damoreira.snodra.messaging.saga.SagaDispatchDocument
+import com.damoreira.snodra.messaging.saga.SagaDocument
+import com.damoreira.snodra.messaging.saga.SagaEventHandler
+import com.damoreira.snodra.messaging.saga.SagaMetrics
+import com.damoreira.snodra.messaging.saga.SagaModelScanner
+import com.damoreira.snodra.messaging.saga.SagaRetry
+import com.damoreira.snodra.messaging.saga.SagaRuntime
+import com.damoreira.snodra.messaging.saga.SettableClock
+import com.damoreira.snodra.messaging.saga.StartSaga
+import org.junit.jupiter.api.BeforeEach
+import org.junit.jupiter.api.Test
+import org.springframework.transaction.support.TransactionTemplate
+import java.time.Duration
+import java.time.Instant
+import java.util.UUID
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CyclicBarrier
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
+
+@MessageType("dl.Placed")
+data class DlPlaced(val orderId: String, val seconds: Long = 900) : Event
+
+@MessageType("dl.Schedule")
+data class DlSchedule(val orderId: String, val name: String, val seconds: Long) : Event
+
+@MessageType("dl.CancelOne")
+data class DlCancelOne(val orderId: String) : Event
+
+@MessageType("dl.CancelAll")
+data class DlCancelAll(val orderId: String, val name: String) : Event
+
+@MessageType("dl.Paid")
+data class DlPaid(val orderId: String) : Event
+
+@MessageType("dl.CancelCharge")
+data class DlCancelCharge(val ref: String) : Command<Unit>
+
+@MessageType("dl.TimeoutPayload")
+data class DlTimeoutPayload(val reason: String)
+
+/** Makes the `charge-timeout` handler fail while set, as a saga with a bug does. */
+object DlSwitch {
+    val broken = AtomicBoolean()
+}
+
+@Saga(name = "dl.Charge")
+class DlSaga {
+    var orderId: String? = null
+    var timeoutDeadline: String? = null
+    var fired = 0
+    var reasons: MutableList<String> = mutableListOf()
+    var firedWithCorrelation: String? = null
+
+    @StartSaga
+    @SagaEventHandler(associationProperty = "orderId")
+    fun on(e: DlPlaced, deadlines: DeadlineManager) {
+        orderId = e.orderId
+        timeoutDeadline = deadlines.schedule(Duration.ofSeconds(e.seconds), "charge-timeout", DlTimeoutPayload("no payment"))
+    }
+
+    @SagaEventHandler(associationProperty = "orderId")
+    fun on(e: DlSchedule, deadlines: DeadlineManager) {
+        deadlines.schedule(Duration.ofSeconds(e.seconds), e.name, DlTimeoutPayload("scheduled ${e.name}"))
+    }
+
+    @SagaEventHandler(associationProperty = "orderId")
+    fun on(e: DlCancelOne, deadlines: DeadlineManager) {
+        timeoutDeadline?.let(deadlines::cancel)
+    }
+
+    @SagaEventHandler(associationProperty = "orderId")
+    fun on(e: DlCancelAll, deadlines: DeadlineManager) {
+        deadlines.cancelAll(e.name)
+    }
+
+    @EndSaga
+    @SagaEventHandler(associationProperty = "orderId")
+    fun on(e: DlPaid) = Unit
+
+    @DeadlineHandler("charge-timeout")
+    fun timeout(payload: DlTimeoutPayload, commands: SagaCommands, ctx: com.damoreira.snodra.messaging.MessageContext) {
+        if (DlSwitch.broken.get()) throw IllegalStateException("deadline handler failed on purpose")
+        fired++
+        firedWithCorrelation = ctx.correlationId
+        reasons += payload.reason
+        commands.send(DlCancelCharge("ref-$orderId"))
+    }
+
+    @EndSaga
+    @DeadlineHandler("end-now")
+    fun endNow() {
+        fired++
+    }
+}
+
+private class OverdueMetrics : SagaMetrics {
+    val fired = CopyOnWriteArrayList<String>()
+    @Volatile var overdue: Map<String, Long> = emptyMap()
+
+    override fun deadlineFired(name: String) { fired += name }
+    override fun deadlinesOverdue(byName: Map<String, Long>) { overdue = byName }
+}
+
+/** The deadline scheduler and the saga runtime over the in-memory message store (no container). */
+class DeadlineSchedulerTest {
+    private lateinit var tx: TransactionTemplate
+    private val codec = JsonCodec()
+    private val resolver = MessageTypeResolver("dl")
+    private val start = Instant.parse("2026-11-03T10:00:00Z")
+    private val clock = SettableClock(start)
+    private val settings = DeadlineSettings(pollInterval = Duration.ofMillis(50), lease = Duration.ofSeconds(30))
+    private lateinit var runtime: SagaRuntime
+    private lateinit var metrics: OverdueMetrics
+    private lateinit var store: MemoryMessageStore
+
+    @BeforeEach
+    fun setUp() {
+        store = MemoryMessageStore()
+        tx = TransactionTemplate(store.transactions)
+        clock.now = start
+        DlSwitch.broken.set(false)
+        metrics = OverdueMetrics()
+        runtime = SagaRuntime(
+            types = SagaModelScanner(resolver, codec).scan(listOf(DlSaga::class)), ports = store.sagas, tx = tx, codec = codec, typeResolver = resolver,
+            beans = { error("no beans") }, clock = clock,
+            retry = SagaRetry(RetryPolicy(maxAttempts = 2, initialBackoff = Duration.ofMillis(1), multiplier = 1.0, maxBackoff = Duration.ofMillis(1))),
+            metrics = metrics,
+        )
+    }
+
+    private fun scheduler() = DeadlineScheduler(store.sagas.deadlines, runtime, clock, settings, metrics)
+
+    private fun deliver(event: Event, id: String = UUID.randomUUID().toString(), correlationId: String = "corr-$id") {
+        val type = resolver.typeNameOf(event::class)
+        runtime.process(type, codec.encode(event), MessageContext(id, type, correlationId, null, emptySet(), null, mapOf("id" to id, "type" to type)))
+    }
+
+    private fun advance(seconds: Long) {
+        clock.now = clock.now.plusSeconds(seconds)
+    }
+
+    private fun saga(orderId: String) = store.sagas().single { it.stateDoc.getString("orderId") == orderId }
+    private fun deadlines(sagaId: String? = null) = store.deadlines().filter { sagaId == null || it.sagaId == sagaId }
+    private fun fired(orderId: String) = saga(orderId).stateDoc.getInteger("fired")
+
+    @Test
+    fun `a deadline carries the correlation id of the message that scheduled it, to its handler and to the commands it sends`() {
+        deliver(DlPlaced("o40", seconds = 60), id = "e-40") // delivered with the correlation id "corr-e-40"
+        val stored = store.deadlines().single()
+        assertEquals("corr-e-40", stored.correlationId, "stored with the deadline")
+
+        advance(61)
+        scheduler().pollOnce()
+
+        assertEquals("corr-e-40", saga("o40").stateDoc.getString("firedWithCorrelation"), "the handler's MessageContext")
+        val sent = store.dispatchEntries().single()
+        assertEquals("corr-e-40", sent.headers["correlation-id"], "the command it sent")
+    }
+
+    /** A deadline stored without a correlation id ('', as a store may keep "none") fires with its own id as the correlation id. */
+    @Test
+    fun `a deadline stored with an empty correlation id fires correlated by its own id`() {
+        deliver(DlPlaced("o41", seconds = 60), id = "e-41", correlationId = "")
+        val stored = store.deadlines().single()
+        assertEquals("", stored.correlationId)
+
+        advance(61)
+        scheduler().pollOnce()
+
+        assertEquals(stored.id, saga("o41").stateDoc.getString("firedWithCorrelation"), "the deadline id, not ''")
+        assertEquals(stored.id, store.dispatchEntries().single().headers["correlation-id"], "the command it sent")
+    }
+
+    @Test
+    fun `a due deadline fires its handler once with its payload`() {
+        deliver(DlPlaced("o1", seconds = 900))
+        val scheduler = scheduler()
+
+        scheduler.pollOnce()
+        assertEquals(0, fired("o1"), "not due yet")
+
+        advance(901)
+        assertEquals(1, scheduler.pollOnce())
+        scheduler.pollOnce()
+
+        assertEquals(1, fired("o1"))
+        assertEquals(listOf("no payment"), saga("o1").stateDoc.getList("reasons", String::class.java))
+        val deadline = deadlines().single()
+        assertEquals(DeadlineStatus.FIRED, deadline.status)
+        assertEquals(clock.now, deadline.finishedAt)
+        assertEquals(listOf("charge-timeout"), metrics.fired)
+    }
+
+    @Test
+    fun `a deadline fires after a restart`() {
+        deliver(DlPlaced("o1", seconds = 60))
+        scheduler() // a scheduler that never got to poll: its service instance stopped
+
+        advance(61)
+        scheduler().pollOnce() // a new instance of the service
+
+        assertEquals(1, fired("o1"))
+    }
+
+    @Test
+    fun `a cancelled deadline never fires`() {
+        deliver(DlPlaced("o1", seconds = 60))
+        deliver(DlCancelOne("o1"))
+
+        advance(3600)
+        scheduler().pollOnce()
+
+        assertEquals(0, fired("o1"))
+        assertEquals(DeadlineStatus.CANCELLED, deadlines().single().status)
+    }
+
+    @Test
+    fun `cancelAll cancels every scheduled deadline of that name for the saga`() {
+        deliver(DlPlaced("o1", seconds = 60))
+        deliver(DlSchedule("o1", "charge-timeout", 120))
+        deliver(DlSchedule("o1", "charge-timeout", 180))
+        deliver(DlSchedule("o1", "end-now", 240))
+        deliver(DlPlaced("o2", seconds = 60))
+
+        deliver(DlCancelAll("o1", "charge-timeout"))
+
+        val byName = deadlines(saga("o1").id).groupBy { it.name }
+        assertTrue(byName.getValue("charge-timeout").all { it.status == DeadlineStatus.CANCELLED })
+        assertEquals(3, byName.getValue("charge-timeout").size)
+        assertEquals(DeadlineStatus.SCHEDULED, byName.getValue("end-now").single().status)
+        assertEquals(DeadlineStatus.SCHEDULED, deadlines(saga("o2").id).single().status, "another saga's deadline is untouched")
+        advance(3600)
+        scheduler().pollOnce()
+        assertEquals(1, fired("o1"), "only end-now fired")
+    }
+
+    @Test
+    fun `a deadline of an ended saga is marked cancelled when found due`() {
+        deliver(DlPlaced("o1", seconds = 60))
+        deliver(DlPaid("o1"))
+        val ended = saga("o1")
+        assertTrue(ended.ended)
+        // A deadline still scheduled for an ended saga (its write raced the saga's end) or for no saga: found due, it is cancelled, not run.
+        store.sagas.deadlines.insert(DeadlineDocument("late", "dl.Charge", ended.id, "charge-timeout", """{"reason":"late"}""", "dl.TimeoutPayload", start.plusSeconds(10), "corr-late"))
+        store.sagas.deadlines.insert(DeadlineDocument("orphan", "dl.Charge", "no-such-saga", "charge-timeout", """{"reason":"orphan"}""", "dl.TimeoutPayload", start.plusSeconds(10), "corr-orphan"))
+
+        advance(3600)
+        scheduler().pollOnce()
+
+        assertEquals(DeadlineStatus.CANCELLED, store.deadlines().single { it.id == "late" }.status)
+        assertEquals(DeadlineStatus.CANCELLED, store.deadlines().single { it.id == "orphan" }.status)
+        assertEquals(0, fired("o1"))
+        assertEquals(emptyList(), metrics.fired)
+    }
+
+    @Test
+    fun `an expired lease makes a deadline fire again (at least once)`() {
+        deliver(DlPlaced("o1", seconds = 60))
+        advance(61)
+        DlSwitch.broken.set(true) // the first service instance claims it and fails (or crashes) before firing
+        val first = scheduler()
+
+        first.pollOnce()
+        assertEquals(DeadlineStatus.SCHEDULED, deadlines().single().status)
+        assertNotNull(deadlines().single().claimedUntil)
+
+        DlSwitch.broken.set(false)
+        advance(10)
+        scheduler().pollOnce()
+        assertEquals(0, fired("o1"), "the lease of the first claim still holds")
+
+        advance(30)
+        scheduler().pollOnce()
+
+        assertEquals(1, fired("o1"))
+        assertEquals(DeadlineStatus.FIRED, deadlines().single().status)
+    }
+
+    @Test
+    fun `two schedulers fire one deadline once while the lease holds`() {
+        deliver(DlPlaced("o1", seconds = 60))
+        advance(61)
+        val barrier = CyclicBarrier(2)
+        val claimed = CopyOnWriteArrayList<Int>()
+        val threads = List(2) { Thread { barrier.await(); claimed += scheduler().pollOnce() } }
+
+        threads.forEach { it.start() }
+        threads.forEach { it.join(20_000) }
+
+        assertEquals(1, fired("o1"))
+        assertEquals(1, claimed.sum(), "exactly one of the two claimed it: $claimed")
+        assertEquals(DeadlineStatus.FIRED, deadlines().single().status)
+    }
+
+    @Test
+    fun `EndSaga on a deadline handler ends the saga`() {
+        deliver(DlPlaced("o1", seconds = 600))
+        deliver(DlSchedule("o1", "end-now", 10))
+
+        advance(11)
+        scheduler().pollOnce()
+
+        val saga = saga("o1")
+        assertTrue(saga.ended)
+        assertEquals(clock.now, saga.endedAt)
+        val byName = deadlines(saga.id).associateBy { it.name }
+        assertEquals(DeadlineStatus.FIRED, byName.getValue("end-now").status)
+        assertEquals(DeadlineStatus.CANCELLED, byName.getValue("charge-timeout").status, "ending the saga cancels its other deadlines")
+    }
+
+    @Test
+    fun `a deadline handler that sends commands records them for the relay`() {
+        deliver(DlPlaced("o1", seconds = 60))
+        val sagaId = saga("o1").id
+        advance(61)
+
+        scheduler().pollOnce()
+
+        val entry = store.dispatchEntries().single { it.sagaId == sagaId }
+        assertEquals(DispatchKind.COMMAND, entry.kind)
+        assertEquals("dl.CancelCharge", entry.type)
+        assertEquals("ref-o1", entry.payloadDoc.getString("ref"))
+        assertEquals("$sagaId:${entry.seq}", entry.id)
+        assertEquals((saga("o1").version) * 1000, entry.seq, "seq follows the saga's new version")
+        assertNull(entry.dispatchedAt, "recorded, not sent: the relay sends it")
+    }
+
+    @Test
+    fun `a poll reports the overdue deadlines it could not fire`() {
+        deliver(DlPlaced("o1", seconds = 60))
+        advance(61)
+        DlSwitch.broken.set(true)
+        val scheduler = scheduler()
+
+        scheduler.pollOnce()
+        assertEquals(mapOf("charge-timeout" to 1L), metrics.overdue)
+
+        DlSwitch.broken.set(false)
+        advance(31)
+        scheduler.pollOnce()
+        assertEquals(emptyMap(), metrics.overdue)
+    }
+}

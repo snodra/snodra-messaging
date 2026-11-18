@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
-# Builds one example service. Context = the kraken-messaging repo root (the starter is compiled from source).
-#   docker build -f examples/Dockerfile --build-arg SERVICE=service-a -t kraken-examples-service-a:dev .
+# Builds one example service. Context = the snodra-messaging repo root (the starter is compiled from source).
+#   docker build -f examples/Dockerfile --build-arg SERVICE=service-a -t snodra-examples-service-a:dev .
 ARG SERVICE
 FROM eclipse-temurin:25-jdk AS build
 ARG SERVICE

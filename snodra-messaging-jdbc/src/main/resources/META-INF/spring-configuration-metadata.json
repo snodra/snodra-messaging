@@ -1,0 +1,40 @@
+{
+  "groups": [
+    {
+      "name": "snodra.messaging.store.jdbc",
+      "type": "com.damoreira.snodra.messaging.jdbc.JdbcStoreProperties",
+      "sourceType": "com.damoreira.snodra.messaging.jdbc.JdbcStoreProperties"
+    }
+  ],
+  "properties": [
+    {
+      "name": "snodra.messaging.store.jdbc.dialect",
+      "type": "java.lang.String",
+      "description": "The SQL message store's dialect: postgresql or mysql. Unset: detected from the DataSource's database product name.",
+      "sourceType": "com.damoreira.snodra.messaging.jdbc.JdbcStoreProperties"
+    },
+    {
+      "name": "snodra.messaging.store.jdbc.notify",
+      "type": "java.lang.Boolean",
+      "description": "Whether appends wake the outbox relays up at once (PostgreSQL LISTEN/NOTIFY); off, the relays poll. Turn it off behind PgBouncer in transaction mode (LISTEN needs a session). Ignored on MySQL.",
+      "sourceType": "com.damoreira.snodra.messaging.jdbc.JdbcStoreProperties",
+      "defaultValue": true
+    },
+    {
+      "name": "snodra.messaging.store.jdbc.purge-interval",
+      "type": "java.time.Duration",
+      "description": "How often the SQL message store deletes what its retentions (snodra.messaging.*.retention) let go, the expired dead letters and the passed dispatch leases. Zero turns the purge off.",
+      "sourceType": "com.damoreira.snodra.messaging.jdbc.JdbcStoreProperties",
+      "defaultValue": "1m"
+    }
+  ],
+  "hints": [
+    {
+      "name": "snodra.messaging.store.jdbc.dialect",
+      "values": [
+        { "value": "postgresql", "description": "PostgreSQL 13 or later." },
+        { "value": "mysql", "description": "MySQL 8.0 or later (InnoDB)." }
+      ]
+    }
+  ]
+}

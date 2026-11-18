@@ -1,0 +1,2 @@
+com.damoreira.snodra.messaging.test.inmemory.ExcludedProbeAutoConfiguration
+com.damoreira.snodra.messaging.test.inmemory.KeptProbeAutoConfiguration
