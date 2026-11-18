@@ -334,6 +334,11 @@ data class SnodraMessagingProperties(
     data class Security(
         /** Put the current request's bearer token in the hub request's `authorization` header. */
         val forwardJwt: Boolean = true,
+        /**
+         * Where a forwarded token's roles are read (`snodra.messaging.security.roles-claim`): a dotted claim path,
+         * or `scope`. `roles` by default; `realm_access.roles` for Keycloak, `groups` for providers that put them there.
+         */
+        val rolesClaim: String = "roles",
     )
 
     /**

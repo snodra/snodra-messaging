@@ -19,13 +19,41 @@ data class Identity(val principal: MessagePrincipal, val authentication: Authent
     val roles: Set<String> get() = principal.roles
 }
 
-/** Extracts Keycloak realm roles (`realm_access.roles`) from token claims; empty when absent. */
-object RealmRoles {
-    fun fromClaims(claims: Map<String, Any?>): Set<String> {
-        val realmAccess = claims["realm_access"] as? Map<*, *> ?: return emptySet()
-        val roles = realmAccess["roles"] as? Collection<*> ?: return emptySet()
-        return roles.filterIsInstance<String>().toSet()
+/**
+ * Where a forwarded token's roles come from (`snodra.messaging.security.roles-claim`): a dotted claim path, or
+ * `scope` for space-separated OAuth2 scopes. Providers disagree, so it is configuration: `roles` by default,
+ * `realm_access.roles` for Keycloak, `groups` for Okta or Dex.
+ */
+object RolesClaim {
+    @Volatile
+    var path: String = "roles"
+        private set
+
+    /** Sets the claim path once, at startup; a blank value keeps the default. */
+    fun configure(value: String) {
+        path = value.trim().ifEmpty { "roles" }
     }
+
+    /** The roles the configured claim holds for [claims]; empty when it is absent or malformed. */
+    fun read(claims: Map<String, Any?>): Set<String> = read(claims, path)
+
+    /** The roles [claim] holds for [claims]: `scope`, or a dotted path into nested objects and an array. */
+    fun read(claims: Map<String, Any?>, claim: String): Set<String> {
+        if (claim.equals("scope", ignoreCase = true)) {
+            val scopes = claims["scope"] as? String ?: return emptySet()
+            return scopes.split(' ').filter { it.isNotBlank() }.toSet()
+        }
+        var node: Any? = claims
+        for (segment in claim.split('.').filter { it.isNotBlank() }) {
+            node = (node as? Map<*, *>)?.get(segment)
+        }
+        return (node as? Collection<*>)?.filterIsInstance<String>()?.toSet() ?: emptySet()
+    }
+}
+
+/** Extracts the roles from token claims (see [RolesClaim]); empty when absent. */
+object RealmRoles {
+    fun fromClaims(claims: Map<String, Any?>): Set<String> = RolesClaim.read(claims)
 
     /** Role names from `ROLE_`-prefixed authorities (the prefix removed); other authorities are ignored. */
     fun fromAuthorities(authentication: Authentication): Set<String> =
