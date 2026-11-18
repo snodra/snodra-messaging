@@ -15,7 +15,7 @@ import java.util.Date
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.minutes
 
-/** RS256 tokens shaped like Keycloak access tokens (`realm_access.roles`), signed with a key pair made once per JVM. */
+/** RS256 access tokens carrying their roles in the default `roles` claim, signed with a key pair made once per JVM. */
 object TestJwt {
     private val keyPair = KeyPairGenerator.getInstance("RSA").apply { initialize(2048) }.generateKeyPair()
     private val publicKey = keyPair.public as RSAPublicKey
@@ -34,7 +34,7 @@ object TestJwt {
             .issuer(issuer)
             .issueTime(Date(minOf(now, expiresAt) - 60_000)) // issued before it expires, also for expired tokens
             .expirationTime(Date(expiresAt))
-            .claim("realm_access", mapOf("roles" to roles))
+            .claim("roles", roles)
             .build()
         return SignedJWT(JWSHeader(JWSAlgorithm.RS256), claims).apply { sign(RSASSASigner(privateKey)) }.serialize()
     }
@@ -44,7 +44,7 @@ object TestJwt {
         val claims = JWTClaimsSet.Builder()
             .subject(subject)
             .issuer("https://issuer.test/realms/snodra")
-            .claim("realm_access", mapOf("roles" to roles))
+            .claim("roles", roles)
             .build()
         return PlainJWT(claims).serialize()
     }
@@ -58,7 +58,7 @@ object TestJwt {
             .issuer("https://other.test/realms/snodra")
             .issueTime(Date())
             .expirationTime(Date(System.currentTimeMillis() + 300_000))
-            .claim("realm_access", mapOf("roles" to roles))
+            .claim("roles", roles)
             .build()
         return SignedJWT(JWSHeader(JWSAlgorithm.RS256), claims)
             .apply { sign(RSASSASigner(foreignKey.private as RSAPrivateKey)) }

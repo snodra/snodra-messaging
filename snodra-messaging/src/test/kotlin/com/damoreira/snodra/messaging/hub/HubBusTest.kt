@@ -397,7 +397,7 @@ class HubBusTest {
     /** A caller authenticated the way a resource server does it: with authorities, hence authenticated. */
     private fun authenticateWithRoles(token: String) {
         val jwt = TestJwt.decoder().decode(token)
-        val roles = (jwt.claims["realm_access"] as Map<*, *>)["roles"] as List<*>
+        val roles = jwt.claims["roles"] as List<*>
         SecurityContextHolder.getContext().authentication =
             JwtAuthenticationToken(jwt, roles.map { SimpleGrantedAuthority("ROLE_$it") })
     }

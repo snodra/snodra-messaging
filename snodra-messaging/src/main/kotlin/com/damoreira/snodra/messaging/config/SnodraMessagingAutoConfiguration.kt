@@ -9,6 +9,7 @@ import com.damoreira.snodra.messaging.handler.HandlerInvoker
 import com.damoreira.snodra.messaging.handler.HandlerRegistry
 import com.damoreira.snodra.messaging.hub.HubQueryUpdateEmitter
 import com.damoreira.snodra.messaging.hub.SubscriptionRegistry
+import com.damoreira.snodra.messaging.security.RolesClaim
 import com.damoreira.snodra.messaging.security.ForwardedIdentityResolver
 import com.damoreira.snodra.messaging.store.MessageStore
 import com.damoreira.snodra.messaging.tracing.TraceHeaders
@@ -42,6 +43,13 @@ class SnodraMessagingAutoConfiguration {
     @Bean
     @ConditionalOnMissingBean
     fun messageTypeResolver(properties: SnodraMessagingProperties) = MessageTypeResolver(properties.typePrefix)
+
+    /** Applies `snodra.messaging.security.roles-claim` once; the bridge reads the claim per message. */
+    @Bean
+    fun rolesClaim(properties: SnodraMessagingProperties): RolesClaim {
+        RolesClaim.configure(properties.security.rolesClaim)
+        return RolesClaim
+    }
 
     @Bean
     @ConditionalOnMissingBean
