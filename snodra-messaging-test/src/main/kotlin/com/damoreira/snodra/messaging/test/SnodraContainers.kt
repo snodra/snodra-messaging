@@ -22,7 +22,7 @@ import java.security.MessageDigest
  */
 object SnodraContainers {
     const val KAFKA_IMAGE = "apache/kafka:4.4.0"
-    const val MONGO_IMAGE = "mongo:8.3.13"
+    const val MONGO_IMAGE = "mongo:8.3.17"
     const val POSTGRES_IMAGE = "postgres:17.7"
     const val MYSQL_IMAGE = "mysql:8.4.7"
     private const val MONGO_OPEN_FILES = 64_000L
