@@ -120,10 +120,10 @@ abstract class JdbcAutoCommitOffTest(private val database: TestDatabase) {
                 assertTrue(store.processedEvents.record(ProcessedMarker("processor:default:evt-1", "t.Happened", t)))
             }
             val events = MemoryEventStore()
-            val relay = OutboxPublisher(store.outbox, events, "kraken.events", "orders", pollInterval = Duration.ofMinutes(10), batchSize = 10)
+            val relay = OutboxPublisher(store.outbox, events, "snodra.events", "orders", pollInterval = Duration.ofMinutes(10), batchSize = 10)
             assertEquals(1, relay.publishPendingNow())
             assertEquals(0, relay.publishPendingNow(), "marked sent: never sent again")
-            assertEquals(1, events.events("kraken.events").size)
+            assertEquals(1, events.events("snodra.events").size)
 
             val dispatch = store.sagas.dispatch
             assertTrue(dispatch.claimLease("s1", "relay-a", until = t.plusSeconds(60), now = t))

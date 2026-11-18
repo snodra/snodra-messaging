@@ -264,7 +264,7 @@ data class SnodraMessagingProperties(
     /** `events.*`: the service's events on the event store (ADR 0027), whichever add-on provides it. */
     data class Events(
         /** The source events are published to and read from (a topic on Kafka). */
-        val source: String = "kraken.events",
+        val source: String = "snodra.events",
         /**
          * The prefix of every event processor's subscription name; unset: the service name. Every processor, `default` included,
          * uses `<this prefix>.<name>` (ADR 0022): on Kafka the consumer group. Changing it on a running deployment starts the

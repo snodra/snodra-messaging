@@ -112,7 +112,7 @@ publishing {
     }
 }
 
-// src/main/proto/hub.proto must stay byte-identical to the umbrella's snodra/protocol/hub.proto (same check as
+// src/main/proto/hub.proto must stay byte-identical to snodra-server's proto/hub.proto (same check as
 // scripts/check-proto-sync.sh). Skipped with a log line when the sibling checkout is absent (e.g. the examples
 // Docker build, which copies only this repo).
 val checkProtoSync = tasks.register("checkProtoSync") {

@@ -16,7 +16,7 @@ import kotlin.time.toJavaDuration
 class SnodraTestKafka(
     private val bootstrap: String,
     private val typePrefix: String,
-    private val topic: String = "kraken.events",
+    private val topic: String = "snodra.events",
     private val codec: JsonCodec = JsonCodec(),
 ) {
     private val typeResolver = MessageTypeResolver(typePrefix)

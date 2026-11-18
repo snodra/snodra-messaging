@@ -352,7 +352,7 @@
       "type": "java.lang.String",
       "description": "The source the service's events are published to and read from (a topic on Kafka).",
       "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Events",
-      "defaultValue": "kraken.events"
+      "defaultValue": "snodra.events"
     },
     {
       "name": "snodra.messaging.events.subscription-prefix",

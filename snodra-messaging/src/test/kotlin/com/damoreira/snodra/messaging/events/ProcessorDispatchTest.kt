@@ -211,14 +211,14 @@ class ProcessorDispatchTest {
 
     @Test fun `a delivered event's marker carries its position, the local dispatch's markers none (P6b)`() {
         val d = dispatcher(CountingStage())
-        d.dispatchIn("orders", "p-1", "test.Happened", payload("p-1"), ctx("p-1"), RecordPosition("kraken.events", "2", "41"))
+        d.dispatchIn("orders", "p-1", "test.Happened", payload("p-1"), ctx("p-1"), RecordPosition("snodra.events", "2", "41"))
         val m = marker("processor:orders:p-1")
-        assertEquals(listOf<Any?>("orders", "kraken.events", 2, 41L), listOf(m["processor"], m["topic"], m["partition"], m["offset"]), "decimal: Int32 and Int64 as always")
+        assertEquals(listOf<Any?>("orders", "snodra.events", 2, 41L), listOf(m["processor"], m["topic"], m["partition"], m["offset"]), "decimal: Int32 and Int64 as always")
         d.dispatch("printer:k-9", "test.Happened", payload("x-9"), ctx("printer:k-9"))
         for (id in listOf("processor:default:printer:k-9", "processor:orders:printer:k-9")) {
             assertEquals(setOf("_id", "type", "processedAt"), marker(id).keys - "_class", "$id has no position")
         }
-        d.runStage1("orders", "r-9", "test.Happened", payload("r-9"), ctx("r-9"), RecordPosition("kraken.events", "0", "7")) {}
+        d.runStage1("orders", "r-9", "test.Happened", payload("r-9"), ctx("r-9"), RecordPosition("snodra.events", "0", "7")) {}
         assertEquals(7L, marker("processor:orders:r-9")["offset"], "a dead-letter retry's marker carries the letter's position")
     }
 
@@ -229,7 +229,7 @@ class ProcessorDispatchTest {
         registry.register(klass)
         val stage = CountingStage()
         val d = dispatcher(stage)
-        val at = RecordPosition("kraken.events", "0", "3")
+        val at = RecordPosition("snodra.events", "0", "3")
         assertEquals(Outcome.HANDLED, d.dispatchIn("default", "y-1", "test.Happened", payload("y-1"), ctx("y-1"), at, replay = true))
         assertEquals(listOf("y-1"), plain.seen.toList())
         assertEquals(emptyList(), method.seen.toList(), "@DisallowReplay on the method")

@@ -43,7 +43,7 @@ class PostgresNotifyTest {
     fun notify_wakes_relay_before_poll() {
         val store = JdbcMessageStore(dataSource, PostgresDialect, listenConnection = { DriverManager.getConnection(connection.url, connection.user, connection.password) })
         val events = MemoryEventStore()
-        val relay = OutboxPublisher(store.outbox, events, "kraken.events", "orders", pollInterval = Duration.ofMinutes(10), batchSize = 100)
+        val relay = OutboxPublisher(store.outbox, events, "snodra.events", "orders", pollInterval = Duration.ofMinutes(10), batchSize = 100)
         relay.start()
         try {
             // LISTEN is in place (and its start-up wake-up spent) before anything is appended: only a NOTIFY wakes the relay later.
@@ -51,9 +51,9 @@ class PostgresNotifyTest {
             await().atMost(Duration.ofSeconds(10)).until { notifications.listens > 0 }
             append(store, "e-1")
             // Relayed by the first poll or by the wake-up; either way the relay now waits ten minutes for its next poll.
-            await().atMost(Duration.ofSeconds(10)).until { events.events("kraken.events").map { it.id } == listOf("e-1") }
+            await().atMost(Duration.ofSeconds(10)).until { events.events("snodra.events").map { it.id } == listOf("e-1") }
             append(store, "e-2")
-            await().atMost(Duration.ofSeconds(5)).until { events.events("kraken.events").map { it.id } == listOf("e-1", "e-2") }
+            await().atMost(Duration.ofSeconds(5)).until { events.events("snodra.events").map { it.id } == listOf("e-1", "e-2") }
         } finally {
             relay.stop()
         }

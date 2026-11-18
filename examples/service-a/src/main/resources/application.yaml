@@ -1,4 +1,4 @@
-# Defaults point at the published ports of the umbrella compose (kraken/infra), so `bootRun` works from the IDE;
+# Defaults point at the published ports of the sandbox compose, so `bootRun` works from the IDE;
 # compose.local.yaml overrides them with in-network addresses.
 snodra:
   messaging:

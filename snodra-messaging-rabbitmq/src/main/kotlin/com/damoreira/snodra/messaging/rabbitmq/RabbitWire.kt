@@ -126,7 +126,7 @@ internal object RabbitWire {
     fun segmentFits(segment: String): Boolean =
         segment.isNotEmpty() && segment.toByteArray(Charsets.UTF_8).size <= com.damoreira.snodra.messaging.eventstore.MAX_SEGMENT_BYTES
 
-    /** The segment of partition stream [stream] of super stream [source]: the suffix after `<source>-` (`kraken.events-3` is `3`), else the stream's whole name. */
+    /** The segment of partition stream [stream] of super stream [source]: the suffix after `<source>-` (`snodra.events-3` is `3`), else the stream's whole name. */
     fun segmentOf(source: String, stream: String): String {
         val suffix = stream.removePrefix("$source-")
         return if (suffix != stream && suffix.isNotEmpty() && stream.startsWith(source)) suffix else stream

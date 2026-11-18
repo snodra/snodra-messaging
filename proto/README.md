@@ -14,5 +14,5 @@ To re-sync after the protocol changes, copy it over:
     cp ../snodra-server/proto/hub.proto snodra-messaging/src/main/proto/hub.proto
 
 `scripts/check-proto-sync.sh` (and the `checkProtoSync` Gradle task) compares the SHA-256 of the two
-files; CI's `proto-sync` job clones `https://gitlab.damoreira.ml/snodra/snodra-server.git` and runs
+files; CI's `proto-sync` job clones `https://github.com/snodra/snodra-server.git` and runs
 it, so a drift fails the pipeline.

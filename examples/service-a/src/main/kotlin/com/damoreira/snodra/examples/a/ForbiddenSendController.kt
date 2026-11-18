@@ -8,7 +8,7 @@ import org.springframework.web.bind.annotation.GetMapping
 import org.springframework.web.bind.annotation.RestController
 
 /**
- * A query nobody handles and the sandbox's ACL (`kraken/infra/scripts/dev-hub-pki.sh`) deliberately does not list in
+ * A query nobody handles and the sandbox's ACL (its `scripts/dev-hub-pki.sh`) deliberately does not list in
  * service-a's `send` patterns. It lives here, not in `examples-api`, because no other service has anything to do with it.
  */
 @MessageType("examples.ForbiddenProbe")

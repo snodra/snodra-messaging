@@ -104,8 +104,8 @@ class MongoProcessorControlStoreTest {
 
     @Test fun `replay ranges are written as Int32 partitions and Int64 offsets and pulled one by one`() = runBlocking<Unit> {
         store.lock("default", "op-1", Duration.ofSeconds(30))
-        val a = ReplayRange("kraken.events", "0", "0", "120")
-        val b = ReplayRange("kraken.events", "1", "5", "9")
+        val a = ReplayRange("snodra.events", "0", "0", "120")
+        val b = ReplayRange("snodra.events", "1", "5", "9")
         store.setReplay("default", listOf(a, b))
         val item = (raw("default")["replay"] as List<*>).first() as Document
         assertEquals(listOf("topic", "partition", "from", "until"), item.keys.toList())
@@ -124,9 +124,9 @@ class MongoProcessorControlStoreTest {
 
     @Test fun `a range whose segment or positions are not decimal is stored as text in the same fields, and read back and removed`() = runBlocking<Unit> {
         store.lock("default", "op-1", Duration.ofSeconds(30))
-        val decimal = ReplayRange("kraken.events", "0", "0", "3")
+        val decimal = ReplayRange("snodra.events", "0", "0", "3")
         val text = ReplayRange("orders-stream", "p-0", "a-5", "a-9")
-        val leadingZero = ReplayRange("kraken.events", "1", "007", "9") // not canonical: kept as written
+        val leadingZero = ReplayRange("snodra.events", "1", "007", "9") // not canonical: kept as written
         store.setReplay("default", listOf(decimal, text, leadingZero))
         val items = (raw("default")["replay"] as List<*>).map { it as Document }
         assertEquals(listOf("topic", "partition", "from", "until"), items[1].keys.toList(), "the same fields, no new ones")
@@ -151,13 +151,13 @@ class MongoProcessorControlStoreTest {
         val at = Date.from(now)
         // As the library wrote them before (P6b): Int32 partition, Int64 offset.
         collection.insertOne(Document("_id", "processor:default:old-4").append("type", "t").append("processedAt", at)
-            .append("processor", "default").append("topic", "kraken.events").append("partition", 0).append("offset", 4L))
+            .append("processor", "default").append("topic", "snodra.events").append("partition", 0).append("offset", 4L))
         collection.insertOne(Document("_id", "processor:default:old-9").append("type", "t").append("processedAt", at)
-            .append("processor", "default").append("topic", "kraken.events").append("partition", 0).append("offset", 9L))
+            .append("processor", "default").append("topic", "snodra.events").append("partition", 0).append("offset", 9L))
         val saga = ProcessedMarker("saga:Order:e-1", "t", now)
         val ingress = ProcessedMarker("ingress:printer:k-1", "t", now)
         val textual = ProcessedMarker("processor:default:s-1", "t", now, "default", "orders-stream", "p-0", "a-5")
-        val decimal = ProcessedMarker("processor:default:new-5", "t", now, "default", "kraken.events", "0", "5")
+        val decimal = ProcessedMarker("processor:default:new-5", "t", now, "default", "snodra.events", "0", "5")
         for (m in listOf(saga, ingress, textual, decimal)) assertTrue(markers.record(m))
         assertFalse(markers.record(saga), "a positionless marker dedupes")
         assertFalse(markers.record(ProcessedMarker("processor:default:old-4", "t", now)), "an old marker dedupes")
@@ -167,10 +167,10 @@ class MongoProcessorControlStoreTest {
         assertIs<Long>(new["offset"])
         assertEquals("a-5", collection.find(Document("_id", textual.id)).first()!!["offset"], "a text position in the same field")
 
-        assertEquals(2L, store.deleteMarkers("default", listOf(ReplayRange("kraken.events", "0", "4", "6"))), "old-4 and new-5, by value")
+        assertEquals(2L, store.deleteMarkers("default", listOf(ReplayRange("snodra.events", "0", "4", "6"))), "old-4 and new-5, by value")
         assertTrue(markers.exists("processor:default:old-9"), "past the range")
         assertEquals(1L, store.deleteMarkers("default", listOf(ReplayRange("orders-stream", "p-0", "a-0", "a-9"))), "a text range deletes a text marker")
-        assertEquals(1L, store.deleteMarkers("default", listOf(ReplayRange("kraken.events", "0", "0", "99999"))), "old-9 goes by a wider range")
+        assertEquals(1L, store.deleteMarkers("default", listOf(ReplayRange("snodra.events", "0", "0", "99999"))), "old-9 goes by a wider range")
         for (m in listOf(saga, ingress)) assertTrue(markers.exists(m.id), "${m.id} survives every reset")
     }
 

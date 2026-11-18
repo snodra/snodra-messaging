@@ -46,7 +46,7 @@ class AuditControllerTest {
     @Autowired lateinit var deadLetters: DeadLetters
 
     private fun letter(id: String, key: String?, reason: DeadLetterReason, blockedBy: String? = null) = DeadLetter(
-        id = id, processor = "audit", source = "kraken.events", segment = "0", position = "7", key = key, eventId = "e-$id",
+        id = id, processor = "audit", source = "snodra.events", segment = "0", position = "7", key = key, eventId = "e-$id",
         eventType = "examples.AuditNote", headers = emptyMap(), payload = "{}", payloadBinary = null, reason = reason,
         error = DeadLetterError("IllegalStateException", "boom"), blockedBy = blockedBy,
         attempts = if (reason == DeadLetterReason.SEQUENCED) 0 else 5,
@@ -86,12 +86,12 @@ class AuditControllerTest {
 
     @Test fun `GET dead-letters lists the letters of a processor as views`() {
         every { deadLetters.list("audit", 100) } returns listOf(
-            letter("audit:kraken.events:0:7", "k1", DeadLetterReason.HANDLER_FAILED),
-            letter("audit:kraken.events:0:8", "k1", DeadLetterReason.SEQUENCED, blockedBy = "audit:kraken.events:0:7"),
+            letter("audit:snodra.events:0:7", "k1", DeadLetterReason.HANDLER_FAILED),
+            letter("audit:snodra.events:0:8", "k1", DeadLetterReason.SEQUENCED, blockedBy = "audit:snodra.events:0:7"),
         )
         assertThat(mvc.get().uri("/audit/dead-letters?processor=audit")).hasStatus(HttpStatus.OK).bodyJson().isLenientlyEqualTo(
-            """[{"id":"audit:kraken.events:0:7","key":"k1","reason":"HANDLER_FAILED","attempts":5,"error":"IllegalStateException: boom"},
-                {"id":"audit:kraken.events:0:8","reason":"SEQUENCED","attempts":0,"blockedBy":"audit:kraken.events:0:7"}]""",
+            """[{"id":"audit:snodra.events:0:7","key":"k1","reason":"HANDLER_FAILED","attempts":5,"error":"IllegalStateException: boom"},
+                {"id":"audit:snodra.events:0:8","reason":"SEQUENCED","attempts":0,"blockedBy":"audit:snodra.events:0:7"}]""",
         )
     }
 
@@ -117,8 +117,8 @@ class AuditControllerTest {
     }
 
     @Test fun `retry takes the letter id with its colons and dots`() {
-        every { deadLetters.retry("audit:kraken.events:0:7") } returns RetryResult.Duplicate
-        assertThat(mvc.post().uri("/audit/dead-letters/audit:kraken.events:0:7/retry")).bodyJson().isLenientlyEqualTo("""{"result":"Duplicate"}""")
+        every { deadLetters.retry("audit:snodra.events:0:7") } returns RetryResult.Duplicate
+        assertThat(mvc.post().uri("/audit/dead-letters/audit:snodra.events:0:7/retry")).bodyJson().isLenientlyEqualTo("""{"result":"Duplicate"}""")
     }
 
     @Test fun `retry-all runs for the audit processor by default`() {
@@ -146,7 +146,7 @@ class AuditControllerTest {
         audit.onReset(
             com.damoreira.snodra.messaging.control.ResetContext(
                 "audit", "op-1", com.damoreira.snodra.messaging.eventstore.ResetTarget.Earliest,
-                listOf(com.damoreira.snodra.messaging.eventstore.ReplayRange("kraken.events", "0", "0", "3")),
+                listOf(com.damoreira.snodra.messaging.eventstore.ReplayRange("snodra.events", "0", "0", "3")),
             ),
         )
         assertThat(mvc.get().uri("/audit/resets")).hasStatus(HttpStatus.OK).bodyJson()

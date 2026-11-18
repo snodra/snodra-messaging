@@ -191,7 +191,7 @@ class MemoryStoresAutoConfigurationTest {
                 // The relay is woken by the commit (its poll is an hour away), the processor by the event store.
                 await().atMost(Duration.ofSeconds(10)).until { handler.handled.toList() == listOf("committed") }
                 val events = context.getBean(MemoryEventStore::class.java)
-                assertEquals(listOf("committed"), events.events("kraken.events").map { it.key })
+                assertEquals(listOf("committed"), events.events("snodra.events").map { it.key })
             }
     }
 

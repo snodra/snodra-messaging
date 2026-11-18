@@ -243,7 +243,7 @@ class ExternalSourcesTest {
         send("""{"jobId":"j4","status":"done"}""")
 
         awaitSaga("j4")
-        assertEquals(0, mongo.count(Query(), "outbox"), "nothing reached the outbox that relays to kraken.events")
+        assertEquals(0, mongo.count(Query(), "outbox"), "nothing reached the outbox that relays to snodra.events")
     }
 
     @Test

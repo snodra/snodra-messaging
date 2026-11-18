@@ -25,7 +25,7 @@ class RabbitWireTest {
         "x-extra" to "kept",
     )
 
-    private fun event(key: String?) = OutgoingEvent("kraken.events", "e-42", "orders.Placed", key, headers, """{"total":42}""".toByteArray())
+    private fun event(key: String?) = OutgoingEvent("snodra.events", "e-42", "orders.Placed", key, headers, """{"total":42}""".toByteArray())
 
     /**
      * The partition table the Rust add-on pins too (murmur3 x86_32, seed 104729, the hash as an unsigned number modulo 6
@@ -131,11 +131,11 @@ class RabbitWireTest {
 
     @Test
     fun `segments are partition suffixes`() {
-        assertEquals("0", RabbitWire.segmentOf("kraken.events", "kraken.events-0"))
-        assertEquals("11", RabbitWire.segmentOf("kraken.events", "kraken.events-11"))
-        assertEquals("eu", RabbitWire.segmentOf("kraken.events", "kraken.events-eu"))
-        assertEquals("other-3", RabbitWire.segmentOf("kraken.events", "other-3"))
-        assertEquals("kraken.events-", RabbitWire.segmentOf("kraken.events", "kraken.events-"))
+        assertEquals("0", RabbitWire.segmentOf("snodra.events", "snodra.events-0"))
+        assertEquals("11", RabbitWire.segmentOf("snodra.events", "snodra.events-11"))
+        assertEquals("eu", RabbitWire.segmentOf("snodra.events", "snodra.events-eu"))
+        assertEquals("other-3", RabbitWire.segmentOf("snodra.events", "other-3"))
+        assertEquals("snodra.events-", RabbitWire.segmentOf("snodra.events", "snodra.events-"))
     }
 
     /** The section codes in order of appearance, each with the types the layout fixes (strings, symbols, maps' entries). */
