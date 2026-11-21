@@ -5,7 +5,7 @@ import java.time.Duration
 import java.time.Instant
 
 /**
- * The processors' control documents (`processor_control`, P6b, ADR 0023): one per event processor, keyed by its name, the
+ * The processors' control documents (`processor_control`): one per event processor, keyed by its name, the
  * source of truth of its pause, of the reset operation holding its lock and of its open replay ranges. Every instance
  * reads it at start and on every poll. A processor without a document is not paused, has no operation and no replay.
  * Every write commits on its own, outside any transaction of the caller.

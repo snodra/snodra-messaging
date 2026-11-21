@@ -8,7 +8,7 @@ import org.springframework.jdbc.core.simple.JdbcClient
 import java.sql.ResultSet
 
 /**
- * `snodra_dead_letters` (ADR 0022). Every write but [deleteInTransaction] commits on its own. A letter whose `expire_at`
+ * `snodra_dead_letters`. Every write but [deleteInTransaction] commits on its own. A letter whose `expire_at`
  * passed is gone at once for every read and write here (it no longer blocks its key), and the purge deletes it.
  * Positions are ordered as [POSITION_ORDER] says: decimal ones by value, then the others by their bytes; a bound compares only
  * positions of its own kind.

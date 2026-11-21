@@ -70,10 +70,10 @@ class StoredEvent internal constructor(
 }
 
 /**
- * The in-memory event store (ADR 0027): every source is a log of a fixed number of segments ([MemoryEventStoreSettings.segments])
+ * The in-memory event store: every source is a log of a fixed number of segments ([MemoryEventStoreSettings.segments])
  * in this JVM's memory, for tests, local runs and single-process demos. **Not durable**: everything is gone when the process
  * ends, and only the subscriptions of this JVM (of this instance of the store) read it. Name `memory`; capabilities `replay`,
- * `browse` (the read access below, [events] and [event]) and `lag`; no `native-dead-letter` (ADR 0027's table).
+ * `browse` (the read access below, [events] and [event]) and `lag`; no `native-dead-letter`.
  *
  * - **Publish**: an event goes to the segment of its key (FNV-1a 64 of the key's UTF-8 bytes, unsigned, modulo the segments), an
  *   event without a key to the next segment in turn; its position is its index in the segment (`0`, `1`, ...), its timestamp the

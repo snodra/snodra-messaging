@@ -81,18 +81,18 @@ data class HubSettings(
      */
     val streamCreditTimeout: Duration = HubProtocol.DEFAULT_STREAM_CREDIT_TIMEOUT,
     /**
-     * The static token sent in `Register.credentials.token` (P5a, ADR 0018), asked for once per stream. Its `toString`
+     * The static token sent in `Register.credentials.token`, asked for once per stream. Its `toString`
      * is redacted, so printing the settings never prints the token.
      */
     val token: HubToken = HubToken.NONE,
     /**
-     * The OAuth2 access token of this service (P5b, ADR 0019), shared by every hub connection: when set, each stream registers
+     * The OAuth2 access token of this service, shared by every hub connection: when set, each stream registers
      * with `Register.credentials.jwt` instead of [token] and gets every renewal as `ClientMessage.credentials`. Its `toString`
      * is redacted too.
      */
     val tokenProvider: HubTokenProvider? = null,
     /**
-     * The client certificate this service presents in the TLS handshake (P5c, ADR 0020): when set, no credentials are ever sent (the hub reads the
+     * The client certificate this service presents in the TLS handshake: when set, no credentials are ever sent (the hub reads the
      * identity from the certificate, ignores a `ClientMessage.credentials` on such a session and refuses a stale token next to it).
      */
     val clientCertificate: HubClientCertificate? = null,
@@ -109,7 +109,7 @@ data class HubSettings(
 /**
  * True when the hub closed the stream because it refuses this registration: a service name or handled type another
  * service owns (`ALREADY_EXISTS`), an invalid registration (`INVALID_ARGUMENT`), no or an unknown token
- * (`UNAUTHENTICATED`), or a service name or type the token's ACL entry does not grant (`PERMISSION_DENIED`, P5a). Trying
+ * (`UNAUTHENTICATED`), or a service name or type the token's ACL entry does not grant (`PERMISSION_DENIED`). Trying
  * again at once cannot succeed, so these are retried at the backoff cap and exposed in [HubConnection.lastRejection].
  */
 internal fun isRegistrationRejection(status: Status): Boolean = when (status.code) {
@@ -162,22 +162,22 @@ internal object ReconnectBackoff {
  * on a nested `sendBlocking`) cannot starve the stream collector that would deliver its own reply. At most
  * [maxConcurrentHandlers] handlers run at once; further requests wait for a permit.
  *
- * Flow control (P1): `Register` carries `initial_permits = maxConcurrentHandlers`, [loadFactor] and [tags]. The hub
+ * Flow control: `Register` carries `initial_permits = maxConcurrentHandlers`, [loadFactor] and [tags]. The hub
  * forwards only against permits, and every completed inbound handler grants one back on the stream the request arrived
  * on (never on a newer stream, which starts again from its own initial permits). Grants go back at once while the hub
  * holds at most `min(PERMIT_BATCH, initial_permits / 2)` permits for the stream, otherwise in `Permits` messages of
  * [HubProtocol.PERMIT_BATCH] or after [HubProtocol.PERMIT_FLUSH_DELAY] ([PermitLedger] has the rule).
  *
- * Multi-hub (P3): [HubConnections] runs one connection per hub [target], all sharing one [HandlerGate] (the local bound
+ * Multi-hub: [HubConnections] runs one connection per hub [target], all sharing one [HandlerGate] (the local bound
  * on handlers over every hub) and announcing [initialPermits] (read when each stream opens) as `initial_permits`. A
  * request still queued for a stream when it breaks was never written: it fails with [HubUnavailableException], so it
  * can go to another hub. [reportStatus] writes an `InstanceStatus` to the hub.
  *
- * Scatter-gather (P4a, ADR 0017): `Register` lists shared query types in `shared_query_types`. [gather] sends a
+ * Scatter-gather: `Register` lists shared query types in `shared_query_types`. [gather] sends a
  * `SCATTER_GATHER` request; its pending entry collects the `ReplyPart`s until the `ReplyEnd` (or an `Error`), under one
  * local guard for the whole gather. Parts and ends for ids nobody waits for are ignored.
  *
- * Streaming (P4b, ADR 0017): as a sender, [stream] sends a `STREAMING` request, hands each `ReplyPart` to the caller
+ * Streaming: as a sender, [stream] sends a `STREAMING` request, hands each `ReplyPart` to the caller
  * (checking `seq` runs 1, 2, 3, ...
  * and, at the end, that `ReplyEnd.parts` is what arrived: a part the hub dropped fails the stream as lost), writes
  * `Flow{initial_credit / 2}` each time that many parts were consumed (the caller's callback returned) and `Cancel`
@@ -193,7 +193,7 @@ internal object ReconnectBackoff {
  * as at a hub `Cancel`) and releases its handler slot and hub permit. The permit of every inbound request goes back
  * to the hub when its coroutine completes, whichever way.
  *
- * Subscriptions (P4c, ADR 0017): as a sender, [subscribe] sends a `SUBSCRIPTION` request, waits for the initial part and
+ * Subscriptions: as a sender, [subscribe] sends a `SUBSCRIPTION` request, waits for the initial part and
  * returns the open
  * [HubSubscription]: its [HubSubscription.next] hands out the updates in order (checking `seq` runs 1, 2, 3, ... and the end's
  * `parts` count, refilling `Flow{initial_credit / 2}` per that many parts consumed, the initial part included) and
@@ -205,7 +205,7 @@ internal object ReconnectBackoff {
  * stream closing removes every subscription the stream carried, and the update emitter writes its parts and its end on the
  * stream it arrived on. The initial result is an ordinary unary request (id `<id>#0`).
  *
- * Processor control (P6b, ADR 0023): a `ControlRequest` goes to [control] in arrival order from one lane per stream, never
+ * Processor control: a `ControlRequest` goes to [control] in arrival order from one lane per stream, never
  * from the read loop (a control handler that blocks holds up only the control requests behind it, not the stream), and its
  * `ControlReply` is written on the stream it arrived on.
  */
@@ -223,13 +223,13 @@ class HubConnection(
     /** The hub's gRPC target (`host:port`). */
     val target: String = "hub",
     private val gate: HandlerGate = HandlerGate(maxConcurrentHandlers),
-    /** `Register.initial_permits` of a new stream (P3 splits `maxConcurrentHandlers` over the hubs). */
+    /** `Register.initial_permits` of a new stream (splits `maxConcurrentHandlers` over the hubs). */
     private val initialPermits: () -> Int = { maxConcurrentHandlers },
-    /** Serves `mode = STREAMING` requests (P4b); without streaming handlers every stream ends with `INVALID_REQUEST`. */
+    /** Serves `mode = STREAMING` requests; without streaming handlers every stream ends with `INVALID_REQUEST`. */
     private val inboundStream: StreamingInbound = NO_STREAMING_HANDLERS,
-    /** The subscriptions this instance serves (P4c), shared by every hub connection; the update emitter delivers to them. */
+    /** The subscriptions this instance serves, shared by every hub connection; the update emitter delivers to them. */
     private val subscriptions: SubscriptionRegistry = SubscriptionRegistry(),
-    /** Admits `mode = SUBSCRIPTION` requests (P4c); without subscription handlers every one ends with `INVALID_REQUEST`. */
+    /** Admits `mode = SUBSCRIPTION` requests; without subscription handlers every one ends with `INVALID_REQUEST`. */
     private val inboundSubscription: SubscriptionInbound = NO_SUBSCRIPTION_HANDLERS,
     /** Called for every `ClientMessage.credentials` this connection writes ([HubConnections] keeps the process-wide, monotonic total). */
     private val onCredentialsRefreshSent: () -> Unit = {},
@@ -237,7 +237,7 @@ class HubConnection(
     private val onRejected: (seq: Long, rejection: HubRejection) -> Unit = { _, _ -> },
     /** Stamps [HubRejection.at]. */
     private val clock: Clock = Clock.systemUTC(),
-    /** Serves the hub's `ControlRequest`s (P6b); without event processors every one is `UNKNOWN_PROCESSOR`. */
+    /** Serves the hub's `ControlRequest`s; without event processors every one is `UNKNOWN_PROCESSOR`. */
     private val control: ControlInbound = NO_PROCESSOR_CONTROL,
 ) : HubTransport {
     private val log = LoggerFactory.getLogger(HubConnection::class.java)
@@ -282,7 +282,7 @@ class HubConnection(
         /**
          * A scatter-gather, a stream or a subscription: its `ReplyPart`s in arrival order, then its `ReplyEnd` (or an `Error`), then closed.
          * [boundedByDeadline] is false for a stream and a subscription this instance consumes: they can run for minutes or forever, so a
-         * rollover (P5c) does not wait for them ([HubConnection.rolloverIdle]); a gather ends within its deadline and is waited for.
+         * rollover does not wait for them ([HubConnection.rolloverIdle]); a gather ends within its deadline and is waited for.
          */
         class Multi(stream: Stream, val boundedByDeadline: Boolean = true) : Pending(stream) {
             val messages = Channel<ServerMessage>(Channel.UNLIMITED)
@@ -329,9 +329,9 @@ class HubConnection(
         val handshakeReached = CompletableDeferred<Unit>()
         /** Completed once the connect loop is done with this stream (the hub finished it, or it failed) and cleaned up. */
         val closed = CompletableDeferred<Unit>()
-        /** A rollover (P5c) told the hub this instance is stopping: every `Register` of the stream carries no types from now on. */
+        /** A rollover told the hub this instance is stopping: every `Register` of the stream carries no types from now on. */
         @Volatile var draining = false
-        /** The `ControlRequest`s read on this stream and not yet handed to the control (P6b), in arrival order. */
+        /** The `ControlRequest`s read on this stream and not yet handed to the control, in arrival order. */
         val controls = Channel<ControlRequest>(Channel.UNLIMITED)
     }
 
@@ -377,7 +377,7 @@ class HubConnection(
     internal val idle: Boolean get() = pending.isEmpty() && inFlight.value == 0
 
     /**
-     * What a rollover (P5c) waits for: [idle], but the streams and subscriptions this instance itself consumes ([Pending.Multi] with
+     * What a rollover waits for: [idle], but the streams and subscriptions this instance itself consumes ([Pending.Multi] with
      * `boundedByDeadline` false) do not count: they never finish on their own and are cut by the roll (the consumer sees the loss of the stream).
      */
     private val rolloverIdle: Boolean get() = inFlight.value == 0 && pending.values.all { it is Pending.Multi && !it.boundedByDeadline }
@@ -420,7 +420,7 @@ class HubConnection(
     }
 
     /**
-     * Moves this hub's session onto the pair [HubSettings.clientCertificate] holds now (P5c, ADR 0020), without failing a request that was
+     * Moves this hub's session onto the pair [HubSettings.clientCertificate] holds now, without failing a request that was
      * accepted: a TLS session cannot change its certificate, so the stream is replaced.
      *
      *  1. Tells the hub the instance is stopping: a `Register` with no types (the shutdown path's), so it routes new work to other instances or
@@ -855,9 +855,9 @@ class HubConnection(
     /** [rejection] currently says the token endpoint refused (no stream was opened), not the hub; touched only by the connect loop. */
     private var tokenRejected = false
 
-    /** What a new stream's `Register` carries: the access token (P5b) or the static token (P5a), or nothing. */
+    /** What a new stream's `Register` carries: the access token or the static token, or nothing. */
     private suspend fun initialCredentials(): Credentials? {
-        if (settings.clientCertificate != null) return null // the TLS handshake is the credential (ADR 0020 ruling 6)
+        if (settings.clientCertificate != null) return null // the TLS handshake is the credential
         val provider = settings.tokenProvider
         return if (provider != null) Credentials.newBuilder().setJwt(provider.token().value).build() else staticCredentials()
     }
@@ -928,14 +928,14 @@ class HubConnection(
                 // The hub forgot this stream's streaming targets (their senders got HANDLER_DISCONNECTED): a handler's
                 // flow waiting for credit would otherwise never move again, holding its permit.
                 cancelStreamingHandlers(stream, "hub stream closed: ${describe(status)}")
-                // Likewise its subscriptions (P4c): the hub forgot them, nobody would ever hear their updates.
+                // Likewise its subscriptions: the hub forgot them, nobody would ever hear their updates.
                 val dropped = subscriptions.closeOwner(stream)
                 if (dropped > 0) log.info("Hub stream of {} ({}) closed: {} subscription(s) dropped", serviceName, instanceId, dropped)
                 stream.closed.complete(Unit)
             }
             if (stopping) break
             if (rollingStream === stream) {
-                // A rollover closed this stream on purpose (P5c): reconnect at once with the pair the files hold, nothing failed.
+                // A rollover closed this stream on purpose: reconnect at once with the pair the files hold, nothing failed.
                 rollingStream = null
                 backoff = settings.backoffMin
                 failures = 0
@@ -975,7 +975,7 @@ class HubConnection(
             } else if (reachedHandshake && settings.clientCertificate != null && status.code == Status.Code.UNAUTHENTICATED &&
                 status.description?.contains("certificate expired") == true
             ) {
-                // The hub closes a certificate session at notAfter, with no grace (ADR 0020 ruling 7): the files are read again, so a renewed pair is presented.
+                // The hub closes a certificate session at notAfter, with no grace: the files are read again, so a renewed pair is presented.
                 val retry = ReconnectBackoff.jittered(settings.backoffMin, settings.backoffMax)
                 log.info(
                     "The hub closed the session of {} ({}) because its client certificate ended; reconnecting in {} with the pair the files hold now",
@@ -1036,7 +1036,7 @@ class HubConnection(
                 if (settings.tokenProvider == null) refreshCredentials(stream) // a rotated token file reaches the hub without a reconnect
             }
         }
-        // One lane per stream for the control requests (P6b): in order, and never on the read loop below. In the connection's
+        // One lane per stream for the control requests: in order, and never on the read loop below. In the connection's
         // scope, so the end of the stream never waits for a control handler.
         val controls = scope.launch(handlerDispatcher) {
             for (request in stream.controls) serveControl(stream, request)
@@ -1089,7 +1089,7 @@ class HubConnection(
     }
 
     /**
-     * Writes an `InstanceStatus` with the event [processors] (ADR 0022) on the live stream; false (nothing written) while no
+     * Writes an `InstanceStatus` with the event [processors] on the live stream; false (nothing written) while no
      * stream has completed its handshake.
      */
     fun reportStatus(connectedHubIds: List<String>, handlersInFlight: Int, processors: List<ProcessorStatus> = emptyList()): Boolean {
@@ -1157,7 +1157,7 @@ class HubConnection(
                     log.debug("Hub cancelled request {}: {}", message.cancel.requestId, message.cancel.reason)
                     entry.job.cancel(CancellationException("cancelled by the hub: ${message.cancel.reason}"))
                 }
-                // A subscription this instance serves (P4c): after the job above, so a registration still running sees
+                // A subscription this instance serves: after the job above, so a registration still running sees
                 // its cancellation (see serveSubscription) and one already registered is found here.
                 if (subscriptions.cancel(stream, message.cancel.requestId)) {
                     log.debug("Hub cancelled subscription {}: {}", message.cancel.requestId, message.cancel.reason)
@@ -1248,7 +1248,7 @@ class HubConnection(
     }
 
     /**
-     * A `SUBSCRIPTION` request (an update target, P4c): the hub wrote it outside flow control, so it takes no handler
+     * A `SUBSCRIPTION` request (an update target): the hub wrote it outside flow control, so it takes no handler
      * permit, no [gate] slot and is no in-flight handler, and none is paid back ([PermitLedger] never sees it). It is
      * registered in [subscriptions] right here, when the request is read, as pending: the admission then runs on
      * [handlerDispatcher] (it validates the forwarded token), and in the meantime the emitter's updates for it are held in

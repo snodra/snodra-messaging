@@ -4,7 +4,7 @@ import java.time.Duration
 import java.time.Instant
 
 /**
- * One event in the outbox (ADR 0005): written in the service's transaction, relayed to the event store afterwards.
+ * One event in the outbox: written in the service's transaction, relayed to the event store afterwards.
  * [payload] is the event as a JSON object (UTF-8) whose integers fit in a signed 64-bit integer (both libraries' contract):
  * a store rejects any other JSON value, an integer outside that range, or bytes that are not JSON, with an
  * [IllegalArgumentException] and appends nothing. [createdAt] and [seq] order the outbox ([seq] breaks ties of one millisecond within one

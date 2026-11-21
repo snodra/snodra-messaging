@@ -21,7 +21,7 @@ interface QueryBus {
     fun <R> sendBlocking(query: Query<R>, options: SendOptions): R = runBlocking { send(query, options) }
 
     /**
-     * Scatter-gather (ADR 0017): asks every live instance of every service owning the query's type (a shared type,
+     * Scatter-gather: asks every live instance of every service owning the query's type (a shared type,
      * `@QueryHandler(shared = true)`; on an exclusive type every instance of its owner) and returns every answer that
      * arrived by the deadline, in arrival order, with the counts of failed and timed-out targets. Partial answers are
      * answers: a failed or missing target does not fail the call. Always goes through the hub, also when this instance
@@ -41,7 +41,7 @@ interface QueryBus {
         flow { scatterGather(query, options).parts.forEach { emit(it) } }
 
     /**
-     * Streaming query (P4b, ADR 0017): one instance of the type's owner (one of every owner's instances on a shared
+     * Streaming query: one instance of the type's owner (one of every owner's instances on a shared
      * type) streams its answer part by part under this collector's back-pressure. The flow is cold: each collection
      * sends one request through the hub; parts are emitted as they arrive and the flow completes when the handler's
      * flow does. The handler is paced by credits ([StreamOptions.initialCredit]); cancelling the collector (or an
@@ -62,7 +62,7 @@ interface QueryBus {
     fun <R> stream(query: StreamingQuery<R>, options: StreamOptions = StreamOptions()): Flow<R>
 
     /**
-     * Subscription query (P4c, ADR 0017): returns once the initial result [I] arrived, with the [U] updates the handlers
+     * Subscription query: returns once the initial result [I] arrived, with the [U] updates the handlers
      * push afterwards as [SubscriptionResult.updates]. One handler instance answers the initial result (a point query's
      * choice among the owners' instances); **every** instance of every owner is a target for updates, as they are when the subscription opens: an instance that registers later is never added and a target that
      * leaves is not replaced (updates are delivered at most once; resubscribe to hear every instance again). Always goes

@@ -49,7 +49,7 @@ data class JdbcStoreProperties(
 )
 
 /**
- * The SQL [MessageStore] (ADR 0028) on the application's [DataSource], unless `snodra.messaging.store.type` names another
+ * The SQL [MessageStore] on the application's [DataSource], unless `snodra.messaging.store.type` names another
  * store (then nothing here is created), or the application declares a [MessageStore] of its own. Another add-on does not make it
  * step back: two of them without the setting fail the startup. The dialect is the database's (`snodra.messaging.store.jdbc.dialect`
  * overrides it); a database other than PostgreSQL 13+ or MySQL 8.0.17+ fails the startup naming the supported ones. The core

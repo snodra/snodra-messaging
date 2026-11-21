@@ -59,12 +59,12 @@ class SnodraMessagingAutoConfiguration {
     @ConditionalOnMissingBean
     fun handlerRegistry(typeResolver: MessageTypeResolver) = HandlerRegistry(typeResolver)
 
-    /** Fails the startup when an event handler, a saga or an idempotent handler has no message store to run on (ADR 0028). */
+    /** Fails the startup when an event handler, a saga or an idempotent handler has no message store to run on. */
     @Bean
     fun snodraMessageStoreGuard(beanFactory: ListableBeanFactory, registry: HandlerRegistry, environment: Environment, resourceLoader: ResourceLoader) =
         MessageStoreGuard(beanFactory, registry, environment, resourceLoader)
 
-    /** Fails the startup when an event handler or a saga has no event store to read from, or two event stores compete (ADR 0027). */
+    /** Fails the startup when an event handler or a saga has no event store to read from, or two event stores compete. */
     @Bean
     fun snodraEventStoreGuard(beanFactory: ListableBeanFactory, registry: HandlerRegistry, environment: Environment, resourceLoader: ResourceLoader) =
         EventStoreGuard(beanFactory, registry, environment, resourceLoader)
@@ -79,7 +79,7 @@ class SnodraMessagingAutoConfiguration {
         HandlerInvoker(registry, codec, idempotency.getIfAvailable()) // the interceptor exists with an @IdempotentHandler (ExternalAutoConfiguration)
 
     /**
-     * The subscription queries this instance serves (P4c): filled by the hub connections, read by [queryUpdateEmitter].
+     * The subscription queries this instance serves: filled by the hub connections, read by [queryUpdateEmitter].
      * Transport-independent on purpose: with the hub disabled it simply stays empty and emitting is a no-op.
      */
     @Bean
@@ -153,7 +153,7 @@ class SnodraMessagingAutoConfiguration {
 
 /**
  * Rejects settings that no longer exist, all of them in one message, each with its replacement. No alias: a removed name is never
- * read (ADR 0024).
+ * read.
  */
 class RemovedPropertiesGuard(private val environment: Environment) : BeanFactoryPostProcessor {
     override fun postProcessBeanFactory(beanFactory: ConfigurableListableBeanFactory) {
@@ -185,7 +185,7 @@ class RemovedPropertiesGuard(private val environment: Environment) : BeanFactory
         private const val KAFKA_DEAD_LETTER_MODE = "snodra.messaging.kafka.dead-letter.mode"
         private const val DEAD_LETTER_MODE = "snodra.messaging.events.dead-letter.mode"
 
-        /** The settings removed in v0.4.0 (the event store became neutral, ADR 0027), with their replacements. */
+        /** The settings removed in v0.4.0 (the event store became neutral), with their replacements. */
         internal val RENAMED: Map<String, String> = linkedMapOf(
             "snodra.messaging.kafka.topic" to "snodra.messaging.events.source",
             "snodra.messaging.kafka.group-id" to "snodra.messaging.events.subscription-prefix",

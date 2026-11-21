@@ -36,7 +36,7 @@ data class MongoStoreSettings(
 )
 
 /**
- * The [MessageStore] on MongoDB (ADR 0028): the collections `outbox`, `processed_events`, `dead_letters`,
+ * The [MessageStore] on MongoDB: the collections `outbox`, `processed_events`, `dead_letters`,
  * `processor_control`, `external_calls`, `sagas`, `saga_dispatch`, `saga_dispatch_leases`, `deadlines` and `saga_failures`,
  * with the documents the library has always written. A replica set is needed for transactions.
  *

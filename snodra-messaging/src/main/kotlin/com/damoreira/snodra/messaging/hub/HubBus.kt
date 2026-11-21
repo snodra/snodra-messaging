@@ -59,7 +59,7 @@ import kotlin.reflect.KClass
  * codec round trip and error mapping, no network); anything else becomes a hub `Request` carrying the caller's bearer
  * token (when [forwardJwt]), a correlation id and the trace context. A query on a type this service registered as
  * **shared** (`@QueryHandler(shared = true)`) is the exception: it always goes through the hub, which round-robins it
- * over every owner's instances, this one included (ADR 0017).
+ * over every owner's instances, this one included.
  *
  * Per call [SendOptions] choose the priority (default [priorities] per type, else 0), the timeout (default
  * [requestTimeout]) and the retry policy (default [retry], null = no retry). With retry, failures that
@@ -72,7 +72,7 @@ import kotlin.reflect.KClass
  * [sendRaw] is the saga relay's own way in ([RawCommandSender], kept out of [CommandBus]): a command known only by wire type
  * name and JSON bytes, sent with no caller and answered with a classified [RawOutcome] instead of a decoded reply.
  *
- * Scatter-gather ([scatterGather], [scatterGatherFlow], ADR 0017) always goes through the hub, also when this instance
+ * Scatter-gather ([scatterGather], [scatterGatherFlow]) always goes through the hub, also when this instance
  * owns the type. Each part is decoded like a unary reply (the query's declared result type); a part's error becomes a
  * [RemoteHandlerException] carrying the hub's code; a part whose payload does not decode is a failed part too (code
  * `ERROR_CODE_UNSPECIFIED`, the decode error as message), never a failure of the whole gather. The hub's `Error` for the gather itself maps as for unary requests
@@ -81,7 +81,7 @@ import kotlin.reflect.KClass
  * retried only while it has not emitted a part. [scatterGatherFlow] reads the caller's bearer token and trace context
  * when it is called, not when the flow is collected: a flow returned from a controller is collected on another thread.
  *
- * Streaming queries ([stream], P4b, ADR 0017) always go through the hub too. The flow is cold and unbuffered: each
+ * Streaming queries ([stream]) always go through the hub too. The flow is cold and unbuffered: each
  * collection sends one `STREAMING` request through the hub, and each part is decoded (the query's
  * element type) and emitted before the next one is read, so the transport's credit refills ([HubTransport.stream])
  * follow what the collector consumed. Unlike a unary attempt, every attempt of a stream sends the chosen timeout
@@ -99,7 +99,7 @@ import kotlin.reflect.KClass
  * stream as [com.damoreira.snodra.messaging.HubConnectionLostException]. The caller's bearer token and trace context
  * are read when [stream] is called, as for [scatterGatherFlow].
  *
- * Subscription queries ([subscribe], P4c, ADR 0017) always go through the hub, to one live hub.
+ * Subscription queries ([subscribe]) always go through the hub, to one live hub.
  * [subscribe] returns once the initial result arrived (decoded as the query's `I`); `timeout_ms` bounds only that
  * request, so the call retries like a unary query (the retry budget, the remaining time per attempt) and never after the
  * initial result. A `ReplyEnd` with an error, or an `Error`, before the initial result fails the call exactly like a unary
@@ -111,7 +111,7 @@ import kotlin.reflect.KClass
  * part the hub dropped fails it as `InvalidMessageException("subscription <type> lost N part(s)")`. The caller's bearer token
  * and trace context are read when [subscribe] is called.
  *
- * Each unary command or query call that goes through the hub ([send], [sendRaw]) is timed into [metrics] (P9) once, from the
+ * Each unary command or query call that goes through the hub ([send], [sendRaw]) is timed into [metrics] once, from the
  * call to its result with every retry and back-off, labelled with its final [HubOutcome] (a request that cannot be encoded
  * is `error`); a call cancelled by its caller is not. Local invocations, scatter-gather, streaming and subscription queries are not observed.
  */
@@ -421,7 +421,7 @@ class HubBus(
     private suspend fun dispatch(message: Any, kind: RequestKind, options: SendOptions): Any {
         val type = typeResolver.typeNameOf(message::class)
         // A shared query type is never answered locally: the hub round-robins a point query over every owner's
-        // instances (ADR 0017), this one included, so an owner is not favoured over the others (as in the Rust library).
+        // instances, this one included, so an owner is not favoured over the others (as in the Rust library).
         val local = when (kind) {
             RequestKind.COMMAND -> registry.commandHandler(type)
             else -> registry.queryHandler(type)?.takeUnless { it.shared }

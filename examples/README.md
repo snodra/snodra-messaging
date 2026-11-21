@@ -10,20 +10,20 @@ A disposable sandbox that shows cross-service messaging on the real `snodra-serv
 5. **service-a** sends the command `examples.Shout` and the query `examples.Reverse` to **service-c**, a Rust
    service built on `snodra-messaging-rs`; C publishes `examples.TextShouted` / `examples.TextReversed` while
    handling them, and A and B log those events; C also logs B's `GreetingDelivered`;
-6. **service-b** and **service-c** both own the shared query `examples.Inventory` (ADR 0017): **service-a** sends it as
+6. **service-b** and **service-c** both own the shared query `examples.Inventory`: **service-a** sends it as
    a point query (one of them answers) and as a scatter-gather (both answer);
-7. **service-b** and **service-c** both own the shared streaming query `examples.Rows` (ADR 0017, P4b): **service-a**
+7. **service-b** and **service-c** both own the shared streaming query `examples.Rows`: **service-a**
    opens a stream (one instance of either streams the rows under A's credits), collects it and returns the rows;
-8. **service-b** and **service-c** both serve the shared subscription query `examples.WatchCounter` (ADR 0017, P4c) with an
+8. **service-b** and **service-c** both serve the shared subscription query `examples.WatchCounter` with an
    in-memory counter per name: **service-a** subscribes (the initial result is one counter's current value, the updates
    are the changes of both), collects the initial result and N updates, cancels and returns them. The updates come from
    `POST /counters/{name}/increment` on service-b and from the command `examples.IncrementCounter` that service-a sends
    to service-c (whose only HTTP is the banner saga's); both push through a `QueryUpdateEmitter`.
-9. **service-b** runs a saga (S1, [The postcard saga](#the-postcard-saga)): every `GreetingDelivered` gets a postcard printed
+9. **service-b** runs a saga ([The postcard saga](#the-postcard-saga)): every `GreetingDelivered` gets a postcard printed
    by an external printer, **fake-printer**, which answers over a webhook, its own Kafka topic or a poll, never, or by dying.
-10. **service-c** runs the same story in Rust (S2, [The banner saga](#the-banner-saga)): every `TextShouted` gets a banner
+10. **service-c** runs the same story in Rust ([The banner saga](#the-banner-saga)): every `TextShouted` gets a banner
    printed by the same fake printer, which answers service-c where each job asks it to.
-11. **service-b** and **service-c** each run a named event processor, `audit` (P6a, [Event processors and dead
+11. **service-b** and **service-c** each run a named event processor, `audit` ([Event processors and dead
    letters](#event-processors-and-dead-letters)): its own consumer group, a failure switch, and example admin endpoints over
    the library's dead letters.
 
@@ -61,7 +61,7 @@ three apps need: both hubs from the released image (`hub`, `hub-2`, `SNODRA_SERV
 (`snodra-event-browser`), Kafka, the topic init job, MongoDB and otel-lgtm (Grafana on <http://localhost:3000/>, see
 [Metrics](#metrics)). The identity provider and RustFS stay down. The hub's gRPC port is published on host
 **7002** (macOS AirPlay owns 7000) and its topology view and dashboard on **7001**; `hub-2` uses **7012** and
-**7011**. Every example connects to both hubs (`SNODRA_SERVER_ADDRESS=static://hub:7000,hub-2:7000`, ADR 0016): it
+**7011**. Every example connects to both hubs (`SNODRA_SERVER_ADDRESS=static://hub:7000,hub-2:7000`): it
 registers on each, sends unkeyed requests round-robin over them and keeps working when one stops.
 
 If the repos are not siblings, point the build contexts at them:
@@ -167,7 +167,7 @@ read them in the logs. Last, it freezes service-b with `docker pause` during a `
 `503 HandlerDisconnectedException` after about 10 s: the hub evicts a session after 10 s without heartbeats, and the
 sandbox hub gives `examples.CountGreetings` a 20 s per-type timeout
 (`SNODRA_SERVER_TIMEOUT_OVERRIDES` in `compose.local.yaml`) so the call outlives the eviction instead of ending in a 5 s
-`TIMEOUT`. It then waits for service-b to answer again. Finally it checks flow control (P1). The sandbox runs every
+`TIMEOUT`. It then waits for service-b to answer again. Finally it checks flow control. The sandbox runs every
 service with the libraries' default concurrency; the one-permit demo is the opt-in override
 `compose.flow-demo.yaml` (service-b: `SNODRA_MESSAGING_HUB_MAX_CONCURRENT_HANDLERS=1` and a slowed
 `CountGreetings`, `examples.count-delay` / env `EXAMPLES_COUNT_DELAY=200ms`; service-c (Rust):
@@ -182,7 +182,7 @@ default concurrency again (also when a step failed). `SERVICE_B_MAX_CONCURRENT_H
 `ceil(1 / 2) = 1` permit of the one-permit instances, but an instance still runs one handler at a time, so step 12
 stays serialised (step 5b looks for its graph edge on either hub, since requests alternate between them).
 
-The two-hub steps (P3, ADR 0016) come last: step 15 waits up to 15 s until both hubs' `/api/v1/topology` list the same
+The two-hub steps come last: step 15 waits up to 15 s until both hubs' `/api/v1/topology` list the same
 service-a, service-b and service-c instances, each reporting both hub ids in `connectedHubIds`; step 16 checks that
 hub-2's `/api/v1/version` lists both dashboards as peers; step 17 runs a loop of calls through service-a (alternating
 `CountGreetings` to service-b and `Reverse` to service-c), stops `snodra-server-2` after 2 s and keeps calling for 4 s:
@@ -191,13 +191,13 @@ call started a second after the hub was gone must succeed. It then starts the hu
 instance to be back on it (also on failure the hub is started again). They need `jq` or `python3`; `SKIP_HA=1` skips
 them, `ONLY_HA=1` runs only them, `HUB2` and `HUB2_CONTAINER` name the second hub.
 
-The scatter-gather steps (P4a, ADR 0017) close the run: step 18 waits until both hubs' `/api/v1/types` list
+The scatter-gather steps close the run: step 18 waits until both hubs' `/api/v1/types` list
 `examples.Inventory` as `shared` with the owners `service-b` and `service-c`; step 18b calls `GET /scatter/inventory`
 and expects parts from both services with `failed` and `timedOut` 0; step 18c calls `GET /inventory` six times and
 expects both services among the answerers (one round-robin pool over both owners). `SKIP_SCATTER=1` skips them,
 `ONLY_SCATTER=1` runs only them.
 
-The streaming-query steps (P4b, ADR 0017) come last: step 19 calls `GET /stream/rows?count=1000&credit=8` (up to
+The streaming-query steps come last: step 19 calls `GET /stream/rows?count=1000&credit=8` (up to
 twelve times, until both owners streamed once) and expects 1000 rows numbered 1..1000 in order, all from one
 service and instance; step 19b adds `take=50` (service-a cancels the collection after 50 rows, which cancels the
 handler through the hub) and expects 50 rows and both hubs' `/api/v1/topology` in-flight counts (`totals.inFlight` and every
@@ -206,7 +206,7 @@ instance's `inFlightAsHandler` + `inFlightAsSender`) back at 0 within 10 s; step
 row 3"}` (the two rows streamed before the failure are not reported: the endpoint returns the error only).
 `SKIP_STREAM=1` skips them, `ONLY_STREAM=1` runs only them.
 
-The subscription-query steps (P4c, ADR 0017) come last: step 20a waits until both hubs' `/api/v1/types` list
+The subscription-query steps come last: step 20a waits until both hubs' `/api/v1/types` list
 `examples.WatchCounter` as `shared` with the owners `service-b` and `service-c` and records how many subscriptions each owner
 serves (`GET /subscribe/open`, which scatter-gathers `examples.OpenSubscriptions`); step 20 opens
 `GET /subscribe/counter?name=<unique>&updates=4&timeoutMs=10000` in the background, waits until both owners hold the
@@ -261,7 +261,7 @@ SECURE=1 MTLS=1 ONLY_MTLS=1 bash examples/smoke.sh  # only steps 23 and 23b (nee
 
 ## Secure sandbox
 
-The same sandbox with hub access control, TLS and a dashboard token (P5a, ADR 0018): the overlay
+The same sandbox with hub access control, TLS and a dashboard token: the overlay
 `compose.secure.yaml`, with secrets generated by `scripts/dev-hub-pki.sh` into the git-ignored
 `.secrets/` directory next to the compose files. Nothing secret is committed; the script is idempotent (`--force` regenerates).
 
@@ -318,7 +318,7 @@ only them (both need `SECURE=1`).
 
 ## JWT sandbox
 
-The secure sandbox with service-b (Kotlin) and service-c (Rust) authenticating by JWT (P5b, ADR 0019): the overlay
+The secure sandbox with service-b (Kotlin) and service-c (Rust) authenticating by JWT: the overlay
 `compose.jwt.yaml` on top of the secure one, with a throwaway identity provider (`hub-idp`, container `snodra-server-idp`, its own
 realm `snodra-server-dev`, tokens that live 30 s). service-a keeps its static token, so both credential kinds run side by side. The
 identity provider, the realm and the client secrets are dev only; the secrets come from `dev-hub-pki.sh` into the git-ignored
@@ -359,7 +359,7 @@ service-c with the JWT overlay as well) and adds, last:
 
 ## mTLS sandbox
 
-The secure sandbox with service-a (Kotlin) and service-c (Rust) authenticating with a client certificate (P5c, ADR 0020): the
+The secure sandbox with service-a (Kotlin) and service-c (Rust) authenticating with a client certificate: the
 overlay `compose.mtls.yaml` on top of the secure one. service-b keeps its static token (the hubs run
 `SNODRA_SERVER_TLS_CLIENT_AUTH=optional`), so both kinds run side by side. It is not combined with the JWT overlay. The client CA, the
 certificates (EC P-256, 30 days, exactly one URI SAN `snodra://service/<name>`) and their keys come from `dev-hub-pki.sh` into the
@@ -401,7 +401,7 @@ service-b and service-c with the mTLS overlay as well) and adds, last:
 
 ## Metrics
 
-Everything in the sandbox exports its metrics over OTLP to otel-lgtm every 5 s (ADR 0026; `compose.local.yaml`):
+Everything in the sandbox exports its metrics over OTLP to otel-lgtm every 5 s (`compose.local.yaml`):
 both hubs (`SNODRA_SERVER_OTLP_ENDPOINT=http://otel-lgtm:4317`, `OTEL_METRIC_EXPORT_INTERVAL=5000`), service-a and service-b (the
 library's metrics, listed in the [README](../README.md#metrics), and Boot's own, over OTLP/HTTP:
 `SNODRA_OTLP_METRICS_ENABLED=true`, `SNODRA_OTLP_METRICS_ENDPOINT=http://otel-lgtm:4318/v1/metrics`,
@@ -424,7 +424,7 @@ curl -sG $P/query --data-urlencode 'query=max by (subscription) (snodra_event_br
 ```
 
 Smoke steps 29 to 29e check it, last, in every sandbox mode: 29 expects Grafana's API (`/api/search?tag=snodra`) to list
-`snodra-overview`, `snodra-server` and `snodra-messaging` in the folder Snodra; 29b expects the hub series of P9
+`snodra-overview`, `snodra-server` and `snodra-messaging` in the folder Snodra; 29b expects the hub series
 (`snodra_server_requests_total`, `snodra_server_request_duration_seconds_bucket`, `snodra_server_connected_instances`, the processor gauges
 `snodra_server_processor_lag`, `_state`, `_dead_letters` and `_processed`) under `job="snodra-server"`, and the subscription lag from `snodra-event-browser`
 from both hubs (`instance` = the `hubId` of each hub's topology) and `snodra_server_connected_instances` for service-a, -b and -c;
@@ -524,7 +524,7 @@ the printer post its signed notifications to an address of its choosing.
 
 ## The banner saga
 
-`examples.Banner` in service-c (Rust, sagas S2: `snodra-messaging-rs/examples/service-c/src/banner.rs`) is the postcard saga
+`examples.Banner` in service-c (Rust, sagas: `snodra-messaging-rs/examples/service-c/src/banner.rs`) is the postcard saga
 in Rust with service-c's own types (a command type has one owner): it starts on `TextShouted` (the job id is
 `banner-<text in lower case>`), sends `PrintBanner` to service-c's own idempotent adapter (`idempotent_command`; the saga relay
 delivers it locally) and gives the printer 30 s. The printer prints the text in lower case and answers by its prefix as for
@@ -546,7 +546,7 @@ is service-c's HTTP address); step 25 also replays the webhook (200) and sends a
 
 ## Event processors and dead letters
 
-service-b (Kotlin) and service-c (Rust) each run a **named event processor**, `audit` (P6a, ADR 0022, the library's
+service-b (Kotlin) and service-c (Rust) each run a **named event processor**, `audit` (the library's
 "Event processors and dead letters"), next to their `default` one: service-b with `@ProcessingGroup("audit")` on `AuditHandler`
 (`service-b/.../Audit.kt`), service-c with `builder.event_in::<ShoutAudit, _, _>("audit", ...)` (`service-c/src/audit.rs`). The
 processor is its own Kafka consumer on `snodra.events`, consumer group `service-b.audit` / `service-c.audit` (the `default`
@@ -583,7 +583,7 @@ curl -s -X POST 'localhost:8092/audit/failing?on=false'
 curl -s -X POST localhost:8092/audit/dead-letters/retry-all                # {"retried":2,"failed":0,"blocked":0,"skipped":0}; handled in order
 ```
 
-The dashboard's Processors page (`localhost:7001`, hub ADR 0022) shows both services' `audit` and `default` processors with their
+The dashboard's Processors page (`localhost:7001`) shows both services' `audit` and `default` processors with their
 state, lag and dead letters. Smoke steps 26 to 26h drive all of it, for service-b and for service-c: 26 waits until both `audit`
 processors are RUNNING with partitions (group `<service>.audit`) next to `default` on the hub's `GET /api/v1/processors`, clears
 any letter left over and expects the hub to list each one's `lag` as 0; 26b and 26c turn the failure on and publish two poison notes under one key and a fine note under another
@@ -594,7 +594,7 @@ and its attempts grow, the sequenced letter `Blocked` behind the head); 26f turn
 poison note, discards it (a second discard is a 404) and expects its key to flow again; 26h waits for the hub's dead-letter
 count to be back at 0. They need `jq` or `python3`; `SKIP_AUDIT=1` skips them, `ONLY_AUDIT=1` runs only them.
 
-**Processor control through the hub** (P6b, ADR 0023, the library's "Processor control"). The hub pauses, resumes and
+**Processor control through the hub** (the library's "Processor control"). The hub pauses, resumes and
 resets a processor on every instance and works its dead letters, through its HTTP API with the write token
 (`SNODRA_SERVER_DASHBOARD_WRITE_TOKEN`; the dashboard token is refused on a write). The `audit` processor of each service also has a
 reset handler (service-b: `@ResetHandler` `AuditHandler.onReset`; service-c: `builder.reset_handler("audit", ...)`) that records
@@ -659,10 +659,9 @@ keys of the run. They need `jq` or `python3`; `SKIP_CONTROL=1` skips them, `ONLY
 
 ## Event browser
 
-The hub reads no event store (ADR 0027): `snodra-event-browser`, a separate binary that the sandbox compose starts
-next to both hubs, reads `snodra.events` from Kafka, read-only, and answers the hubs' `snodra.events.*` queries (P7,
-ADR 0025, the hub's event browser). The search goes newest first (by key, type or a `type.*`
-prefix, source, correlation id, user id, event id, time range), a record shows every header, a tail streams new records
+The hub reads no event store: `snodra-event-browser`, a separate binary that the sandbox compose starts
+next to both hubs, reads `snodra.events` from Kafka, read-only, and answers the hubs' `snodra.events.*` queries. The search goes newest first (by key, type or a
+`type.*` prefix, source, correlation id, user id, event id, time range), a record shows every header, a tail streams new records
 as server-sent events, and the lag lists every subscription on the topic, members or not. The dashboard shows the Events
 page; without a browser connected the hubs answer 404 `event browser not installed`. The browser never joins a
 subscription and starts without Kafka (only these routes answer 503 while it is down).

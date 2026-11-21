@@ -24,7 +24,7 @@ import java.util.concurrent.ConcurrentHashMap
 /**
  * Reads the partner sources ([ExternalSourceProvider], one per source name: on Kafka `snodra.messaging.external.kafka.sources.<name>`
  * with `snodra-messaging-kafka`), one subscription and one thread per source, and turns their records into local snodra events
- * (spec "Inbound 1", ADR 0027).
+ * (spec "Inbound 1").
  *
  * Each record ([ExternalRecord]) goes through the source's [ExternalRecordTranslator] (the bean named like the source:
  * [translators] must hold one per source, else construction fails naming the source) and the resulting event is dispatched
@@ -42,7 +42,7 @@ import java.util.concurrent.ConcurrentHashMap
  *
  * The local dispatch reaches the handlers of every event processor, each under its own marker `processor:<name>:<dedupeId>`
  * (`default` included); these records are never dead-lettered. The source names `processor`, `saga`, `ingress` and `failed` are
- * refused (construction fails naming the source; ADR 0021, ADR 0022): a dedupe id `failed:...` is the one of a failed notice,
+ * refused (construction fails naming the source): a dedupe id `failed:...` is the one of a failed notice,
  * and the other names stay free for the library's own marker families.
  *
  * A source whose reader an [Error] (not an exception) ended stays stopped ([stoppedSources], logged at error) until the sources

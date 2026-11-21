@@ -23,18 +23,18 @@ class HandlerMethod(
     val authorization: CompiledAuthorization? = null,
     /** `@QueryHandler(shared = true)`: the type is registered as a shared query type. */
     val shared: Boolean = false,
-    /** The message is a `StreamingQuery<R>` and the function returns `Flow<R>` (P4b): served part by part under credit. */
+    /** The message is a `StreamingQuery<R>` and the function returns `Flow<R>`: served part by part under credit. */
     val streaming: Boolean = false,
     /**
-     * The message is a `SubscriptionQuery<I, U>` (P4c): the function answers the initial result `I` of a subscription
+     * The message is a `SubscriptionQuery<I, U>`: the function answers the initial result `I` of a subscription
      * (the hub's `<id>#0` request); the updates come from the `QueryUpdateEmitter`.
      */
     val subscription: Boolean = false,
     /** Compiled `@IdempotentHandler`, or null: the invoker runs the handler through the idempotency interceptor. */
     val idempotency: CompiledIdempotency? = null,
-    /** The event processor of an `@EventHandler` (its class's `@ProcessingGroup`, else `default`, ADR 0022); `default` for other kinds. */
+    /** The event processor of an `@EventHandler` (its class's `@ProcessingGroup`, else `default`); `default` for other kinds. */
     val processor: String = Processors.DEFAULT,
-    /** `@DisallowReplay` on the event handler or its class (P6b): a replayed record does not run it. */
+    /** `@DisallowReplay` on the event handler or its class: a replayed record does not run it. */
     val disallowReplay: Boolean = false,
 ) {
     init {
@@ -55,7 +55,7 @@ class HandlerMethod(
     }
 }
 
-/** A `@ResetHandler` method (P6b) of [processor]: called with the [ResetContext] when it takes one. */
+/** A `@ResetHandler` method of [processor]: called with the [ResetContext] when it takes one. */
 class ResetHandlerMethod(val bean: Any, val function: KFunction<*>, val processor: String, val wantsContext: Boolean) {
     init {
         function.isAccessible = true

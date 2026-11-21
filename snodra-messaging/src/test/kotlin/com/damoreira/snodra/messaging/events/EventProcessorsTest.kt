@@ -59,7 +59,7 @@ class CountingHandlers {
 }
 
 /**
- * Named processors against a real Kafka (the event-store add-on) and MongoDB (ADR 0022, ADR 0027): subscriptions (today's consumer
+ * Named processors against a real Kafka (the event-store add-on) and MongoDB: subscriptions (today's consumer
  * groups), markers, independence, and the status they report.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
@@ -118,7 +118,7 @@ class EventProcessorsTest {
         assertEquals(setOf("processor:default:e-1", "processor:orders:e-1"), markers())
     }
 
-    @Test fun `stage-1 markers carry the processor and the record's position (P6b)`() {
+    @Test fun `stage-1 markers carry the processor and the record's position`() {
         val p = processors(plain, orders).also { it.start() }
         support.send(topic, "e-1", key = "k1", partition = 0)
         val offset = support.send(topic, "e-2", key = "k1", partition = 1)

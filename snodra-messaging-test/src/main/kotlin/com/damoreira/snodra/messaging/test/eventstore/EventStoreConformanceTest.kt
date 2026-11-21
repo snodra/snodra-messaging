@@ -46,7 +46,7 @@ import java.util.TreeSet
 import java.util.UUID
 
 /**
- * The conformance kit of the event store (ADR 0027): the behaviour every event-store add-on must have, a third party's
+ * The conformance kit of the event store: the behaviour every event-store add-on must have, a third party's
  * included. An add-on runs it by subclassing this class in its own tests:
  *
  * ```kotlin

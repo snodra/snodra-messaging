@@ -5,7 +5,7 @@ import com.damoreira.snodra.messaging.api.Event
 import com.damoreira.snodra.messaging.api.MessageType
 
 /*
- * The postcard saga of service-b (S1, sagas): every delivered greeting is printed on a postcard by an external printer
+ * The postcard saga of service-b: every delivered greeting is printed on a postcard by an external printer
  * (the fake-printer example). Service-b's GreetingDeliverySaga drives it; these are the messages it sends and reacts to.
  */
 

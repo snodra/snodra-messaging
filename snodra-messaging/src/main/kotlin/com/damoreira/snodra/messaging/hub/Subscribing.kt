@@ -4,7 +4,7 @@ import com.damoreira.snodra.server.v1.ReplyPart
 import com.damoreira.snodra.server.v1.ServerMessage
 
 /**
- * One open subscription as the transport hands it to [HubBus] (P4c): the initial part is in, the updates follow. The
+ * One open subscription as the transport hands it to [HubBus]: the initial part is in, the updates follow. The
  * transport checks what it can see of the stream: the parts' `seq` runs 1, 2, 3, ... and a `ReplyEnd.parts` count is
  * what arrived; it refills the sender's credit as [next] consumes parts.
  */

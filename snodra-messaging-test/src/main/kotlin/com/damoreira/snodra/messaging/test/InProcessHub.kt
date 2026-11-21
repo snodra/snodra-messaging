@@ -59,18 +59,18 @@ import java.util.concurrent.TimeUnit
  * [typeTimeouts]. The effective timeout follows the hub's rule: `timeoutMs > 0` -> `min(timeoutMs, override or
  * maxTimeout)`, `timeoutMs == 0` -> `override or replyTimeout`.
  *
- * Flow control (P1): the first `Register` of a stream must carry `initial_permits >= 1` (`INVALID_ARGUMENT` otherwise). A
+ * Flow control: the first `Register` of a stream must carry `initial_permits >= 1` (`INVALID_ARGUMENT` otherwise). A
  * request is forwarded only while the handler's session has permits (one per forward), otherwise queued per instance
  * ordered by `Request.priority` (higher first) then arrival, keeping its own deadline. `Permits` messages add permits and
  * drain the queue; like snodra-server, a session never holds more than its cap, which starts at `initial_permits` and is
- * raised (never lowered) to `Permits.grant` when a grant is above it (P3 multi-hub top-up). A full queue ([queueCapacity])
+ * raised (never lowered) to `Permits.grant` when a grant is above it (multi-hub top-up). A full queue ([queueCapacity])
  * answers `RESOURCE_EXHAUSTED`.
  *
- * Multi-hub status (P3): the `InstanceStatus` reports of every session are kept ([lastStatusFrom], with their
+ * Multi-hub status: the `InstanceStatus` reports of every session are kept ([lastStatusFrom], with their
  * `processors`) and counted ([statusMessagesFrom]). [pauseReading] stops reading every stream (what clients write stays
  * queued on their side), and [requestsFrom] counts requests per sender.
  *
- * Query modes (P4a, ADR 0017): `shared_query_types` may be owned by many services; a type registered exclusive (or as a
+ * Query modes: `shared_query_types` may be owned by many services; a type registered exclusive (or as a
  * command) by one registrant and shared by another, even of the same service, is `ALREADY_EXISTS`, and one listed both
  * ways in a single `Register` is `INVALID_ARGUMENT`. A point query on a shared type round-robins over every owner's
  * instances. A `SCATTER_GATHER` request sends every registered instance owning the type (sorted by service, then instance id) an ordinary unary request with
@@ -80,7 +80,7 @@ import java.util.concurrent.TimeUnit
  * (`HANDLER_DISCONNECTED`). No target: `NO_HANDLER`; a command: `INVALID_REQUEST`; a mode this hub does not know:
  * `INVALID_REQUEST`. [inject] writes any message to an instance's stream.
  *
- * Streaming queries (P4b): a `STREAMING` request goes to one live instance that lists the type (round-robin per type), as
+ * Streaming queries: a `STREAMING` request goes to one live instance that lists the type (round-robin per type), as
  * `Request{id = <id>#1, mode = STREAMING, initial_credit}` (a uint32; 0 reads
  * as 64; `max_results` is kept by the hub) through the target's permits and queue. The handler's `ReplyPart{<id>#1}` and
  * `ReplyEnd{<id>#1}` are relayed with the sender's id, `responder_service` / `responder_instance` and the handler's
@@ -95,7 +95,7 @@ import java.util.concurrent.TimeUnit
  * `Cancel{<id>#<n>, reason}` to its forwarded targets. [dropParts] drops relayed parts by `seq` (the real hub's
  * full-buffer drop). [openStreams], [creditOf], [flowsFrom] and [cancelsFrom] observe it.
  *
- * Subscription queries (P4c): a `SUBSCRIPTION` request goes to **every** live instance that lists the type, as they are
+ * Subscription queries: a `SUBSCRIPTION` request goes to **every** live instance that lists the type, as they are
  * at the open
  * (sorted by service, then instance id; an instance registering later is never added), each getting
  * `Request{id = <id>#n, mode = SUBSCRIPTION}` (`n` from 1; `initial_credit` and `max_results` 0) written directly, without
@@ -120,7 +120,7 @@ import java.util.concurrent.TimeUnit
  * registered stream replaces that older stream (it ends, its in-flight requests fail with `HANDLER_DISCONNECTED`;
  * [sessionsReplacedOf] counts it). Set [replaceSessions] false to accept parallel streams of one instance id.
  *
- * Access control (P5a, ADR 0018): [auth] (default [HubAuth.OFF]) holds the mode (`off`, `permissive`, `enforce`) and the
+ * Access control: [auth] (default [HubAuth.OFF]) holds the mode (`off`, `permissive`, `enforce`) and the
  * token -> ACL map (the real hub keeps digests; here the plain test token is the key). In `enforce` the first `Register`
  * of a stream is judged like the real hub does and the stream is closed with `UNAUTHENTICATED` (no credentials, an empty
  * token, `jwt`, an unknown token) or `PERMISSION_DENIED` (a service name the entry does not grant, a command, query or
@@ -133,14 +133,14 @@ import java.util.concurrent.TimeUnit
  * `permissive` (the owner is untouched; with [auth] off the older stream is replaced as usual). [authViolations] lists them all and [tokensSeenFrom] the token of every
  * `Register` received, rejected ones included.
  *
- * JWT credentials (P5b, ADR 0019): with [HubAuth.services] set (the `[[service]]` tables) a `jwt` credential whose `azp` names the
+ * JWT credentials: with [HubAuth.services] set (the `[[service]]` tables) a `jwt` credential whose `azp` names the
  * registering service and that has such an entry is accepted, with the entry's rights; another `azp` is `PERMISSION_DENIED`, a
  * service without an entry too, a token that is not three segments with an `azp` is `UNAUTHENTICATED`, and without `services` the
  * hub answers "jwt credentials are not configured on this hub" like a hub with no issuer. The signature and `exp` are **not**
  * checked (the double does not know the issuer's keys): the real hub image covers them. A `ClientMessage.credentials` is recorded ([credentialsSeenFrom]) and judged like a `Register`'s against the session's own service (an invalid one or one for
  * another service closes the stream in `enforce`); [jwtsSeenFrom] lists the JWTs of the `Register`s.
  *
- * Processor control (P6b, ADR 0023): [control] writes a `ControlRequest` to an instance's session and waits for the
+ * Processor control: [control] writes a `ControlRequest` to an instance's session and waits for the
  * `ControlReply` with its `control_id` from that session; every reply received is kept
  * ([controlRepliesFrom]), the unmatched ones too.
  *
@@ -236,7 +236,7 @@ class InProcessHub(val name: String = "snodra-server-" + UUID.randomUUID()) : Au
     private var currentAuth: HubAuth = HubAuth.OFF
 
     /**
-     * Access control (P5a): the mode and the token -> ACL map. Read per `Register` and per request, so it may change at
+     * Access control: the mode and the token -> ACL map. Read per `Register` and per request, so it may change at
      * runtime. Like the real hub on an ACL reload, setting it re-judges every live session: in `enforce` a session whose
      * token is gone or whose registration the new ACL no longer allows is closed (`UNAUTHENTICATED` for a token that left,
      * `PERMISSION_DENIED` for a service name or a handled type it no longer grants; its in-flight requests fail as on any
@@ -256,7 +256,7 @@ class InProcessHub(val name: String = "snodra-server-" + UUID.randomUUID()) : Au
         @Volatile var commandTypes: Set<String> = emptySet()
         @Volatile var sharedTypes: Set<String> = emptySet()
         @Volatile var registered = false
-        /** The stream's first `Register` was judged for credentials (ruling 5 of ADR 0018: only the first counts). */
+        /** The stream's first `Register` was judged for credentials (only the first counts). */
         var credentialsJudged = false
         /** The token the stream's first `Register` carried; null without a token (or with `jwt`). */
         @Volatile var token: String? = null
@@ -290,7 +290,7 @@ class InProcessHub(val name: String = "snodra-server-" + UUID.randomUUID()) : Au
         val subscription: Subscription? = null,
     )
 
-    /** A subscription query in progress (P4c); guarded by [lock]. */
+    /** A subscription query in progress; guarded by [lock]. */
     private class Subscription(val id: String, val sender: Session, val type: String, var credit: Long, val maxResults: Int) {
         val initialId: String get() = "$id#0"
         lateinit var initialHandler: Session
@@ -307,7 +307,7 @@ class InProcessHub(val name: String = "snodra-server-" + UUID.randomUUID()) : Au
         var duration: Job? = null
     }
 
-    /** A streaming query in progress (P4b); guarded by [lock]. */
+    /** A streaming query in progress; guarded by [lock]. */
     private class Stream(val id: String, val sender: Session, val handler: Session, var credit: Long, val maxResults: Int, val timeout: Duration) {
         val targetId: String get() = "$id#1"
         var parts = 0
@@ -943,7 +943,7 @@ class InProcessHub(val name: String = "snodra-server-" + UUID.randomUUID()) : Au
         gather.sender.out.trySend(ServerMessage.newBuilder().setEnd(end).build())
     }
 
-    // --- streaming queries (P4b) ---
+    // --- streaming queries ---
 
     /** Starts the stream [req] from [sender]: the gates in the hub's order, then the target through its permits and queue. */
     private fun startStream(sender: Session, req: Request) {
@@ -1191,7 +1191,7 @@ class InProcessHub(val name: String = "snodra-server-" + UUID.randomUUID()) : Au
         }
     }
 
-    // --- subscription queries (P4c) ---
+    // --- subscription queries ---
 
     /** Starts the subscription [req] from [sender]: the gates in the hub's order, then every target and the initial request. */
     private fun startSubscription(sender: Session, req: Request) {
@@ -1396,10 +1396,10 @@ data class AclEntry(val service: String, val handle: List<String> = emptyList(),
 
 /**
  * The access control of an [InProcessHub]: [mode], the [tokens] (plain token -> entry; the real hub keys by SHA-256) and the
- * [services] (`[[service]]` tables, P5b: the rights of a service that authenticates with a `jwt` whose `azp` is its name).
+ * [services] (`[[service]]` tables: the rights of a service that authenticates with a `jwt` whose `azp` is its name).
  */
 class HubAuth(val mode: AuthMode, val tokens: Map<String, AclEntry> = emptyMap(), val services: List<AclEntry> = emptyList()) {
-    /** True when the hub has `[[service]]` tables, the double's stand-in for "a JWT issuer is configured" (ADR 0019). */
+    /** True when the hub has `[[service]]` tables, the double's stand-in for "a JWT issuer is configured". */
     val jwtEnabled: Boolean get() = services.isNotEmpty()
 
     /** The `[[service]]` entry named [name] (the `azp` of a JWT), or null. */

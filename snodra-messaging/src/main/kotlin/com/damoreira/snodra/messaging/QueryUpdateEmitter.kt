@@ -4,7 +4,7 @@ import com.damoreira.snodra.messaging.api.SubscriptionQuery
 import kotlin.reflect.KClass
 
 /**
- * Pushes the updates of subscription queries (P4c, ADR 0017) from the instance that learns of them. Every subscription of
+ * Pushes the updates of subscription queries from the instance that learns of them. Every subscription of
  * a query type that this instance serves (a `@QueryHandler` taking the [SubscriptionQuery]) is a target; [emit],
  * [complete] and [completeExceptionally] pick the ones whose decoded query passes `filter` and deliver to them in call
  * order. Emitting when no subscription matches is a no-op, so a service may emit unconditionally.

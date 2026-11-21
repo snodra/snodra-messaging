@@ -13,7 +13,7 @@ import org.junit.jupiter.api.Test
 import java.time.Duration
 import java.util.concurrent.atomic.AtomicBoolean
 
-/** Starting without the `processor_control` documents (P6b): a consumer starts only once its document could be read. */
+/** Starting without the `processor_control` documents: a consumer starts only once its document could be read. */
 class ProcessorControlStartTest {
     @Test fun `a document that cannot be read at start keeps the consumer stopped until a poll reads it`() {
         val readable = AtomicBoolean(false)

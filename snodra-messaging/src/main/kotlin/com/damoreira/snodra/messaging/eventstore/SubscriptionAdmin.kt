@@ -1,6 +1,6 @@
 package com.damoreira.snodra.messaging.eventstore
 
-/** Where a reset moves a subscription (ADR 0023, capability [Capability.REPLAY]). */
+/** Where a reset moves a subscription (capability [Capability.REPLAY]). */
 sealed interface ResetTarget {
     /** Every segment's first position: everything the event store still has is a replay. */
     data object Earliest : ResetTarget

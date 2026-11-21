@@ -3,7 +3,7 @@ package com.damoreira.snodra.messaging.store
 import org.springframework.transaction.PlatformTransactionManager
 
 /**
- * Where the library keeps its state (ADR 0028): the outbox, the processed-event markers, the dead letters, the processors'
+ * Where the library keeps its state: the outbox, the processed-event markers, the dead letters, the processors'
  * control documents, the external calls and the sagas, all in the service's own database. One add-on per database
  * implements every store, so a service never needs a second database for any of them.
  *

@@ -51,7 +51,7 @@ import kotlin.test.assertIs
 import kotlin.test.assertTrue
 
 /**
- * Scatter-gather and shared query types (P4a, ADR 0017) against two containers of the hub image under test
+ * Scatter-gather and shared query types against two containers of the hub image under test
  * (`SNODRA_SERVER_IMAGE`) in the multi-hub configuration: every instance is connected to both hubs. Skips when the
  * image is not built.
  */

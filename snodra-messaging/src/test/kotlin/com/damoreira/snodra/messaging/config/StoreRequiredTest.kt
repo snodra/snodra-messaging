@@ -61,7 +61,7 @@ class PublisherConfig {
 class PublisherApp
 
 /**
- * No message store (ADR 0028): commands and queries run without one; an event handler, a saga or a publisher fails the startup
+ * No message store: commands and queries run without one; an event handler, a saga or a publisher fails the startup
  * with a message naming what needs the store and the add-on that provides one.
  */
 @ExtendWith(OutputCaptureExtension::class)

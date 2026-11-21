@@ -49,7 +49,7 @@ private class FlakyStore(private val inner: DeadLetterStore) : DeadLetterStore b
     }
 }
 
-/** Dead letters of one event processor against a real Kafka and MongoDB (ADR 0022): each reason, sequencing, parking, modes. */
+/** Dead letters of one event processor against a real Kafka and MongoDB: each reason, sequencing, parking, modes. */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class DeadLetterConsumerTest {
     private val support = KafkaMongoSupport("dead_letter_consumer")

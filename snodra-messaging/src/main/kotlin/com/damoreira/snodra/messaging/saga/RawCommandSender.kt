@@ -35,7 +35,7 @@ interface RawCommandSender {
 
     /**
      * How long the relay waits for [sendRaw] of [type] before it abandons the call and sends it again later with the same
-     * idempotency key, given its `sagas.relay.send-timeout` [sendTimeout] (ADR 0021 ruling 74). A local handler has no other
+     * idempotency key, given its `sagas.relay.send-timeout` [sendTimeout]. A local handler has no other
      * bound: [sendTimeout]. Through the hub never less than the hub's deadline for the call plus [HUB_CALL_GUARD], so the relay
      * never sends a command again while the hub may still be running the first call.
      */

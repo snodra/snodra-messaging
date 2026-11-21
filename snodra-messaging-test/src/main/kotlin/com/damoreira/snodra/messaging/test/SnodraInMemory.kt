@@ -16,7 +16,7 @@ import java.lang.annotation.Inherited
 import java.time.Clock
 
 /**
- * The zero-infrastructure mode of a service test (ADR 0027, ADR 0028): the application runs on the in-memory event store and
+ * The zero-infrastructure mode of a service test: the application runs on the in-memory event store and
  * the in-memory message store, without a broker, a database or a hub, and the test gets an [InMemoryEvents] bean to publish
  * events to the service and to read what it published and what its processors dead-lettered.
  *

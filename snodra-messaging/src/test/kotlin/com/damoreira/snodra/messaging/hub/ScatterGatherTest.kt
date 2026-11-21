@@ -62,7 +62,7 @@ class OwnExclusiveCountHandlers(private val value: Int) {
     @QueryHandler fun handle(query: GetCount): Count = Count(value)
 }
 
-/** Scatter-gather queries and shared query types (P4a, ADR 0017) over in-process hubs. */
+/** Scatter-gather queries and shared query types over in-process hubs. */
 class ScatterGatherTest {
     private val hubs = mutableListOf<InProcessHub>()
     private val hub = hub()
@@ -394,7 +394,7 @@ class ScatterGatherTest {
         assertEquals(1, asked.get())
     }
 
-    // --- multi-hub (P3) ---
+    // --- multi-hub ---
 
     @Test fun `one gather goes to one hub, round-robin over the live hubs`() = runBlocking {
         val other = hub()

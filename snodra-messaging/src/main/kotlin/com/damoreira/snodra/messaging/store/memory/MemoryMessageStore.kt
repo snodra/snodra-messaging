@@ -23,7 +23,7 @@ import java.time.Instant
 import java.util.concurrent.CopyOnWriteArrayList
 
 /**
- * The in-memory message store (ADR 0028): every store of the library (outbox, processed events, dead letters, processor
+ * The in-memory message store: every store of the library (outbox, processed events, dead letters, processor
  * control, external calls, the saga ports) as maps in this JVM's memory, for tests, local runs and single-process demos.
  * **Not durable**: everything is gone when the process ends, and only this JVM (this instance of the store) sees it. Name
  * `memory`; no schema.

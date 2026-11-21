@@ -55,7 +55,7 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 /**
- * Subscription queries (P4c, ADR 0017) against two containers of the hub image under test (`SNODRA_SERVER_IMAGE`) in the
+ * Subscription queries against two containers of the hub image under test (`SNODRA_SERVER_IMAGE`) in the
  * multi-hub configuration: every instance is connected to both hubs. Two services own `test.WatchAccount` (a shared type)
  * through the real handler stack and their own [QueryUpdateEmitter]; a third subscribes through `QueryBus.subscribe`,
  * connected to the first hub only so that every subscription lands on it.

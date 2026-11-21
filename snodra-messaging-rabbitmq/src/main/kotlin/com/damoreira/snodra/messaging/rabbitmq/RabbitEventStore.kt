@@ -15,7 +15,7 @@ import java.util.UUID
 import kotlin.coroutines.cancellation.CancellationException
 
 /**
- * The event store on RabbitMQ Streams (ADR 0027), the add-on `snodra-messaging-rabbitmq`: RabbitMQ 3.13 or later with the stream
+ * The event store on RabbitMQ Streams, the add-on `snodra-messaging-rabbitmq`: RabbitMQ 3.13 or later with the stream
  * plugin, through the stream protocol (the RabbitMQ Stream Java client's `Client`).
  *
  * **The layout on the wire** is shared with the Rust add-on (`snodra-messaging-rabbitmq`, `rabbitmq-stream-client`): both read

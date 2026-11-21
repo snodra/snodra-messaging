@@ -17,7 +17,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
-/** The service's metrics go out over OTLP when `SNODRA_OTLP_METRICS_ENABLED` is set, and nowhere (no error) otherwise (P9). */
+/** The service's metrics go out over OTLP when `SNODRA_OTLP_METRICS_ENABLED` is set, and nowhere (no error) otherwise. */
 class OtlpMetricsExportTest {
     private val runner = ApplicationContextRunner()
         .withInitializer(ConfigDataApplicationContextInitializer()) // this service's application.yaml

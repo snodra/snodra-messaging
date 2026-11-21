@@ -6,9 +6,10 @@ import com.damoreira.snodra.messaging.api.MessageType
 /**
  * What the dispatch relay tells a saga when a command it recorded could not be delivered or failed: a saga does not
  * wait for replies, so a failure comes back as this event, dispatched locally (never published to `snodra.events`) with
- * the dedupe key `failed:<dispatchId>`. A saga handles it with `@SagaEventHandler(associationProperty = "sagaId")` after
- * associating itself with its own id (`saga.associateWith("sagaId", saga.sagaId)`); unhandled, it is logged at error and
- * counted. [idempotencyKey] is the failed command's `<sagaId>:<seq>`, [commandType] its wire type name.
+ * the dedupe key `failed:<dispatchId>`. The runtime routes it by [sagaId]: it reaches the live instance of the saga type
+ * with that id, which needs no association, as well as any instance associated through the handler's own
+ * `@SagaEventHandler(associationProperty = "sagaId")`; unhandled, it is logged at error and counted.
+ * [idempotencyKey] is the failed command's `<sagaId>:<seq>`, [commandType] its wire type name.
  */
 @MessageType("snodra.SagaCommandFailed")
 data class SagaCommandFailed(

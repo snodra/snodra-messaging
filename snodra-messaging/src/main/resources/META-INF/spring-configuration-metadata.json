@@ -191,7 +191,7 @@
     {
       "name": "snodra.messaging.hub.token",
       "type": "java.lang.String",
-      "description": "Static token sent in Register.credentials.token of every hub stream (hub access control, P5a). Optional; empty is the same as none. Never logged and redacted in toString and in the actuator configprops and env output. Environment variable SNODRA_MESSAGING_HUB_TOKEN, or SNODRA_SERVER_TOKEN when this property is unset.",
+      "description": "Static token sent in Register.credentials.token of every hub stream (hub access control). Optional; empty is the same as none. Never logged and redacted in toString and in the actuator configprops and env output. Environment variable SNODRA_MESSAGING_HUB_TOKEN, or SNODRA_SERVER_TOKEN when this property is unset.",
       "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Hub"
     },
     {
@@ -203,7 +203,7 @@
     {
       "name": "snodra.messaging.hub.oauth2.token-uri",
       "type": "java.net.URI",
-      "description": "OAuth2 token endpoint (for example https://<host>/realms/<realm>/protocol/openid-connect/token on an OpenID Connect provider). Setting it turns OAuth2 client-credentials authentication on (P5b, ADR 0019): the service registers with the access token as a jwt credential and renews it before it expires. http is allowed and warns unless the host is loopback or a single-label name. Cannot be combined with hub.token or hub.token-file. Environment variable SNODRA_MESSAGING_HUB_OAUTH2_TOKEN_URI, or SNODRA_SERVER_OAUTH2_TOKEN_URI when this property is unset.",
+      "description": "OAuth2 token endpoint (for example https://<host>/realms/<realm>/protocol/openid-connect/token on an OpenID Connect provider). Setting it turns OAuth2 client-credentials authentication on: the service registers with the access token as a jwt credential and renews it before it expires. http is allowed and warns unless the host is loopback or a single-label name. Cannot be combined with hub.token or hub.token-file. Environment variable SNODRA_MESSAGING_HUB_OAUTH2_TOKEN_URI, or SNODRA_SERVER_OAUTH2_TOKEN_URI when this property is unset.",
       "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$OAuth2"
     },
     {

@@ -21,17 +21,17 @@ import java.time.Instant
  * stage 2). Shared by the event processors ([EventConsumer], one per processor, [dispatchIn]), the external sources
  * and the webhook ingress ([dispatch]).
  *
- * Stage 1 runs per event processor (ADR 0022): the processor's idempotency marker ([ProcessedMarker], id
+ * Stage 1 runs per event processor: the processor's idempotency marker ([ProcessedMarker], id
  * [Processors.markerId]: `processor:<name>:<dedupeId>`, `default` included) is recorded and the processor's handlers run
  * inside one transaction of the message [store]; a duplicate marker (from the marker's record only) skips the processor, a
  * handler failure rolls the marker back. Handlers run via `runBlocking` on the calling thread so the thread-bound
  * transaction wraps them. Stage 2 runs only for the `default` processor, after stage 1 committed, with markers
  * and transactions of its own, so a redelivered record whose stage 1 is done goes straight to it. **Stage 2 runs even when
- * stage 1 failed** (review amendment, ADR 0021 ruling 26): the failure is held, stage 2 runs, and then the failure is
+ * stage 1 failed**: the failure is held, stage 2 runs, and then the failure is
  * thrown, so the caller redelivers, parks or skips the record by its own rules; a redelivery applies nothing twice because
  * the markers decide. Both stages finish before the caller acknowledges the record.
  *
- * Each stage-1 run of [dispatchIn] (a delivered event) is timed into [metrics] (P9), whether its handlers ran, failed
+ * Each stage-1 run of [dispatchIn] (a delivered event) is timed into [metrics], whether its handlers ran, failed
  * or found the marker; the saga stage and the other entry points are not.
  */
 class LocalEventDispatcher(
@@ -100,7 +100,7 @@ class LocalEventDispatcher(
 
     /**
      * Dispatches the event to [processor] only: its stage 1 (its marker carrying [position], the delivered event's), then (only
-     * for `default`) the sagas. In a [replay] (the record is in a replay range of a reset, P6b) the `@DisallowReplay`
+     * for `default`) the sagas. In a [replay] (the record is in a replay range of a reset) the `@DisallowReplay`
      * handlers and the sagas are skipped. Throws stage 1's failure (stage 2's suppressed in it), or a [SagaStageException]
      * when only stage 2 failed.
      */
@@ -124,7 +124,7 @@ class LocalEventDispatcher(
      * Runs [processor]'s stage 1 for the event and then [inTransaction], all in the marker transaction: a dead letter's
      * retry deletes the letter there, so handling and deletion commit together or not at all. Throws what the handlers or
      * [inTransaction] throw (everything rolled back). [replay]: the record was parked while its processor replayed it, so its
-     * `@DisallowReplay` handlers are left out (P6b).
+     * `@DisallowReplay` handlers are left out.
      */
     fun runStage1(
         processor: String, dedupeId: String, type: String, payload: ByteArray, ctx: MessageContext, position: RecordPosition? = null,

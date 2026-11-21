@@ -27,7 +27,7 @@ import java.util.Date
 import javax.security.auth.x500.X500Principal
 
 /**
- * Throwaway certificate authorities and client certificates for the mTLS tests (P5c), generated at test time (BouncyCastle, test scope: the
+ * Throwaway certificate authorities and client certificates for the mTLS tests, generated at test time (BouncyCastle, test scope: the
  * JDK cannot put a URI SAN or a seconds-long validity in a certificate). Nothing is checked in; every file lands in a caller's temp dir.
  */
 object TestPki {

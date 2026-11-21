@@ -22,7 +22,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 /**
- * The zero-infrastructure twin of [AuditControllerTest] (ADR 0027, ADR 0028): the whole of service-b on the in-memory event
+ * The zero-infrastructure twin of [AuditControllerTest]: the whole of service-b on the in-memory event
  * store and message store, no broker, no database, no hub. Where the slice test mocks the event bus and the dead letters, this
  * one runs the real `audit` processor: a note published over HTTP goes through the outbox and the event store to the processor,
  * a poison note is parked as a dead letter, and its retry through the admin API handles it.

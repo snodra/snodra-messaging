@@ -11,13 +11,13 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
-/** The status of this instance's event processors, one entry per started processor (ADR 0022); never blocks. */
+/** The status of this instance's event processors, one entry per started processor; never blocks. */
 fun interface ProcessorStatusSource {
     fun processorStatuses(): List<ProcessorStatus>
 }
 
 /**
- * The event processors of this service (ADR 0022): at start, one [EventConsumer] (from [consumerFor]) per processor that runs
+ * The event processors of this service: at start, one [EventConsumer] (from [consumerFor]) per processor that runs
  * here ([LocalEventDispatcher.processors]: every `@ProcessingGroup` with a handler, and `default` when it has a handler or
  * sagas run), each in its own subscription of the event store; they start and stop together.
  *
@@ -25,7 +25,7 @@ fun interface ProcessorStatusSource {
  * blocking), so it never blocks the hub connection or a consumer. Each call also asks, without waiting, a single background
  * thread to refresh what needs the store: the dead-letter counts (every [deadLetterSample], and after a park).
  *
- * With a [control] (P6b, ADR 0023) the consumers are started by it, as their `processor_control` documents say (paused, with
+ * With a [control] the consumers are started by it, as their `processor_control` documents say (paused, with
  * their replay ranges, or not at all while a reset holds the lock), and follow the documents from then on.
  */
 class EventProcessors(

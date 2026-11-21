@@ -62,7 +62,7 @@ object SnodraContainers {
     fun hub(): GenericContainer<*> = hub(hubImage).withExposedPorts(7000, 7001)
 
     /**
-     * The hub image under test (`SNODRA_SERVER_IMAGE`, default `snodra-server:dev`) with token access control (P5a, ADR 0018) and
+     * The hub image under test (`SNODRA_SERVER_IMAGE`, default `snodra-server:dev`) with token access control and
      * optionally TLS.
      *
      * - [acl]: token -> ACL entry. The ACL file (digests only, as the hub wants it) is written into [directory] and copied
@@ -97,7 +97,7 @@ object SnodraContainers {
     }
 
     /**
-     * The hub image under test (`SNODRA_SERVER_IMAGE`, default `snodra-server:dev`) with JWT authentication (P5b, ADR 0019), mode
+     * The hub image under test (`SNODRA_SERVER_IMAGE`, default `snodra-server:dev`) with JWT authentication, mode
      * `enforce`: [services] become the ACL file's `[[service]]` tables (the rights of a service whose token's `azp` is its name),
      * [issuer] is the exact `iss` a token must carry and [jwksUri] where the hub fetches the signing keys (a test server on the
      * host is `http://host.testcontainers.internal:<port>/...` after `Testcontainers.exposeHostPorts(port)`). The leeway is 0 s
@@ -122,11 +122,11 @@ object SnodraContainers {
     }
 
     /**
-     * The hub image under test (`SNODRA_SERVER_IMAGE`, default `snodra-server:dev`) with client certificates (mutual TLS, P5c, ADR 0020), mode
+     * The hub image under test (`SNODRA_SERVER_IMAGE`, default `snodra-server:dev`) with client certificates (mutual TLS), mode
      * `enforce`: [services] become the ACL file's `[[service]]` tables (the rights of the service a certificate's `snodra://service/<name>`
      * SAN names), [serverCertificate] and [serverKey] are the hub's own pair (PEM files), [clientCa] the PEM bundle of the CAs whose client
      * certificates it accepts and [clientAuth] `required` or `optional`. Under `required` the image's own health check presents the hub's pair
-     * as a client certificate (ADR 0020 ruling 14), so issue the server certificate from [clientCa] with both the server and the client usage;
+     * as a client certificate, so issue the server certificate from [clientCa] with both the server and the client usage;
      * the wait strategy is the log line, which does not depend on it. Further `SNODRA_SERVER_*` settings go in [env]. Exposes gRPC 7000 and HTTP
      * 7001; OTLP export is disabled.
      */

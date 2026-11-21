@@ -48,7 +48,7 @@ class DefaultWriting(mongo: MongoTemplate) : WritingProjection(mongo, "default")
     @EventHandler fun on(event: Happened) = record(event)
 }
 
-/** A `default` handler that must not run again in a replay (P6b), and one whose whole class must not. */
+/** A `default` handler that must not run again in a replay, and one whose whole class must not. */
 class NoReplayMethod {
     val seen = CopyOnWriteArrayList<String>()
     @DisallowReplay @EventHandler fun on(event: Happened) { seen += event.id }
@@ -209,7 +209,7 @@ class ProcessorDispatchTest {
 
     private fun marker(id: String) = mongo.findById(id, Document::class.java, "processed_events")!!
 
-    @Test fun `a delivered event's marker carries its position, the local dispatch's markers none (P6b)`() {
+    @Test fun `a delivered event's marker carries its position, the local dispatch's markers none`() {
         val d = dispatcher(CountingStage())
         d.dispatchIn("orders", "p-1", "test.Happened", payload("p-1"), ctx("p-1"), RecordPosition("snodra.events", "2", "41"))
         val m = marker("processor:orders:p-1")
@@ -222,7 +222,7 @@ class ProcessorDispatchTest {
         assertEquals(7L, marker("processor:orders:r-9")["offset"], "a dead-letter retry's marker carries the letter's position")
     }
 
-    @Test fun `a replayed record skips the sagas and the DisallowReplay handlers (P6b)`() {
+    @Test fun `a replayed record skips the sagas and the DisallowReplay handlers`() {
         val method = NoReplayMethod()
         val klass = NoReplayClass()
         registry.register(method)

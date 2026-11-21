@@ -11,7 +11,7 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-/** The handler side's bookkeeping of subscriptions (P4c), without a hub. */
+/** The handler side's bookkeeping of subscriptions, without a hub. */
 class SubscriptionRegistryTest {
     private class Recording : SubscriptionSink {
         val parts = mutableListOf<Pair<Long, String>>()

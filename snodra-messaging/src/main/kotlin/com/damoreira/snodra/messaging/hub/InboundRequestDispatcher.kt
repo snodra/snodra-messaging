@@ -32,10 +32,10 @@ import org.springframework.security.core.context.SecurityContextHolder
  * Threads the handler starts itself do not inherit it; such code should read [MessageContext] instead. The request's
  * correlation id travels the same way ([CorrelationContext]), so messages sent while handling carry it.
  *
- * [dispatchStream] does the same for a streaming request (`mode = STREAMING`, P4b): the handler's flow is collected and
+ * [dispatchStream] does the same for a streaming request (`mode = STREAMING`): the handler's flow is collected and
  * each element handed to the connection as a part; the outcome is null or the error that ends the stream.
  *
- * [dispatchSubscription] admits a subscription request (`mode = SUBSCRIPTION`, P4c); the initial result of a subscription
+ * [dispatchSubscription] admits a subscription request (`mode = SUBSCRIPTION`); the initial result of a subscription
  * is an ordinary unary request (its id ends in `#0`) answered by [dispatch].
  */
 class InboundRequestDispatcher(
@@ -50,7 +50,7 @@ class InboundRequestDispatcher(
             is Caller.Rejected -> caller.failure
             is Caller.Resolved -> caller.run(req) { payload, ctx, identity ->
                 when (req.kind) {
-                    // `<id>#0` is the initial request of a subscription (P4c): the hub's id scheme, the only marker it leaves.
+                    // `<id>#0` is the initial request of a subscription: the hub's id scheme, the only marker it leaves.
                     RequestKind.QUERY -> invoker.invokeQuery(req.type, payload, ctx, identity, subscriptionInitial = req.id.endsWith("#0"))
                     RequestKind.COMMAND -> invoker.invokeCommand(req.type, payload, ctx, identity)
                     else -> InvocationResult.Failure(ErrorCode.INVALID_REQUEST, "unsupported request kind ${req.kind}")
@@ -80,7 +80,7 @@ class InboundRequestDispatcher(
     }
 
     /**
-     * Admits a subscription request (`mode = SUBSCRIPTION`, P4c, see [SubscriptionInbound]): the forwarded token is
+     * Admits a subscription request (`mode = SUBSCRIPTION`, see [SubscriptionInbound]): the forwarded token is
      * validated and the handler's pre-checks run as for a unary request; the decoded query goes to [register], whose
      * error (the instance's subscription limit) or null is the result. Nothing is invoked: the initial result is answered
      * by the separate `<id>#0` request.

@@ -13,7 +13,7 @@ import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 
 /**
- * The RabbitMQ Streams [com.damoreira.snodra.messaging.eventstore.EventStore] (ADR 0027) from `snodra.messaging.rabbitmq.*`
+ * The RabbitMQ Streams [com.damoreira.snodra.messaging.eventstore.EventStore] from `snodra.messaging.rabbitmq.*`
  * ([RabbitProperties]), unless the application has an event store of its own, or `snodra.messaging.event-store` names another
  * one (needed when two event-store add-ons are on the classpath). It connects lazily (the publisher on the first publish, the
  * consumers per subscription); with the management API configured it asks it once at startup ([RabbitEventStore.open]).

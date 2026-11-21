@@ -52,7 +52,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 /**
- * The rotation of a client certificate (P5c, ADR 0020) against in-process hubs: the renewed files are noticed on the check tick, and the
+ * The rotation of a client certificate against in-process hubs: the renewed files are noticed on the check tick, and the
  * hub connections roll over to them one hub at a time (told first, drained, closed gracefully, reconnected), without failing a request.
  */
 class HubCertificateRotationTest {

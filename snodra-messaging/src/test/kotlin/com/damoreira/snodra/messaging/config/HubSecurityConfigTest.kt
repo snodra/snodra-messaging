@@ -36,7 +36,7 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-/** P5a client configuration: `hub.token`, `hub.token-file`, `hub.tls.*`, and that the token never leaks. */
+/** Client configuration: `hub.token`, `hub.token-file`, `hub.tls.*`, and that the token never leaks. */
 class HubSecurityConfigTest {
     @Configuration(proxyBeanMethods = false)
     @EnableConfigurationProperties(SnodraMessagingProperties::class)

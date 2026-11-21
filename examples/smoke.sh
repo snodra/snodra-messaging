@@ -57,7 +57,7 @@ B=${B:-http://localhost:8092}
 
 fail() { echo "SMOKE FAILED: $*" >&2; exit 1; }
 
-# F3 (P1): flow control. The steps recreate service-b and service-c with compose.flow-demo.yaml (one
+# F3: flow control. The steps recreate service-b and service-c with compose.flow-demo.yaml (one
 # permit each, a 200 ms CountGreetings), so parallel calls queue in the hub and come back as latency, not timeouts
 # or 503s, and revert them to the default concurrency afterwards (also when a step fails). Needs the docker CLI.
 # SKIP_FLOW=1 skips these steps; ONLY_FLOW=1 runs only them. Timings in ms need perl (Time::HiRes).
@@ -216,7 +216,7 @@ flow_steps() {
   flow_demo_off
 }
 
-# F1 (P0): a frozen handler is evicted after the hub's 10 s heartbeat timeout, so a call to it fails in ~10 s
+# F1: a frozen handler is evicted after the hub's 10 s heartbeat timeout, so a call to it fails in ~10 s
 # instead of the 30 s it took before (and instead of burning a 5 s TIMEOUT: compose.local.yaml gives
 # examples.CountGreetings a 20 s per-type override). SKIP_PAUSE=1 skips this step; ONLY_PAUSE=1 runs only this step.
 pause_step() {
@@ -250,7 +250,7 @@ pause_step() {
   echo "   service-b answers again after ${i}s"
 }
 
-# P3 (ADR 0016): every example instance connects to both hubs. JSON is read with jq, else python3 (field order and
+# every example instance connects to both hubs. JSON is read with jq, else python3 (field order and
 # whitespace do not matter); SKIP_HA=1 skips these steps, ONLY_HA=1 runs only them.
 if command -v jq >/dev/null; then
   hub_id_of() { jq -r '.hubId // empty' 2>/dev/null || true; }
@@ -634,7 +634,7 @@ ha_steps() {
   echo "   every example instance is back on $h2 (and reports it) $(( $(now_ms) - t0 )) ms after docker start"
 }
 
-# P4a (ADR 0017): examples.Inventory is a shared query type owned by service-b (Kotlin) and service-c (Rust). A
+# examples.Inventory is a shared query type owned by service-b (Kotlin) and service-c (Rust). A
 # scatter-gather from service-a asks both; a point query goes to one instance of either. Needs jq or python3;
 # SKIP_SCATTER=1 skips these steps, ONLY_SCATTER=1 runs only them.
 scatter_steps() {
@@ -675,7 +675,7 @@ scatter_steps() {
   done
 }
 
-# P4b (ADR 0017): examples.Rows is a shared streaming query type owned by service-b (Kotlin) and service-c (Rust); a
+# examples.Rows is a shared streaming query type owned by service-b (Kotlin) and service-c (Rust); a
 # stream from service-a goes to one instance of either, paced by credits. Step 19 streams 1000 rows with a window of
 # 8 credits (so the handler is held back and refilled many times) until both owners streamed once; 19b cancels a stream
 # from the collector's side (take=50) and expects both hubs' in-flight counts back at 0; 19c makes the handler fail on
@@ -727,7 +727,7 @@ stream_steps() {
   echo "   $code $body"
 }
 
-# P4c (ADR 0017): examples.WatchCounter is a shared subscription query type served by service-b (Kotlin) and service-c
+# examples.WatchCounter is a shared subscription query type served by service-b (Kotlin) and service-c
 # (Rust), each with an in-memory counter per name. Step 20 opens `GET /subscribe/counter?updates=4` in the background
 # (service-a subscribes, collects the initial result and four updates, cancels), waits until both owners hold the
 # subscription, then increments the counter twice through service-b (`POST $B/counters/<name>/increment`) and twice
@@ -844,7 +844,7 @@ subscribe_steps() {
   echo "   $body"
 }
 
-# S1 (sagas, ADR 0021): service-b's GreetingDeliverySaga gets every delivered greeting printed by the fake printer
+# S1 (sagas): service-b's GreetingDeliverySaga gets every delivered greeting printed by the fake printer
 # (the sandbox's `fake-printer`, localhost:8093), which answers by the greeting name's prefix. Each step greets with a name of its
 # kind through service-a, then reads `GET $B/postcards/<id>` (service-b's projection of PostcardPrinted/PostcardFailed,
 # 404 while the postcard is in flight) until it is printed or failed. Step 24: webhook-* (the printer posts a signed
@@ -920,7 +920,7 @@ postcard_steps() {
   done
 }
 
-# S2 (Rust sagas, ADR 0021): service-c's banner saga (examples.Banner) gets every shouted text printed as a banner by the
+# S2 (Rust sagas): service-c's banner saga (examples.Banner) gets every shouted text printed as a banner by the
 # same fake printer, which answers service-c where each job asks it to (its own webhook and printer.banner.events, never
 # service-b). Each step shouts a text of its kind through service-a (`POST $A/shouts`, the command examples.Shout to
 # service-c, whose TextShouted starts the saga) and reads `GET $C/banners/banner-<text>` (service-c's projection of
@@ -993,7 +993,7 @@ banner_steps() {
   done
 }
 
-# P6a (ADR 0022): service-b (Kotlin) and service-c (Rust) each run a named event processor, `audit` (consumer group
+# service-b (Kotlin) and service-c (Rust) each run a named event processor, `audit` (consumer group
 # `<service>.audit`, markers `processor:audit:<eventId>`), next to their `default` one. It handles an audit note published
 # under a key (`POST <service>/audit/notes {"key","text"}`, service-b's AuditNote and service-c's ShoutAudit) and fails
 # on demand: while `POST <service>/audit/failing?on=true` is on, a note whose text starts with `poison` fails. The example
@@ -1217,7 +1217,7 @@ audit_steps() {
   audit_off
 }
 
-# P6b (ADR 0023): the hub as control plane for event processors, through its HTTP API
+# the hub as control plane for event processors, through its HTTP API
 # ($HUB/api/v1/services/<service>/processors/audit/...) with the dashboard write token: scripts/dev-hub-pki.sh
 # writes it to <secrets>/hub-control/dashboard-write.token and every sandbox mode mounts it into both hubs
 # (SNODRA_SERVER_DASHBOARD_WRITE_TOKEN_FILE). For the `audit` processor of service-b (Kotlin) and of service-c (Rust):
@@ -1236,7 +1236,7 @@ audit_steps() {
 # timestamp of the saga's start record (examples.GreetingDelivered / examples.TextShouted under the run's key, read from the
 # hub's event browser, so the host clock plays no part) and resumed: the replay runs (ok, replay) and ends, and 10 s later
 # the printer has still delivered the job once. That is the end-to-end outcome only: it is double-protected, since the replay
-# skips the sagas (ADR 0023) and the saga stage's markers (`saga:<type>:<eventId>`, which carry no position and which a reset
+# skips the sagas and the saga stage's markers (`saga:<type>:<eventId>`, which carry no position and which a reset
 # does not delete) would make a saga skip the replayed event anyway; the library tests check the skip itself.
 # SKIP_CONTROL=1 skips these steps, ONLY_CONTROL=1 runs only them.
 
@@ -1470,7 +1470,7 @@ control_steps() {
   control_off
 }
 
-# P7 (ADR 0025, ADR 0027): the hubs' event browser, `snodra-event-browser`, a separate binary that reads snodra.events
+# the hubs' event browser, `snodra-event-browser`, a separate binary that reads snodra.events
 # from Kafka, read-only (compose.yaml starts it next to both hubs; compose.secure.yaml, and with it the jwt
 # and mtls overlays, turns payloads on). The events are audit notes the smoke publishes through service-b (`POST
 # $B/audit/notes`: examples.AuditNote under the note's key, with a correlation id of its own that the library makes up and
@@ -1672,16 +1672,16 @@ browser_steps() {
   echo "   $kafka (kafka-consumer-groups.sh --list): $(printf '%s\n' "$listed" | grep -c .) groups, none snodra-server*"
 }
 
-# P9 (ADR 0026): metrics and dashboards. Both hubs and the examples export their metrics over OTLP to the sandbox's
+# metrics and dashboards. Both hubs and the examples export their metrics over OTLP to the sandbox's
 # otel-lgtm every 5 s (compose.local.yaml); its Grafana (GRAFANA, default http://localhost:3000, or the port in
 # SNODRA_GRAFANA_PORT) provisions the snodra dashboards from grafana/, and Prometheus is read through Grafana's
 # proxy of the bundled data source (PROM; otel-lgtm does not publish Prometheus' port). These steps run last, once the
 # others made traffic. 29: Grafana lists the three dashboards, Overview, Hub and Messaging, in the folder Snodra. 29b: the
-# hub series of P9 come from both hubs (job snodra-server, instance = the hub id each hub's topology gives). 29c: service-b
+# hub series come from both hubs (job snodra-server, instance = the hub id each hub's topology gives). 29c: service-b
 # (Kotlin) and service-c (Rust) export the library series under the same names with the same label names (the
 # hub-client histogram from the sandbox's senders, service-a and service-c, whose GET /greetings/{name}/count sends
 # examples.CountGreetings through the hub for it), and their instance label is the instance id the hubs list. 29d: no series has a label hub_id, and only the hub's streams and
-# subscriptions open have instance_id (the handler instance, ADR 0026 hub ruling 3). 29e: every panel query of the three
+# subscriptions open have instance_id (the handler instance). 29e: every panel query of the three
 # dashboards, as Grafana serves them, returns data with the template variables at All (.*), $__rate_interval at 5m and
 # $hub_seen (Hubs seen within) and $instance_seen (Instances seen within) at their default 3m,
 # except the panels in OBS_MAY_BE_EMPTY, which the sandbox may not drive in this mode (each with its reason), and those
@@ -1781,7 +1781,7 @@ obs_steps() {
            snodra_server_processor_processed; do
     await_label_values "count by (instance) ($m{job=\"snodra-server\"})" instance "$ids" 60 >/dev/null
   done
-  # The subscription lag comes from the event browser, a process of its own (ADR 0027): it lists the examples'
+  # The subscription lag comes from the event browser, a process of its own: it lists the examples'
   # subscriptions, live instances or not.
   await_label_values 'max by (subscription) (snodra_event_browser_subscription_lag)' subscription \
     "service-b.default service-b.audit service-c.default service-c.audit" 60 >/dev/null
@@ -1848,7 +1848,7 @@ obs_steps() {
       for line in "${OBS_MAY_BE_EMPTY[@]}"; do
         [ "${line%%|*}" = "$uid" ] && [ "$(printf '%s' "$line" | cut -d'|' -f2)" = "$title" ] && reason=${line##*|}
       done
-      # $hub_seen and $instance_seen are ranges, not label matches: their default, 3m (ADR 0026 Dashboards rulings 9 and 10).
+      # $hub_seen and $instance_seen are ranges, not label matches: their default, 3m.
       q=$(printf '%s' "$expr" | sed -e 's/\$__rate_interval/5m/g' -e 's/\$hub_seen/3m/g' -e 's/\$instance_seen/3m/g' -e 's/\$[A-Za-z_][A-Za-z0-9_]*/.*/g')
       found=$(prom_query "$q" | prom_rows __name__ | grep -c . || true)
       if [ "$found" -gt 0 ]; then continue; fi
@@ -1876,7 +1876,7 @@ obs_steps() {
   done
 }
 
-# P5a (ADR 0018), only with SECURE=1 against the secure sandbox (compose.secure.yaml). Step 21: a service
+# Only with SECURE=1 against the secure sandbox (compose.secure.yaml). Step 21: a service
 # with a token the ACL does not know, and one with a valid token that grants only another service name, are refused by
 # both hubs and logged by the client as a registration rejection (ERROR once per hub), and never listed on /api/v1/topology; a
 # request outside service-a's `send` patterns answers 403 AccessDeniedException. Step 21b: the dashboard API wants the
@@ -1995,7 +1995,7 @@ secure_steps() {
   trap - EXIT
 }
 
-# P5b (ADR 0019), only with SECURE=1 JWT=1 against the JWT sandbox (compose.jwt.yaml): service-b (Kotlin) and
+# Only with SECURE=1 JWT=1 against the JWT sandbox (compose.jwt.yaml): service-b (Kotlin) and
 # service-c (Rust) register with an OAuth2 access token (a dev identity provider, tokens that live 30 s), service-a with its
 # static token. Step 22: both hubs list service-b and service-c with authKind jwt and an expiresAt, and service-a with
 # authKind token. Step 22b: within ~40 s the expiresAt of both services advances on both hubs while the instance, and the
@@ -2101,7 +2101,7 @@ jwt_steps() {
   echo "   neither hub logged 'credentials expired' since $jwt_started"
 }
 
-# P5c (ADR 0020), only with SECURE=1 MTLS=1 against the mTLS sandbox (compose.mtls.yaml): service-a (Kotlin) and
+# Only with SECURE=1 MTLS=1 against the mTLS sandbox (compose.mtls.yaml): service-a (Kotlin) and
 # service-c (Rust) register with a client certificate (a dev client CA, exactly one URI SAN snodra://service/<name>), service-b
 # with its static token (the hubs run with SNODRA_SERVER_TLS_CLIENT_AUTH=optional). Step 23: both hubs list service-a and
 # service-c with authKind certificate, the fingerprint of the certificate in the service's mounted directory and an

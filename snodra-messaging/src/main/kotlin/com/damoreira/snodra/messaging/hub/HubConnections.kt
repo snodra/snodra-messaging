@@ -32,7 +32,7 @@ import java.util.concurrent.ThreadLocalRandom
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * This instance's connections to every hub (multi-hub HA, ADR 0016): one [HubConnection] (one `Connect` stream, with its
+ * This instance's connections to every hub (multi-hub HA): one [HubConnection] (one `Connect` stream, with its
  * own handshake, heartbeat and reconnect backoff) per hub target, all sending the identical
  * registration. With a single target it behaves like that one connection.
  *
@@ -59,10 +59,10 @@ import java.util.concurrent.atomic.AtomicInteger
  * - **Scatter-gather**: one gather goes to one live hub, round-robin like an unkeyed request. A gather not yet written
  *   fails over like a request; once written, a broken stream fails it with `HubConnectionLostException` (the parts
  *   already received are not asked again).
- * - **Streaming** (P4b): a streaming query goes to one live hub, chosen and failed over exactly like a gather. Its
+ * - **Streaming**: a streaming query goes to one live hub, chosen and failed over exactly like a gather. Its
  *   `timeout_ms` is the idle timeout and is sent whole, never reduced by a hub wait or a failover (the deadline of the
  *   call bounds only those); a collector exception (`StreamCollectorException`) is never a reason to fail over.
- * - **Subscriptions** (P4c): a subscription goes to one live hub, chosen and failed over like a gather. `timeout_ms`
+ * - **Subscriptions**: a subscription goes to one live hub, chosen and failed over like a gather. `timeout_ms`
  *   bounds the initial request (as for a unary request: what is left of the call's deadline after a hub wait is sent). Instances
  *   serve subscriptions from every hub they are connected to through one shared [SubscriptionRegistry].
  * - **Permits**: a stream announces `ceil(maxConcurrentHandlers / N)` initial permits, N = 1 (itself) + the other kept
@@ -73,7 +73,7 @@ import java.util.concurrent.atomic.AtomicInteger
  *   survivors of an outage (or of a hub that failed its first attempt) serve at full capacity, flaps never add up, a
  *   hub that joins or returns gets `ceil(max / N)` on its new stream, and nothing is ever revoked (rule shared with
  *   the Rust library). One [HandlerGate] keeps the local bound at [maxConcurrentHandlers] over all hubs.
- * - **Client certificate rotation** (P5c, ADR 0020): with [HubSettings.clientCertificate], every [certificateCheckInterval] the files are
+ * - **Client certificate rotation**: with [HubSettings.clientCertificate], every [certificateCheckInterval] the files are
  *   read ([HubClientCertificate.refresh]); when a renewed, valid pair was adopted, the instance first waits a random delay (uniform in
  *   [0, min([rolloverMaxDelay], 10 % of what is left of the pair its streams present)], once per pair, so replicas that see the same renewed
  *   file do not all deregister at once), reads the files again, and rolls the connections whose stream presents an older pair over
@@ -86,7 +86,7 @@ import java.util.concurrent.atomic.AtomicInteger
  *   complete stops the rollover for that pair (one ERROR); the remaining hubs keep the old pair until the files change again. An unexpected
  *   exception in a check is logged once and the next tick checks again.
  * - **Status**: every [statusInterval], and whenever the live set changes, each live hub gets an `InstanceStatus` with the
- *   ids of the live hubs, the handlers in flight and the event processors ([processors], P6a).
+ *   ids of the live hubs, the handlers in flight and the event processors ([processors]).
  */
 class HubConnections(
     private val targets: HubTargets,
@@ -105,20 +105,20 @@ class HubConnections(
     private val resolver: suspend (String) -> List<InetAddress> = { host ->
         withContext(Dispatchers.IO) { InetAddress.getAllByName(host).toList() }
     },
-    /** Serves `mode = STREAMING` requests (P4b); see [HubConnection]. */
+    /** Serves `mode = STREAMING` requests; see [HubConnection]. */
     private val inboundStream: StreamingInbound = NO_STREAMING_HANDLERS,
-    /** The subscriptions this instance serves over every hub (P4c); see [HubConnection]. */
+    /** The subscriptions this instance serves over every hub; see [HubConnection]. */
     private val subscriptions: SubscriptionRegistry = SubscriptionRegistry(),
-    /** Admits `mode = SUBSCRIPTION` requests (P4c); see [HubConnection]. */
+    /** Admits `mode = SUBSCRIPTION` requests; see [HubConnection]. */
     private val inboundSubscription: SubscriptionInbound = NO_SUBSCRIPTION_HANDLERS,
-    /** How often the client certificate files are read for a renewed pair (P5c): the hub's heartbeat period, the tick of the other file checks. */
+    /** How often the client certificate files are read for a renewed pair: the hub's heartbeat period, the tick of the other file checks. */
     private val certificateCheckInterval: Duration = HubProtocol.CERTIFICATE_CHECK_INTERVAL,
-    /** The longest a rollover waits, per hub, for the work in flight on the old stream before it closes it anyway (P5c). */
+    /** The longest a rollover waits, per hub, for the work in flight on the old stream before it closes it anyway. */
     private val rolloverDrainTimeout: Duration = HubProtocol.ROLLOVER_DRAIN_TIMEOUT,
-    /** The longest a rollover waits, per hub, for the new stream to register before it leaves the other hubs on the old pair until the next tick (P5c). */
+    /** The longest a rollover waits, per hub, for the new stream to register before it leaves the other hubs on the old pair until the next tick. */
     private val rolloverReconnectTimeout: Duration = HubProtocol.ROLLOVER_RECONNECT_TIMEOUT,
     /**
-     * The longest this instance waits after it first sees a renewed pair before it starts rolling the hubs onto it (P5c): the wait is uniform
+     * The longest this instance waits after it first sees a renewed pair before it starts rolling the hubs onto it: the wait is uniform
      * in [0, min([rolloverMaxDelay], 10 % of the remaining validity of the pair the streams present)], so replicas that see the same renewed
      * file within one tick do not all deregister at once. Zero for no wait (tests).
      */
@@ -126,11 +126,11 @@ class HubConnections(
     /** The random source of the wait before a rollover: a value in [0, 1). Replaced in tests. */
     private val rolloverRandom: () -> Double = { ThreadLocalRandom.current().nextDouble() },
     /**
-     * The status of this instance's event processors (P6a, ADR 0022), read once per report and sent to every live hub. Must
+     * The status of this instance's event processors, read once per report and sent to every live hub. Must
      * return at once from in-memory state; one that throws sends the report without processors.
      */
     private val processors: () -> List<ProcessorStatus> = { emptyList() },
-    /** Serves the `ControlRequest`s of every hub (P6b, ADR 0023); see [HubConnection]. */
+    /** Serves the `ControlRequest`s of every hub; see [HubConnection]. */
     private val control: ControlInbound = NO_PROCESSOR_CONTROL,
     /** Stamps [HubRejection.at] (display only: refusals are ordered by when they were recorded, whatever the clock does). */
     private val clock: Clock = Clock.systemUTC(),
@@ -197,7 +197,7 @@ class HubConnections(
     fun liveHubIds(): List<String> = live.value.mapNotNull { it.hubId }
 
     /**
-     * How this instance authenticates to the hubs (P5a/P5b) and the health of its credential: the kind, a JWT's expiry, the last
+     * How this instance authenticates to the hubs and the health of its credential: the kind, a JWT's expiry, the last
      * token fetch error, fetch counts by result and refreshes sent. Read-only and cheap; safe to call from a health indicator.
      */
     fun authStatus(): HubAuthStatus {
@@ -636,7 +636,7 @@ class HubConnections(
     private var abandonedGeneration = -1L
 
     /**
-     * The check tick of a client certificate (P5c): read the files, then roll over the hubs whose stream presents an older pair, one at a
+     * The check tick of a client certificate: read the files, then roll over the hubs whose stream presents an older pair, one at a
      * time in target order. A hub with no live stream is skipped (its next attempt reads the files anyway). A hub with another live hub leaves
      * routing at once; the only hub leaves it after its work in flight finished (a sender then waits for the new stream, within its deadline).
      * A roll that does not complete (the new stream does not register in time) ends the rollover for that pair with one ERROR: the other hubs
@@ -736,7 +736,7 @@ data class HubRejection(val hub: String, val code: String, val description: Stri
 /** The order refusals were recorded in, over every connection of the process: what "newer" means for [HubConnections.latestRejection]. */
 internal val REJECTION_SEQ = java.util.concurrent.atomic.AtomicLong()
 
-/** The credential a service presents to the hub: nothing, a static token (P5a), an OAuth2 access token (P5b) or a client certificate (P5c). */
+/** The credential a service presents to the hub: nothing, a static token, an OAuth2 access token or a client certificate. */
 enum class HubAuthKind { NONE, TOKEN, JWT, CERTIFICATE }
 
 /**
@@ -744,7 +744,7 @@ enum class HubAuthKind { NONE, TOKEN, JWT, CERTIFICATE }
  * and while a hub refused it until it is renewed), the
  * [lastTokenError] (null when the last fetch worked), [tokenFetches] by result (`ok`, `http_error`, `oauth_error`, `io_error`,
  * `bad_response`: the `result` label of `snodra_hub_client_token_fetches_total`) and [credentialsRefreshesSent]
- * (`snodra_hub_client_credentials_refreshes_sent_total`). For a client certificate (P5c): the [certificateService] it names, the [certificateFingerprint] (first 8 hex characters of
+ * (`snodra_hub_client_credentials_refreshes_sent_total`). For a client certificate: the [certificateService] it names, the [certificateFingerprint] (first 8 hex characters of
  * the leaf's SHA-256, what the hub shows too), its end ([certificateExpiresAt], `notAfter`) and the pairs adopted since start
  * ([certificateRotations], `snodra_hub_client_certificate_rotations_total`). Holds no token and no key.
  */

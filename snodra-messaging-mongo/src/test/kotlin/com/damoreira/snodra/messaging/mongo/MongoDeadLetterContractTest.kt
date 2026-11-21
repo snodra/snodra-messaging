@@ -33,13 +33,13 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
- * The storage contract of `dead_letters` (ADR 0022): the documents this library writes are exactly the hand-written
- * fixtures in `src/test/resources/dead_letters_contract` (written from the ADR's table, and byte for byte the Rust library's
+ * The storage contract of `dead_letters`: the documents this library writes are exactly the hand-written
+ * fixtures in `src/test/resources/dead_letters_contract` (byte for byte the Rust library's
  * `tests/fixtures/dead_letters_contract`), types included (Int32 `partition`, Int64 `offset`, BinData, dates), with no
- * `_class`, no null, a blank `id` or `type` header absent as `eventId` or `eventType`, and `replay` (P6b: parked while the
+ * `_class`, no null, a blank `id` or `type` header absent as `eventId` or `eventType`, and `replay` (parked while the
  * processor replayed the record) written only when true: the core's [DeadLetterFactory] builds the letter, this add-on
  * stores it. Every fixture document, as the other library writes it, reads back through the store and the core's admin
- * API; the indexes have the ADR's names.
+ * API; the indexes have the documented names.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class MongoDeadLetterContractTest {
@@ -186,7 +186,7 @@ class MongoDeadLetterContractTest {
         assertEquals(6L, admin.count(null))
     }
 
-    @Test fun `the indexes have the ADR's names, keys and TTL`() = runBlocking<Unit> {
+    @Test fun `the indexes have the documented names, keys and TTL`() = runBlocking<Unit> {
         MongoIndexes.ensure(mongo, MongoStoreSettings())
         MongoIndexes.ensure(mongo, MongoStoreSettings()) // idempotent
         val indexes = mongo.db.getCollection(MongoDeadLetterStore.COLLECTION).listIndexes().associateBy { it.getString("name") }

@@ -15,7 +15,7 @@ import kotlin.test.assertTrue
 data class RsThing(val id: String) : Event
 
 /**
- * External source names that would collide with a marker family (ADR 0021 `saga:`, `ingress:`, `failed:`; ADR 0022
+ * External source names that would collide with a marker family (`saga:`, `ingress:`, `failed:`,
  * `processor:`) are refused: a partner source at startup, a webhook source at the call.
  */
 class ReservedSourceNamesTest {

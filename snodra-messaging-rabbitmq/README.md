@@ -1,6 +1,6 @@
 # snodra-messaging-rabbitmq
 
-The RabbitMQ Streams event store (ADR 0027) of `snodra-messaging`: publish, competing subscriptions, replay, lag and a
+The RabbitMQ Streams event store of `snodra-messaging`: publish, competing subscriptions, replay, lag and a
 dead-letter stream on **RabbitMQ 3.13 or later with the stream plugin** (`rabbitmq_stream`), through the stream protocol
 (port 5552, 5551 with TLS) and the RabbitMQ Stream Java client (`com.rabbitmq:stream-client`). It reads and writes the same
 streams as the Rust crate `snodra-messaging-rabbitmq`: the layout on the wire below is shared, rule for rule.

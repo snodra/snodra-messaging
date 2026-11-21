@@ -8,7 +8,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 
 /**
- * Serves one streaming request this instance was chosen for (`mode = STREAMING`, P4b): writes every part through
+ * Serves one streaming request this instance was chosen for (`mode = STREAMING`): writes every part through
  * `emit` (which suspends until the hub granted credit for it, so a flow that produces faster than the sender consumes is
  * held back inside its `emit`) and returns null when the handler's flow completed, or the error that ends the stream
  * (`ReplyEnd.error`). It is cancelled when the hub sends `Cancel` for the request, or its hub stream closes.

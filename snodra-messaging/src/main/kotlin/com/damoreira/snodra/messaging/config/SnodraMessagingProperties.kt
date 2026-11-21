@@ -24,18 +24,18 @@ data class SnodraMessagingProperties(
     /** Prefix of the wire type name of message classes without `@MessageType`. Required. */
     val typePrefix: String,
     /**
-     * This instance's id: its hub `Register.instance_id` and the `service.instance.id` of its metrics (ADR 0026). A fresh UUID
+     * This instance's id: its hub `Register.instance_id` and the `service.instance.id` of its metrics. A fresh UUID
      * per start unless set (a pod name, for example); unique among the instances of the service.
      */
     val instanceId: String = UUID.randomUUID().toString(),
     val hub: Hub = Hub(),
     /**
      * The event store's name (`kafka`, `rabbitmq-streams`, `memory`): which one runs when two event-store add-ons are on the
-     * classpath (ADR 0027), and the only way to run the in-memory one (`memory`, never chosen otherwise). Unset: the only one
+     * classpath, and the only way to run the in-memory one (`memory`, never chosen otherwise). Unset: the only one
      * there is.
      */
     val eventStore: String? = null,
-    /** The message store (ADR 0028): which one runs, and its schema. */
+    /** The message store: which one runs, and its schema. */
     val store: Store = Store(),
     /** The in-memory event store (`snodra.messaging.event-store=memory`). */
     val memory: Memory = Memory(),
@@ -51,7 +51,7 @@ data class SnodraMessagingProperties(
         /** Connect to the hub and expose the hub-backed `CommandBus`/`QueryBus` (addition beyond the spec table). */
         val enabled: Boolean = true,
         /**
-         * The hub or hubs (ADR 0016): one gRPC target (`host:port`, optional `static://` prefix), a comma-separated list
+         * The hub or hubs: one gRPC target (`host:port`, optional `static://` prefix), a comma-separated list
          * of them (one connection per hub), or one `dns:///name:port` re-resolved every 30 s. Parsed by `HubTargets`.
          */
         val address: String = "static://snodra-server:7000",
@@ -94,7 +94,7 @@ data class SnodraMessagingProperties(
          */
         val maxSubscriptions: Int = 1024,
         /**
-         * Static token sent in `Register.credentials.token` of every hub stream (P5a, ADR 0018): the hub in mode `enforce`
+         * Static token sent in `Register.credentials.token` of every hub stream: the hub in mode `enforce`
          * (or `permissive`) looks it up in its ACL. Optional; an empty value is the same as none. Never logged, and
          * redacted in [toString] and in the actuator's `configprops` and `env` output. Environment variable
          * `SNODRA_MESSAGING_HUB_TOKEN` (relaxed binding), or `SNODRA_SERVER_TOKEN` when this property is unset.
@@ -107,10 +107,10 @@ data class SnodraMessagingProperties(
          * `SNODRA_MESSAGING_HUB_TOKEN_FILE`, or `SNODRA_SERVER_TOKEN_FILE` when this property is unset.
          */
         val tokenFile: Path? = null,
-        /** TLS towards the hub (P5a): off by default (plain text). */
+        /** TLS towards the hub: off by default (plain text). */
         val tls: Tls = Tls(),
         /**
-         * OAuth2 client-credentials authentication (P5b, ADR 0019): the service gets an access token from [OAuth2.tokenUri] and
+         * OAuth2 client-credentials authentication: the service gets an access token from [OAuth2.tokenUri] and
          * registers with it as a `jwt` credential, renewing it before it expires. Off unless a token URI is set (here or as
          * `SNODRA_SERVER_OAUTH2_TOKEN_URI`); cannot be combined with [token] or [tokenFile].
          */
@@ -151,7 +151,7 @@ data class SnodraMessagingProperties(
         }
     }
 
-    /** `hub.tls.*` (P5a, ADR 0018); the client certificate (mTLS) is P5c, ADR 0020. */
+    /** `hub.tls.*`; the client certificate (mTLS). */
     data class Tls(
         /** Talk TLS to the hub (every address form, `dns:///` too). Off: plain text, unless a client certificate is set (it implies TLS). */
         val enabled: Boolean = false,
@@ -160,7 +160,7 @@ data class SnodraMessagingProperties(
         /** Name to verify the hub's certificate against instead of the address's host (for example an IP or a service alias). */
         val serverName: String? = null,
         /**
-         * PEM file with the client certificate chain (leaf first) presented in the TLS handshake (mTLS, P5c, ADR 0020). The leaf must have
+         * PEM file with the client certificate chain (leaf first) presented in the TLS handshake (mTLS). The leaf must have
          * exactly one URI SAN `snodra://service/<name>` with `<name>` equal to `snodra.messaging.service-name`. Needs [clientKeyFile]; implies TLS;
          * cannot be combined with a static token or OAuth2. Checked at startup, read again on every reconnect and heartbeat tick: a renewed pair
          * is adopted without a restart (the hub connections roll over to it one hub at a time). Environment variable
@@ -182,7 +182,7 @@ data class SnodraMessagingProperties(
     }
 
     /**
-     * `hub.oauth2.*` (P5b, ADR 0019). Every setting also reads the plain environment variable `SNODRA_SERVER_OAUTH2_<NAME>` (`TOKEN_URI`,
+     * `hub.oauth2.*`. Every setting also reads the plain environment variable `SNODRA_SERVER_OAUTH2_<NAME>` (`TOKEN_URI`,
      * `CLIENT_ID`, `CLIENT_SECRET`, `CLIENT_SECRET_FILE`, `SCOPE`, and `CA` for [caFile]) when its property is unset; relaxed binding
      * gives `SNODRA_MESSAGING_HUB_OAUTH2_*` as well.
      */
@@ -261,13 +261,13 @@ data class SnodraMessagingProperties(
         }
     }
 
-    /** `events.*`: the service's events on the event store (ADR 0027), whichever add-on provides it. */
+    /** `events.*`: the service's events on the event store, whichever add-on provides it. */
     data class Events(
         /** The source events are published to and read from (a topic on Kafka). */
         val source: String = "snodra.events",
         /**
          * The prefix of every event processor's subscription name; unset: the service name. Every processor, `default` included,
-         * uses `<this prefix>.<name>` (ADR 0022): on Kafka the consumer group. Changing it on a running deployment starts the
+         * uses `<this prefix>.<name>`: on Kafka the consumer group. Changing it on a running deployment starts the
          * subscriptions from the earliest position.
          */
         val subscriptionPrefix: String? = null,
@@ -283,7 +283,7 @@ data class SnodraMessagingProperties(
         fun subscriptionPrefix(serviceName: String): String = subscriptionPrefix ?: serviceName
     }
 
-    /** `events.dead-letter.*` (P6a, ADR 0022): what an event processor does with a record it cannot handle. */
+    /** `events.dead-letter.*`: what an event processor does with a record it cannot handle. */
     data class DeadLetter(
         /**
          * `collection` (park in the message store's dead letters, the default), `event-store` (publish to the event store's

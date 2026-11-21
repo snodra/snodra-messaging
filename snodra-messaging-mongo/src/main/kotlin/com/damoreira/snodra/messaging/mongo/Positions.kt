@@ -1,7 +1,7 @@
 package com.damoreira.snodra.messaging.mongo
 
 /**
- * How segments and positions (the event store's opaque strings, ADR 0027) are stored: in the fields they always had
+ * How segments and positions (the event store's opaque strings) are stored: in the fields they always had
  * (`partition`, `offset`, and a replay range's `partition`, `from` and `until`), as an Int32 (a segment) or an Int64 (a position)
  * when the string is a canonical decimal number, as the library always wrote them for Kafka, else as the string itself.
  * Documents written before the event store became an add-on are read, found and deleted as before, without a migration.

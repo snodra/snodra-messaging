@@ -37,7 +37,7 @@ dependencies {
     implementation(libs.spring.security.oauth2.resource.server)
     implementation(libs.spring.security.oauth2.jose)
     compileOnly(libs.micrometer.tracing)
-    compileOnly("io.micrometer:micrometer-core") // optional: the messaging, saga and hub client meters (P9) exist only when a registry does
+    compileOnly("io.micrometer:micrometer-core") // optional: the messaging, saga and hub client meters exist only when a registry does
     compileOnly("org.springframework.boot:spring-boot-actuator") // optional: HubTokenSanitizingConfiguration masks the hub token in configprops/env
     compileOnly("jakarta.validation:jakarta.validation-api") // optional: violation messages go into HANDLER_ERROR details when present
 
@@ -54,13 +54,13 @@ dependencies {
     testImplementation(project(":snodra-messaging-test"))
     // The tests that need a real store run on MongoDB through the add-on (which depends on this module's main code).
     testImplementation(project(":snodra-messaging-mongo"))
-    // ... and on Kafka through the event-store add-on (the core has no event-store client of its own, ADR 0027).
+    // ... and on Kafka through the event-store add-on (the core has no event-store client of its own).
     testImplementation(project(":snodra-messaging-kafka"))
     testImplementation(libs.spring.boot.testcontainers)
     testImplementation(libs.testcontainers.kafka)
     testImplementation(libs.testcontainers.mongodb)
     testImplementation(libs.nimbus.jose.jwt)
-    testImplementation(libs.bouncycastle.pkix) // test certificates with a URI SAN and a short validity (mTLS, P5c)
+    testImplementation(libs.bouncycastle.pkix) // test certificates with a URI SAN and a short validity (mTLS)
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 

@@ -20,7 +20,7 @@ import java.time.Instant
 import java.util.Date
 
 /**
- * The `processor_control` collection (P6b, ADR 0023): one document per event processor, `_id` its name. Written field by
+ * The `processor_control` collection: one document per event processor, `_id` its name. Written field by
  * field, every field always present (null, `false` or `[]` when unset); a missing document or field reads as not paused, no
  * operation, no replay. Every write commits on its own, whatever transaction the caller has.
  */

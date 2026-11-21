@@ -26,7 +26,7 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
- * No event store (ADR 0027): commands and queries run without one; an event handler, a saga or a publisher fails the startup
+ * No event store: commands and queries run without one; an event handler, a saga or a publisher fails the startup
  * with a message naming what needs it and the add-on that provides one. Two event stores need `snodra.messaging.event-store`.
  */
 class EventStoreRequiredTest {

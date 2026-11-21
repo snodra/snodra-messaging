@@ -47,7 +47,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 /**
- * The conformance kit of the message store (ADR 0028): the behaviour every store add-on must have, whatever its database.
+ * The conformance kit of the message store: the behaviour every store add-on must have, whatever its database.
  * An add-on runs it by subclassing this class in its own tests and implementing [store]:
  *
  * ```kotlin

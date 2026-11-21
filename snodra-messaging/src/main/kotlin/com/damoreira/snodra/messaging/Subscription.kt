@@ -4,7 +4,7 @@ import kotlinx.coroutines.flow.Flow
 import java.time.Duration
 
 /**
- * How one subscription query is sent ([QueryBus.subscribe], P4c, ADR 0017). Every field is optional.
+ * How one subscription query is sent ([QueryBus.subscribe]). Every field is optional.
  *
  * @property timeout bounds the **initial result** only (queue wait at the hub plus the handler), sent as `timeout_ms`: same
  *   defaults as [SendOptions.timeout] (`snodra.messaging.hub.request-timeout`, else the hub decides; zero counts as

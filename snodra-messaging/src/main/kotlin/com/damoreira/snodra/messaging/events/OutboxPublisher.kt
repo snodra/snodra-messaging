@@ -19,7 +19,7 @@ import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
 /**
- * Relays the [outbox] entries to the event store ([events], ADR 0027) in creation order, on a single daemon thread: each entry
+ * Relays the [outbox] entries to the event store ([events]) in creation order, on a single daemon thread: each entry
  * becomes an [OutgoingEvent] of the service's events [source], with the entry's headers and then `type`, `id`, `timestamp`
  * (its creation) and `source` ([service]).
  *
@@ -36,7 +36,7 @@ import kotlin.concurrent.withLock
  *
  * Between polls it waits [pollInterval], or less when the outbox tells it entries were appended ([OutboxStore.onAppend]).
  *
- * Reports to [metrics] (P9) every send attempt. When the metrics want it ([MessagingMetrics.countsOutbox]) the relay thread
+ * Reports to [metrics] every send attempt. When the metrics want it ([MessagingMetrics.countsOutbox]) the relay thread
  * also samples the outbox ([samplePending]: the pending entries and the oldest of them, whichever instance holds it) at most
  * every [pendingSampleInterval], so the gauges never make the export thread touch the database.
  */

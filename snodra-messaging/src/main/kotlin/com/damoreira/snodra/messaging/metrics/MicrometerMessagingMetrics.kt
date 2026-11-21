@@ -14,7 +14,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * The messaging meters of P9 (ADR 0026) on a Micrometer [registry]. Prometheus shows them with `_` for `.`, the unit
+ * The messaging meters on a Micrometer [registry]. Prometheus shows them with `_` for `.`, the unit
  * appended and `_total` on counters (the series the dashboards query, identical to the Rust library's):
  *
  * - `snodra.outbox.published{outcome}` (counter, `ok | failed`, one per send attempt), and the gauges `snodra.outbox.pending`
