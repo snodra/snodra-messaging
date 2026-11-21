@@ -284,7 +284,7 @@ class InProcessHubTest {
         assertEquals("type test.Ping is owned by service svc-a", failure.status.description)
     }
 
-    // --- shared query types and scatter-gather (P4a) ---
+    // --- shared query types and scatter-gather ---
 
     private fun scatter(id: String, type: String, timeoutMs: Int = 0, maxResults: Int = 0) = ClientMessage.newBuilder().setRequest(
         Request.newBuilder().setId(id).setKind(RequestKind.QUERY).setType(type).setMode(RequestMode.SCATTER_GATHER)
@@ -393,7 +393,7 @@ class InProcessHubTest {
         assertEquals(ErrorCode.INVALID_REQUEST, sender.next().error.code)
     }
 
-    // --- streaming queries (P4b) ---
+    // --- streaming queries ---
 
     private fun stream(id: String, type: String, timeoutMs: Int = 0, credit: Int = 0, maxResults: Int = 0) = ClientMessage.newBuilder().setRequest(
         Request.newBuilder().setId(id).setKind(RequestKind.QUERY).setType(type).setMode(RequestMode.STREAMING)
@@ -637,7 +637,7 @@ class InProcessHubTest {
         assertEquals("sender disconnected", y.next().cancel.reason)
     }
 
-    // --- subscription queries (P4c) ---
+    // --- subscription queries ---
 
     private fun subscribe(id: String, type: String, timeoutMs: Int = 5_000, credit: Int = 0, maxResults: Int = 0) = ClientMessage.newBuilder().setRequest(
         Request.newBuilder().setId(id).setKind(RequestKind.QUERY).setType(type).setMode(RequestMode.SUBSCRIPTION)

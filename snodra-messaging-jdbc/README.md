@@ -1,6 +1,6 @@
 # snodra-messaging-jdbc: the SQL message store (PostgreSQL and MySQL)
 
-The message store add-on (ADR 0028) for services whose database is **PostgreSQL 13 or later** or **MySQL 8.0.17 or later
+The message store add-on for services whose database is **PostgreSQL 13 or later** or **MySQL 8.0.17 or later
 (InnoDB)**: the outbox, the processed-event markers, the dead letters, the processor control, the external calls and the sagas
 live in tables `snodra_*` of the service's own database, written through plain JDBC (Spring's `JdbcClient`, no JPA, no ORM) in
 the service's own transaction. One module, one dialect per database (`PostgresDialect`, `MySqlDialect`).
@@ -250,7 +250,7 @@ is the same on every message store, so the core's check (`checkOutboxPayload`) r
 
 `snodra_schema`: the schema versions applied (`version` PK, `applied_at` UTC).
 
-`snodra_outbox`: events waiting for the relay (ADR 0005).
+`snodra_outbox`: events waiting for the relay.
 
 | Column | PostgreSQL / MySQL | |
 |---|---|---|
@@ -273,7 +273,7 @@ Indexes: PostgreSQL `snodra_outbox_pending (created_at, seq) WHERE sent_at IS NU
 is a canonical decimal one). Indexes `snodra_processed_events_range (processor, source, segment, position_num)` (a reset deletes a
 range by value; partial `WHERE processor IS NOT NULL` on PostgreSQL), `snodra_processed_events_processed_at (processed_at)`.
 
-`snodra_dead_letters` (ADR 0022): `id` `VARCHAR(578)` PK (parked once); `processor` `VARCHAR(64)`, `source` `VARCHAR(255)`,
+`snodra_dead_letters`: `id` `VARCHAR(578)` PK (parked once); `processor` `VARCHAR(64)`, `source` `VARCHAR(255)`,
 `segment`, `position` `VARCHAR(128)`; `position_num` `BIGINT`; `event_key` text and `event_key_hash` `CHAR(64)`; `event_id`,
 `event_type` text; `headers` JSON; `payload` text; `payload_binary` `BYTEA`/`LONGBLOB`; `reason` `VARCHAR(32)` (`HANDLER_FAILED`,
 `SEQUENCED`, `INVALID`); `error_type`, `error_message` `TEXT` (cut to 16 KiB); `blocked_by` text; `attempts`; `parked_at`,
@@ -282,7 +282,7 @@ key's head: decimal positions by value first, then the others by their bytes, ti
 parked_at)`, `snodra_dead_letters_expire (expire_at)`. A letter past its `expire_at` is gone at once for every read (it no longer
 blocks its key), and the purge deletes it.
 
-`snodra_processor_control` (ADR 0023): `processor` `VARCHAR(64)` PK; `paused`, `paused_at`, `paused_by`; the reset operation
+`snodra_processor_control`: `processor` `VARCHAR(64)` PK; `paused`, `paused_at`, `paused_by`; the reset operation
 holding the lock: `op_id`, `op_kind`, `op_lease_until`, `op_prepared_at` (all null: free); `replay` JSON (the open ranges,
 `[{"source","segment","from","until"}]` strings, in order); `updated_at`.
 
@@ -290,7 +290,7 @@ holding the lock: `op_id`, `op_kind`, `op_lease_until`, `op_prepared_at` (all nu
 (`IN_PROGRESS`, `SUCCEEDED`, `FAILED`, `UNKNOWN`); `reply`, `error` text (JSON as written); `attempts`; `updated_at` (retention);
 `lease_until`, `owner`. Index `snodra_external_calls_updated (updated_at)`.
 
-`snodra_sagas` (ADR 0021): `id` `VARCHAR(255)` PK; `type` `VARCHAR(255)`; `state` text (JSON as written); `start_key` text and
+`snodra_sagas`: `id` `VARCHAR(255)` PK; `type` `VARCHAR(255)`; `state` text (JSON as written); `start_key` text and
 `start_key_hash` `CHAR(64)`; `ended` `BOOLEAN`, `ended_at`; `version` `BIGINT` (optimistic, checked by every update); `created_at`,
 `updated_at`; `live_start_key_hash`, a stored generated column (`CASE WHEN ended THEN NULL ELSE start_key_hash END`) with the
 unique index `snodra_sagas_live_start_key`: **one live saga per start key** (an ended saga frees it). Indexes

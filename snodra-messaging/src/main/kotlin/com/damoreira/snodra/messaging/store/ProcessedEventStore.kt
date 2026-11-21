@@ -6,7 +6,7 @@ import java.time.Instant
  * The idempotency marker of a handled event (`processed_events`): [id] is the marker id (`processor:<name>:<eventId>`,
  * `saga:<type>:<eventId>`, `ingress:<source>:<key>`, ...), [type] the event's type, [processedAt] when it was handled (the
  * retention counts from it). A stage-1 marker of a delivered event also carries its [processor], [source], [segment] and
- * [position] (P6b, ADR 0023: the event store's opaque strings), so a reset deletes exactly the markers of its replay range
+ * [position], the event store's opaque strings), so a reset deletes exactly the markers of its replay range
  * ([ProcessorControlStore.deleteMarkers]); every other marker leaves them null and is never deleted by a reset.
  */
 data class ProcessedMarker(

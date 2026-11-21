@@ -54,7 +54,7 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-/** The client side of P5a (ADR 0018): the static token, the four registration-rejection codes and request-level refusals. */
+/** The client side: the static token, the four registration-rejection codes and request-level refusals. */
 class HubAccessControlTest {
     private val hub = InProcessHub().start()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)

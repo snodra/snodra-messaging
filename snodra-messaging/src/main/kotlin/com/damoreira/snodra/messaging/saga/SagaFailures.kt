@@ -9,7 +9,7 @@ import com.damoreira.snodra.messaging.store.SagaFailureStore
  * by design) and deletes the failure in the same transaction that applies the event, so concurrent retries apply it
  * once. A failure that fails again stays, with `attempts` increased and the new error. A discarded event keeps its
  * marker: redelivering the record does not apply it either. A retry of a saga type this service does not run is refused
- * with an [IllegalStateException] and writes nothing (H1): the parked event keeps its error.
+ * with an [IllegalStateException] and writes nothing: the parked event keeps its error.
  */
 class SagaFailures(private val store: SagaFailureStore, private val runtime: SagaRuntime) {
     /** The parked events of saga type [type] (every type when null), the longest waiting first. */

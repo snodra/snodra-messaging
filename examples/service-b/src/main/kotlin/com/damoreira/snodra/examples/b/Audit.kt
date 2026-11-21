@@ -21,14 +21,14 @@ import java.util.concurrent.CopyOnWriteArrayList
 data class AuditNote(val key: String, val text: String, val at: Instant) : Event
 
 /**
- * The sandbox's named event processor (P6a, ADR 0022): its own Kafka consumer, group `<group>.audit`, markers
+ * The sandbox's named event processor: its own Kafka consumer, group `<group>.audit`, markers
  * `processor:audit:<eventId>`, its own dead letters. [failing] is example-only: while it is on, every note whose text starts
  * with `poison` fails (the others are handled), so the sandbox can show a record parked as a dead letter, the later records
  * of its key parked behind it while other keys flow, and the key draining once [failing] is off and the letters are retried
  * (`POST /audit/failing?on=...`, `/audit/dead-letters`). [handled] is what it handled, in order, in memory (lost on restart,
  * like the rest of service-b's state).
  *
- * P6b (ADR 0023): a reset of `audit` through the hub replays the notes in its range, so [handled] lists them again; [onReset]
+ * A reset of `audit` through the hub replays the notes in its range, so [handled] lists them again; [onReset]
  * (its `@ResetHandler`) records each reset in [resets] before the replay starts. A real projection would clear itself there.
  */
 @Component
@@ -78,7 +78,7 @@ data class AuditReset(val operationId: String, val target: String, val ranges: L
 data class AuditRange(val partition: Int, val from: Long, val until: Long)
 
 /**
- * The `audit` processor's side effect that must happen once (P6b): it would notify someone of each note, so it is
+ * The `audit` processor's side effect that must happen once: it would notify someone of each note, so it is
  * `@DisallowReplay`: a reset of `audit` replays [AuditHandler] but not this. [notified] is what it notified, in memory.
  */
 @Component

@@ -6,7 +6,7 @@ import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
-/** The replay ranges of a reset from the event store's plan (ADR 0023, ADR 0027), ordered by the event store's compare only. */
+/** The replay ranges of a reset from the event store's plan, ordered by the event store's compare only. */
 class ResetRangesTest {
     private val decimal = Comparator<String> { a, b -> a.toLong().compareTo(b.toLong()) }
 

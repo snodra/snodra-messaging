@@ -19,7 +19,7 @@ import org.springframework.transaction.TransactionManager
 import java.time.Clock
 
 /**
- * The in-memory stores of the core (ADR 0027, ADR 0028), for tests, local runs and single-process demos: **not durable**, one
+ * The in-memory stores of the core, for tests, local runs and single-process demos: **not durable**, one
  * JVM. Each runs only when its setting names it, never because nothing else is there:
  *
  * - `snodra.messaging.event-store=memory`: the [MemoryEventStore] (`snodra.messaging.memory.segments` segments per source).

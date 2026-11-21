@@ -23,7 +23,7 @@ sealed interface InvocationResult {
     data class Failure(val code: ErrorCode, val message: String, val details: ByteArray = ByteArray(0)) : InvocationResult
 }
 
-/** The outcome of admitting a subscription (`mode = SUBSCRIPTION`, P4c) on this instance: the decoded query, or why not. */
+/** The outcome of admitting a subscription (`mode = SUBSCRIPTION`) on this instance: the decoded query, or why not. */
 sealed interface SubscriptionAdmission {
     /** The query decoded as the handler's message class; the subscription may be registered. */
     class Accepted(val query: Any) : SubscriptionAdmission
@@ -42,12 +42,12 @@ sealed interface SubscriptionAdmission {
  * (`UNAUTHENTICATED` / `PERMISSION_DENIED`); a thrown `AccessDeniedException` (ours or Spring's) is `PERMISSION_DENIED`.
  * Stack traces are never included.
  *
- * A streaming query handler (`StreamingQuery<R>` -> `Flow<R>`, P4b) is run by [invokeStream]: every element is encoded
+ * A streaming query handler (`StreamingQuery<R>` -> `Flow<R>`) is run by [invokeStream]: every element is encoded
  * and handed to the caller as it is emitted (the caller suspends the collection while the hub granted no credit), and an
  * exception from the flow maps exactly like a unary handler's. The same handler reached by a unary request (mode
  * `UNARY`, [invokeQuery]) is `INVALID_REQUEST`: its flow cannot be a single reply.
  *
- * A subscription query handler (`SubscriptionQuery<I, U>` -> `I`, P4c) answers only the initial request of a
+ * A subscription query handler (`SubscriptionQuery<I, U>` -> `I`) answers only the initial request of a
  * subscription ([invokeQuery] with `subscriptionInitial`, the hub's `<id>#0`); a plain unary request for its type is
  * `INVALID_REQUEST` ("send it with QueryBus.subscribe"). [admitSubscription] runs the same pre-checks for the
  * subscription request itself (`mode = SUBSCRIPTION`) and hands back the decoded query, which the connection keeps to
@@ -85,7 +85,7 @@ class HandlerInvoker(
         invoke(type, registry.commandHandler(type), payload, ctx, identity)
 
     /**
-     * [subscriptionInitial] (P4c): the request is the initial request of a subscription (`<id>#0`), so a subscription
+     * [subscriptionInitial]: the request is the initial request of a subscription (`<id>#0`), so a subscription
      * query handler answers it; without it such a handler is `INVALID_REQUEST`. Other handlers are invoked either way.
      */
     suspend fun invokeQuery(
@@ -97,7 +97,7 @@ class HandlerInvoker(
     ): InvocationResult = invoke(type, registry.queryHandler(type), payload, ctx, identity, subscriptionInitial)
 
     /**
-     * Admits a subscription request (`mode = SUBSCRIPTION`, P4c) for [type]: the handler must be a subscription query
+     * Admits a subscription request (`mode = SUBSCRIPTION`) for [type]: the handler must be a subscription query
      * handler (else `INVALID_REQUEST`), `@RequiresAuthentication` is checked as for a unary handler, and [payload] is
      * decoded as the handler's message class (`INVALID_REQUEST` when it does not). Nothing is invoked.
      */
@@ -114,7 +114,7 @@ class HandlerInvoker(
     }
 
     /**
-     * Calls every handler of [type] in order, only those of [processor] when it is given (ADR 0022), and in a [replay] (P6b)
+     * Calls every handler of [type] in order, only those of [processor] when it is given, and in a [replay]
      * none marked `@DisallowReplay`; a failing handler does not stop the others, the first failure is rethrown.
      */
     suspend fun invokeEvent(type: String, payload: ByteArray, ctx: MessageContext, processor: String? = null, replay: Boolean = false) {
@@ -134,7 +134,7 @@ class HandlerInvoker(
     }
 
     /**
-     * Runs the streaming query handler of [type] (P4b): decodes [payload], checks `@RequiresAuthentication` as for a
+     * Runs the streaming query handler of [type]: decodes [payload], checks `@RequiresAuthentication` as for a
      * unary handler, then collects the handler's `Flow<R>`, encoding each element and handing it to [onPart] in order.
      * Returns null when the flow completed, or the failure that ends the stream: the pre-checks' (`NO_HANDLER`,
      * `INVALID_REQUEST` for a bad payload or a handler that is not a streaming one, `UNAUTHENTICATED`,

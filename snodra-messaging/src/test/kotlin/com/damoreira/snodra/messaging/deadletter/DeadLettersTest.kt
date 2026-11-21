@@ -58,7 +58,7 @@ class OrdersHandler(private val mongo: MongoTemplate) {
     }
 }
 
-/** The admin API of the dead letters (ADR 0022): every retry result, its transaction, retryAll's order, discard, modes, checks. */
+/** The admin API of the dead letters: every retry result, its transaction, retryAll's order, discard, modes, checks. */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class DeadLettersTest {
     private val mongoContainer = SnodraContainers.mongo()

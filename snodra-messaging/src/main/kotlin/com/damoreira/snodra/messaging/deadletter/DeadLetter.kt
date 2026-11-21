@@ -2,7 +2,7 @@ package com.damoreira.snodra.messaging.deadletter
 
 import java.time.Instant
 
-/** Why a record became a dead letter (ADR 0022). */
+/** Why a record became a dead letter. */
 enum class DeadLetterReason {
     /** Stage 1 failed on every attempt (or once, for a payload its handler cannot decode). */
     HANDLER_FAILED,
@@ -43,7 +43,7 @@ class DeadLetterError(type: String, message: String) {
 }
 
 /**
- * One document of `dead_letters` (ADR 0022), as [DeadLetters] returns it. [payload] is the record's value as text when it
+ * One document of `dead_letters`, as [DeadLetters] returns it. [payload] is the record's value as text when it
  * is valid UTF-8, [payloadBinary] otherwise; both are null for an empty value ([value] gives the bytes either way).
  */
 data class DeadLetter(
@@ -75,7 +75,7 @@ data class DeadLetter(
     val lastAttemptAt: Instant,
     /** When the TTL index deletes it (`parkedAt` + retention), which also unblocks its key. */
     val expireAt: Instant,
-    /** It was parked while its processor replayed the record (P6b): its retry is a replay too. `replay: true`, else absent. */
+    /** It was parked while its processor replayed the record: its retry is a replay too. `replay: true`, else absent. */
     val replay: Boolean = false,
 ) {
     /** The record's value. */

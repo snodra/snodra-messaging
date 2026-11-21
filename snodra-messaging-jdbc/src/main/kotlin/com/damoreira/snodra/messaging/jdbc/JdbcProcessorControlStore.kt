@@ -11,7 +11,7 @@ import java.sql.ResultSet
 import java.time.Duration
 
 /**
- * `snodra_processor_control` (P6b, ADR 0023): one row per processor, created by the first write that needs it (not paused, no
+ * `snodra_processor_control`: one row per processor, created by the first write that needs it (not paused, no
  * operation, no replay). Every write commits on its own; each method is one transaction, so a lock taken, renewed or released
  * is atomic (a conditional `UPDATE` on the row). The replay ranges are a JSON array of `{"source","segment","from","until"}`.
  */

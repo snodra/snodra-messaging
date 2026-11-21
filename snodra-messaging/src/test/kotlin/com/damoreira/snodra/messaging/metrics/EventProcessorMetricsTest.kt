@@ -15,7 +15,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-/** `snodra_processor_lag`, `snodra_processor_state` and `snodra_dead_letters` from the processors' status (P9, ADR 0026). */
+/** `snodra_processor_lag`, `snodra_processor_state` and `snodra_dead_letters` from the processors' status. */
 class EventProcessorMetricsTest {
     private val registry = SimpleMeterRegistry()
 

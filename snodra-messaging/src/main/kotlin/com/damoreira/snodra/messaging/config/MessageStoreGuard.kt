@@ -25,7 +25,7 @@ internal const val ADD_A_MESSAGE_STORE =
         "(snodra.messaging.store.type=memory runs the in-memory one, not durable: tests and local runs)"
 
 /**
- * Fails the startup when the application's message store (ADR 0028) is missing but something needs one, or is ambiguous:
+ * Fails the startup when the application's message store is missing but something needs one, or is ambiguous:
  *
  * - none, and there is an `@EventHandler`, a `@Saga` (unless `snodra.messaging.sagas.enabled` is false) or an
  *   `@IdempotentHandler`. Command, query and subscription-query handlers need none.
@@ -100,7 +100,7 @@ internal const val ADD_AN_EVENT_STORE =
         "(snodra.messaging.event-store=memory runs the in-memory one, not durable: tests and local runs)"
 
 /**
- * Fails the startup when the application's event store (ADR 0027) is missing but something needs one, or is ambiguous:
+ * Fails the startup when the application's event store is missing but something needs one, or is ambiguous:
  *
  * - none, and there is an `@EventHandler` or a `@Saga` (unless `snodra.messaging.sagas.enabled` is false): they read events.
  *   Command, query and subscription-query handlers need none. (Without a message store either, [MessageStoreGuard] reports
@@ -164,7 +164,7 @@ class MessageStoreSchema(private val store: ObjectProvider<MessageStore>, privat
 
 /**
  * Explains a startup that failed because a bean needs an [EventBus] (or the saga relay's [RawEventPublisher]) and there is
- * none: without a message store there is no outbox (ADR 0028), and without an event store nothing relays it (ADR 0027), so no
+ * none: without a message store there is no outbox, and without an event store nothing relays it, so no
  * event bus.
  */
 @Order(Ordered.HIGHEST_PRECEDENCE) // before Boot's generic NoSuchBeanDefinitionException analyzer, which would explain it first

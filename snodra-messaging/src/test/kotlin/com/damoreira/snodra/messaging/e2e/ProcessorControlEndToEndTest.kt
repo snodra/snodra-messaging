@@ -43,7 +43,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
- * Processor control end to end (P6b, ADR 0023): a Spring Boot service against the real hub image under test, driven through
+ * Processor control end to end: a Spring Boot service against the real hub image under test, driven through
  * the hub's HTTP API with the write token: pause (records held, PAUSED in the hub), resume, a reset to `earliest` that
  * replays the named processor (its `@ResetHandler` ran once, its `@DisallowReplay` handler did not run again), and the dead
  * letters listed, retried and discarded through the hub. The dashboard token is refused on a write. Skips when the image is

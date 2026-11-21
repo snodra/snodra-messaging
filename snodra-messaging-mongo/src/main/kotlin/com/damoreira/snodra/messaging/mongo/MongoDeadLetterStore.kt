@@ -18,8 +18,7 @@ import java.time.Clock
 import java.util.Date
 
 /**
- * The `dead_letters` collection (ADR 0022). The documents are written field by field, so their shape is exactly the ADR's
- * table: no `_class`, an absent field instead of null, `topic` (the source), `partition` (the segment) and `offset` (the
+ * The `dead_letters` collection. The documents are written field by field, so their shape is fixed: no `_class`, an absent field instead of null, `topic` (the source), `partition` (the segment) and `offset` (the
  * position) as [Positions] says (Int32 and Int64 for decimal ones, as always), dates and BinData. Every write but
  * [deleteInTransaction] commits on its own, whatever transaction the caller has.
  */

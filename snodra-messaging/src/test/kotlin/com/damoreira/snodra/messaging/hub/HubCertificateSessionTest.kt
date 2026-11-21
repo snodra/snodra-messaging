@@ -50,7 +50,7 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
- * One hub stream of a service that authenticates with a client certificate (P5c, ADR 0020), against the in-process hub (which cannot do TLS: the
+ * One hub stream of a service that authenticates with a client certificate, against the in-process hub (which cannot do TLS: the
  * handshake is covered by [HubMutualTlsChannelTest] and the end-to-end tests; what is checked here is what the connection itself does).
  */
 class HubCertificateSessionTest {

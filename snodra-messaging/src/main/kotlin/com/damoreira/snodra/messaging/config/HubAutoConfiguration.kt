@@ -65,7 +65,7 @@ import java.nio.file.Path
 class HubAutoConfiguration {
 
     /**
-     * The client certificate of `hub.tls.client-cert-file` / `client-key-file` (mTLS, P5c), or null without them: read and checked here, so a
+     * The client certificate of `hub.tls.client-cert-file` / `client-key-file` (mTLS), or null without them: read and checked here, so a
      * file that cannot be used, a key that does not match, a certificate that does not name this service, or a static token or OAuth2 next
      * to it fails the startup naming the settings. One instance, shared by the channel factory (which presents it) and the connections (which
      * roll over to a renewed pair).
@@ -199,7 +199,7 @@ class HubAutoConfiguration {
 
     private val log = LoggerFactory.getLogger(HubAutoConfiguration::class.java)
 
-    /** A client certificate is the service's one credential: a static token or OAuth2 next to it would be refused by the hub (ADR 0020 ruling 6). */
+    /** A client certificate is the service's one credential: a static token or OAuth2 next to it would be refused by the hub. */
     private fun rejectOtherCredentials(hub: SnodraMessagingProperties.Hub, environment: Environment) {
         fun env(name: String) = environment.getProperty(name)?.takeIf { it.isNotBlank() }
         val other = listOfNotNull(
@@ -233,7 +233,7 @@ class HubAutoConfiguration {
     }
 
     /**
-     * The OAuth2 client-credentials settings (P5b): `hub.oauth2.*`, each falling back to the plain `SNODRA_SERVER_OAUTH2_*` variable
+     * The OAuth2 client-credentials settings: `hub.oauth2.*`, each falling back to the plain `SNODRA_SERVER_OAUTH2_*` variable
      * when its property is unset; null when no token URI is set. Checked here so a mistake fails the startup naming the setting:
      * a static token as well, an OAuth2 setting without a token URI, no secret, a secret file that cannot be read, a CA file that cannot be used, a URI that is not http(s).
      */

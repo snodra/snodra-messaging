@@ -6,7 +6,7 @@ import com.damoreira.snodra.messaging.api.Query
 import com.damoreira.snodra.messaging.api.SubscriptionQuery
 
 /*
- * A shared subscription query type (ADR 0017, P4c): service-b (Kotlin) and service-c (Rust) both serve it with an
+ * A shared subscription query type: service-b (Kotlin) and service-c (Rust) both serve it with an
  * in-memory counter per name; a subscription gets the current value of one of them as its initial result and then the
  * changes of both, as they happen. Mirrored in snodra-messaging-rs/examples/service-c/src/messages.rs; keep both in step.
  */

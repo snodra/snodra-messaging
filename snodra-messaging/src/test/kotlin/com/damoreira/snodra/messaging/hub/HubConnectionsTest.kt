@@ -35,7 +35,7 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
 
-/** Multi-hub client (P3, ADR 0016) against in-process hubs: one target name = one in-process hub. */
+/** Multi-hub client against in-process hubs: one target name = one in-process hub. */
 class HubConnectionsTest {
     private val hubs = mutableListOf<InProcessHub>()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)

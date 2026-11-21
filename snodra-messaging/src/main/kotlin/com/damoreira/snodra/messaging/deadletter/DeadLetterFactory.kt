@@ -9,7 +9,7 @@ import java.time.Clock
 import java.time.Duration
 
 /**
- * Builds the [DeadLetter] of a delivered record (ADR 0022), ready for [DeadLetterStore.park]: the id
+ * Builds the [DeadLetter] of a delivered record, ready for [DeadLetterStore.park]: the id
  * `<processor>:<source>:<segment>:<position>`, the record's key and headers (as the event store delivers them: UTF-8 text),
  * the `id` and `type` headers as `eventId` and `eventType` (a blank one is none), the value as text when it is valid UTF-8 and
  * as bytes otherwise (neither for an empty value), and `expireAt` = now + [retention].

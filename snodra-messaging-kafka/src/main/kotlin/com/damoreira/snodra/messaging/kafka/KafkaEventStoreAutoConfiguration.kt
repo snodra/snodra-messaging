@@ -22,7 +22,7 @@ import org.springframework.context.annotation.Configuration
 import org.springframework.core.type.AnnotatedTypeMetadata
 
 /**
- * The Kafka [EventStore] (ADR 0027) from `snodra.messaging.kafka.*` ([KafkaProperties]), unless the application has an event
+ * The Kafka [EventStore] from `snodra.messaging.kafka.*` ([KafkaProperties]), unless the application has an event
  * store of its own, or `snodra.messaging.event-store` names another one (when two event-store add-ons are on the classpath). It
  * connects lazily: the producer on the first publish, a consumer per subscription.
  *

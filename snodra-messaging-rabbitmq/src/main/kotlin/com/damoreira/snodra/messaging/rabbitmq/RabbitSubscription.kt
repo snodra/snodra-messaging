@@ -544,7 +544,7 @@ internal class RabbitSubscription private constructor(
         /** How long after subscribing to every partition a subscription that became active on none announces `Assigned([])`. */
         val FIRST_SETTLE: Duration = Duration.ofSeconds(1)
 
-        /** How often the end of each active partition is read (ADR 0022: at most every 5 s). */
+        /** How often the end of each active partition is read (at most every 5 s). */
         val STATUS_REFRESH: Duration = Duration.ofSeconds(5)
 
         /** Until every active partition's end is known: how long between two reads. */

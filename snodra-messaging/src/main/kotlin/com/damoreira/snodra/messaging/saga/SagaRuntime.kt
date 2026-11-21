@@ -139,7 +139,7 @@ class SagaRuntime(
     private class GaveUp(val last: Exception, val attempts: Int) : RuntimeException(last.message, last, false, false)
 
     /**
-     * Runs [block] (one attempt, in its own transaction) until it returns, with the retry rules of ruling 33: a conflict is
+     * Runs [block] (one attempt, in its own transaction) until it returns, with these retry rules: a conflict is
      * retried up to `maxAttempts` attempts in all with the backoff of [SagaRetry.pauseBefore]; any other exception gets at
      * most [SagaRetry.HANDLER_ATTEMPTS] attempts with only a quick pause between them (waiting does not cure a handler that
      * throws). Throws [GaveUp] with the last failure and the attempts made.
@@ -208,7 +208,7 @@ class SagaRuntime(
                 handledBy.getOrPut(doc.id) { mutableSetOf() } += handler
             }
         }
-        // A SagaCommandFailed also reaches the saga that sent the command, by its id: no association needed (ruling 27).
+        // A SagaCommandFailed also reaches the saga that sent the command, by its id: no association needed.
         if (eventType == commandFailedType) {
             ports.sagas.findById((event as SagaCommandFailed).sagaId)?.takeIf { it.type == sagaType.name && !it.ended }?.let { owner ->
                 matched.putIfAbsent(owner.id, owner)

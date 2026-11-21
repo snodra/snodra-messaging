@@ -16,12 +16,12 @@ import java.util.concurrent.atomic.AtomicLongArray
 import kotlin.random.Random
 
 /**
- * The access token of this service (P5b, ADR 0019), one per process and shared by every hub connection: N hubs, one token.
+ * The access token of this service, one per process and shared by every hub connection: N hubs, one token.
  *
  * - [token] returns the cached token while it is fresh, else fetches; callers that arrive while a fetch runs wait for that one
  *   (single flight, and its failure is theirs too). Fresh means before [AccessToken.refreshAt] by the wall clock **and** by the
  *   monotonic clock ([nanoTime], counted from the fetch): a machine that slept stops the monotonic clock, a wall clock set back
- *   stops the other, and either alone would keep a token past its refresh point (H1, as the Rust library).
+ *   stops the other, and either alone would keep a token past its refresh point, as the Rust library does.
  * - After the first fetch the provider renews the token **in the background** when it stops being fresh and publishes it in
  *   [current], which every live stream follows (see [HubConnection]). A token a hub refused ([invalidate]) is renewed at the
  *   renewer's next look (within 5 s) and is not [usable] meanwhile. A renewal that fails keeps the current

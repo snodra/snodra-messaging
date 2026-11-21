@@ -48,7 +48,7 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 /**
- * Event processors end to end (ADR 0022): a Spring Boot service with a `default` handler and a named processor, its status
+ * Event processors end to end: a Spring Boot service with a `default` handler and a named processor, its status
  * reported to the real hub image under test (`GET /api/v1/processors`, `/api/v1/topology`), a poisoned event parked and
  * retried. Skips when the image is not built.
  */
@@ -180,7 +180,7 @@ class ProcessorsEndToEndTest {
         assertEquals(listOf("o-1", "o-2", "o-2", "o-2", "o-3"), ctx.getBean(OrdersProjection::class.java).seen.sorted())
     }
 
-    @Test fun `a running service has every messaging meter of P9 in Boot's registry`() {
+    @Test fun `a running service has every messaging meter in Boot's registry`() {
         val hub = startHub(SnodraContainers.hub())
         val ctx = service(hub, "svc-p9", "snodra.messaging.outbox.enabled=true")
         val registry = ctx.getBean(MeterRegistry::class.java)

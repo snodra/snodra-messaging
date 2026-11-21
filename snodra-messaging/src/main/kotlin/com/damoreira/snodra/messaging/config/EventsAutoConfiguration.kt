@@ -33,12 +33,12 @@ import org.springframework.context.annotation.Configuration
 import java.time.Clock
 
 /**
- * Events with the transactional outbox (ADR 0027, ADR 0028), over the application's [EventStore] (an event-store add-on's,
+ * Events with the transactional outbox, over the application's [EventStore] (an event-store add-on's,
  * for example `snodra-messaging-kafka`, or its own bean) and [MessageStore]: [OutboxEventBus] as the [EventBus],
  * [OutboxPublisher] relaying the outbox to the event store, [EventProcessors] running the `@EventHandler`s (one [EventConsumer]
- * per processor, ADR 0022), the dead letters ([DeadLetters]) and the processor control ([ProcessorControl], P6b).
+ * per processor), the dead letters ([DeadLetters]) and the processor control ([ProcessorControl]).
  *
- * Needs a [MessageStore] (ADR 0028): a store add-on's (`snodra-messaging-mongo` provides one over the application's
+ * Needs a [MessageStore]: a store add-on's (`snodra-messaging-mongo` provides one over the application's
  * MongoDB, ordered before this configuration) or the application's own bean. The outbox entries and the markers join the
  * store's transactions, which the add-on also gives the application's `@Transactional` methods, so business writes and outbox
  * entries commit together. The local dispatcher and the dead letters exist with a store alone (the webhook ingress uses them);
@@ -101,7 +101,7 @@ class EventsAutoConfiguration {
         )
 
         /**
-         * The control of the event processors (P6b, ADR 0023): what their `processor_control` documents say, applied at start and
+         * The control of the event processors: what their `processor_control` documents say, applied at start and
          * every 5 s, and the hub's control requests (pause, resume, reset through the event store, dead letters).
          */
         @Bean
@@ -111,7 +111,7 @@ class EventsAutoConfiguration {
             ProcessorControl(store.processorControl, registry, deadLetters, events)
 
         /**
-         * The event processors (ADR 0022): one consumer per processor that runs here, each in the subscription
+         * The event processors: one consumer per processor that runs here, each in the subscription
          * `<prefix>.<name>` (`events.subscription-prefix`, else the service name; `default` included) of `events.source`.
          */
         @Bean

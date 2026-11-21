@@ -32,7 +32,7 @@ import kotlin.test.assertNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
-/** The process-wide access token of a service (P5b, ADR 0019): cached, fetched once for everybody, renewed in the background. */
+/** The process-wide access token of a service: cached, fetched once for everybody, renewed in the background. */
 class HubTokenProviderTest {
     private val server = TestOAuth2Server()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)

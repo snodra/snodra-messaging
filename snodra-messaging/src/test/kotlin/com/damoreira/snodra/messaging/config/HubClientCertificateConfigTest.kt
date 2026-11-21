@@ -33,7 +33,7 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-/** P5c client configuration: `hub.tls.client-cert-file` / `client-key-file`, their environment names and the startup checks (ADR 0020). */
+/** Client configuration: `hub.tls.client-cert-file` / `client-key-file`, their environment names and the startup checks. */
 class HubClientCertificateConfigTest {
     @Configuration(proxyBeanMethods = false)
     @EnableConfigurationProperties(SnodraMessagingProperties::class)

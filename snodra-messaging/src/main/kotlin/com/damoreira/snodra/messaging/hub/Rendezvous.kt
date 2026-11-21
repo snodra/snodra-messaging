@@ -1,7 +1,7 @@
 package com.damoreira.snodra.messaging.hub
 
 /**
- * Rendezvous (highest random weight) hashing of a routing key over hub ids (ADR 0016): a keyed request goes to the live
+ * Rendezvous (highest random weight) hashing of a routing key over hub ids: a keyed request goes to the live
  * hub with the highest `score(hubId, key)`, so a key keeps its hub while the set of hubs is stable and only the keys of
  * a hub that leaves move.
  *

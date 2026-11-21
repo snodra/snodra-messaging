@@ -164,7 +164,7 @@ class HeldReads(private val store: ProcessorControlStore) : ProcessorControlStor
 }
 
 /**
- * Processor control against a real Kafka and MongoDB (P6b, ADR 0023): pause and resume, the leased reset (prepare, execute,
+ * Processor control against a real Kafka and MongoDB: pause and resume, the leased reset (prepare, execute,
  * finish, expiry), replay ranges, reset handlers and the dead letters, driven by the control requests the hub sends.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
@@ -734,7 +734,7 @@ class ProcessorControlTest {
         runBlocking { support.store.processorControl.release("default", "op-2") }
         val lost = a.ask(prepare("op-2"))
         assertEquals(ControlRefusal.CONTROL_REFUSAL_NOT_PREPARED, lost.refusal(), lost.toString())
-        // Whichever notices the lost lock first answers (ADR 0023 ruling 19): the renewal ("lock lost"), or the 300 ms poll,
+        // Whichever notices the lost lock first answers: the renewal ("lock lost"), or the 300 ms poll,
         // which forgets op-2 so this prepare is a late one ("already finished"). Either way the lock is not taken (below).
         assertTrue("lock lost" in lost.refused.message || "op-2 already finished" in lost.refused.message, lost.refused.message)
         assertNull(control()!!.operation)

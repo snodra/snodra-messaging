@@ -18,16 +18,16 @@ object HubProtocol {
     /** How often a `dns:///` hub address is resolved again. */
     val DNS_REFRESH: Duration = Duration.ofSeconds(30)
 
-    /** How often the client certificate files are read (P5c): the heartbeat period snodra-server announces. */
+    /** How often the client certificate files are read: the heartbeat period snodra-server announces. */
     val CERTIFICATE_CHECK_INTERVAL: Duration = Duration.ofSeconds(3)
 
-    /** The longest a rollover waits for the work in flight on a stream before it closes it (P5c; shared with the Rust library). */
+    /** The longest a rollover waits for the work in flight on a stream before it closes it (shared with the Rust library). */
     val ROLLOVER_DRAIN_TIMEOUT: Duration = Duration.ofSeconds(10)
 
-    /** The longest wait, in [0, this], before a rollover starts after a renewed pair was seen (P5c, spreads the replicas of a service; shared with the Rust library). */
+    /** The longest wait, in [0, this], before a rollover starts after a renewed pair was seen (spreads the replicas of a service; shared with the Rust library). */
     val ROLLOVER_MAX_DELAY: Duration = Duration.ofSeconds(30)
 
-    /** The longest a rollover waits for the new stream to register (P5c). */
+    /** The longest a rollover waits for the new stream to register. */
     val ROLLOVER_RECONNECT_TIMEOUT: Duration = Duration.ofSeconds(30)
 
     /**

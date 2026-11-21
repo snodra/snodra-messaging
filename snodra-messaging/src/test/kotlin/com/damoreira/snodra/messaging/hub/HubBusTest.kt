@@ -160,7 +160,7 @@ class HubBusTest {
 
     private val pong = "{\"echoed\":\"remote\",\"at\":\"1970-01-01T00:00:00Z\"}"
 
-    // --- SendOptions, priority (P1) ---
+    // --- SendOptions, priority ---
 
     @Test fun `priority comes from the per-type property, SendOptions wins`() = runBlocking {
         val bus = remoteBus({ payload(it.id, if (it.type == "test.GetCount") "{\"value\":1}" else pong) }) {
@@ -190,7 +190,7 @@ class HubBusTest {
         assertEquals("test.Ping", e.type)
     }
 
-    // --- retry (P1) ---
+    // --- retry ---
 
     private val fastRetry = RetryPolicy(maxAttempts = 3, initialBackoff = Duration.ofMillis(10), maxBackoff = Duration.ofMillis(50))
 

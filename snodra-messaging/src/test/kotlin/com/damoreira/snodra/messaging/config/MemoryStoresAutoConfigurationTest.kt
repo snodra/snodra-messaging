@@ -57,7 +57,7 @@ class InMemoryApplicationConfig {
 }
 
 /**
- * The in-memory stores (ADR 0027, ADR 0028): chosen only by `snodra.messaging.event-store=memory` and
+ * The in-memory stores: chosen only by `snodra.messaging.event-store=memory` and
  * `snodra.messaging.store.type=memory`, never because nothing else is there, never behind an add-on's back; each warns that it is not
  * durable, naming the profile; a setting naming a store the application lacks fails the startup.
  */

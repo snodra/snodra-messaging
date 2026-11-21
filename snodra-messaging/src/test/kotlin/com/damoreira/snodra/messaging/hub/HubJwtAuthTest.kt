@@ -36,7 +36,7 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-/** The client side of P5b (ADR 0019): the access token in `Register`, shared by every connection, and pushed to live streams as `ClientMessage.credentials`. */
+/** The client side: the access token in `Register`, shared by every connection, and pushed to live streams as `ClientMessage.credentials`. */
 class HubJwtAuthTest {
     private val oauth = TestOAuth2Server()
     private val hubA = InProcessHub().start()

@@ -12,7 +12,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
 import org.springframework.context.annotation.Bean
 
 /**
- * The Micrometer meters of the outbox relay, the event processors and the hub client (P9, ADR 0026): only when Micrometer is
+ * The Micrometer meters of the outbox relay, the event processors and the hub client: only when Micrometer is
  * on the classpath and a `MeterRegistry` bean exists. [MicrometerMessagingMetrics] is the [MessagingMetrics] the components
  * report to (an application's own bean replaces it; without a registry they get
  * [com.damoreira.snodra.messaging.metrics.NoopMessagingMetrics]), and [EventProcessorMetrics] samples the processors' gauges when

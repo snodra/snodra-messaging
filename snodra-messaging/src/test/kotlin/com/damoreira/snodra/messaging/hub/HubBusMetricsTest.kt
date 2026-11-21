@@ -32,7 +32,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
-/** `snodra_hub_client_request_duration_seconds` (P9): one observation per unary call through the hub, with its final outcome. */
+/** `snodra_hub_client_request_duration_seconds`: one observation per unary call through the hub, with its final outcome. */
 class HubBusMetricsTest {
     private val hub = InProcessHub().start()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)

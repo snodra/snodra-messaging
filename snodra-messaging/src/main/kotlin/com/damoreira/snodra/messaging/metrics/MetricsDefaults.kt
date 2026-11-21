@@ -10,7 +10,7 @@ import java.nio.charset.StandardCharsets
 import java.util.UUID
 
 /**
- * The defaults that make Boot's OTLP metrics export what the dashboards query (ADR 0026), as the last property source, so
+ * The defaults that make Boot's OTLP metrics export what the dashboards query, as the last property source, so
  * any setting of the application wins. They apply to the whole application, its own meters and traces included:
  *
  * - `management.otlp.metrics.export.base-time-unit=seconds` (Boot's default is milliseconds): the library's timers

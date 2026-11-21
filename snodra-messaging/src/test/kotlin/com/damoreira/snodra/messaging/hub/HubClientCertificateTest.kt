@@ -19,7 +19,7 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
-/** The client certificate pair of `hub.tls.client-cert-file` / `client-key-file` (P5c, ADR 0020): what is checked at startup, how a change is adopted. */
+/** The client certificate pair of `hub.tls.client-cert-file` / `client-key-file`: what is checked at startup, how a change is adopted. */
 class HubClientCertificateTest {
     @TempDir lateinit var dir: Path
     private lateinit var ca: TestPki.Ca

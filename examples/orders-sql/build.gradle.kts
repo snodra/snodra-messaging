@@ -16,7 +16,7 @@ dependencyManagement {
 
 dependencies {
     implementation(project(":snodra-messaging"))
-    // The message store: the outbox, the processed events, the dead letters and the sagas in the service's PostgreSQL (ADR 0028).
+    // The message store: the outbox, the processed events, the dead letters and the sagas in the service's PostgreSQL.
     implementation(project(":snodra-messaging-jdbc"))
     implementation(libs.jackson.module.kotlin)
     implementation(libs.kotlin.reflect)

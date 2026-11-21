@@ -10,9 +10,9 @@ import java.nio.file.Path
 import java.util.concurrent.TimeUnit
 
 /**
- * TLS towards the hub (P5a, ADR 0018). [enabled] false is plain text; [caFile] is the PEM CA that signed the hub's
+ * TLS towards the hub. [enabled] false is plain text; [caFile] is the PEM CA that signed the hub's
  * certificate (the JVM's system roots when null); [serverName] is the name the certificate is verified against instead
- * of the address's host. [clientCertificate] (P5c, ADR 0020) is the pair every TLS channel presents to the hub: it implies TLS ([tls]), and is
+ * of the address's host. [clientCertificate] is the pair every TLS channel presents to the hub: it implies TLS ([tls]), and is
  * read again before each new connection attempt ([HubClientCertificate.refresh], by the connection, not by the channel factory), so a rotated pair needs no restart.
  */
 data class HubTls(

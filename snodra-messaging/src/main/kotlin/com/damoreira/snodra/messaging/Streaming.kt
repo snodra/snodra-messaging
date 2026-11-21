@@ -3,7 +3,7 @@ package com.damoreira.snodra.messaging
 import java.time.Duration
 
 /**
- * How one streaming query is sent ([QueryBus.stream], P4b, ADR 0017). Every field is optional.
+ * How one streaming query is sent ([QueryBus.stream]). Every field is optional.
  *
  * @property timeout the **idle** timeout: the longest the hub waits for the next part (and for the handler to start);
  *   it does not run while the collector holds the handler at the window (credit 0). Sent whole as `timeout_ms` on

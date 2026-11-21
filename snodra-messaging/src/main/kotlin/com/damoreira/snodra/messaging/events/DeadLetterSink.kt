@@ -7,7 +7,7 @@ import com.damoreira.snodra.messaging.eventstore.deadLetterSource
 import com.damoreira.snodra.messaging.store.DeadLetterStore
 import java.time.Duration
 
-/** Where an [EventConsumer] puts a record it cannot handle (`snodra.messaging.events.dead-letter.mode`, ADR 0022). */
+/** Where an [EventConsumer] puts a record it cannot handle (`snodra.messaging.events.dead-letter.mode`). */
 sealed interface DeadLetterSink {
     val mode: DeadLetterMode
 

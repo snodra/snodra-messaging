@@ -17,7 +17,7 @@ import com.damoreira.snodra.messaging.UnauthenticatedException
 import java.time.Instant
 
 /**
- * What the outbox relay, the event processors and the hub client report (P9, ADR 0026): implemented on Micrometer when a
+ * What the outbox relay, the event processors and the hub client report: implemented on Micrometer when a
  * registry exists ([MicrometerMessagingMetrics]), else [NoopMessagingMetrics]. The hooks run on the hot paths, so an
  * implementation only counts in memory. Every label value is a processor, a registered type (or [OTHER]), a kind or an
  * outcome from a fixed set, never an id. Methods have empty defaults so more can be added without breaking implementations.

@@ -142,7 +142,7 @@ class AuditControllerTest {
         assertThat(mvc.get().uri("/audit/dead-letters/count")).hasStatus(HttpStatus.CONFLICT)
     }
 
-    @Test fun `GET resets lists the resets of the audit processor and GET notified what the notifier sent once (P6b)`() {
+    @Test fun `GET resets lists the resets of the audit processor and GET notified what the notifier sent once`() {
         audit.onReset(
             com.damoreira.snodra.messaging.control.ResetContext(
                 "audit", "op-1", com.damoreira.snodra.messaging.eventstore.ResetTarget.Earliest,

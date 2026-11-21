@@ -97,7 +97,7 @@ private class EkTranslator(private val codec: JsonCodec) : ExternalRecordTransla
 }
 
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
-/** Partner sources read through the core's [ExternalSources] from the Kafka add-on's [KafkaExternalSource] (ADR 0027). */
+/** Partner sources read through the core's [ExternalSources] from the Kafka add-on's [KafkaExternalSource]. */
 class ExternalSourcesTest {
     private val kafkaContainer = SnodraContainers.kafka()
     private val mongoContainer = SnodraContainers.mongo()

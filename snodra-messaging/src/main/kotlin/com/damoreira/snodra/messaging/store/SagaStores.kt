@@ -10,7 +10,7 @@ import java.time.Instant
 
 /*
  * The persistence the saga runtime, the dispatch relay, the deadline scheduler and the saga gauges need, as small ports
- * (ADR 0021, ADR 0028): a message store add-on implements them ([SagaStores], [MessageStore.sagas]), and `SagaTestFixture`
+ *: a message store add-on implements them ([SagaStores], [MessageStore.sagas]), and `SagaTestFixture`
  * supplies in-memory ones. What the runtime calls runs inside its transaction (when the implementation has one), so the
  * runtime decides what commits together; what the relay, the scheduler and the gauges call outside one commits on its own.
  * Times are the caller's (the application clock), passed in.

@@ -72,7 +72,7 @@ class PropertiesBindingTest {
             }
     }
 
-    @Test fun `P1 hub defaults`() {
+    @Test fun `hub defaults`() {
         runner.withPropertyValues(*required).run { context ->
             val hub = context.getBean(SnodraMessagingProperties::class.java).hub
             assertEquals(100, hub.loadFactor)
@@ -261,7 +261,7 @@ class PropertiesBindingTest {
         }
     }
 
-    @Test fun `events settings, the dead-letter mode and retention and the subscription prefix default and bind (P6a, ADR 0027)`() {
+    @Test fun `events settings, the dead-letter mode and retention and the subscription prefix default and bind`() {
         runner.withPropertyValues(*required).run { context ->
             val p = context.getBean(SnodraMessagingProperties::class.java)
             assertEquals(null, p.events.subscriptionPrefix)
@@ -286,7 +286,7 @@ class PropertiesBindingTest {
         }
     }
 
-    @Test fun `a dead-letter retention below 1 s or an unknown mode fails at startup (P6a)`() {
+    @Test fun `a dead-letter retention below 1 s or an unknown mode fails at startup`() {
         runner.withPropertyValues(*required, "snodra.messaging.events.dead-letter.retention=999ms").run { context ->
             assertNotNull(context.startupFailure)
             assertTrue(generateSequence(context.startupFailure) { it.cause }.any { it.message?.contains("snodra.messaging.events.dead-letter.retention") == true })

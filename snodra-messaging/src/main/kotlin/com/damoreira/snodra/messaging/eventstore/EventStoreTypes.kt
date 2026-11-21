@@ -1,7 +1,7 @@
 package com.damoreira.snodra.messaging.eventstore
 
 /**
- * The headers every event carries (ADR 0027), as the event store's native metadata.
+ * The headers every event carries, as the event store's native metadata.
  */
 object EventHeaders {
     /** The event's type name. */
@@ -46,7 +46,7 @@ const val MAX_POSITION_BYTES = 128
  */
 fun deadLetterSource(source: String): String = "$source.dlt"
 
-/** What an event store may offer beyond the required contract (ADR 0027); the hub and the dashboard offer only what an event store declares. */
+/** What an event store may offer beyond the required contract; the hub and the dashboard offer only what an event store declares. */
 enum class Capability(
     /** The protocol's name (`ProcessorStatus.capabilities`). */
     val wireName: String,

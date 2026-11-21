@@ -52,7 +52,7 @@ class AuditHandlerTest {
         assertEquals(listOf("fine", "not poisoned"), audit.handled.map { it.text })
     }
 
-    @Test fun `a reset of the audit processor is recorded with its target and ranges (P6b)`() {
+    @Test fun `a reset of the audit processor is recorded with its target and ranges`() {
         val audit = AuditHandler()
         assertTrue(AuditHandler::class.java.getMethod("onReset", ResetContext::class.java).isAnnotationPresent(ResetHandler::class.java))
         audit.onReset(ResetContext("audit", "op-1", ResetTarget.Earliest, listOf(ReplayRange("snodra.events", "0", "0", "3"))))
@@ -66,7 +66,7 @@ class AuditHandlerTest {
         )
     }
 
-    @Test fun `the notifier is in audit, never replays and records each note it notified (P6b)`() {
+    @Test fun `the notifier is in audit, never replays and records each note it notified`() {
         assertEquals("audit", AuditNotifier::class.java.getAnnotation(ProcessingGroup::class.java).value)
         assertTrue(AuditNotifier::class.java.getMethod("on", AuditNote::class.java).isAnnotationPresent(DisallowReplay::class.java))
         val notifier = AuditNotifier()

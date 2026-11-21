@@ -206,7 +206,7 @@ class HandlerRegistryTest {
         assertNull(assertNotNull(r.queryHandler("test.GetCount")).authorization)
     }
 
-    // --- shared query types (P4a) ---
+    // --- shared query types ---
 
     @Test fun `a shared query handler is listed as a shared query type`() {
         registry.register(SharedCountHandlers())
@@ -235,7 +235,7 @@ class HandlerRegistryTest {
         assertTrue(within.message!!.contains("both exclusive and shared"), within.message)
     }
 
-    // --- streaming queries (P4b) ---
+    // --- streaming queries ---
 
     @Test fun `a QueryHandler taking a StreamingQuery and returning a Flow is a streaming query handler`() = runBlocking {
         registry.register(StreamingRowsHandlers())
@@ -273,7 +273,7 @@ class HandlerRegistryTest {
         assertEquals("Handler StreamingAsCommand.handle takes a StreamingQuery: use @QueryHandler", e.message)
     }
 
-    // --- subscription queries (P4c) ---
+    // --- subscription queries ---
 
     @Test fun `a QueryHandler taking a SubscriptionQuery is a subscription query handler answering the initial result`() = runBlocking {
         registry.register(AccountWatchers())
@@ -305,7 +305,7 @@ class HandlerRegistryTest {
         assertEquals("Handler SubscriptionAsCommand.handle takes a SubscriptionQuery: use @QueryHandler", e.message)
     }
 
-    @Test fun `reset handlers are kept per processor in registration order and take no parameter or a ResetContext (P6b)`() = runBlocking {
+    @Test fun `reset handlers are kept per processor in registration order and take no parameter or a ResetContext`() = runBlocking {
         val registry = HandlerRegistry(MessageTypeResolver("test"))
         val projection = ResettingProjection()
         registry.register(projection)

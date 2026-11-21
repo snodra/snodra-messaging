@@ -6,7 +6,7 @@ import java.net.Inet6Address
 import java.net.InetAddress
 
 /**
- * The hubs named by `snodra.messaging.hub.address` (ADR 0016): either a fixed list of gRPC targets or one DNS name whose
+ * The hubs named by `snodra.messaging.hub.address`: either a fixed list of gRPC targets or one DNS name whose
  * addresses are the hubs.
  *
  * - `host:port` or `static://host:port`: one hub, today's behaviour.

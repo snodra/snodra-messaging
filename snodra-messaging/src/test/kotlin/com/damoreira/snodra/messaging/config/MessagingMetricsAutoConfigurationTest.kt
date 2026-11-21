@@ -22,7 +22,7 @@ import kotlin.test.assertIs
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
-/** The messaging meters are registered when a `MeterRegistry` bean exists, and the components report to them (P9, ADR 0026). */
+/** The messaging meters are registered when a `MeterRegistry` bean exists, and the components report to them. */
 class MessagingMetricsAutoConfigurationTest {
     private val hub = InProcessHub().start()
 

@@ -17,7 +17,7 @@ import org.springframework.data.mongodb.core.MongoTemplate
 import java.time.Clock
 
 /**
- * The MongoDB [MessageStore] (ADR 0028), when the application has a [MongoTemplate] and no store of its own, unless
+ * The MongoDB [MessageStore], when the application has a [MongoTemplate] and no store of its own, unless
  * `snodra.messaging.store.type` names another one (`memory`, for example: then neither the store nor its transaction manager is
  * created here). The retentions
  * come from `snodra.messaging.*.retention`; the core creates its indexes at startup ([MongoMessageStore.initSchema]) unless

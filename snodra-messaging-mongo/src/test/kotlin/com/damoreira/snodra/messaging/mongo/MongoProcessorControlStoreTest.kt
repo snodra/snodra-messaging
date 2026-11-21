@@ -27,7 +27,7 @@ import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-/** The `processor_control` document (P6b, ADR 0023): its exact shape, the conditional lock, renewal, release and ranges. */
+/** The `processor_control` document: its exact shape, the conditional lock, renewal, release and ranges. */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class MongoProcessorControlStoreTest {
     private val container = SnodraContainers.mongo()
@@ -149,7 +149,7 @@ class MongoProcessorControlStoreTest {
         val collection = mongo.db.getCollection(MongoProcessedEventStore.COLLECTION)
         collection.deleteMany(Document())
         val at = Date.from(now)
-        // As the library wrote them before (P6b): Int32 partition, Int64 offset.
+        // As the library wrote them before: Int32 partition, Int64 offset.
         collection.insertOne(Document("_id", "processor:default:old-4").append("type", "t").append("processedAt", at)
             .append("processor", "default").append("topic", "snodra.events").append("partition", 0).append("offset", 4L))
         collection.insertOne(Document("_id", "processor:default:old-9").append("type", "t").append("processedAt", at)

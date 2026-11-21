@@ -42,7 +42,7 @@ enum class DispatchKind { COMMAND, EVENT }
  *
  * A command given up on carries its outcome with it: [failureReason] and [failureMessage] (what the `SagaCommandFailed`
  * says) are written in the same update as [failedAt], and [noticePending] is true until that event has been delivered
- * locally (review amendment, ruling 28). A pending notice is retried by the relay with its own bounded backoff
+ * locally. A pending notice is retried by the relay with its own bounded backoff
  * ([noticeAttempts], [noticeNextAt]; the next try is not before [noticeNextAt], which also reserves the delivery for the
  * instance that claimed it) and never makes the relay send the command again. All of these are absent while unused.
  */
@@ -73,8 +73,7 @@ enum class DeadlineStatus { SCHEDULED, FIRED, CANCELLED }
 /**
  * A deadline of a saga instance in `deadlines`. [payload] is the JSON text of the payload (any JSON value, not only an
  * object) and [payloadType] its type name; both absent when there is none. A scheduler instance claims a due deadline
- * by setting [claimedBy] and [claimedUntil] (a lease: an expired one lets it fire again). [finishedAt] (added by the S1
- * plan: a TTL index needs a date) is set when the deadline is FIRED or CANCELLED. [correlationId] (ruling 37) is the
+ * by setting [claimedBy] and [claimedUntil] (a lease: an expired one lets it fire again). [finishedAt] (a TTL index needs a date) is set when the deadline is FIRED or CANCELLED. [correlationId] is the
  * correlation id of the message that scheduled it: the deadline handler's `MessageContext.correlationId` and the commands
  * it sends carry it, so a trace follows a saga through its timeouts.
  */

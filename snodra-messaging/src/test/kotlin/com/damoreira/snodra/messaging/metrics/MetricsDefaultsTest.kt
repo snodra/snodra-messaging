@@ -14,7 +14,7 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
- * The metrics export defaults (P9, ADR 0026): seconds as the OTLP base time unit, so the library's timers are `..._seconds`
+ * The metrics export defaults: seconds as the OTLP base time unit, so the library's timers are `..._seconds`
  * series, and the resource identity the dashboards aggregate on: `service.name` the service name the hub sees,
  * `service.instance.id` the instance id the hub sees.
  */

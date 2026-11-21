@@ -109,7 +109,7 @@ class UserCommandBusConfig {
 @org.springframework.stereotype.Component
 class BusClient(val commandBus: CommandBus, val queryBus: QueryBus)
 
-/** A message store (ADR 0028) that answers everything with nothing: what the events configuration needs to exist. */
+/** A message store that answers everything with nothing: what the events configuration needs to exist. */
 @Configuration(proxyBeanMethods = false)
 class MessageStoreMockConfig {
     @Bean fun messageStore(): MessageStore = mockk(relaxed = true)
@@ -358,7 +358,7 @@ class AutoConfigurationTest {
             }
     }
 
-    @Test fun `event processors, their control and dead letters are wired, and the hub reads their status (P6a, P6b)`() {
+    @Test fun `event processors, their control and dead letters are wired, and the hub reads their status`() {
         runner.withUserConfiguration(MessageStoreMockConfig::class.java)
             .withConfiguration(AutoConfigurations.of(TransactionAutoConfiguration::class.java, KafkaEventStoreAutoConfiguration::class.java))
             .withPropertyValues("snodra.messaging.kafka.bootstrap-servers=localhost:9", "snodra.messaging.events.consumer.enabled=true")
@@ -368,7 +368,7 @@ class AutoConfigurationTest {
                 assertTrue(processors.isRunning)
                 assertEquals(emptyList(), processors.consumers(), "no @EventHandler and no saga: no processor starts")
                 assertEquals(emptyList(), context.getBean(ProcessorStatusSource::class.java).processorStatuses())
-                // P6b: the processors' control, which the hub connection asks per control request.
+                // The processors' control, which the hub connection asks per control request.
                 assertNotNull(context.getBean(ProcessorControl::class.java))
             }
         runner.withUserConfiguration(MessageStoreMockConfig::class.java)

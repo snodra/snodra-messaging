@@ -31,7 +31,7 @@ import kotlin.concurrent.withLock
  * Settings of the [SagaDispatchRelay] (`snodra.messaging.sagas.relay.*`, S1 plan R8): how often it polls, how long a saga's
  * dispatch lease holds, and the transient retry of a command (up to [maxAttempts] attempts in all, then `EXHAUSTED`, with
  * [initialBackoff] growing by [multiplier] up to [maxBackoff]). [parallelism] sagas are dispatched at a time, at most
- * [batchSize] of them per poll. A command send gets [sendTimeout] for its answer (H1): one that takes longer is abandoned
+ * [batchSize] of them per poll. A command send gets [sendTimeout] for its answer: one that takes longer is abandoned
  * and counts as a transient failure. Through the hub the bound is never shorter than the hub's own deadline for the call plus
  * a guard ([RawCommandSender.sendTimeoutFor]).
  */
@@ -218,7 +218,7 @@ class SagaDispatchRelay(
                 commands.sendRaw(entry.type, entry.payload.toByteArray(Charsets.UTF_8), SendOptions(routingKey = entry.routingKey, retry = RetryPolicy.NONE, headers = headers))
             }
         })
-        // A local adapter has no other bound; through the hub the bound waits for the hub to give up first (ADR 0021 ruling 74).
+        // A local adapter has no other bound; through the hub the bound waits for the hub to give up first.
         val timeout = commands.sendTimeoutFor(entry.type, settings.sendTimeout)
         val outcome = try {
             send.get(timeout.toMillis(), TimeUnit.MILLISECONDS)

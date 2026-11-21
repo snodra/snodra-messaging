@@ -10,7 +10,7 @@ import kotlinx.coroutines.runBlocking
 import org.slf4j.LoggerFactory
 
 /**
- * The admin API of the dead letters (ADR 0022), the bean a service exposes on its own admin endpoints. It works on any
+ * The admin API of the dead letters, the bean a service exposes on its own admin endpoints. It works on any
  * instance of the service, but only for the processors this instance runs (it has a handler in it; `default` also when
  * sagas run): a call naming another processor, or a letter of one, throws [IllegalArgumentException] naming it. In modes
  * `event-store` and `log` there are no letters and every call throws [IllegalStateException] naming the mode.
@@ -126,8 +126,8 @@ class DeadLetters(
             headers = letter.headers,
         )
         return try {
-            val position = RecordPosition(letter.source, letter.segment, letter.position) // it is that record's stage 1 (P6b)
-            // A letter parked during a replay is retried as one: without its @DisallowReplay handlers (P6b).
+            val position = RecordPosition(letter.source, letter.segment, letter.position) // it is that record's stage 1
+            // A letter parked during a replay is retried as one: without its @DisallowReplay handlers.
             val outcome = dispatcher.runStage1(letter.processor, dedupeId, type, letter.value(), ctx, position, letter.replay) {
                 if (!runBlocking { store.deleteInTransaction(letter.id) }) throw Gone // retried or discarded meanwhile: roll the handling back
             }

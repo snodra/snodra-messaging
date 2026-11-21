@@ -14,7 +14,7 @@ import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
 
 /**
- * The event processors' gauges (P9, ADR 0026), from the status this instance reports to the hub ([source]), sampled every
+ * The event processors' gauges, from the status this instance reports to the hub ([source]), sampled every
  * [interval] on a daemon thread (and on [sampleOnce]); the export only reads the sampled values. The status is built from
  * memory and what the subscriptions report, and asks its own background thread to refresh the dead-letter counts, so sampling it
  * also keeps those fresh when no hub is connected. One set per started processor, as Prometheus shows them:

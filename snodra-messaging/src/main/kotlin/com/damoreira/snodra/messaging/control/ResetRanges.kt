@@ -5,7 +5,7 @@ import com.damoreira.snodra.messaging.eventstore.ResetTarget
 import com.damoreira.snodra.messaging.eventstore.SegmentOrder
 
 /**
- * The replay ranges of a reset (ADR 0023), from what the event store plans ([com.damoreira.snodra.messaging.eventstore.SubscriptionAdmin.plan]);
+ * The replay ranges of a reset, from what the event store plans ([com.damoreira.snodra.messaging.eventstore.SubscriptionAdmin.plan]);
  * positions are ordered by the event store's `compare` only.
  */
 internal object ResetRanges {

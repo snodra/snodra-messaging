@@ -4,7 +4,7 @@ import com.damoreira.snodra.messaging.api.MessageType
 import com.damoreira.snodra.messaging.api.StreamingQuery
 
 /*
- * A shared streaming query type (ADR 0017, P4b): service-b (Kotlin) and service-c (Rust) both own it, so a stream goes
+ * A shared streaming query type: service-b (Kotlin) and service-c (Rust) both own it, so a stream goes
  * to one instance of either. Mirrored in snodra-messaging-rs/examples/service-c/src/messages.rs; keep both in step.
  */
 

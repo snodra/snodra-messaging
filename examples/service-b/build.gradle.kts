@@ -16,9 +16,9 @@ dependencyManagement {
 
 dependencies {
     implementation(project(":snodra-messaging"))
-    // The message store: the outbox, the processed events, the dead letters and the sagas in the service's MongoDB (ADR 0028).
+    // The message store: the outbox, the processed events, the dead letters and the sagas in the service's MongoDB.
     implementation(project(":snodra-messaging-mongo"))
-    // The event store: the service's events on Kafka (ADR 0027).
+    // The event store: the service's events on Kafka.
     implementation(project(":snodra-messaging-kafka"))
     implementation(project(":examples:examples-api"))
     implementation(libs.spring.boot.starter.webmvc)

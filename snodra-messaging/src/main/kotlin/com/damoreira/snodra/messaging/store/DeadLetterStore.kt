@@ -6,7 +6,7 @@ import com.damoreira.snodra.messaging.deadletter.DeadLetterReason
 import java.time.Instant
 
 /**
- * The dead letters (`dead_letters`, ADR 0022): records that exhausted their attempts, sequenced per key. A letter's id is
+ * The dead letters (`dead_letters`): records that exhausted their attempts, sequenced per key. A letter's id is
  * `<processor>:<source>:<segment>:<position>` (on Kafka `<processor>:<topic>:<partition>:<offset>`, as always). The **blocking**
  * letters of a key are those whose reason is not INVALID; the key's head is the blocking letter at the earliest position (ties
  * by id), and later records of the key wait behind it. The letters of one key come from one segment; positions are ordered as

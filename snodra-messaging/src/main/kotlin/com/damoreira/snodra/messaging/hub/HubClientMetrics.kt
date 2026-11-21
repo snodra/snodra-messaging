@@ -7,11 +7,11 @@ import io.micrometer.core.instrument.binder.MeterBinder
 
 /**
  * The meters of the hub connections, bound to a Micrometer registry when there is one (Boot binds every [MeterBinder] bean).
- * As Prometheus shows them (P9, ADR 0026; the Rust library exports the same series):
+ * As Prometheus shows them (the Rust library exports the same series):
  *
  * - `snodra_hub_client_connected_hubs`: the live hubs (acknowledged stream, not rolling over);
  * - `snodra_hub_client_handlers_in_flight`: incoming hub requests being handled or waiting for a handler permit, over all hubs;
- * - the credential counters (P5b, P5c): `snodra_hub_client_token_fetches_total{result}` (`ok`, `http_error`, `oauth_error`,
+ * - the credential counters: `snodra_hub_client_token_fetches_total{result}` (`ok`, `http_error`, `oauth_error`,
  *   `io_error`, `bad_response`; only with `hub.oauth2`), `snodra_hub_client_certificate_rotations_total` (only with a client
  *   certificate) and `snodra_hub_client_credentials_refreshes_sent_total`.
  *

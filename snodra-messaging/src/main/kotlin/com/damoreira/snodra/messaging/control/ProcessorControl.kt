@@ -40,7 +40,7 @@ import com.damoreira.snodra.server.v1.ReplayRange as WireRange
 import com.damoreira.snodra.server.v1.ResetTarget as WireTarget
 
 /**
- * The control of this instance's event processors (P6b, ADR 0023): the hub's `ControlRequest`s ([handle]), the local
+ * The control of this instance's event processors: the hub's `ControlRequest`s ([handle]), the local
  * [pause] and [resume], and the convergence of every processor on its `processor_control` document ([ProcessorControlStore]).
  *
  * [com.damoreira.snodra.messaging.events.EventProcessors] hands its consumers to [attach] at start: the documents are read
@@ -54,7 +54,7 @@ import com.damoreira.snodra.server.v1.ResetTarget as WireTarget
  *
  * Requests run off the hub stream, one at a time per processor (a single thread each), except the renewal of the operation
  * this instance holds, which is answered at once, and the dead-letter requests while a reset of the processor executes here:
- * the list is read beside it, a retry, retry-all or discard is refused LOCKED at once (H1, as the Rust library). A prepare or
+ * the list is read beside it, a retry, retry-all or discard is refused LOCKED at once (as the Rust library does). A prepare or
  * renewal with a lease under [MIN_RESET_LEASE_MS] is INVALID. A reset needs the event store's capability `replay`: without it a
  * prepare or an execute is refused UNSUPPORTED before anything changes (the processor keeps its subscription). A reset executes
  * here only for an operation this instance holds, through the event store's [com.damoreira.snodra.messaging.eventstore.SubscriptionAdmin]:
@@ -192,10 +192,10 @@ class ProcessorControl(
         val prepare = request.resetPrepare
         val executing = slot.executing
         if (request.hasResetPrepare() && slot.held?.id == prepare.operationId) {
-            // A renewal of the operation held here: answered at once, never behind an execute of it (ADR 0023).
+            // A renewal of the operation held here: answered at once, never behind an execute of it.
             Thread.ofVirtual().name("snodra-control-renew").start { answer(guarded(request) { renew(slot, request) }) }
         } else if (executing != null && request.actionCase == ControlRequest.ActionCase.DEAD_LETTER_LIST) {
-            // Dead letters never wait behind an execute (the hub gives a request 10 s): the list only reads (H1, ADR 0023).
+            // Dead letters never wait behind an execute (the hub gives a request 10 s): the list only reads.
             Thread.ofVirtual().name("snodra-control-letters").start { answer(guarded(request) { letters(request) { list(request) } }) }
         } else if (executing != null && request.actionCase in LETTER_CHANGES) {
             // A change beside the execute would race its reset handlers and marker deletion: refused at once.
@@ -228,7 +228,7 @@ class ProcessorControl(
         else -> refused(request, ControlRefusal.CONTROL_REFUSAL_INVALID, "the control request has no action this instance knows")
     }
 
-    /** The refusal of an action the event store cannot do (ADR 0027). */
+    /** The refusal of an action the event store cannot do. */
     private fun unsupported(request: ControlRequest, capability: Capability): ControlReply = refused(
         request, ControlRefusal.CONTROL_REFUSAL_UNSUPPORTED,
         "the event store ${events.name} lacks the capability $capability: processor ${request.processor} cannot be reset",
@@ -250,7 +250,7 @@ class ProcessorControl(
         val lease = Duration.ofMillis(request.resetPrepare.leaseMs)
         val processor = slot.consumer.processor
         if (runBlocking { store.renew(processor, op, lease) }) return ok(request, "lease renewed")
-        // Its lease passed and was cleared, or it finished meanwhile: a late renewal must not take the free lock (ADR 0023).
+        // Its lease passed and was cleared, or it finished meanwhile: a late renewal must not take the free lock.
         synchronized(slot) {
             if (slot.held?.id == op) slot.held = null
             slot.changes++
@@ -667,7 +667,7 @@ class ProcessorControl(
     }
 
     companion object {
-        /** How often the `processor_control` documents are read (P6b). */
+        /** How often the `processor_control` documents are read. */
         val POLL_INTERVAL: Duration = Duration.ofSeconds(5)
 
         /** The executor of a reset extends its lease at least this often (at most a third of the lease) while it runs. */

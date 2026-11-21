@@ -32,7 +32,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 /**
- * The processor's loop over a subscription (ADR 0027), on a scripted event store: a failed subscription is subscribed again
+ * The processor's loop over a subscription, on a scripted event store: a failed subscription is subscribed again
  * after a backoff, a pause that comes after a delivery hands it out again, what the subscription reports reaches the status.
  * Records of a type the processor does not handle are acknowledged without touching the message store.
  */

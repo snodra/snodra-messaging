@@ -68,7 +68,7 @@ class AuditController(
     @GetMapping("/audit/handled")
     fun handled(): List<AuditNote> = audit.handled
 
-    /** The processor's resets that replayed something (P6b), as its `@ResetHandler` saw them. */
+    /** The processor's resets that replayed something, as its `@ResetHandler` saw them. */
     @GetMapping("/audit/resets")
     fun resets(): List<AuditReset> = audit.resets
 

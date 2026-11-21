@@ -50,7 +50,7 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 /**
- * JWT authentication (P5b, ADR 0019) against the real hub image (`SNODRA_SERVER_IMAGE`, default `snodra-server:dev`) in mode `enforce`
+ * JWT authentication against the real hub image (`SNODRA_SERVER_IMAGE`, default `snodra-server:dev`) in mode `enforce`
  * with `[[service]]` tables. A [TestOAuth2Server] on the host plays the identity provider: it issues the access tokens (RS256, a key made at test
  * time) and serves the JWKS the hub container fetches through `host.testcontainers.internal`. Leeway 0 s and expiry grace 2 s, so
  * `exp` is exact. The tests skip when the image is not built.
@@ -164,7 +164,7 @@ class HubJwtEndToEndTest {
 
     @Test fun `a service with no ACL table is refused even with a valid token`() = runBlocking {
         val hub = hub()
-        val stranger = connection(hub, "files-service").also { it.start() }
+        val stranger = connection(hub, "inventory-service").also { it.start() }
         val e = assertFailsWith<HubRegistrationRejectedException> { stranger.awaitRegistered(wait) }
         assertTrue("PERMISSION_DENIED" in e.message!!, e.message)
     }

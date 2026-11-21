@@ -77,7 +77,7 @@ class ExportHandlers {
 }
 
 /**
- * Streaming queries (P4b, ADR 0017) against two containers of the hub image under test (`SNODRA_SERVER_IMAGE`) in the
+ * Streaming queries against two containers of the hub image under test (`SNODRA_SERVER_IMAGE`) in the
  * multi-hub configuration: every instance is connected to both hubs. One service streams through the real handler
  * stack (registry, dispatcher, credits), the other collects through `QueryBus.stream`. Skips when the image is not built.
  */

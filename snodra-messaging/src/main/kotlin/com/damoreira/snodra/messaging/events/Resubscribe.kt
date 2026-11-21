@@ -10,7 +10,7 @@ import kotlinx.coroutines.withContext
 import java.time.Duration
 
 /**
- * How a reader of the event store (an event processor, an external source) keeps a subscription (ADR 0027): it subscribes, reads
+ * How a reader of the event store (an event processor, an external source) keeps a subscription: it subscribes, reads
  * until it stops or the subscription fails ([com.damoreira.snodra.messaging.eventstore.EventStoreException.Failed] from `next`
  * ends a subscription), closes it, and subscribes again after a backoff: [min] doubling up to [max] while the subscriptions keep
  * failing before they delivered anything; it starts again from [min] after a subscription that delivered an event or lived

@@ -77,7 +77,7 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
- * Mutual TLS (P5c, ADR 0020) against the real hub image (`SNODRA_SERVER_IMAGE`, default `snodra-server:dev`) in mode `enforce` with
+ * Mutual TLS against the real hub image (`SNODRA_SERVER_IMAGE`, default `snodra-server:dev`) in mode `enforce` with
  * `SNODRA_SERVER_TLS_CLIENT_AUTH=required` and `[[service]]` tables. A CA and every certificate are generated at test time (nothing is
  * checked in); the hub's own pair is issued by the same CA with both usages, so the image's health check (which presents it) passes.
  * The tests skip when the image is not built.

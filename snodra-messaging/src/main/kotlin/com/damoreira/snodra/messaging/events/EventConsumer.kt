@@ -40,7 +40,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * One event processor (ADR 0022, ADR 0027): reads the subscription [spec] (`<prefix>.<processor>` on the service's events
+ * One event processor: reads the subscription [spec] (`<prefix>.<processor>` on the service's events
  * source) of the event store [events] with at-least-once delivery and exactly-once handler effects, and puts what it cannot
  * handle in its [DeadLetterSink].
  *
@@ -56,7 +56,7 @@ import java.util.concurrent.atomic.AtomicLong
  * **Sequencing** (mode `collection`): the keys of this processor's letters on the assigned segments are loaded on
  * assignment and added to on every park. A record with a stage-1 handler whose key is in that set is confirmed against
  * the store: when the key still has a head letter, the record is parked `SEQUENCED` without running stage 1 (stage 2
- * still runs for it in `default`, ADR 0021 ruling 26, with the attempts and the log-and-skip of any record's stage 2); a miss
+ * still runs for it in `default`, with the attempts and the log-and-skip of any record's stage 2); a miss
  * (the letter was retried, discarded or expired, possibly on another instance) forgets the key and handles the record. A
  * record whose own letter already exists was parked before a crash: it is acknowledged.
  *
@@ -75,16 +75,16 @@ import java.util.concurrent.atomic.AtomicLong
  * The record's correlation id is in the handlers' coroutine context ([com.damoreira.snodra.messaging.tracing.CorrelationContext])
  * and the MDC, so events they publish carry it.
  *
- * [status] reports the processor for the hub (ADR 0022): the event store and its capabilities, the segments and their positions
+ * [status] reports the processor for the hub: the event store and its capabilities, the segments and their positions
  * as the subscription reports them ([Subscription.segments], never blocking), the dead-letter count from [sampleDeadLetters].
  *
- * **Control** (P6b, ADR 0023, driven by [com.damoreira.snodra.messaging.control.ProcessorControl]): [pause] pauses the
+ * **Control** (driven by [com.damoreira.snodra.messaging.control.ProcessorControl]): [pause] pauses the
  * subscription without leaving it (kept across [stop] and [start]; a record handed out before the pause took effect is handed
  * out again on the resume); the stage-1 marker of every record carries its position; a record inside an open [replay] range
  * (by the event store's [EventStore.compare]) runs stage 1 without its `@DisallowReplay` handlers and never stage 2. The status
  * says PAUSED, the [operationId] holding the processor's lock, `replaying` and each segment's `replay_until`.
  *
- * **Metrics** (P9): each record's final outcome in this processor goes to [metrics] once ([Consumed]; a parked record when
+ * **Metrics**: each record's final outcome in this processor goes to [metrics] once ([Consumed]; a parked record when
  * the sink took it, so a redelivery after a sink failure counts once, and as a duplicate when its letter was there already),
  * labelled with its type when the processor handles it, else [MessagingMetrics.OTHER]. A stop in the middle of the attempts
  * records nothing: the record comes back.
@@ -193,7 +193,7 @@ class EventConsumer(
     }
 
     /**
-     * Pauses consumption (P6b): the subscription delivers nothing more without being left (a record handed out before the pause
+     * Pauses consumption: the subscription delivers nothing more without being left (a record handed out before the pause
      * took effect is handed out again on the resume); the record in hand finishes. Kept across [stop] and [start]. Idempotent.
      */
     fun pause() = synchronized(pauseLock) {
@@ -210,10 +210,10 @@ class EventConsumer(
     /** Whether consumption is paused (or will start paused). */
     val paused: Boolean get() = pauseRequested
 
-    /** The reset operation holding this processor's lock (P6b), reported as `operation_id`; empty when none. */
+    /** The reset operation holding this processor's lock, reported as `operation_id`; empty when none. */
     @Volatile var operationId: String = ""
 
-    /** Sets the open replay ranges (P6b) from the processor's control document; those of another source are ignored. */
+    /** Sets the open replay ranges from the processor's control document; those of another source are ignored. */
     fun replay(ranges: List<ReplayRange>) {
         replayRanges = ranges.filter { it.source == spec.source }
     }
@@ -414,7 +414,7 @@ class EventConsumer(
             advance(sub, record)
             return true
         }
-        // The sagas see it even though stage 1 waits (ADR 0021 ruling 26), unless it is replayed (sagas never replay, P6b).
+        // The sagas see it even though stage 1 waits, unless it is replayed (sagas never replay).
         if (processor == Processors.DEFAULT && !replay) stage2(record, type, ctx)
         val letter = sink.letters.sequenced(processor, spec.source, record, head, replay)
         log.info("Record {} of type {} parked SEQUENCED in processor {} behind {}", where(record), type, processor, head)
@@ -643,7 +643,7 @@ class EventConsumer(
         pending.keys.removeIf { it.first in segments } // the new owner parks it, from the start
     }
 
-    /** This processor's status for the hub (ADR 0022), from in-memory state only: never blocks. */
+    /** This processor's status for the hub, from in-memory state only: never blocks. */
     fun status(): ProcessorStatus {
         val sub = current
         sub?.takeError()?.let(::failing)

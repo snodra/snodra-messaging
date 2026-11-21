@@ -18,7 +18,7 @@ import java.time.Instant
 import java.util.Base64
 
 /**
- * A client certificate and its key as the hub's TLS handshake needs them (P5c, ADR 0020): [chainPem] (the file's certificates, leaf first)
+ * A client certificate and its key as the hub's TLS handshake needs them: [chainPem] (the file's certificates, leaf first)
  * and [keyPem] (PKCS#8) as read, [leaf] and the [service] its one `snodra://service/<name>` URI SAN names. [toString] shows the service,
  * the [fingerprint] and the end of validity, never a key.
  */
@@ -37,7 +37,7 @@ class ClientCertificate internal constructor(
 }
 
 /**
- * The client certificate files of `snodra.messaging.hub.tls.client-cert-file` / `client-key-file` (P5c, ADR 0020): checked when this is
+ * The client certificate files of `snodra.messaging.hub.tls.client-cert-file` / `client-key-file`: checked when this is
  * built (an unreadable or empty file, a key that does not match, a certificate without exactly one `snodra://service/<name>` URI SAN, a
  * name other than [serviceName] fail the startup with the setting named), shared by every hub connection, and watched afterwards.
  *
@@ -204,7 +204,7 @@ class HubClientCertificate(
         return ClientCertificate(raw.cert, raw.key, leaf, service)
     }
 
-    /** The one `snodra://service/<name>` URI SAN, as the hub reads it (ADR 0020 ruling 4); other SANs are ignored. */
+    /** The one `snodra://service/<name>` URI SAN, as the hub reads it; other SANs are ignored. */
     private fun serviceOf(leaf: X509Certificate): String {
         val uris = try {
             leaf.subjectAlternativeNames.orEmpty().filter { it[0] == URI_SAN }.map { it[1] as String }

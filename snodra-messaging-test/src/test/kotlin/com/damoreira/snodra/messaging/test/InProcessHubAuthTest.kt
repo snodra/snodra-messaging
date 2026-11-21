@@ -30,7 +30,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-/** The `auth` knob of [InProcessHub] (P5a): the real hub's closes and request refusals, per mode. */
+/** The `auth` knob of [InProcessHub]: the real hub's closes and request refusals, per mode. */
 class InProcessHubAuthTest {
     private val hub = InProcessHub().start()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -78,7 +78,7 @@ class InProcessHubAuthTest {
             out.trySend(ClientMessage.newBuilder().setRegister(reg).build())
         }
 
-        /** A `ClientMessage.credentials` (P5b): a fresh `jwt` or `token` for the session. */
+        /** A `ClientMessage.credentials`: a fresh `jwt` or `token` for the session. */
         fun refresh(jwt: String? = null, token: String? = null) {
             val credentials = Credentials.newBuilder().apply { jwt?.let { setJwt(it) }; token?.let { setToken(it) } }
             out.trySend(ClientMessage.newBuilder().setCredentials(credentials).build())
@@ -204,7 +204,7 @@ class InProcessHubAuthTest {
         // wrong service name and the type outside handle, both for i-wrong; the request outside send for i-ok
         assertEquals(listOf(Status.Code.PERMISSION_DENIED, Status.Code.PERMISSION_DENIED), violations.filter { it.instanceId == "i-wrong" }.map { it.code })
         assertEquals(Status.Code.PERMISSION_DENIED, violations.single { it.instanceId == "i-ok" }.code)
-        // A session without a valid token is not judged per request (ruling 14).
+        // A session without a valid token is not judged per request.
         anonymous.request("secret.Get", RequestMode.UNARY)
         assertEquals(ErrorCode.NO_HANDLER, anonymous.next().error.code)
         assertEquals(1, hub.authViolations().count { it.instanceId == "i-anon" })
@@ -322,7 +322,7 @@ class InProcessHubAuthTest {
         assertEquals(1, hub.sessionsReplacedOf(own))
     }
 
-    // --- JWT credentials (P5b, ADR 0019) ---
+    // --- JWT credentials ---
 
     /** An unsigned token shaped like a client-credentials access token: the hub double reads `azp` and `exp`, never the signature. */
     private fun jwt(azp: String, expiresInSeconds: Long = 300) = listOf(
@@ -351,7 +351,7 @@ class InProcessHubAuthTest {
         val status = wrongAzp.status()
         assertEquals(Status.Code.PERMISSION_DENIED, status.code)
         assertTrue("orders-service" in status.description!!, status.toString())
-        val noEntry = Raw().also { it.register("files-service", "i-2", jwt = jwt("files-service")) }
+        val noEntry = Raw().also { it.register("inventory-service", "i-2", jwt = jwt("inventory-service")) }
         assertEquals(Status.Code.PERMISSION_DENIED, noEntry.status().code)
         val garbage = Raw().also { it.register("billing-service", "i-3", jwt = "not-a-jwt") }
         assertEquals(Status.Code.UNAUTHENTICATED, garbage.status().code)

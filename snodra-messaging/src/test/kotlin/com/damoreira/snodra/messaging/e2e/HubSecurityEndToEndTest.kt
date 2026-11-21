@@ -54,7 +54,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
- * Hub access control and TLS (P5a, ADR 0018) against the hub image under test (`SNODRA_SERVER_IMAGE`) in mode `enforce`, with an
+ * Hub access control and TLS against the hub image under test (`SNODRA_SERVER_IMAGE`) in mode `enforce`, with an
  * ACL file and a TLS certificate generated for each test: tokens are random strings, the certificate is created at test
  * time, nothing is checked in. The tests skip when the image is not built.
  */

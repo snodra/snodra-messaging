@@ -50,10 +50,10 @@ class HandlerRegistry(private val typeResolver: MessageTypeResolver) {
     /** The event handlers of [type] in every processor. */
     fun eventHandlers(type: String): List<HandlerMethod> = events[type]?.toList().orEmpty()
 
-    /** The event handlers of [type] in [processor] (ADR 0022). */
+    /** The event handlers of [type] in [processor]. */
     fun eventHandlers(type: String, processor: String): List<HandlerMethod> = eventHandlers(type).filter { it.processor == processor }
 
-    /** The `@ResetHandler`s of [processor] (P6b), in registration order (beans as registered, then by method name). */
+    /** The `@ResetHandler`s of [processor], in registration order (beans as registered, then by method name). */
     fun resetHandlers(processor: String): List<ResetHandlerMethod> = resets.filter { it.processor == processor }
 
     /** The processors that have at least one event handler, `default` included when it has one. */
@@ -73,7 +73,7 @@ class HandlerRegistry(private val typeResolver: MessageTypeResolver) {
     /** Query types of exclusive `@QueryHandler`s (announced as `query_types`). */
     fun exclusiveQueryTypes(): Set<String> = queries.filterValues { !it.shared }.keys.toSet()
 
-    /** Query types served by a subscription query handler (`SubscriptionQuery<I, U>`, P4c), shared or exclusive. */
+    /** Query types served by a subscription query handler (`SubscriptionQuery<I, U>`), shared or exclusive. */
     fun subscriptionQueryTypes(): Set<String> = queries.filterValues { it.subscription }.keys.toSet()
     fun eventTypes(): Set<String> = events.keys.toSet()
 
@@ -166,7 +166,7 @@ class HandlerRegistry(private val typeResolver: MessageTypeResolver) {
         }
         val authorization = requires?.let { HandlerAuthorizations.compile(it.expression, labelOf(klass, fn)) }
         val shared = kind == HandlerKind.QUERY && fn.findAnnotation<QueryHandler>()!!.shared
-        // A StreamingQuery<R> (P4b) is served by a @QueryHandler returning Flow<R>; the hub routes it with mode STREAMING.
+        // A StreamingQuery<R> is served by a @QueryHandler returning Flow<R>; the hub routes it with mode STREAMING.
         val streaming = messageClass.isSubclassOf(StreamingQuery::class)
         if (streaming && kind != HandlerKind.QUERY) {
             throw IllegalStateException("Handler ${labelOf(klass, fn)} takes a StreamingQuery: use @QueryHandler")
@@ -174,7 +174,7 @@ class HandlerRegistry(private val typeResolver: MessageTypeResolver) {
         if (streaming && fn.returnType.classifier != Flow::class) {
             throw IllegalStateException("Handler ${labelOf(klass, fn)} takes a StreamingQuery and must return kotlinx.coroutines.flow.Flow<R>")
         }
-        // A SubscriptionQuery<I, U> (P4c) is served by a @QueryHandler returning I (the initial result); the updates go
+        // A SubscriptionQuery<I, U> is served by a @QueryHandler returning I (the initial result); the updates go
         // through the QueryUpdateEmitter, so a Flow would be a streaming handler's shape, never a subscription's.
         val subscription = messageClass.isSubclassOf(SubscriptionQuery::class)
         if (subscription && streaming) {

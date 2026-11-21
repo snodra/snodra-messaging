@@ -6,7 +6,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 
 /**
- * The static hub token (P5a, ADR 0018) a service sends in `Register.credentials.token`, or none.
+ * The static hub token a service sends in `Register.credentials.token`, or none.
  *
  * [current] is asked once per stream, so a token that changes between reconnects (a rotated container secret) is picked
  * up by the next attempt. Surrounding whitespace is dropped (a secret file ends in a newline) and an empty inline token is no

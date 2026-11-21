@@ -29,7 +29,7 @@ management:
       export:
         # Metrics over OTLP/HTTP (the sandbox's otel-lgtm) only when switched on: without a collector the export would log a
         # failure every step. The library makes the export's time unit seconds and its resource the service and the
-        # instance id the hub sees (ADR 0026).
+        # instance id the hub sees.
         enabled: ${SNODRA_OTLP_METRICS_ENABLED:false}
         url: ${SNODRA_OTLP_METRICS_ENDPOINT:http://localhost:4318/v1/metrics}
         step: ${SNODRA_OTLP_METRICS_STEP:60s}

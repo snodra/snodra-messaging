@@ -34,7 +34,7 @@ data class JdbcStoreSettings(
 )
 
 /**
- * The [MessageStore] on a SQL database through plain JDBC (ADR 0028): PostgreSQL 13+ or MySQL 8.0.17+ ([dialect]), the tables
+ * The [MessageStore] on a SQL database through plain JDBC: PostgreSQL 13+ or MySQL 8.0.17+ ([dialect]), the tables
  * `snodra_outbox`, `snodra_processed_events`, `snodra_dead_letters`, `snodra_processor_control`, `snodra_external_calls`,
  * `snodra_sagas`, `snodra_saga_associations`, `snodra_saga_dispatch`, `snodra_saga_dispatch_leases`, `snodra_deadlines` and
  * `snodra_saga_failures` (schema `db/snodra/<dialect>/V1__snodra.sql`, applied by [initSchema]).

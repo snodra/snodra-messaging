@@ -179,7 +179,7 @@ class HubEndToEndTest {
         assertTrue(elapsed <= Duration.ofSeconds(6), "re-registered only after $elapsed")
     }
 
-    // --- flow control (P1) ---
+    // --- flow control ---
 
     @Test fun `a slow handler with one permit gives latency, not timeouts`() = runBlocking {
         val hub = start(newHub())

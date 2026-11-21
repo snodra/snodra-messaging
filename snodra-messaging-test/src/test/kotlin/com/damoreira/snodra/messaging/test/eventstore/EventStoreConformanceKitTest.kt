@@ -39,7 +39,7 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 /**
- * The event-store kit's own test (ADR 0027): the kit runs on a minimal in-process event store of this file, a test double
+ * The event-store kit's own test: the kit runs on a minimal in-process event store of this file, a test double
  * (not the in-memory event store add-on, which comes later), with a message store that only keeps processed-event markers. An
  * event-store add-on proves itself by running the same kit.
  */

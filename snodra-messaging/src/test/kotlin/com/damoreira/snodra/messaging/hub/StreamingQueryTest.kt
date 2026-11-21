@@ -120,7 +120,7 @@ class SilentStreamer {
     @QueryHandler fun handle(query: ExportRows): Flow<Row> = flow { awaitCancellation() }
 }
 
-/** Streaming queries (P4b, ADR 0017) over in-process hubs: the handler side, the sender side and their meeting. */
+/** Streaming queries over in-process hubs: the handler side, the sender side and their meeting. */
 class StreamingQueryTest {
     private val hubs = mutableListOf<InProcessHub>()
     private val hub = hub()

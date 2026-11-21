@@ -245,7 +245,7 @@ class HandlerInvokerTest {
         assertEquals("no auth", failure.message)
     }
 
-    // --- streaming queries (P4b) ---
+    // --- streaming queries ---
 
     @Test fun `invokeStream hands every encoded element to onPart and returns null at the end`() = runBlocking {
         registry.register(RowsHandlers())
@@ -295,7 +295,7 @@ class HandlerInvokerTest {
         assertEquals(1, parts.size)
     }
 
-    // --- subscription queries (P4c) ---
+    // --- subscription queries ---
 
     @Test fun `a unary request for a subscription query type is INVALID_REQUEST, the initial request runs the handler`() = runBlocking {
         registry.register(WatchHandlers())

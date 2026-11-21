@@ -22,7 +22,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-/** The meters of the outbox relay, the event processors and the hub client on a [SimpleMeterRegistry] (P9, ADR 0026). */
+/** The meters of the outbox relay, the event processors and the hub client on a [SimpleMeterRegistry]. */
 class MicrometerMessagingMetricsTest {
     private val registry = SimpleMeterRegistry()
     private val clock = SettableClock(Instant.parse("2026-11-07T10:00:00Z"))

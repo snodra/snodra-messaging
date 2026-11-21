@@ -4,7 +4,7 @@ import com.damoreira.snodra.messaging.hub.PermitLedger.Step
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
 
-/** The flush rule of returned permits (ADR 0014), without a stream or a clock. */
+/** The flush rule of returned permits, without a stream or a clock. */
 class PermitLedgerTest {
 
     private fun ledger(initial: Int) = PermitLedger(initial)

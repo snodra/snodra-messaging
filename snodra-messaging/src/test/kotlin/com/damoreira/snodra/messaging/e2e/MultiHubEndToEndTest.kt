@@ -49,7 +49,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 /**
- * Multi-hub HA (P3, ADR 0016) against two containers of the hub image under test (`SNODRA_SERVER_IMAGE`): every instance
+ * Multi-hub HA against two containers of the hub image under test (`SNODRA_SERVER_IMAGE`): every instance
  * registers on both hubs, reports both ids, spreads unkeyed requests over both and survives losing one. Each hub gets
  * fixed host ports so a stopped container comes back on the same address. Skips when the image is not built.
  */

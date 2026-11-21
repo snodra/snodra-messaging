@@ -46,7 +46,7 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-/** P5b client configuration: `hub.oauth2.*` and its environment fallbacks, the startup checks, and that the client secret never leaks. */
+/** Client configuration: `hub.oauth2.*` and its environment fallbacks, the startup checks, and that the client secret never leaks. */
 class HubOAuth2ConfigTest {
     @Configuration(proxyBeanMethods = false)
     @EnableConfigurationProperties(SnodraMessagingProperties::class)

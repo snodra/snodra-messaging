@@ -23,13 +23,13 @@ data class NoAnnotation(val x: Int) : Command<Unit>
 @MessageType("test.Happened")
 data class Happened(val id: String, val at: Instant) : Event
 
-/** A streaming query (P4b): [count] rows, failing with `IllegalStateException` before row [failAt] when it is set. */
+/** A streaming query: [count] rows, failing with `IllegalStateException` before row [failAt] when it is set. */
 @MessageType("test.ExportRows")
 data class ExportRows(val count: Int, val failAt: Int = -1) : StreamingQuery<Row>
 
 data class Row(val n: Int)
 
-/** A subscription query (P4c): the balance of [account] now, then every change to it. */
+/** A subscription query: the balance of [account] now, then every change to it. */
 @MessageType("test.WatchAccount")
 data class WatchAccount(val account: Int) : SubscriptionQuery<Balance, BalanceChanged>
 

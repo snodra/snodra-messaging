@@ -34,7 +34,7 @@ import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
 /**
- * The event store on Apache Kafka (ADR 0027), the add-on `snodra-messaging-kafka`.
+ * The event store on Apache Kafka, the add-on `snodra-messaging-kafka`.
  *
  * - **Source, segment, position.** A source is a topic (`snodra.events`, and its dead-letter topic `snodra.events.dlt`), a
  *   segment one of its partitions (the partition number in decimal) and a position an offset (in decimal). The topics are

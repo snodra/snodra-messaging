@@ -16,7 +16,7 @@ internal interface SubscriptionSink {
 }
 
 /**
- * Admits one `mode = SUBSCRIPTION` request this instance was chosen for (P4c): validates it like a handler call and, when
+ * Admits one `mode = SUBSCRIPTION` request this instance was chosen for: validates it like a handler call and, when
  * it is acceptable, calls `register` with the decoded query. Returns null when the subscription is registered, or the
  * error that ends it (`ReplyEnd{error}`): the pre-checks' or `register`'s (the instance's subscription limit).
  */
@@ -142,7 +142,7 @@ internal sealed interface Opening {
 }
 
 /**
- * The subscription queries (P4c) this instance serves, over every hub it is connected to: the [QueryUpdateEmitter]
+ * The subscription queries this instance serves, over every hub it is connected to: the [QueryUpdateEmitter]
  * delivers to them, a hub `Cancel` removes one, a lost hub stream removes the ones it carried. At most [maxSubscriptions]
  * are open at once (`snodra.messaging.hub.max-subscriptions`): the next one is refused with `RESOURCE_EXHAUSTED`. A
  * subscription holds no handler permit (`HandlerGate`): it is a standing interest, not work in progress. A subscription is registered when its request is read (pending, see [ServedSubscription]) and counts against the limit from then on.

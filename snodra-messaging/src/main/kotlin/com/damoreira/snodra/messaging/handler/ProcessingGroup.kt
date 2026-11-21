@@ -1,7 +1,7 @@
 package com.damoreira.snodra.messaging.handler
 
 /**
- * Puts every `@EventHandler` method of the annotated class in the named event processor (P6a, ADR 0022). Each processor
+ * Puts every `@EventHandler` method of the annotated class in the named event processor. Each processor
  * reads the service's events in its own subscription of the event store (`<prefix>.<name>`, where `<prefix>` is
  * `snodra.messaging.events.subscription-prefix`, else the service name; on Kafka the consumer group), with its own position,
  * its own idempotency markers (`processor:<name>:<eventId>`) and its own dead letters, so a slow or failing handler group never
@@ -17,7 +17,7 @@ package com.damoreira.snodra.messaging.handler
 @MustBeDocumented
 annotation class ProcessingGroup(val value: String)
 
-/** Names of event processors (ADR 0022) and the marker id each one writes in `processed_events`. */
+/** Names of event processors and the marker id each one writes in `processed_events`. */
 object Processors {
     /** The processor of every `@EventHandler` whose class has no [ProcessingGroup]. */
     const val DEFAULT = "default"
@@ -36,6 +36,6 @@ object Processors {
     /** The stage-1 marker `_id` of [dedupeId] in [processor], [DEFAULT] included: `processor:<processor>:<dedupeId>`. */
     fun markerId(processor: String, dedupeId: String): String = "processor:$processor:$dedupeId"
 
-    /** External source names that would let a dedupe id collide with a marker family of ADR 0021 or 0022. */
+    /** External source names that would let a dedupe id collide with a marker family. */
     val RESERVED_SOURCE_NAMES: Set<String> = setOf("processor", "saga", "ingress", "failed")
 }

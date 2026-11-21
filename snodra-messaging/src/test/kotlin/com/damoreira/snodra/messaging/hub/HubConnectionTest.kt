@@ -96,7 +96,7 @@ class HubConnectionTest {
         kotlinx.coroutines.Dispatchers.IO, maxConcurrentHandlers, loadFactor, tags,
     ).also { connections += it }
 
-    // --- flow control (P1) ---
+    // --- flow control ---
 
     @Test fun `register carries the initial permits, load factor and tags`() = runBlocking {
         val conn = flowConnection("a", maxConcurrentHandlers = 4, loadFactor = 150, tags = mapOf("zone" to "eu-1")) { req ->
@@ -410,7 +410,7 @@ class HubConnectionTest {
         assertTrue(response.reply.error.message.startsWith("TimeoutCancellationException: "), response.reply.error.message)
     }
 
-    // --- handshake, timeouts, error split, backoff (P0) ---
+    // --- handshake, timeouts, error split, backoff ---
 
     @Test fun `the ack is parsed`() = runBlocking {
         hub.typeTimeouts = mapOf("test.Slow" to Duration.ofSeconds(30))
@@ -623,7 +623,7 @@ class HubConnectionTest {
     private fun errorReply(id: String, code: ErrorCode, message: String): Reply =
         Reply.newBuilder().setRequestId(id).setError(Error.newBuilder().setRequestId(id).setCode(code).setMessage(message)).build()
 
-    // --- processor control (P6b, ADR 0023) ---
+    // --- processor control ---
 
     private fun pause(id: String) = ControlRequest.newBuilder().setControlId(id).setProcessor("audit")
         .setPause(ProcessorPause.getDefaultInstance()).build()

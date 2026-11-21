@@ -1,7 +1,7 @@
 package com.damoreira.snodra.messaging.hub
 
 /**
- * Permit accounting of one hub stream (flow control, ADR 0014): decides when the permits of completed handlers are
+ * Permit accounting of one hub stream (flow control): decides when the permits of completed handlers are
  * written back in a `Permits` message.
  *
  * Per stream it keeps `initial` (the `Register.initial_permits` sent on it), `received` (requests that arrived on it),

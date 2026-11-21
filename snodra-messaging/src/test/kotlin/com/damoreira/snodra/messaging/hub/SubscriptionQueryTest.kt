@@ -121,7 +121,7 @@ class NoopTransactionManager : AbstractPlatformTransactionManager() {
     override fun doRollback(status: DefaultTransactionStatus) = Unit
 }
 
-/** Subscription queries (P4c, ADR 0017) over in-process hubs: the handler side (registration, emitter), then the sender side. */
+/** Subscription queries over in-process hubs: the handler side (registration, emitter), then the sender side. */
 class SubscriptionQueryTest {
     private val hubs = mutableListOf<InProcessHub>()
     private val hub = hub()
