@@ -25,7 +25,7 @@ internal const val DISPATCH_CORRELATION_HEADER = "correlation-id"
  */
 internal const val DISPATCH_TRACEPARENT_HEADER = "traceparent"
 
-/** Entries of one saga handling take `seq = version * SEQ_STRIDE + index`, so the index must stay below it. */
+/** Entries of one saga handling take `seq = version * SEQ_STRIDE + index`; a handling records at most `SEQ_STRIDE - 1` (999). */
 internal const val SEQ_STRIDE = 1000L
 
 internal class RecordingSagaLifecycle(override val sagaId: String, associations: List<Association>) : SagaLifecycle {
@@ -66,7 +66,7 @@ internal class RecordingSagaCommands(
 
     private fun record(kind: DispatchKind, message: Any, routingKey: String?) {
         val index = entries.size
-        check(index < SEQ_STRIDE) { "A saga handling may send and publish at most ${SEQ_STRIDE - 1} messages, was $index" }
+        check(index < SEQ_STRIDE - 1) { "A saga handling may send and publish at most ${SEQ_STRIDE - 1} messages, was $index" }
         val seq = version * SEQ_STRIDE + index
         entries += SagaDispatchDocument(
             id = "$sagaId:$seq",
