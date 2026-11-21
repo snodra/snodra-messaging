@@ -57,7 +57,7 @@ B=${B:-http://localhost:8092}
 
 fail() { echo "SMOKE FAILED: $*" >&2; exit 1; }
 
-# F3: flow control. The steps recreate service-b and service-c with compose.flow-demo.yaml (one
+# Flow control. The steps recreate service-b and service-c with compose.flow-demo.yaml (one
 # permit each, a 200 ms CountGreetings), so parallel calls queue in the hub and come back as latency, not timeouts
 # or 503s, and revert them to the default concurrency afterwards (also when a step fails). Needs the docker CLI.
 # SKIP_FLOW=1 skips these steps; ONLY_FLOW=1 runs only them. Timings in ms need perl (Time::HiRes).
@@ -216,7 +216,7 @@ flow_steps() {
   flow_demo_off
 }
 
-# F1: a frozen handler is evicted after the hub's 10 s heartbeat timeout, so a call to it fails in ~10 s
+# A frozen handler is evicted after the hub's 10 s heartbeat timeout, so a call to it fails in ~10 s
 # instead of the 30 s it took before (and instead of burning a 5 s TIMEOUT: compose.local.yaml gives
 # examples.CountGreetings a 20 s per-type override). SKIP_PAUSE=1 skips this step; ONLY_PAUSE=1 runs only this step.
 pause_step() {

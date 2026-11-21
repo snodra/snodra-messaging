@@ -22,7 +22,7 @@ internal object JdbcSchema {
     const val VERSION = 1
 
     /** The session-level advisory lock (PostgreSQL, one bigint key) and the named lock (MySQL) that serialise [apply]. */
-    private const val PG_LOCK = 0x4B524B4E_5343484DL // 'KRKN' 'SCHM'
+    private const val PG_LOCK = 0x4B524B4E_5343484DL // session advisory lock serialising schema setup; shared with the Rust library, 0x4B524B4E5343484D = 5427483300711319629
     private const val MYSQL_LOCK = "snodra_schema"
 
     /** How long [apply] waits for another instance applying the schema. */
