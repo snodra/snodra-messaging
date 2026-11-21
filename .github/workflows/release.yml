@@ -12,7 +12,27 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # The JAR uploads attach to an existing release, so it is created first.
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - name: create the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          NOTES="Maven Central: \`com.damoreira.snodra:snodra-messaging*:${VERSION#v}\`
+          JARs: every published module below."
+          if gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$VERSION" --repo "$GITHUB_REPOSITORY" \
+              --title "${GITHUB_REPOSITORY#*/} $VERSION" --notes "$NOTES"
+          else
+            gh release create "$VERSION" --repo "$GITHUB_REPOSITORY" \
+              --title "${GITHUB_REPOSITORY#*/} $VERSION" --generate-notes --notes "$NOTES"
+          fi
+
   publish:
+    needs: prepare
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -35,12 +55,11 @@ jobs:
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: ./gradlew publishAggregationToCentralPortal -Pversion="$VERSION" --no-daemon
 
-      - name: GitHub release
+      - name: the published JARs attach to the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "${GITHUB_REPOSITORY#*/} $GITHUB_REF_NAME" \
-            --generate-notes \
-            --notes "Maven Central: \`com.damoreira.snodra:snodra-messaging*:$VERSION\`"
+          find . -path '*/build/libs/*.jar' \
+            ! -name '*-sources.jar' ! -name '*-javadoc.jar' -print0 \
+            | xargs -0 -r gh release upload "$GITHUB_REF_NAME" \
+                --repo "$GITHUB_REPOSITORY" --clobber
