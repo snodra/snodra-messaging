@@ -55,11 +55,13 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.reflect.KClass
 
 /**
- * [CommandBus] and [QueryBus] over the hub. A message whose handler lives in this instance is invoked directly (same
- * codec round trip and error mapping, no network); anything else becomes a hub `Request` carrying the caller's bearer
- * token (when [forwardJwt]), a correlation id and the trace context. A query on a type this service registered as
- * **shared** (`@QueryHandler(shared = true)`) is the exception: it always goes through the hub, which round-robins it
- * over every owner's instances, this one included.
+ * [CommandBus] and [QueryBus] over the hub. By default a command or query whose handler lives in this instance is invoked
+ * directly (same codec round trip and error mapping, no network; its routing key is ignored); anything else becomes a hub
+ * `Request` carrying the caller's bearer token (when [forwardJwt]), a correlation id and the trace context. A query on a
+ * type this service registered as **shared** (`@QueryHandler(shared = true)`) is the exception: it always goes through the
+ * hub, which round-robins it over every owner's instances, this one included. With [alwaysThroughHub]
+ * (`snodra.messaging.hub.always-route-through-hub`) nothing is invoked directly: every request goes through the hub, so a
+ * keyed request reaches the instance its routing key chooses whichever instance sent it.
  *
  * Per call [SendOptions] choose the priority (default [priorities] per type, else 0), the timeout (default
  * [requestTimeout]) and the retry policy (default [retry], null = no retry). With retry, failures that
@@ -130,6 +132,13 @@ class HubBus(
     /** Default retry policy (`snodra.messaging.hub.retry.*` when enabled); null = no retry. */
     private val retry: RetryPolicy? = null,
     private val metrics: MessagingMetrics = NoopMessagingMetrics,
+    /**
+     * `snodra.messaging.hub.always-route-through-hub`: when true, every command and query goes through the hub, also one of a
+     * type this instance handles itself (and [sendRaw]'s commands), so the hub routes it like any other: by its routing key to
+     * the same instance whichever instance sent it, with flow control, priorities, the hub's deadline and metrics. False (the
+     * default) answers such a request in-process, without the hub, ignoring its routing key.
+     */
+    private val alwaysThroughHub: Boolean = false,
 ) : CommandBus, QueryBus, RawCommandSender {
 
     override suspend fun <R> send(command: Command<R>, routingKey: String?): R = send(command, SendOptions(routingKey = routingKey))
@@ -140,13 +149,13 @@ class HubBus(
 
     /**
      * The saga relay's send path ([com.damoreira.snodra.messaging.saga.RawCommandSender]): a command known by wire [type]
-     * and JSON [payload]. A handler in this instance is invoked directly, otherwise the request goes to the hub, with
+     * and JSON [payload]. A handler in this instance is invoked directly (unless [alwaysThroughHub]), otherwise the request goes to the hub, with
      * [options] (routing key, headers, timeout, retry) and the correlation id of the calling coroutine. It carries **no
      * caller**: no bearer token and no identity, whoever is signed in on the thread (a saga's triggering event is not a
      * caller). The reply is not decoded; a failure is returned classified, see [com.damoreira.snodra.messaging.saga.RawFailures], except that the hub's `NO_HANDLER` is transient here.
      */
     override suspend fun sendRaw(type: String, payload: ByteArray, options: SendOptions): RawOutcome {
-        if (registry.commandHandler(type) != null) return localRaw.sendRaw(type, payload, options)
+        if (handledHere(type)) return localRaw.sendRaw(type, payload, options)
         return try {
             timed(MessageKind.COMMAND, type) {
                 val template = rawTemplate(type, payload, options)
@@ -164,13 +173,16 @@ class HubBus(
 
     private val localRaw = LocalRawCommandSender(invoker)
 
+    /** [sendRaw] answers a command of [type] in-process: this instance handles it and [alwaysThroughHub] is off. */
+    private fun handledHere(type: String): Boolean = !alwaysThroughHub && registry.commandHandler(type) != null
+
     /**
      * A local handler: [sendTimeout]. Through the hub at least the hub's deadline for the request [sendRaw] sends (its
      * `timeout_ms` is [requestTimeout] or 0; every live hub's per-type override or clamp) plus
      * [RawCommandSender.HUB_CALL_GUARD], so the relay never abandons a call the hub may still be running.
      */
     override fun sendTimeoutFor(type: String, sendTimeout: Duration): Duration {
-        if (registry.commandHandler(type) != null) return sendTimeout
+        if (handledHere(type)) return sendTimeout
         val timeoutMs = chosenTimeout(null)?.toMillis()?.coerceIn(0, Int.MAX_VALUE.toLong())?.toInt() ?: 0
         return maxOf(sendTimeout, connection.hubDeadlineBound(type, timeoutMs).plus(RawCommandSender.HUB_CALL_GUARD))
     }
@@ -422,8 +434,10 @@ class HubBus(
         val type = typeResolver.typeNameOf(message::class)
         // A shared query type is never answered locally: the hub round-robins a point query over every owner's
         // instances, this one included, so an owner is not favoured over the others (as in the Rust library).
-        val local = when (kind) {
-            RequestKind.COMMAND -> registry.commandHandler(type)
+        // With alwaysThroughHub nothing is: the hub routes it (by its routing key, too) like a request of another service.
+        val local = when {
+            alwaysThroughHub -> null
+            kind == RequestKind.COMMAND -> registry.commandHandler(type)
             else -> registry.queryHandler(type)?.takeUnless { it.shared }
         }
         if (local != null) {

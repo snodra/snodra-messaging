@@ -63,6 +63,10 @@ class LocalPingHandlers {
     @CommandHandler fun handle(command: Ping): Pong = Pong("local:${command.text}", Instant.EPOCH)
 }
 
+class CountHandlers {
+    @QueryHandler fun handle(query: GetCount): Count = Count(query.key.length)
+}
+
 class AdminOnlyHandlers {
     @CommandHandler @RequiresAuthentication("hasRole('snodra-admin')")
     fun handle(command: Ping): Pong = Pong("admin:${command.text}", Instant.EPOCH)
@@ -306,6 +310,54 @@ class HubBusTest {
         val pong = withTimeout(5_000) { bus.send(Ping("x")) }
 
         assertEquals(Pong("local:x", Instant.EPOCH), pong)
+    }
+
+    /** This instance handles its own types ([registry]) and serves them from the hub too, as the hub lifecycle wires it. */
+    private suspend fun selfServingBus(alwaysThroughHub: Boolean): HubBus {
+        val dispatcher = InboundRequestDispatcher(invoker, ForwardedIdentityResolver(null), codec)
+        val self = connection("self") { dispatcher.dispatch(it) }
+        self.register(registry.commandTypes(), registry.exclusiveQueryTypes(), registry.sharedQueryTypes())
+        self.start()
+        assertTrue(self.awaitRegistered(wait))
+        return HubBus(self, registry, invoker, codec, resolver, true, TraceHeaders(null, null), Duration.ofSeconds(2), alwaysThroughHub = alwaysThroughHub)
+    }
+
+    @Test fun `by default a keyed command of an own type is answered in-process and never reaches the hub`() = runBlocking {
+        registry.register(LocalPingHandlers())
+        val bus = selfServingBus(alwaysThroughHub = false)
+
+        val pong = withTimeout(5_000) { bus.send(Ping("x"), SendOptions(routingKey = "order-1")) }
+
+        assertEquals(Pong("local:x", Instant.EPOCH), pong)
+        assertEquals(0, hub.requestsFrom("self"))
+    }
+
+    @Test fun `with always-route-through-hub a keyed command of an own type reaches the hub with its routing key`() = runBlocking {
+        registry.register(LocalPingHandlers())
+        val bus = selfServingBus(alwaysThroughHub = true)
+
+        val pong = withTimeout(5_000) { bus.send(Ping("x"), SendOptions(routingKey = "order-1")) }
+
+        assertEquals(Pong("local:x", Instant.EPOCH), pong) // the hub routed it back to its only owner, this instance
+        assertEquals(1, hub.requestsFrom("self"))
+        val sent = assertNotNull(hub.lastRequest())
+        assertEquals("test.Ping", sent.type)
+        assertEquals("order-1", sent.routingKey)
+        assertEquals(2_000, sent.timeoutMs)
+    }
+
+    @Test fun `with always-route-through-hub a query and a saga relay command of own types go through the hub too`() = runBlocking {
+        registry.register(LocalPingHandlers())
+        registry.register(CountHandlers())
+        val bus = selfServingBus(alwaysThroughHub = true)
+
+        assertEquals(Count(3), withTimeout(5_000) { bus.send(GetCount("abc")) })
+        assertEquals(1, hub.requestsFrom("self"))
+        assertEquals("test.GetCount", hub.lastRequest()!!.type)
+        val raw = withTimeout(5_000) { bus.sendRaw("test.Ping", codec.encode(Ping("y")), SendOptions(routingKey = "order-2")) }
+        assertEquals(com.damoreira.snodra.messaging.saga.RawOutcome.Success, raw)
+        assertEquals(2, hub.requestsFrom("self"))
+        assertEquals("order-2", hub.lastRequest()!!.routingKey)
     }
 
     @Test fun `remote command carries bearer token and correlation id`() = runBlocking {

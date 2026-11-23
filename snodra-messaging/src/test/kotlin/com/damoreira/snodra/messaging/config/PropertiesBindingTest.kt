@@ -48,6 +48,28 @@ class PropertiesBindingTest {
         }
     }
 
+    @Test fun `always-route-through-hub is off by default and binds from the property and the environment`() {
+        runner.withPropertyValues(*required).run { context ->
+            assertEquals(false, context.getBean(SnodraMessagingProperties::class.java).hub.alwaysRouteThroughHub)
+        }
+        runner.withPropertyValues(*required, "snodra.messaging.hub.always-route-through-hub=true").run { context ->
+            assertEquals(true, context.getBean(SnodraMessagingProperties::class.java).hub.alwaysRouteThroughHub)
+        }
+        val env = mapOf<String, Any>(
+            "SNODRA_MESSAGING_SERVICE_NAME" to "billing",
+            "SNODRA_MESSAGING_TYPE_PREFIX" to "snodra.billing",
+            "SNODRA_MESSAGING_HUB_ALWAYSROUTETHROUGHHUB" to "true",
+        )
+        runner
+            .withInitializer { context ->
+                val name = "test-" + StandardEnvironment.SYSTEM_ENVIRONMENT_PROPERTY_SOURCE_NAME
+                context.environment.propertySources.addFirst(SystemEnvironmentPropertySource(name, env))
+            }
+            .run { context -> assertEquals(true, context.getBean(SnodraMessagingProperties::class.java).hub.alwaysRouteThroughHub) }
+        val json = checkNotNull(javaClass.getResourceAsStream("/META-INF/spring-configuration-metadata.json")).use { String(it.readAllBytes()) }
+        assertTrue("\"snodra.messaging.hub.always-route-through-hub\"" in json)
+    }
+
     @Test fun `relaxed env binding SNODRA_MESSAGING_HUB_ADDRESS`() {
         val env = mapOf<String, Any>(
             "SNODRA_MESSAGING_SERVICE_NAME" to "billing",

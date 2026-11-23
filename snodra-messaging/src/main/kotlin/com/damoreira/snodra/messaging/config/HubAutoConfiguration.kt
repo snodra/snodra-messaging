@@ -176,6 +176,7 @@ class HubAutoConfiguration {
         priorities = properties.hub.priorities,
         retry = properties.hub.retry.policy(),
         metrics = metrics.getIfAvailable { NoopMessagingMetrics },
+        alwaysThroughHub = properties.hub.alwaysRouteThroughHub,
     )
 
     // Facades delegate instead of returning hubBus itself: an object implementing both interfaces would make each

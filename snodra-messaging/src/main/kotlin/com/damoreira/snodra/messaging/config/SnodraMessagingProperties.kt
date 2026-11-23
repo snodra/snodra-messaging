@@ -115,10 +115,18 @@ data class SnodraMessagingProperties(
          * `SNODRA_SERVER_OAUTH2_TOKEN_URI`); cannot be combined with [token] or [tokenFile].
          */
         val oauth2: OAuth2 = OAuth2(),
+        /**
+         * Send every command and query through the hub, also one of a type this instance handles itself. Off (the default): such
+         * a request (a command, or a query of a type not declared `shared`) is answered in-process, without the hub, and its
+         * routing key is ignored. On: the hub routes it like any other request, so a routing key keeps its instance affinity
+         * across the instances of this service, and the request gets the hub's flow control, priorities, deadline and
+         * metrics. Covers the saga relay's commands too.
+         */
+        val alwaysRouteThroughHub: Boolean = false,
     ) {
         /** The token never appears: every other field as the data class prints it. */
         override fun toString(): String = "Hub(enabled=$enabled, address=$address, statusInterval=$statusInterval, " +
-            "requestTimeout=$requestTimeout, reconnectBackoff=$reconnectBackoff, " +
+            "requestTimeout=$requestTimeout, alwaysRouteThroughHub=$alwaysRouteThroughHub, reconnectBackoff=$reconnectBackoff, " +
             "maxConcurrentHandlers=$maxConcurrentHandlers, loadFactor=$loadFactor, tags=$tags, priorities=$priorities, " +
             "retry=$retry, streamCreditTimeout=$streamCreditTimeout, maxSubscriptions=$maxSubscriptions, " +
             "token=${if (token.isNullOrEmpty()) token else "****"}, tokenFile=$tokenFile, tls=$tls, oauth2=$oauth2)"

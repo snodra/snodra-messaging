@@ -161,6 +161,13 @@
       "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Hub"
     },
     {
+      "name": "snodra.messaging.hub.always-route-through-hub",
+      "type": "java.lang.Boolean",
+      "description": "Send every command and query through the hub, also one of a type this instance handles itself (and the saga relay's commands), so a routing key keeps its instance affinity across the instances of the service. Off: such a request (a command, or a query of a type not declared shared) is answered in-process and its routing key is ignored.",
+      "sourceType": "com.damoreira.snodra.messaging.config.SnodraMessagingProperties$Hub",
+      "defaultValue": false
+    },
+    {
       "name": "snodra.messaging.hub.reconnect-backoff.min",
       "type": "java.time.Duration",
       "description": "Initial reconnect delay when the hub stream drops; doubles per failed attempt, resets once an attempt reached the hub's handshake.",
