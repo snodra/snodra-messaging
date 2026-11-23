@@ -68,12 +68,48 @@ class ForwardedIdentityResolverTest {
         assertFalse(e.message!!.contains(expired))
     }
 
-    @Test fun `a token without decoder is no identity - its claims are never read`() {
-        val token = TestJwt.foreignToken("u-9", listOf("snodra-admin"))
+    @Test fun `a well-formed token without decoder is no identity - its claims are never presented`() {
+        assertNull(withoutDecoder.resolve("Bearer ${TestJwt.foreignToken("u-9", listOf("snodra-admin"))}"))
+        // Signed by anyone, even expired: without the keys neither the signature nor the expiry can be judged.
+        assertNull(withoutDecoder.resolve("Bearer ${TestJwt.token("u-1", listOf("snodra-user"), expiresIn = (-5).minutes)}"))
+    }
 
-        assertNull(withoutDecoder.resolve("Bearer $token"))
-        assertNull(withoutDecoder.resolve("Bearer not-a-jwt"), "not read, so not refused either")
-        assertNull(withoutDecoder.resolve("Bearer ${TestJwt.unsignedToken("u-9", listOf("snodra-admin"))}"))
+    private fun b64(json: String) = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(json.toByteArray())
+
+    @Test fun `without decoder what is not a signed JWS is UNAUTHENTICATED, as with one`() {
+        val header = b64("""{"alg":"RS256","typ":"JWT"}""")
+        val claims = b64("""{"sub":"u-9"}""")
+        val refused = mapOf(
+            "not-a-jwt" to "unreadable token",
+            "$header.$claims" to "unreadable token", // two segments
+            "$header.$claims.sig.extra" to "unreadable token", // four segments
+            "a.b.c.d.e" to "unsupported token", // five segments: an encrypted token (JWE)
+            "%%%.$claims.sig" to "unreadable token", // a header that is not base64url
+            "${b64("[1]")}.$claims.sig" to "unreadable token", // a header that is not a JSON object
+            "${b64("""{"alg":1}""")}.$claims.sig" to "unreadable token", // an alg that is not a string
+            "$header.${b64("42")}.sig" to "unreadable token", // claims that are not a JSON object
+            "${b64("""{"alg":"none"}""")}.$claims.sig" to "unsigned token",
+            "${b64("""{"alg":"NONE"}""")}.$claims." to "unsigned token",
+            "$header.$claims." to "unsigned token", // an empty signature
+            TestJwt.unsignedToken("u-9", listOf("snodra-admin")) to "unsigned token",
+        )
+        for ((token, message) in refused) {
+            val e = assertFailsWith<UnauthenticatedException>(token) { withoutDecoder.resolve("Bearer $token") }
+            assertEquals(message, e.message, token)
+        }
+        // Padding is tolerated, as base64url decoders do.
+        assertNull(withoutDecoder.resolve("Bearer ${java.util.Base64.getUrlEncoder().encodeToString("""{"alg":"RS256"}""".toByteArray())}.$claims.sig"))
+    }
+
+    @Test fun `without decoder a bad token is UNAUTHENTICATED before the handler lookup, also for a type nobody handles`() = runBlocking {
+        val codec = JsonCodec()
+        val registry = HandlerRegistry(MessageTypeResolver("test"))
+        val dispatcher = InboundRequestDispatcher(HandlerInvoker(registry, codec), withoutDecoder, codec)
+
+        val reply = dispatcher.dispatch(ping("Bearer not-a-jwt").toBuilder().setType("test.Nobody").build())
+
+        assertEquals(com.damoreira.snodra.server.v1.ErrorCode.UNAUTHENTICATED, reply.error.code)
+        assertEquals("unreadable token", reply.error.message)
     }
 
     @Test fun `malformed header is UnauthenticatedException`() {
