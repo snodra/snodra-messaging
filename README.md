@@ -34,15 +34,18 @@ nothing it does not: the buses, the handlers, the stores and the tests.
 ## Install
 
 ```kotlin
+val snodraVersion = "X.Y.Z" // the latest release: see the Maven Central badge above
+
 dependencies {
-    implementation("com.damoreira.snodra:snodra-messaging:0.5.0")
-    implementation("com.damoreira.snodra:snodra-messaging-kafka:0.5.0")   // or -rabbitmq
-    implementation("com.damoreira.snodra:snodra-messaging-mongo:0.5.0")   // or -jdbc
-    testImplementation("com.damoreira.snodra:snodra-messaging-test:0.5.0")
+    implementation("com.damoreira.snodra:snodra-messaging:$snodraVersion")
+    implementation("com.damoreira.snodra:snodra-messaging-kafka:$snodraVersion")   // or -rabbitmq
+    implementation("com.damoreira.snodra:snodra-messaging-mongo:$snodraVersion")   // or -jdbc
+    testImplementation("com.damoreira.snodra:snodra-messaging-test:$snodraVersion")
 }
 ```
 
-Everything is on Maven Central; no repository configuration beyond `mavenCentral()`.
+Everything is on Maven Central; no repository configuration beyond `mavenCentral()`. Every module of a
+release has the same version.
 
 ## A handler
 
@@ -68,6 +71,32 @@ same protocol (`snodra.hub.v1`) and share the event records and store layouts.
 ## Contributing
 
 Branches off `main`, conventional commits, a pull request with a green workflow.
+
+## Releases
+
+CI cuts every version from the commit types. Never push a tag. When every check passes on a push to
+`main`, the commit subjects since the last `v*` tag decide:
+
+- any `feat` is the next minor;
+- otherwise any `fix` or `perf` is the next patch;
+- anything else (`docs`, `test`, `chore`, `ci`, `refactor`, `build`, `style`) releases nothing.
+
+CI then builds the Maven Central bundle with that version and checks it. It tags the tested commit
+`vX.Y.Z` and publishes every module to Maven Central and to the GitHub release. No file holds the version:
+the build takes it from the tag, so there is no release commit.
+
+- Below 1.0.0, any `type!:` subject and any line starting `BREAKING CHANGE:` count as a minor, never a
+  major. 1.0.0 is declared by hand.
+- A revert (`Revert "feat: ..."`, `revert:`) is not a release reason. The reverted change stays in the last
+  published version until the next `feat`, `fix` or `perf`.
+- Only tags shaped `vN.N.N` count. The highest one reachable from `main` is the last release.
+- `scripts/next-version.sh` holds the rule. `for t in scripts/*.test.sh; do sh "$t"; done` runs the tests
+  of the release scripts.
+
+If a release fails half way (the tag exists, Maven Central or the GitHub release does not have it), use
+**Re-run failed jobs** on that run, or run the `release` workflow by hand with the existing tag. Both are
+safe to repeat: a version Maven Central already has is not uploaded again. **Re-run all jobs** on a run
+that tagged does nothing, because its commit then carries the tag.
 
 ## License
 
