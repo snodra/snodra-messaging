@@ -73,6 +73,15 @@ class TraceCapturingHandlers {
     }
 }
 
+/** Records the caller each `test.Ping` is handled for: the context's user and token, and the security context's user. */
+class CallerSeeingHandlers {
+    val seen = java.util.concurrent.CopyOnWriteArrayList<Triple<String?, String?, String?>>()
+    @CommandHandler fun handle(command: Ping, ctx: MessageContext): Pong {
+        seen += Triple(ctx.userId, ctx.authorization, com.damoreira.snodra.messaging.security.CallerContext.currentUserId())
+        return Pong("seen", Instant.EPOCH)
+    }
+}
+
 class CountHandlers {
     @QueryHandler fun handle(query: GetCount): Count = Count(query.key.length)
 }
@@ -379,6 +388,30 @@ class HubBusTest {
         withContext(com.damoreira.snodra.messaging.tracing.CorrelationContext("corr-1", traceparent)) { bus.send(Ping("x")) }
 
         assertEquals(traceparent, handlers.seen)
+    }
+
+    @Test fun `a request answered in-process sees the caller the hub path would carry, with forward-jwt on and off`() = runBlocking {
+        val handlers = CallerSeeingHandlers()
+        registry.register(handlers)
+        // This instance serves its own type from the hub too, verifying forwarded tokens like any receiver with a JWKS.
+        val dispatcher = InboundRequestDispatcher(invoker, ForwardedIdentityResolver(TestJwt.decoder()), codec)
+        val self = connection("self") { dispatcher.dispatch(it) }
+        self.register(registry.commandTypes(), registry.exclusiveQueryTypes())
+        self.start()
+        assertTrue(self.awaitRegistered(wait))
+        val token = TestJwt.token("u-1", listOf("snodra-user"))
+        authenticateWithRoles(token)
+        fun busOf(forwardJwt: Boolean, throughHub: Boolean) =
+            HubBus(self, registry, invoker, codec, resolver, forwardJwt, TraceHeaders(null, null), Duration.ofSeconds(2), alwaysThroughHub = throughHub)
+
+        for (forwardJwt in listOf(true, false)) {
+            handlers.seen.clear()
+            withTimeout(5_000) { busOf(forwardJwt, throughHub = false).send(Ping("local")) }
+            withTimeout(5_000) { busOf(forwardJwt, throughHub = true).send(Ping("hub")) }
+            val (local, hub) = handlers.seen.toList()
+            assertEquals(hub, local, "forward-jwt=$forwardJwt: in-process and through the hub the handler sees the same caller")
+            if (forwardJwt) assertEquals(Triple("u-1", "Bearer $token", "u-1"), local) else assertEquals(Triple(null, null, null), local)
+        }
     }
 
     @Test fun `remote command carries bearer token and correlation id`() = runBlocking {

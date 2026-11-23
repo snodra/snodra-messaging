@@ -40,6 +40,8 @@ import com.damoreira.snodra.messaging.saga.RawFailures
 import com.damoreira.snodra.messaging.saga.RawOutcome
 import com.damoreira.snodra.messaging.security.CallerContext
 import com.damoreira.snodra.messaging.security.LocalIdentity
+import com.damoreira.snodra.messaging.security.SecurityContextElement
+import org.springframework.security.core.context.SecurityContextHolder
 import com.damoreira.snodra.messaging.tracing.TraceHeaders
 import com.damoreira.snodra.messaging.tracing.CorrelationContext
 import kotlinx.coroutines.CancellationException
@@ -61,7 +63,9 @@ import kotlin.reflect.KClass
  * type this service registered as **shared** (`@QueryHandler(shared = true)`) is the exception: it always goes through the
  * hub, which round-robins it over every owner's instances, this one included. With [alwaysThroughHub]
  * (`snodra.messaging.hub.always-route-through-hub`) nothing is invoked directly: every request goes through the hub, so a
- * keyed request reaches the instance its routing key chooses whichever instance sent it.
+ * keyed request reaches the instance its routing key chooses whichever instance sent it. Answered in-process, a handler sees the
+ * caller the hub path would carry: the caller's identity and token with [forwardJwt], an anonymous caller without (so the
+ * option is a pure routing switch).
  *
  * Per call [SendOptions] choose the priority (default [priorities] per type, else 0), the timeout (default
  * [requestTimeout]) and the retry policy (default [retry], null = no retry). With retry, failures that
@@ -448,7 +452,8 @@ class HubBus(
         }
         if (local != null) {
             val correlationId = CorrelationContext.resolve(currentCoroutineContext())
-            val token = CallerContext.currentBearerToken()
+            // The caller the hub path would carry: none with forward-jwt off (see invokeLocally).
+            val token = if (forwardJwt) CallerContext.currentBearerToken() else null
             return invokeLocally(type, kind, message::class, codec.encode(message), correlationId, token, options.headers)
         }
         val messageKind = if (kind == RequestKind.COMMAND) MessageKind.COMMAND else MessageKind.QUERY
@@ -591,7 +596,9 @@ class HubBus(
         token: String?,
         extra: Map<String, String>,
     ): Any {
-        val identity = LocalIdentity.current()
+        // Answered in-process, the handler sees the caller the hub path would carry: with forward-jwt off the hub request carries no
+        // token, so the receiver's caller is anonymous; here too (no identity, no token, an empty security context while it runs).
+        val identity = if (forwardJwt) LocalIdentity.current() else null
         val ctx = MessageContext(
             messageId = UUID.randomUUID().toString(),
             type = type,
@@ -604,7 +611,8 @@ class HubBus(
         // Same thread and coroutine as the caller (so a thread-bound transaction of the caller is joined), and the caller's trace floor:
         // what the handler sends carries the caller's traceparent, as it would through the hub.
         val trace = CorrelationContext(correlationId, CorrelationContext.currentTraceparent(currentCoroutineContext()))
-        val result = withContext(trace) {
+        val caller = if (forwardJwt) trace else trace + SecurityContextElement(SecurityContextHolder.createEmptyContext())
+        val result = withContext(caller) {
             if (kind == RequestKind.COMMAND) invoker.invokeCommand(type, payload, ctx, identity) else invoker.invokeQuery(type, payload, ctx, identity)
         }
         return when (result) {
