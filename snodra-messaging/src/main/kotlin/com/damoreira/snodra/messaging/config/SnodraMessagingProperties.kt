@@ -120,7 +120,8 @@ data class SnodraMessagingProperties(
          * a request (a command, or a query of a type not declared `shared`) is answered in-process, without the hub, and its
          * routing key is ignored. On: the hub routes it like any other request, so a routing key keeps its instance affinity
          * across the instances of this service, and the request gets the hub's flow control, priorities, deadline and
-         * metrics. Covers the saga relay's commands too.
+         * metrics. Covers the saga relay's commands too. On: a request this instance sends to its own types before the hub
+         * acknowledged its registration (during startup, say) gets `NoHandlerException` where it used to be answered in-process.
          */
         val alwaysRouteThroughHub: Boolean = false,
     ) {
@@ -350,7 +351,7 @@ data class SnodraMessagingProperties(
     )
 
     /**
-     * `sagas.*` (S1 plan, R4 and R8). The saga runtime, the dispatch relay and the deadline scheduler exist only when the
+     * `sagas.*`. The saga runtime, the dispatch relay and the deadline scheduler exist only when the
      * application has a `@Saga` class and [enabled] is true. Every duration must be positive; checked at binding, so a bad
      * value fails the startup also in a service with no saga.
      */
@@ -425,7 +426,7 @@ data class SnodraMessagingProperties(
         fun toSettings() = DeadlineSettings(pollInterval, lease)
     }
 
-    /** `external.*`: the integration toolkit (S1 plan, Tasks 9, 10 and 13). */
+    /** `external.*`: the integration toolkit. */
     data class External(
         val calls: ExternalCalls = ExternalCalls(),
     )

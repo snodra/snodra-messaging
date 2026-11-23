@@ -1,5 +1,6 @@
 package com.damoreira.snodra.messaging.config
 
+import com.damoreira.snodra.messaging.handler.HandlerMethod
 import com.damoreira.snodra.messaging.handler.HandlerRegistry
 import org.springframework.beans.factory.ObjectProvider
 import org.springframework.beans.factory.SmartInitializingSingleton
@@ -11,21 +12,21 @@ import org.springframework.security.oauth2.jwt.JwtDecoder
  * identity, so such a handler could only ever refuse its callers, or worse, act on claims nobody checked. Every guarded handler
  * is named in the message.
  *
- * Runs once every singleton exists, so the [registry] holds every handler, and again for every handler registered later
- * (a lazily created bean), which then fails that bean's creation.
+ * Runs once every singleton exists, so the [registry] holds every handler, and again, before they are added, on the handlers of
+ * every bean registered later (a lazily created bean): that bean's creation fails and none of its handlers is registered.
  */
 class RequiresAuthenticationGuard(
     private val registry: HandlerRegistry,
     private val decoder: ObjectProvider<JwtDecoder>,
 ) : SmartInitializingSingleton {
     override fun afterSingletonsInstantiated() {
-        check()
-        registry.onChange(::check)
+        check(registry.commandTypes().mapNotNull(registry::commandHandler) + registry.queryTypes().mapNotNull(registry::queryHandler))
+        registry.beforeAdd(::check)
     }
 
-    /** Throws [IllegalStateException] naming every guarded handler when there is no `JwtDecoder`. */
-    fun check() {
-        val guarded = (registry.commandTypes().mapNotNull(registry::commandHandler) + registry.queryTypes().mapNotNull(registry::queryHandler))
+    /** Throws [IllegalStateException] naming every guarded handler of [handlers] when there is no `JwtDecoder`. */
+    fun check(handlers: List<HandlerMethod>) {
+        val guarded = handlers
             .filter { it.authorization != null }
             .map { it.label }
             .distinct()

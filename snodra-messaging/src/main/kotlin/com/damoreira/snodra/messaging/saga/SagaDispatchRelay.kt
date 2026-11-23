@@ -28,7 +28,7 @@ import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
 /**
- * Settings of the [SagaDispatchRelay] (`snodra.messaging.sagas.relay.*`, S1 plan R8): how often it polls, how long a saga's
+ * Settings of the [SagaDispatchRelay] (`snodra.messaging.sagas.relay.*`): how often it polls, how long a saga's
  * dispatch lease holds, and the transient retry of a command (up to [maxAttempts] attempts in all, then `EXHAUSTED`, with
  * [initialBackoff] growing by [multiplier] up to [maxBackoff]). [parallelism] sagas are dispatched at a time, at most
  * [batchSize] of them per poll. A command send gets [sendTimeout] for its answer: one that takes longer is abandoned

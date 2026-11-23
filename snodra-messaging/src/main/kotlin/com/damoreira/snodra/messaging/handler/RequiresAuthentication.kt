@@ -9,7 +9,9 @@ package com.damoreira.snodra.messaging.handler
  *
  * A forwarded token is an identity only once the service verified it against its JWKS (a `JwtDecoder` bean, which Spring Boot
  * creates from `spring.security.oauth2.resourceserver.jwt.jwk-set-uri` or `issuer-uri`): a service with a handler annotated
- * this way and no `JwtDecoder` fails at startup, naming the handler.
+ * this way and no `JwtDecoder` fails at startup, naming the handler. That holds also for a service that guards only its own
+ * in-process calls with another kind of security (a session login, an opaque token introspected as `BearerTokenAuthentication`):
+ * it needs a `JwtDecoder` too.
  */
 @Target(AnnotationTarget.FUNCTION)
 @Retention(AnnotationRetention.RUNTIME)

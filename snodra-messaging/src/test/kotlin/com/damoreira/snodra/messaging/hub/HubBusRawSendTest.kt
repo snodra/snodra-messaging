@@ -149,6 +149,20 @@ class HubBusRawSendTest {
         assertEquals(Duration.ofMinutes(5), unset.sendTimeoutFor("test.Slow", Duration.ofMinutes(5)), "never shorter than the send timeout")
     }
 
+    @Test fun `with always-route-through-hub the relay waits for its own command type as for any call through the hub`() = runBlocking {
+        val local = HandlerRegistry(resolver).also { it.register(ContextCapturingHandlers()) } // handles test.Ping itself
+        val caller = connection("caller") { error("unexpected") }
+        caller.start()
+        assertTrue(caller.awaitRegistered(wait))
+        val routed = HubBus(caller, local, HandlerInvoker(local, codec), codec, resolver, true, TraceHeaders(null, null), Duration.ofSeconds(2), alwaysThroughHub = true)
+
+        assertEquals(
+            caller.callBound("test.Ping", 2_000).plus(RawCommandSender.HUB_CALL_GUARD),
+            routed.sendTimeoutFor("test.Ping", Duration.ofMillis(300)),
+            "not the local send timeout: the command goes through the hub",
+        )
+    }
+
     @Test fun `over several hubs the relay waits for a call moved to another hub just before its timeout, with the full timeout again`() = runBlocking {
         // request-timeout 60 s: the call may wait for a hub (and move) for up to 60 s, and the hop it starts then carries the full
         // 60 s again; the relay must not abandon it before that hop's guard (60 s + 1 s) has passed too.

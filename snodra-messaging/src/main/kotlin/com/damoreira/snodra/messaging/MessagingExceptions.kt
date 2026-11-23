@@ -41,6 +41,10 @@ class HubUnavailableException(message: String) : MessagingException(message) {
     /**
      * The request was queued on a hub stream that broke before the request was written: one move to another hub, of the
      * at most [com.damoreira.snodra.messaging.hub.HubConnections.MAX_UNWRITTEN_MOVES] a request makes.
+     *
+     * Kept as a field on purpose: kotlinx.coroutines' stack-trace recovery (debug mode, `-ea`) copies an exception it rethrows
+     * across a suspension only when the class declares no field of its own, so this mark survives `await()`/`receive()`. Do not
+     * turn it into a constructor argument without a field.
      */
     internal var lostWhileQueued: Boolean = false
 }

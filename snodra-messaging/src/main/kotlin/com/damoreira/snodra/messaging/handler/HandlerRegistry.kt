@@ -30,13 +30,22 @@ class HandlerRegistry(private val typeResolver: MessageTypeResolver) {
     private val resets = CopyOnWriteArrayList<ResetHandlerMethod>()
     private val registered: MutableSet<Any> = Collections.newSetFromMap(IdentityHashMap())
     private val listeners = CopyOnWriteArrayList<() -> Unit>()
+    private val validators = CopyOnWriteArrayList<(List<HandlerMethod>) -> Unit>()
 
     /** Registers the handlers of [bean] (scanned via its target class); returns those added. Idempotent per instance. */
     fun register(bean: Any): List<HandlerMethod> {
         val added = synchronized(this) {
             if (!registered.add(bean)) return emptyList()
             val found = scan(bean)
-            resets += scanResets(bean) // after scan: an invalid @ProcessingGroup fails there first, naming an event handler
+            val foundResets = scanResets(bean) // after scan: an invalid @ProcessingGroup fails there first, naming an event handler
+            // A validator that refuses the bean's handlers leaves nothing of the bean registered.
+            try {
+                validators.forEach { it(found) }
+            } catch (e: Exception) {
+                registered.remove(bean)
+                throw e
+            }
+            resets += foundResets
             found.also { it.forEach(::add) }
         }
         if (added.isNotEmpty()) listeners.forEach { it() }
@@ -76,6 +85,14 @@ class HandlerRegistry(private val typeResolver: MessageTypeResolver) {
     /** Query types served by a subscription query handler (`SubscriptionQuery<I, U>`), shared or exclusive. */
     fun subscriptionQueryTypes(): Set<String> = queries.filterValues { it.subscription }.keys.toSet()
     fun eventTypes(): Set<String> = events.keys.toSet()
+
+    /**
+     * Registers a check run by every later [register] on the handlers it found, before any is added: when it throws, nothing of
+     * the bean is registered and the exception propagates (a startup error for the bean being created).
+     */
+    fun beforeAdd(validator: (List<HandlerMethod>) -> Unit) {
+        validators.add(validator)
+    }
 
     /** Registers a listener called after each [register] that added handlers. */
     fun onChange(listener: () -> Unit) {

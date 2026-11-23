@@ -52,6 +52,16 @@ class RequiresAuthenticationGuardTest {
         }
     }
 
+    @Test fun `a guarded handler registered after startup without a JWKS fails and is not registered`() {
+        runner.withBean(OpenPing::class.java).run { context ->
+            assertNull(context.startupFailure)
+            val registry = context.getBean(com.damoreira.snodra.messaging.handler.HandlerRegistry::class.java)
+            val e = kotlin.test.assertFailsWith<IllegalStateException> { registry.register(GuardedCount()) }
+            assertTrue("GuardedCount.handle requires an authenticated caller" in e.message.orEmpty(), e.message)
+            assertEquals(emptySet(), registry.queryTypes(), "nothing of the refused bean stays registered")
+        }
+    }
+
     @Test fun `with a JwtDecoder a guarded handler starts`() {
         runner.withBean(GuardedPing::class.java).withBean(JwtDecoder::class.java, { TestJwt.decoder() }).run { context ->
             assertNull(context.startupFailure)

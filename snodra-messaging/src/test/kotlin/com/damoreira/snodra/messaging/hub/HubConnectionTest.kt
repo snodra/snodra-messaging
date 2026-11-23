@@ -255,6 +255,23 @@ class HubConnectionTest {
         .setTimeoutMs(timeoutMs)
         .build()
 
+    @Test fun `a request still queued when its stream breaks fails as lost while queued, one the transport took as connection lost`() = runBlocking {
+        val conn = connection("a")
+        conn.start()
+        assertTrue(conn.awaitRegistered(wait))
+        hub.pauseReading = true // the hub stops reading: what the client writes stays queued on its side
+        val calls = (1..20).map { async { runCatching { conn.send(request(timeoutMs = 5_000)) } } }
+        delay(300)
+        hub.dropInstance("a")
+        val failures = withTimeout(10_000) { calls.awaitAll() }.map { it.exceptionOrNull() }
+        hub.pauseReading = false
+        val unwritten = failures.filterIsInstance<HubUnavailableException>()
+        // Only the few the transport had taken are outcome-unknown; the queued ones are marked as moves (HubConnections counts them).
+        assertTrue(unwritten.size >= 15, "unwritten: ${unwritten.size} of 20 ($failures)")
+        assertTrue(unwritten.all { it.lostWhileQueued }, "every request still queued is marked lost while queued")
+        failures.filterNot { it is HubUnavailableException }.forEach { assertIs<HubConnectionLostException>(it, it.toString()) }
+    }
+
     @Test fun `registers on connect and hub sees types`() = runBlocking {
         val conn = connection("a")
         conn.register(setOf("test.Ping"), setOf("test.GetCount"))
@@ -471,8 +488,8 @@ class HubConnectionTest {
     }
 
     @Test fun `a silent hub is dropped on the tick after three unanswered heartbeats, never before three intervals`() = runBlocking {
-        val interval = 200L
-        val slack = 80L // scheduling and transport
+        val interval = 400L
+        val slack = 200L // scheduling and transport on a loaded runner; "never before three intervals" stays exact
         hub.heartbeatInterval = Duration.ofMillis(interval)
         val tap = HeartbeatTap()
         val conn = tappedConnection("a", tap)

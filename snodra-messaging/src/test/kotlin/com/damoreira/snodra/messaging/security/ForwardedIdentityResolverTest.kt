@@ -30,7 +30,9 @@ class CallerRecordingHandlers {
     @Volatile var seenUserId: String? = "unset"
     @Volatile var seenRoles: Set<String>? = null
     @Volatile var seenToken: String? = null
+    @Volatile var seenAuthentication: Any? = "unset"
     @CommandHandler fun handle(command: Ping): Pong {
+        seenAuthentication = org.springframework.security.core.context.SecurityContextHolder.getContext().authentication
         seenUserId = CallerContext.currentUserId()
         seenRoles = CallerContext.currentRoles()
         seenToken = CallerContext.currentBearerToken()
@@ -139,6 +141,7 @@ class ForwardedIdentityResolverTest {
         assertNull(handlers.seenUserId, "no verified identity: anonymous")
         assertEquals(emptySet(), handlers.seenRoles)
         assertEquals(token, handlers.seenToken, "the token is forwarded on by nested sends")
+        assertNull(handlers.seenAuthentication, "anonymous to Spring Security too: no authentication object")
     }
 
     @Test fun `with decoder the dispatcher installs the verified caller`() = runBlocking {

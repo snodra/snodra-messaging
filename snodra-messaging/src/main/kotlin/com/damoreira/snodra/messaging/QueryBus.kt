@@ -11,7 +11,10 @@ import kotlinx.coroutines.runBlocking
 interface QueryBus {
     suspend fun <R> send(query: Query<R>): R
 
-    /** Like [send] with per-call [SendOptions] (priority, timeout, retry; a routing key is ignored for queries). */
+    /**
+     * Like [send] with per-call [SendOptions] (priority, timeout, retry, headers, and a routing key: sent on the request through the hub,
+     * where it chooses the instance as for a command; a query answered in-process ignores it).
+     */
     suspend fun <R> send(query: Query<R>, options: SendOptions): R = send(query)
 
     /** Blocking variant of [send] for non-coroutine callers; never call it from a coroutine. */

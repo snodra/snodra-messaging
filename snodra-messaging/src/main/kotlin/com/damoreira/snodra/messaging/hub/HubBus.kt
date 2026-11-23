@@ -40,6 +40,7 @@ import com.damoreira.snodra.messaging.saga.RawFailures
 import com.damoreira.snodra.messaging.saga.RawOutcome
 import com.damoreira.snodra.messaging.security.CallerContext
 import com.damoreira.snodra.messaging.security.LocalIdentity
+import com.damoreira.snodra.messaging.security.ForwardedToken
 import com.damoreira.snodra.messaging.security.SecurityContextElement
 import org.springframework.security.core.context.SecurityContextHolder
 import com.damoreira.snodra.messaging.tracing.TraceHeaders
@@ -611,7 +612,7 @@ class HubBus(
         // Same thread and coroutine as the caller (so a thread-bound transaction of the caller is joined), and the caller's trace floor:
         // what the handler sends carries the caller's traceparent, as it would through the hub.
         val trace = CorrelationContext(correlationId, CorrelationContext.currentTraceparent(currentCoroutineContext()))
-        val caller = if (forwardJwt) trace else trace + SecurityContextElement(SecurityContextHolder.createEmptyContext())
+        val caller = if (forwardJwt) trace else trace + SecurityContextElement(SecurityContextHolder.createEmptyContext()) + ForwardedToken(null)
         val result = withContext(caller) {
             if (kind == RequestKind.COMMAND) invoker.invokeCommand(type, payload, ctx, identity) else invoker.invokeQuery(type, payload, ctx, identity)
         }

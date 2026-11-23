@@ -26,7 +26,7 @@ import org.springframework.context.annotation.Import
 import java.time.Clock
 
 /**
- * The integration toolkit's edges (S1 plan, Task 13), on top of [EventsAutoConfiguration]'s local dispatcher:
+ * The integration toolkit's edges, on top of [EventsAutoConfiguration]'s local dispatcher:
  *
  * - the [WebhookSignatureVerifier] and the [ExternalEventIngress], always (they are passive: a service uses them from its own endpoint);
  * - [ExternalSources], only when an event-store add-on provides partner sources ([ExternalSourceProviders]: with

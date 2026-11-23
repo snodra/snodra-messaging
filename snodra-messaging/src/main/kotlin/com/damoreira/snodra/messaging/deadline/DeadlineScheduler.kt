@@ -14,7 +14,7 @@ import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
 /**
- * Settings of the [DeadlineScheduler] (`snodra.messaging.deadlines.*`, S1 plan R8): how often it polls and how long a
+ * Settings of the [DeadlineScheduler] (`snodra.messaging.deadlines.*`): how often it polls and how long a
  * claimed deadline stays reserved for the instance that claimed it, at most [batchSize] deadlines per poll.
  */
 data class DeadlineSettings(

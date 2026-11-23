@@ -27,7 +27,7 @@ import java.util.UUID
 /**
  * Sends a command it knows only by wire type name and JSON bytes: the saga relay has no Kotlin class for a stored
  * command, and a saga never reads a command's reply. Kept apart from the public `CommandBus`. A call carries no caller:
- * no user token and no identity, so a handler with `@RequiresAuthentication` refuses it (S1 plan, spec "identity").
+ * no user token and no identity, so a handler with `@RequiresAuthentication` refuses it.
  * The correlation id comes from the calling coroutine's `CorrelationContext`.
  */
 interface RawCommandSender {

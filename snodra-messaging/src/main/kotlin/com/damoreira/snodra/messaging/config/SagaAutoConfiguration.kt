@@ -43,7 +43,7 @@ import java.time.Duration
 class SagaCatalog(val types: List<SagaType>)
 
 /**
- * Sagas, deadlines and the dispatch relay (S1 plan, Task 13): the [SagaRuntime] (handed to the [LocalEventDispatcher] as its
+ * Sagas, deadlines and the dispatch relay: the [SagaRuntime] (handed to the [LocalEventDispatcher] as its
  * saga stage), the [SagaDispatchRelay] and the [DeadlineScheduler] as lifecycles in phases after the outbox publisher starts
  * and before the event consumer stops, and [SagaFailures], all over the message store's saga ports ([MessageStore.sagas]).
  *

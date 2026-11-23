@@ -21,7 +21,7 @@ import kotlin.reflect.KClass
 /**
  * The saga stage of local event dispatch: applies each event to every interested saga type, once per instance.
  *
- * Per (event, saga type) (S1 plan R1) one transaction runs: the marker `processed_events` id `saga:<sagaType>:<eventId>`
+ * Per (event, saga type) one transaction runs: the marker `processed_events` id `saga:<sagaType>:<eventId>`
  * is inserted first (an existing one skips the event); the live instances associated with the event are resolved per
  * handler (`keyName = value`); when none matches, a `@StartSaga` handler creates one with `startKey =
  * "<type>|<key>=<value>"` ([startKey]: the parts escaped) (a `forceNew` handler always creates one, without a start key; the key is kept only while the
@@ -31,7 +31,7 @@ import kotlin.reflect.KClass
  * written with an optimistic version check (`version + 1`; a version of 0 means just created), the recorded dispatch
  * entries (`seq = version * 1000 + index`) and deadline changes are written, and an ended instance cancels its
  * scheduled deadlines. A conflict (version, start key, a write conflict in the store) or any handler exception rolls the whole
- * transaction back and the event is retried with [retry] (R4); after the last attempt it is parked in `saga_failures`
+ * transaction back and the event is retried with [retry]; after the last attempt it is parked in `saga_failures`
  * together with the marker and the stage moves on. The only exception [process] throws is when parking itself fails
  * (the store is down): the consumer then redelivers the record instead of losing it.
  *

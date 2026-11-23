@@ -1,7 +1,7 @@
 package com.damoreira.snodra.messaging.saga
 
 /**
- * What the saga runtime reports; implemented by Micrometer when a registry exists (Task 12), else [NoopSagaMetrics].
+ * What the saga runtime reports; implemented by Micrometer when a registry exists, else [NoopSagaMetrics].
  * Methods have empty defaults so more can be added without breaking implementations.
  */
 interface SagaMetrics {

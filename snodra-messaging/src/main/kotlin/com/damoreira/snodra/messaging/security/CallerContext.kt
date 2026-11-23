@@ -13,8 +13,10 @@ import kotlin.coroutines.CoroutineContext
 /**
  * The acting user of the current thread, read from Spring Security's [SecurityContextHolder]: an incoming HTTP request
  * authenticated as [JwtAuthenticationToken] or [BearerTokenAuthentication], or a hub request being handled
- * ([SnodraForwardedAuthentication] for a verified caller, [SnodraForwardedToken] for a token this service cannot verify; installed
- * by the inbound dispatcher so nested sends re-forward the same token).
+ * ([SnodraForwardedAuthentication] for a verified caller, installed by the inbound dispatcher so nested sends re-forward the same
+ * token). A forwarded token this service cannot verify (it has no `JwtDecoder`) is no authentication at all: the security context
+ * stays empty (the caller is anonymous to Spring Security) and the token travels in a [ForwardedToken] element, read by
+ * [currentBearerToken] only, so nested sends still forward it.
  */
 object CallerContext {
     /** The raw bearer token (without the `Bearer ` prefix), or null for an anonymous caller. */
@@ -22,8 +24,7 @@ object CallerContext {
         is JwtAuthenticationToken -> auth.token.tokenValue
         is BearerTokenAuthentication -> auth.token.tokenValue
         is SnodraForwardedAuthentication -> auth.token
-        is SnodraForwardedToken -> auth.token
-        else -> null
+        else -> ForwardedToken.current()
     }
 
     fun currentUserId(): String? = when (val auth = SecurityContextHolder.getContext().authentication) {
@@ -59,20 +60,21 @@ class SnodraForwardedAuthentication(
 }
 
 /**
- * A hub request's forwarded [token] that this service cannot verify (it has no `JwtDecoder`): the caller is anonymous (never
- * authenticated, no user, no roles), and the token is only carried on by the requests sent while handling it.
+ * The forwarded bearer [token] of the hub request being handled when this service cannot verify it (no `JwtDecoder`): not an
+ * identity, only what nested sends forward on ([CallerContext.currentBearerToken]). Mirrored into a thread-local while the
+ * coroutine runs, like the security context; null clears it (an in-process call that carries no caller).
  */
-class SnodraForwardedToken(val token: String) : AbstractAuthenticationToken(emptyList()) {
-    init {
-        isAuthenticated = false
+internal class ForwardedToken(private val token: String?) : ThreadContextElement<String?>, AbstractCoroutineContextElement(Key) {
+    companion object Key : CoroutineContext.Key<ForwardedToken> {
+        private val tokens = ThreadLocal<String?>()
+
+        /** The forwarded token of the request being handled on this thread, or null. */
+        fun current(): String? = tokens.get()
     }
 
-    override fun getCredentials(): Any = token
-    override fun getPrincipal(): Any? = null
-    override fun setAuthenticated(authenticated: Boolean) {
-        require(!authenticated) { "a forwarded token nobody verified is never an authenticated caller" }
-        super.setAuthenticated(false)
-    }
+    override fun updateThreadContext(context: CoroutineContext): String? = tokens.get().also { tokens.set(token) }
+
+    override fun restoreThreadContext(context: CoroutineContext, oldState: String?) = tokens.set(oldState)
 }
 
 /**
