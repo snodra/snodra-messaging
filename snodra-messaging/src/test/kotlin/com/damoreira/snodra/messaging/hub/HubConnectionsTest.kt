@@ -366,7 +366,7 @@ class HubConnectionsTest {
         assertTrue(took in 400..1_000, "failed after $took ms")
     }
 
-    @Test fun `a request moved to another hub carries what is left of its timeout`() = runBlocking {
+    @Test fun `a request moved to another hub keeps its full timeout`() = runBlocking {
         val a = hub()
         val b = hub()
         handler(listOf(a.name, b.name))
@@ -376,7 +376,7 @@ class HubConnectionsTest {
         eventually(5_000) { sender.liveHubIds().size == 2 }
 
         val dropped = AtomicBoolean()
-        sender.beforeWrite = { conn ->
+        sender.beforeWrite = { conn, _ ->
             if (conn.hubId == a.hubId && dropped.compareAndSet(false, true)) {
                 delay(400)
                 a.dropInstance("a")
@@ -391,7 +391,31 @@ class HubConnectionsTest {
                 if (dropped.get()) resent = b.lastRequest()
             }
         }
-        assertTrue(resent!!.timeoutMs in 1..650, "resent with timeout_ms ${resent!!.timeoutMs}")
+        // Each hop is guarded by the full bound: the chosen timeout is sent again, not what is left of it.
+        assertEquals(1_000, resent!!.timeoutMs, "resent with timeout_ms ${resent!!.timeoutMs}")
+    }
+
+    @Test fun `a request whose stream is lost before it is written moves at most eight times, with the same id and its full timeout`() = runBlocking {
+        val a = hub()
+        val b = hub()
+        val sender = client(listOf(a.name, b.name), "a")
+        sender.start()
+        assertTrue(sender.awaitRegistered(wait))
+        eventually(5_000) { sender.liveHubIds().size == 2 }
+
+        val attempts = java.util.concurrent.CopyOnWriteArrayList<Request>()
+        sender.beforeWrite = { conn, outgoing ->
+            attempts += outgoing
+            // The hub's stream breaks while the request still sits in its outbound queue: never written.
+            (if (conn.target == a.name) a else b).dropInstance("a")
+            withTimeout(5_000) { conn.connected.first { !it } }
+            throw HubUnavailableException("hub stream to ${conn.target} closed before the request was written").apply { lostWhileQueued = true }
+        }
+        val failure = assertFailsWith<HubUnavailableException> { withTimeout(30_000) { sender.send(request(timeoutMs = 20_000)) } }
+        assertEquals("'test.Ping' not written: 9 hub streams lost before it was", failure.message)
+        assertEquals(9, attempts.size, "the first attempt and eight moves")
+        assertEquals(1, attempts.map { it.id }.distinct().size, "one id for every move")
+        assertEquals(listOf(20_000), attempts.map { it.timeoutMs }.distinct())
     }
 
     // --- failover ---
@@ -431,7 +455,7 @@ class HubConnectionsTest {
         eventually(5_000) { sender.liveHubIds().size == 2 }
 
         val dropped = AtomicBoolean()
-        sender.beforeWrite = { conn ->
+        sender.beforeWrite = { conn, _ ->
             // The first pick of hub A: its stream breaks between the choice and the write.
             if (conn.hubId == a.hubId && dropped.compareAndSet(false, true)) {
                 a.dropInstance("a")

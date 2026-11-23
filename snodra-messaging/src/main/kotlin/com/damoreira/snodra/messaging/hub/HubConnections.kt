@@ -52,18 +52,20 @@ import java.util.concurrent.atomic.AtomicInteger
  *   round-robin over the live hubs. Replies to incoming requests go on the stream they arrived on ([HubConnection]).
  * - **Failover**: a request that its hub could not take before writing it (the stream closed, or broke with the
  *   request still queued) goes to another live hub; when none is left the call waits for the set of live hubs to change.
- *   The whole call has one deadline: the request's `timeout_ms` when set (the caller's `SendOptions.timeout` or
- *   `request-timeout`), else `requestTimeout`, else 5 s. Waiting ends there with [HubUnavailableException], and a request
- *   sent again carries what is left of its `timeout_ms`. A request already written fails with
+ *   Waiting for a hub and trying the hubs is bounded by the request's `timeout_ms` when set (the caller's
+ *   `SendOptions.timeout` or `request-timeout`), else `requestTimeout`, else 5 s; it ends there with
+ *   [HubUnavailableException]. A request sent again keeps its id and carries its `timeout_ms` unchanged (each hop is guarded
+ *   by the full bound). One whose stream broke while it was still queued moves at most [MAX_UNWRITTEN_MOVES] times; the next
+ *   such loss fails it as never sent ([HubUnavailableException]). A request already written fails with
  *   `HubConnectionLostException`.
  * - **Scatter-gather**: one gather goes to one live hub, round-robin like an unkeyed request. A gather not yet written
  *   fails over like a request; once written, a broken stream fails it with `HubConnectionLostException` (the parts
  *   already received are not asked again).
  * - **Streaming**: a streaming query goes to one live hub, chosen and failed over exactly like a gather. Its
- *   `timeout_ms` is the idle timeout and is sent whole, never reduced by a hub wait or a failover (the deadline of the
- *   call bounds only those); a collector exception (`StreamCollectorException`) is never a reason to fail over.
+ *   `timeout_ms` is the idle timeout and is sent whole, as every request's; a collector exception (`StreamCollectorException`)
+ *   is never a reason to fail over.
  * - **Subscriptions**: a subscription goes to one live hub, chosen and failed over like a gather. `timeout_ms`
- *   bounds the initial request (as for a unary request: what is left of the call's deadline after a hub wait is sent). Instances
+ *   bounds the initial request and is sent whole, as for a unary request. Instances
  *   serve subscriptions from every hub they are connected to through one shared [SubscriptionRegistry].
  * - **Permits**: a stream announces `ceil(maxConcurrentHandlers / N)` initial permits, N = 1 (itself) + the other kept
  *   hubs that are live or still on their first connect attempt. Whenever that set changes, every live hub's stream is
@@ -190,8 +192,11 @@ class HubConnections(
     /** Incoming requests of every hub currently being handled (or waiting for a handler permit). */
     val inFlightHandlers: StateFlow<Int> get() = gate.inFlightHandlers
 
-    /** Test hook: runs after a hub is chosen for a request and before the request is handed to it. */
-    internal var beforeWrite: (suspend (HubConnection) -> Unit)? = null
+    /**
+     * Test hook: runs after a hub is chosen for a request and before the request (as it will be sent) is handed to it. A
+     * [HubUnavailableException] it throws counts as that hub not taking the request.
+     */
+    internal var beforeWrite: (suspend (HubConnection, Request) -> Unit)? = null
 
     /** Ids of the live hubs, in target order. */
     fun liveHubIds(): List<String> = live.value.mapNotNull { it.hubId }
@@ -319,14 +324,13 @@ class HubConnections(
      * parts, result and exceptions.
      */
     override suspend fun stream(request: Request, onPart: suspend (ReplyPart) -> Unit): ServerMessage =
-        route(request, keepTimeout = true) { connection, outgoing ->
+        route(request) { connection, outgoing ->
             connection.stream(outgoing, awaitStream = false, onPart)
         }
 
     /**
      * Sends [request] as a subscription query through one live hub (see the class comment), with [HubConnection.subscribe]'s
-     * result and exceptions. `timeout_ms` bounds the initial request: it is what is left of the call's deadline after a hub
-     * wait or a hub that did not take the request, as for [send].
+     * result and exceptions. `timeout_ms` bounds the initial request and is sent unchanged to whichever hub takes it, as for [send].
      */
     override suspend fun subscribe(request: Request): SubscribeResult =
         route(request) { connection, outgoing ->
@@ -334,24 +338,24 @@ class HubConnections(
         }
 
     /**
-     * The hub choice and failover of [send], [gather], [stream] and [subscribe]. A positive `timeout_ms` is one deadline for the whole call: a hub wait or a hub that did not take the
-     * request uses some of it and the request is sent with what is left, unless [keepTimeout] (a stream: `timeout_ms`
-     * is its idle timeout, sent whole; the deadline bounds only the hub wait and the retries). A hub whose answer is [declined]
-     * (`NO_HANDLER` for a unary request) is skipped like one that could not take the request; when every live hub declined, the
-     * last answer is returned at once.
+     * The hub choice and failover of [send], [gather], [stream] and [subscribe]. A positive `timeout_ms` (else `request-timeout`,
+     * else 5 s) bounds how long the call waits for a hub and goes on trying hubs that did not take the request. The request is
+     * always sent with its own `timeout_ms`, also when it moves to another hub: each hop is guarded by the full bound. A request
+     * whose stream broke while it was still queued (never written) moves at most [MAX_UNWRITTEN_MOVES] times; the next such loss
+     * fails it with [HubUnavailableException]. A hub whose answer is [declined] (`NO_HANDLER` for a unary request) is skipped like
+     * one that could not take the request; when every live hub declined, the last answer is returned at once.
      */
     private suspend fun <T> route(
         request: Request,
-        keepTimeout: Boolean = false,
         declined: (T) -> Boolean = { false },
         call: suspend (HubConnection, Request) -> T,
     ): T {
-        // One deadline for the whole call: the caller's timeout (timeout_ms), else request-timeout, else 5 s.
+        // How long the call waits for a hub to take it: the caller's timeout (timeout_ms), else request-timeout, else 5 s.
         val wait = if (request.timeoutMs > 0) Duration.ofMillis(request.timeoutMs.toLong())
         else settings.chosenRequestTimeout ?: HubProtocol.DEFAULT_REQUEST_TIMEOUT
         val deadline = System.nanoTime() + wait.toNanos()
         val tried = HashSet<HubConnection>()
-        var waited = false
+        var moves = 0
         var lastDeclined: T? = null
         while (true) {
             val hubs = live.value
@@ -367,19 +371,11 @@ class HubConnections(
                     )
                 }
                 tried.clear() // the live hubs changed: a hub that failed before may have a new stream
-                waited = true
                 continue
             }
-            beforeWrite?.invoke(connection)
-            // A caller's timeout is what is left of it once a wait or a hub that did not take the request used some.
-            val outgoing = if (!keepTimeout && request.timeoutMs > 0 && (tried.isNotEmpty() || waited)) {
-                val remaining = ((deadline - System.nanoTime()) / 1_000_000).coerceIn(1, request.timeoutMs.toLong())
-                request.toBuilder().setTimeoutMs(remaining.toInt()).build()
-            } else {
-                request
-            }
             try {
-                val result = call(connection, outgoing)
+                beforeWrite?.invoke(connection, request)
+                val result = call(connection, request)
                 if (!declined(result)) return result
                 // This hub has no owner of the type right now (the owner is connected to another hub only, or is being rolled over onto a
                 // renewed client certificate here); nothing was delivered, so another hub may still have one.
@@ -389,7 +385,9 @@ class HubConnections(
             } catch (e: HubUnavailableException) {
                 // Only the hub not taking the request: a collector's HubUnavailableException arrives wrapped in a
                 // StreamCollectorException (the request was written; it is never re-sent).
-
+                if (e.lostWhileQueued && ++moves > MAX_UNWRITTEN_MOVES) {
+                    throw HubUnavailableException("'${request.type}' not written: $moves hub streams lost before it was")
+                }
                 log.debug("Request {} not taken by hub {}: {}; trying another hub", request.id, connection.target, e.message)
                 tried += connection
             }
@@ -708,6 +706,15 @@ class HubConnections(
         if (connection.rolling) return
         connection.rolling = true
         onHandshake(connection)
+    }
+
+    companion object {
+        /**
+         * How often one request moves to another hub because the stream it was queued on broke before it was written. The
+         * next such loss fails the call with [HubUnavailableException] ("'<type>' not written: 9 hub streams lost before it
+         * was"). A hub that was not live when chosen, or a stream that closed before the request could be queued, is no move.
+         */
+        const val MAX_UNWRITTEN_MOVES = 8
     }
 
     private suspend fun drain(member: Member) {

@@ -1458,14 +1458,17 @@ class HubConnection(
         stream.out.trySend(ClientMessage.newBuilder().setPermits(Permits.newBuilder().setCount(count).setGrant(grant)).build())
     }
 
-    /** Fails, with [HubUnavailableException], the requests left in [stream]'s closed outbound queue. */
+    /**
+     * Fails, with [HubUnavailableException] marked [HubUnavailableException.lostWhileQueued], the requests left in [stream]'s
+     * closed outbound queue: each may move to another hub ([HubConnections.MAX_UNWRITTEN_MOVES] times at most).
+     */
     private fun failUnsent(stream: Stream, message: String) {
         while (true) {
             val queued = stream.out.tryReceive().getOrNull() ?: break
             if (!queued.hasRequest()) continue
             val id = queued.request.id
             val entry = pending[id] ?: continue
-            if (entry.stream === stream && pending.remove(id, entry)) entry.fail(HubUnavailableException(message))
+            if (entry.stream === stream && pending.remove(id, entry)) entry.fail(HubUnavailableException(message).apply { lostWhileQueued = true })
         }
     }
 

@@ -37,7 +37,13 @@ class AccessDeniedException(message: String) : MessagingException(message)
  * The request was never written to a live hub stream: no stream came up in time, or the stream closed before the
  * request could be queued on it. The handler did not run; retrying is safe.
  */
-class HubUnavailableException(message: String) : MessagingException(message)
+class HubUnavailableException(message: String) : MessagingException(message) {
+    /**
+     * The request was queued on a hub stream that broke before the request was written: one move to another hub, of the
+     * at most [com.damoreira.snodra.messaging.hub.HubConnections.MAX_UNWRITTEN_MOVES] a request makes.
+     */
+    internal var lostWhileQueued: Boolean = false
+}
 
 /**
  * The request was written to a hub stream (accepted by its outbound queue) and that stream broke before an answer

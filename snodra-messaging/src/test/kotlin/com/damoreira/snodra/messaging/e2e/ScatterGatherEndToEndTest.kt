@@ -116,7 +116,7 @@ class ScatterGatherEndToEndTest {
         owners(hubs) { if (slow.get()) { started.complete(Unit); delay(5_000) } }
         val conns = callerConnections(hubs)
         val carrying = CompletableDeferred<String>()
-        conns.beforeWrite = { connection -> carrying.complete(connection.target) }
+        conns.beforeWrite = { connection, _ -> carrying.complete(connection.target) }
         val bus = bus(conns)
 
         val gather = async { runCatching { bus.scatterGather(GetCount("k"), ScatterOptions(timeout = Duration.ofSeconds(10))) } }
