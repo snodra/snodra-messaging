@@ -210,7 +210,8 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git tag -a "$tag" -m "${GITHUB_REPOSITORY#*/} $tag"
           if ! git push origin "refs/tags/$tag"; then
-            remote=$(git ls-remote origin "refs/tags/$tag^{}" | cut -f1)
+            # The commit the remote tag names (the peeled line of an annotated tag comes last).
+            remote=$(git ls-remote origin "refs/tags/$tag" "refs/tags/$tag^{}" | tail -n 1 | cut -f1)
             if [ "$remote" = "$GITHUB_SHA" ]; then
               # The push landed and only the client saw an error: release it.
               echo "::warning::git reported an error, but $tag is on the remote"
