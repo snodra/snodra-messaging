@@ -101,6 +101,11 @@ import kotlin.reflect.KClass
  * stream as [com.damoreira.snodra.messaging.HubConnectionLostException]. The caller's bearer token and trace context
  * are read when [stream] is called, as for [scatterGatherFlow].
  *
+ * A query type served by a subscription handler (`SubscriptionQuery<I, U>`) is declared to the hub as a subscription type, and
+ * the hub serves it in mode `SUBSCRIPTION` only: a [send] (unary), [stream] or [scatterGather] of such a type, and a [subscribe] of a
+ * query type nobody declared, fail with the hub's `INVALID_REQUEST` ([InvalidMessageException]) before any handler is reached, and
+ * are not retried.
+ *
  * Subscription queries ([subscribe]) always go through the hub, to one live hub.
  * [subscribe] returns once the initial result arrived (decoded as the query's `I`); `timeout_ms` bounds only that
  * request, so the call retries like a unary query (the retry budget, the remaining time per attempt) and never after the

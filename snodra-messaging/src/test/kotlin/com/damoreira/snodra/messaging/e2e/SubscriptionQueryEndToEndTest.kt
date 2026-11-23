@@ -127,6 +127,30 @@ class SubscriptionQueryEndToEndTest {
         withTimeout(30_000) { bus.subscribe(WatchAccount(7)) }.cancel()
     }
 
+    @Test fun `the hub serves a declared subscription type in mode SUBSCRIPTION only - a point query, a stream and a gather of it are INVALID_REQUEST`() = runBlocking {
+        val hubs = startHubs()
+        val a = owner(hubs, "svc-acc-a", base = 100)
+        // The typed API cannot send a SubscriptionQuery any other way: a raw sender on the transport does.
+        val raw = connections(hubs.take(1), "svc-raw").apply { start(); assertTrue(awaitRegistered(wait)) }
+        fun request() = com.damoreira.snodra.server.v1.Request.newBuilder()
+            .setId(UUID.randomUUID().toString()).setKind(com.damoreira.snodra.server.v1.RequestKind.QUERY).setType("test.WatchAccount")
+            .setPayload(com.google.protobuf.ByteString.copyFrom(codec.encode(WatchAccount(7)))).setTimeoutMs(5_000).build()
+
+        val answers = listOf(
+            withTimeout(30_000) { raw.send(request()) },
+            withTimeout(30_000) { raw.stream(request()) { } },
+            withTimeout(30_000) { raw.gather(request()) { } },
+        )
+        for (answer in answers) {
+            assertTrue(answer.hasError(), answer.toString())
+            assertEquals(ErrorCode.INVALID_REQUEST, answer.error.code, answer.toString())
+            assertTrue("subscription type" in answer.error.message, answer.error.message)
+        }
+        assertEquals(0, a.subscriptions.size, "nothing reached the owner")
+        // The declared type still subscribes.
+        withTimeout(30_000) { caller(hubs.take(1)).subscribe(WatchAccount(7)) }.cancel()
+    }
+
     @Test fun `a cancel mid-way frees what the hub holds open for the subscription, maxResults does the same`() = runBlocking {
         val hubs = startHubs()
         val a = owner(hubs, "svc-acc-a", base = 100)
@@ -251,7 +275,7 @@ class SubscriptionQueryEndToEndTest {
         val dispatcher = InboundRequestDispatcher(HandlerInvoker(registry, codec), ForwardedIdentityResolver(null), codec)
         val subscriptions = SubscriptionRegistry()
         val conns = connections(hubs, service, dispatcher, subscriptions)
-        conns.register(emptySet(), registry.exclusiveQueryTypes(), registry.sharedQueryTypes())
+        conns.register(emptySet(), registry.exclusiveQueryTypes(), registry.sharedQueryTypes(), registry.subscriptionQueryTypes())
         conns.start()
         assertTrue(conns.awaitRegistered(wait))
         return Owner(conns, subscriptions, HubQueryUpdateEmitter(subscriptions, codec, resolver))

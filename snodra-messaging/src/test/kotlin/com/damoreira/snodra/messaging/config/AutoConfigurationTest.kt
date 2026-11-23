@@ -87,6 +87,11 @@ class AccountWatcherConfig {
 }
 
 @Configuration(proxyBeanMethods = false)
+class SharedAccountWatcherConfig {
+    @Bean fun sharedAccountWatcher() = com.damoreira.snodra.messaging.hub.SharedAccountWatcher()
+}
+
+@Configuration(proxyBeanMethods = false)
 class SharedHandlersConfig {
     @Bean fun sharedCountHandlers() = SharedCountHandlers()
 }
@@ -230,6 +235,34 @@ class AutoConfigurationTest {
             await atMost Duration.ofSeconds(5) until { hub.connectedInstances().isEmpty() }
             // stop() announced an empty registration (no more routing) before closing the stream
             assertEquals(registrations + 1, hub.registrationsFrom(connection.instanceId))
+        }
+    }
+
+    @Test fun `the lifecycle declares an exclusive subscription handler as a subscription query type, and nothing else`() {
+        withHub().withUserConfiguration(HandlersConfig::class.java, SharedHandlersConfig::class.java, AccountWatcherConfig::class.java).run { context ->
+            assertEquals(null, context.startupFailure)
+            val connection = context.getBean(HubConnections::class.java)
+            await atMost Duration.ofSeconds(5) until { connection.connected.value && "test.WatchAccount" in hub.registeredTypes() }
+            val register = hub.lastRegisterFrom(connection.instanceId)!!
+            assertEquals(listOf("test.WatchAccount"), register.queryTypesList)
+            assertEquals(listOf("test.GetCount"), register.sharedQueryTypesList)
+            assertEquals(listOf("test.WatchAccount"), register.subscriptionQueryTypesList)
+            context.close()
+            // The empty Register of the shutdown declares nothing either.
+            val last = hub.lastRegisterFrom(connection.instanceId)!!
+            assertEquals(emptyList(), last.queryTypesList + last.sharedQueryTypesList + last.subscriptionQueryTypesList)
+        }
+    }
+
+    @Test fun `the lifecycle declares a shared subscription handler as a subscription query type`() {
+        withHub().withUserConfiguration(SharedAccountWatcherConfig::class.java).run { context ->
+            assertEquals(null, context.startupFailure)
+            val connection = context.getBean(HubConnections::class.java)
+            await atMost Duration.ofSeconds(5) until { connection.connected.value && "test.WatchAccount" in hub.registeredTypes() }
+            val register = hub.lastRegisterFrom(connection.instanceId)!!
+            assertEquals(emptyList(), register.queryTypesList)
+            assertEquals(listOf("test.WatchAccount"), register.sharedQueryTypesList)
+            assertEquals(listOf("test.WatchAccount"), register.subscriptionQueryTypesList)
         }
     }
 

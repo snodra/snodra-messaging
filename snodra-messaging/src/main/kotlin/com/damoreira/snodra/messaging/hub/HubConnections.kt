@@ -153,7 +153,7 @@ class HubConnections(
     private val owners = HashMap<String, HubConnection>() // hub id -> the kept connection that answered it first
     private val parked = HashMap<String, String>() // target closed as a duplicate -> the hub id it answered
     private var resolvedTargets: List<String> = emptyList() // latest DNS answer (DNS targets only)
-    private class Types(val commands: Set<String>, val queries: Set<String>, val shared: Set<String>)
+    private class Types(val commands: Set<String>, val queries: Set<String>, val shared: Set<String>, val subscriptions: Set<String>)
     private var types: Types? = null
     private var started = false
     private var stopped = false
@@ -262,12 +262,17 @@ class HubConnections(
      * Replaces the announced handler types (see [HubConnection.register]) on every hub; re-sent on every reconnect and to
      * hubs added later.
      */
-    fun register(commandTypes: Set<String>, queryTypes: Set<String>, sharedQueryTypes: Set<String> = emptySet()) {
+    fun register(
+        commandTypes: Set<String>,
+        queryTypes: Set<String>,
+        sharedQueryTypes: Set<String> = emptySet(),
+        subscriptionQueryTypes: Set<String> = emptySet(),
+    ) {
         val connections = synchronized(lock) {
-            types = Types(commandTypes, queryTypes, sharedQueryTypes)
+            types = Types(commandTypes, queryTypes, sharedQueryTypes, subscriptionQueryTypes)
             active.values.map { it.connection }
         }
-        connections.forEach { it.register(commandTypes, queryTypes, sharedQueryTypes) }
+        connections.forEach { it.register(commandTypes, queryTypes, sharedQueryTypes, subscriptionQueryTypes) }
     }
 
     /**
@@ -463,7 +468,7 @@ class HubConnections(
                     control = control,
                 )
                 self = connection
-                types?.let { connection.register(it.commands, it.queries, it.shared) }
+                types?.let { connection.register(it.commands, it.queries, it.shared, it.subscriptions) }
                 val watcher = scope.launch(start = CoroutineStart.LAZY) {
                     merge(connection.ack, connection.firstAttemptOver).collect { onHandshake(connection) }
                 }
@@ -475,7 +480,7 @@ class HubConnections(
             log.info("Hub target {} is resolved again; keeping its connection", connection.target)
             val announced = synchronized(lock) { types }
             // Replaces the empty registration it announced while draining.
-            connection.register(announced?.commands.orEmpty(), announced?.queries.orEmpty(), announced?.shared.orEmpty())
+            connection.register(announced?.commands.orEmpty(), announced?.queries.orEmpty(), announced?.shared.orEmpty(), announced?.subscriptions.orEmpty())
             onHandshake(connection) // dedupe and the live hubs, as for a fresh handshake
         }
         // Every new target is counted before any of them opens a stream, so each gets its share of the permits.

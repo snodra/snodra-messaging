@@ -228,7 +228,7 @@ class StreamingQueryEndToEndTest {
         val registry = HandlerRegistry(resolver).apply { register(handlers) }
         val dispatcher = InboundRequestDispatcher(HandlerInvoker(registry, codec), ForwardedIdentityResolver(null), codec)
         val conns = connections(hubs, "svc-export", maxConcurrentHandlers, dispatcher)
-        conns.register(emptySet(), registry.exclusiveQueryTypes(), registry.sharedQueryTypes())
+        conns.register(emptySet(), registry.exclusiveQueryTypes(), registry.sharedQueryTypes(), registry.subscriptionQueryTypes())
         conns.start()
         assertTrue(conns.awaitRegistered(wait))
         return conns

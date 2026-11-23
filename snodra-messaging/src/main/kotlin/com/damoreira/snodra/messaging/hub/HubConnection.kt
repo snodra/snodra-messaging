@@ -209,7 +209,9 @@ internal object ReconnectBackoff {
  * as at a hub `Cancel`) and releases its handler slot and hub permit. The permit of every inbound request goes back
  * to the hub when its coroutine completes, whichever way.
  *
- * Subscriptions: as a sender, [subscribe] sends a `SUBSCRIPTION` request, waits for the initial part and
+ * Subscriptions: every `Register` declares the query types served by a subscription handler (exclusive or shared) in
+ * `subscription_query_types` ([register]); the hub serves those types in mode `SUBSCRIPTION` only, and that mode for those
+ * types only (anything else is its `Error{INVALID_REQUEST}`). As a sender, [subscribe] sends a `SUBSCRIPTION` request, waits for the initial part and
  * returns the open
  * [HubSubscription]: its [HubSubscription.next] hands out the updates in order (checking `seq` runs 1, 2, 3, ... and the end's
  * `parts` count, refilling `Flow{initial_credit / 2}` per that many parts consumed, the initial part included) and
@@ -382,7 +384,7 @@ class HubConnection(
     }
 
     private val lock = Any() // guards registration, generation and current
-    private var registration = buildRegister(emptySet(), emptySet(), emptySet())
+    private var registration = buildRegister(emptySet(), emptySet(), emptySet(), emptySet())
     private val generation = MutableStateFlow(0L) // bumped by every register(...)
     private val acknowledged = MutableStateFlow(-1L) // generation confirmed by the hub on the current stream
     @Volatile private var current: Stream? = null
@@ -525,11 +527,17 @@ class HubConnection(
 
     /**
      * Replaces the announced handler types ([sharedQueryTypes]: `@QueryHandler(shared = true)`, sent as
-     * `shared_query_types`); sent now if a stream is open and re-sent on every reconnect.
+     * `shared_query_types`; [subscriptionQueryTypes]: the query types, of either list, served by a subscription handler, sent as
+     * `subscription_query_types`); sent now if a stream is open and re-sent on every reconnect.
      */
-    fun register(commandTypes: Set<String>, queryTypes: Set<String>, sharedQueryTypes: Set<String> = emptySet()) {
+    fun register(
+        commandTypes: Set<String>,
+        queryTypes: Set<String>,
+        sharedQueryTypes: Set<String> = emptySet(),
+        subscriptionQueryTypes: Set<String> = emptySet(),
+    ) {
         synchronized(lock) {
-            registration = buildRegister(commandTypes, queryTypes, sharedQueryTypes)
+            registration = buildRegister(commandTypes, queryTypes, sharedQueryTypes, subscriptionQueryTypes)
             generation.value += 1
             current?.let(::announce)
         }
@@ -1110,12 +1118,18 @@ class HubConnection(
         }
     }
 
-    private fun buildRegister(commandTypes: Set<String>, queryTypes: Set<String>, sharedQueryTypes: Set<String>): Register = Register.newBuilder()
+    private fun buildRegister(
+        commandTypes: Set<String>,
+        queryTypes: Set<String>,
+        sharedQueryTypes: Set<String>,
+        subscriptionQueryTypes: Set<String>,
+    ): Register = Register.newBuilder()
         .setServiceName(serviceName)
         .setInstanceId(instanceId)
         .addAllCommandTypes(commandTypes.sorted())
         .addAllQueryTypes(queryTypes.sorted())
         .addAllSharedQueryTypes(sharedQueryTypes.sorted())
+        .addAllSubscriptionQueryTypes(subscriptionQueryTypes.sorted())
         .setClientVersion(HubProtocol.CLIENT_VERSION)
         .setLoadFactor(loadFactor)
         .putAllTags(tags)
@@ -1124,7 +1138,7 @@ class HubConnection(
     /** Writes the current registration followed by a heartbeat whose echo confirms it; returns that heartbeat's `sent_at_ms`. Caller holds [lock]. */
     private fun announce(stream: Stream): Long {
         val register = registration.toBuilder().setInitialPermits(stream.initialPermits)
-            .apply { if (stream.draining) clearCommandTypes().clearQueryTypes().clearSharedQueryTypes() }
+            .apply { if (stream.draining) clearCommandTypes().clearQueryTypes().clearSharedQueryTypes().clearSubscriptionQueryTypes() }
             // Every Register of the stream carries the stream's token (the hub reads it from the first one only).
             .apply { synchronized(stream) { stream.credentials }?.let { credentials = it } }
             .build()

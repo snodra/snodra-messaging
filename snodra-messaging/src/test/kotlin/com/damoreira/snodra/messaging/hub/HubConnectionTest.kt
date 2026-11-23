@@ -120,6 +120,33 @@ class HubConnectionTest {
         assertEquals(mapOf("zone" to "eu-1"), reg.tagsMap)
     }
 
+    @Test fun `every Register declares the subscription query types, on a re-register and a new stream too`() = runBlocking {
+        val conn = connection("a")
+        conn.register(setOf("test.Ping"), setOf("test.Get", "test.Watch"), setOf("test.SharedWatch"), subscriptionQueryTypes = setOf("test.Watch", "test.SharedWatch"))
+        conn.start()
+        assertTrue(conn.awaitRegistered(wait))
+        val first = hub.lastRegisterFrom("a")!!
+        assertEquals(listOf("test.Get", "test.Watch"), first.queryTypesList)
+        assertEquals(listOf("test.SharedWatch", "test.Watch"), first.subscriptionQueryTypesList)
+
+        conn.register(setOf("test.Ping"), setOf("test.Get", "test.Watch"), setOf("test.SharedWatch"), subscriptionQueryTypes = setOf("test.Watch"))
+        assertTrue(conn.awaitRegistered(wait))
+        assertEquals(listOf("test.Watch"), hub.lastRegisterFrom("a")!!.subscriptionQueryTypesList)
+
+        val registrations = hub.registrationsFrom("a")
+        hub.dropInstance("a")
+        await atMost Duration.ofSeconds(5) until { hub.registrationsFrom("a") > registrations }
+        assertEquals(listOf("test.Watch"), hub.lastRegisterFrom("a")!!.subscriptionQueryTypesList)
+    }
+
+    @Test fun `without subscription handlers the Register declares no subscription query type`() = runBlocking {
+        val conn = connection("a")
+        conn.register(setOf("test.Ping"), setOf("test.Get"), setOf("test.Shared"))
+        conn.start()
+        assertTrue(conn.awaitRegistered(wait))
+        assertEquals(emptyList(), hub.lastRegisterFrom("a")!!.subscriptionQueryTypesList)
+    }
+
     @Test fun `fewer than one handler or a negative load factor is rejected`() {
         assertFailsWith<IllegalArgumentException> { flowConnection("x", maxConcurrentHandlers = 0) { req -> payloadReply(req.id, "{}") } }
         val e = assertFailsWith<IllegalArgumentException> {

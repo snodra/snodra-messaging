@@ -187,7 +187,7 @@ class SubscriptionQueryTest {
                 dispatcher.dispatchSubscription(req, register)
             },
         ).also { connections += it }
-        conn.register(emptySet(), ownerRegistry.exclusiveQueryTypes(), ownerRegistry.sharedQueryTypes())
+        conn.register(emptySet(), ownerRegistry.exclusiveQueryTypes(), ownerRegistry.sharedQueryTypes(), ownerRegistry.subscriptionQueryTypes())
         conn.start()
         assertTrue(conn.awaitRegistered(wait))
         return Owner(conn, subscriptions, HubQueryUpdateEmitter(subscriptions, codec, resolver))
@@ -911,7 +911,7 @@ class SubscriptionQueryTest {
             subscriptions = subscriptions,
             inboundSubscription = dispatcher::dispatchSubscription,
         ).also { multi += it }
-        conns.register(emptySet(), emptySet(), ownerRegistry.sharedQueryTypes())
+        conns.register(emptySet(), emptySet(), ownerRegistry.sharedQueryTypes(), ownerRegistry.subscriptionQueryTypes())
         conns.start()
         assertTrue(conns.awaitRegistered(wait))
         val emitter = HubQueryUpdateEmitter(subscriptions, codec, resolver)

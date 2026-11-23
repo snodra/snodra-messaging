@@ -375,7 +375,7 @@ class HubLifecycle(
     override fun getPhase(): Int = PHASE
 
     private fun announce() {
-        if (running) connections.register(registry.commandTypes(), registry.exclusiveQueryTypes(), registry.sharedQueryTypes())
+        if (running) connections.register(registry.commandTypes(), registry.exclusiveQueryTypes(), registry.sharedQueryTypes(), registry.subscriptionQueryTypes())
     }
 
     companion object {
