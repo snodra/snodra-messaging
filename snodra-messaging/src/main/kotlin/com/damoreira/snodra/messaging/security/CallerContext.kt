@@ -13,7 +13,8 @@ import kotlin.coroutines.CoroutineContext
 /**
  * The acting user of the current thread, read from Spring Security's [SecurityContextHolder]: an incoming HTTP request
  * authenticated as [JwtAuthenticationToken] or [BearerTokenAuthentication], or a hub request being handled
- * ([SnodraForwardedAuthentication], installed by the inbound dispatcher so nested sends re-forward the same token).
+ * ([SnodraForwardedAuthentication] for a verified caller, [SnodraForwardedToken] for a token this service cannot verify; installed
+ * by the inbound dispatcher so nested sends re-forward the same token).
  */
 object CallerContext {
     /** The raw bearer token (without the `Bearer ` prefix), or null for an anonymous caller. */
@@ -21,6 +22,7 @@ object CallerContext {
         is JwtAuthenticationToken -> auth.token.tokenValue
         is BearerTokenAuthentication -> auth.token.tokenValue
         is SnodraForwardedAuthentication -> auth.token
+        is SnodraForwardedToken -> auth.token
         else -> null
     }
 
@@ -54,6 +56,23 @@ class SnodraForwardedAuthentication(
     override fun getCredentials(): Any? = token
     override fun getPrincipal(): MessagePrincipal = principal
     override fun getName(): String = principal.userId.orEmpty()
+}
+
+/**
+ * A hub request's forwarded [token] that this service cannot verify (it has no `JwtDecoder`): the caller is anonymous (never
+ * authenticated, no user, no roles), and the token is only carried on by the requests sent while handling it.
+ */
+class SnodraForwardedToken(val token: String) : AbstractAuthenticationToken(emptyList()) {
+    init {
+        isAuthenticated = false
+    }
+
+    override fun getCredentials(): Any = token
+    override fun getPrincipal(): Any? = null
+    override fun setAuthenticated(authenticated: Boolean) {
+        require(!authenticated) { "a forwarded token nobody verified is never an authenticated caller" }
+        super.setAuthenticated(false)
+    }
 }
 
 /**

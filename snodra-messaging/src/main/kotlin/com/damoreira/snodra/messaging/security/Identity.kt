@@ -7,8 +7,10 @@ import org.springframework.security.oauth2.server.resource.authentication.Bearer
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken
 
 /**
- * The caller of a command or query as seen by the receiving handler: the token's subject, the roles and
- * whether the identity was cryptographically verified by this service ([verified]) or trusted as forwarded by a peer.
+ * The caller of a command or query as seen by the receiving handler: the token's subject, the roles and whether the
+ * identity was verified ([verified]). A forwarded token becomes an identity only once this service verified it against its
+ * JWKS (a token it cannot verify leaves the caller anonymous), and the local short-circuit takes the identity the
+ * application's own security established, so [verified] is true for every identity the library hands out.
  * This is also what `principal` resolves to in `@RequiresAuthentication` expressions.
  */
 data class MessagePrincipal(val userId: String?, val roles: Set<String>, val verified: Boolean)

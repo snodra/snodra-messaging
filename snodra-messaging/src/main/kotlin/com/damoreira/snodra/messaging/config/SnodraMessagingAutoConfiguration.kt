@@ -96,6 +96,11 @@ class SnodraMessagingAutoConfiguration {
     @ConditionalOnMissingBean
     fun forwardedIdentityResolver(decoder: ObjectProvider<JwtDecoder>) = ForwardedIdentityResolver(decoder.ifAvailable)
 
+    /** Fails the startup when a handler requires an authenticated caller and no `JwtDecoder` (JWKS) verifies forwarded tokens. */
+    @Bean
+    fun snodraRequiresAuthenticationGuard(registry: HandlerRegistry, decoder: ObjectProvider<JwtDecoder>) =
+        RequiresAuthenticationGuard(registry, decoder)
+
     /** Fallback when micrometer-tracing is absent: no trace headers. */
     @Bean
     @ConditionalOnMissingBean

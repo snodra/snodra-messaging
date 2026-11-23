@@ -525,12 +525,15 @@ class HubBusTest {
         assertEquals(Pong("admin:x", Instant.EPOCH), withTimeout(5_000) { bus.send(Ping("x")) })
     }
 
-    @Test fun `receiver without JwtDecoder accepts forwarded token unverified`() = runBlocking {
+    @Test fun `receiver without JwtDecoder never takes a forwarded token for an identity`() = runBlocking {
+        // (A Spring service with this handler and no JwtDecoder does not start; the dispatcher alone shows why.)
         remoteService("remote", null, UserOnlyHandlers())
         authenticateWithRoles(TestJwt.token("user-1", listOf("snodra-user")))
         val bus = callerBus()
 
-        assertEquals(Pong("user:x", Instant.EPOCH), withTimeout(5_000) { bus.send(Ping("x")) })
+        val e = assertFailsWith<UnauthenticatedException> { withTimeout(5_000) { bus.send(Ping("x")) } }
+
+        assertEquals("handler UserOnlyHandlers.handle requires authentication", e.message)
     }
 
     @Test fun `local short-circuit uses realm roles and identity for ctx regardless of the app authorities`() = runBlocking {

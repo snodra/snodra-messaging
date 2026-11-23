@@ -28,6 +28,10 @@ class ConformanceService {
         }
     }
 
+    /** `conformance.Guarded` with the runner's JWKS only: a handler that requires an authenticated caller cannot start without one. */
+    @Bean
+    fun guardedHandler(env: ConformanceEnv): GuardedHandler? = if (env.jwksUrl != null) GuardedHandler() else null
+
     @Bean
     fun conformanceEnv(): ConformanceEnv = ConformanceEnv.read(System.getenv())
 }

@@ -74,11 +74,6 @@ class Handlers(
     @CommandHandler
     fun handle(m: Strict): JsonNode = json.objectNode().put("count", m.count)
 
-    /** An authenticated caller (anonymous ones are refused before decoding), and not the subject the contract refuses. */
-    @CommandHandler
-    @RequiresAuthentication(expression = "isAuthenticated() and principal.userId != 'conformance-refused'")
-    fun handle(m: Guarded, ctx: MessageContext): JsonNode = json.objectNode().put("count", m.count).put("user", ctx.userId)
-
     /** A nested call with default options; its failure is rethrown as an application lets it propagate. */
     @CommandHandler
     suspend fun handle(m: Relay): JsonNode {
@@ -140,4 +135,15 @@ class Handlers(
         // CONFORMANCE_RETRY_* configures the library's policy for every send (it also takes one per call).
         put("retry", env.retry != null)
     }
+}
+
+/**
+ * `conformance.Guarded`: an authenticated caller (anonymous ones are refused before decoding), and not the subject the contract
+ * refuses. A handler that requires an authenticated caller needs a JWKS to verify forwarded tokens, so it is served only when the
+ * runner gives one (`CONFORMANCE_JWKS_URL`, see [ConformanceService.guardedHandler]).
+ */
+class GuardedHandler {
+    @CommandHandler
+    @RequiresAuthentication(expression = "isAuthenticated() and principal.userId != 'conformance-refused'")
+    fun handle(m: Guarded, ctx: MessageContext): JsonNode = json.objectNode().put("count", m.count).put("user", ctx.userId)
 }

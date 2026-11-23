@@ -28,8 +28,12 @@ import kotlin.time.Duration.Companion.minutes
 /** Records the caller seen through [CallerContext] while handling. */
 class CallerRecordingHandlers {
     @Volatile var seenUserId: String? = "unset"
+    @Volatile var seenRoles: Set<String>? = null
+    @Volatile var seenToken: String? = null
     @CommandHandler fun handle(command: Ping): Pong {
         seenUserId = CallerContext.currentUserId()
+        seenRoles = CallerContext.currentRoles()
+        seenToken = CallerContext.currentBearerToken()
         return Pong(command.text, Instant.EPOCH)
     }
 }
@@ -64,21 +68,12 @@ class ForwardedIdentityResolverTest {
         assertFalse(e.message!!.contains(expired))
     }
 
-    @Test fun `token without decoder is parsed unverified`() {
+    @Test fun `a token without decoder is no identity - its claims are never read`() {
         val token = TestJwt.foreignToken("u-9", listOf("snodra-admin"))
 
-        val identity = assertNotNull(withoutDecoder.resolve("Bearer $token"))
-
-        assertEquals("u-9", identity.userId)
-        assertEquals(setOf("snodra-admin"), identity.roles)
-        assertFalse(identity.principal.verified)
-        assertEquals(token, assertIs<SnodraForwardedAuthentication>(identity.authentication).token)
-    }
-
-    @Test fun `unreadable token without decoder is UnauthenticatedException`() {
-        val e = assertFailsWith<UnauthenticatedException> { withoutDecoder.resolve("Bearer not-a-jwt") }
-
-        assertEquals("unreadable token", e.message)
+        assertNull(withoutDecoder.resolve("Bearer $token"))
+        assertNull(withoutDecoder.resolve("Bearer not-a-jwt"), "not read, so not refused either")
+        assertNull(withoutDecoder.resolve("Bearer ${TestJwt.unsignedToken("u-9", listOf("snodra-admin"))}"))
     }
 
     @Test fun `malformed header is UnauthenticatedException`() {
@@ -86,38 +81,43 @@ class ForwardedIdentityResolverTest {
         assertFailsWith<UnauthenticatedException> { withoutDecoder.resolve("Basic abc") }
     }
 
-    @Test fun `missing sub without decoder yields identity with null userId`() {
-        val identity = assertNotNull(withoutDecoder.resolve("Bearer ${TestJwt.foreignToken(null, listOf("snodra-user"))}"))
+    private fun ping(authorization: String) = Request.newBuilder()
+        .setId("req-1")
+        .setKind(RequestKind.COMMAND)
+        .setType("test.Ping")
+        .setPayload(ByteString.copyFrom(JsonCodec().encode(Ping("x"))))
+        .putHeaders("authorization", authorization)
+        .build()
 
-        assertNull(identity.userId)
-        assertEquals(setOf("snodra-user"), identity.roles)
-    }
-
-    @Test fun `dispatcher installs forwarded authentication for unverified identity`() = runBlocking {
+    @Test fun `without decoder the dispatcher runs the handler for an anonymous caller and still forwards the token`() = runBlocking {
         val codec = JsonCodec()
         val registry = HandlerRegistry(MessageTypeResolver("test"))
         val handlers = CallerRecordingHandlers()
         registry.register(handlers)
         val dispatcher = InboundRequestDispatcher(HandlerInvoker(registry, codec), withoutDecoder, codec)
-        val request = Request.newBuilder()
-            .setId("req-1")
-            .setKind(RequestKind.COMMAND)
-            .setType("test.Ping")
-            .setPayload(ByteString.copyFrom(codec.encode(Ping("x"))))
-            .putHeaders("authorization", "Bearer ${TestJwt.foreignToken("u-9", listOf("snodra-user"))}")
-            .build()
+        val token = TestJwt.foreignToken("u-9", listOf("snodra-user"))
 
-        val reply = dispatcher.dispatch(request)
+        val reply = dispatcher.dispatch(ping("Bearer $token"))
 
         assertTrue(reply.hasPayload(), "expected a payload, got ${reply.error.message}")
-        assertEquals("u-9", handlers.seenUserId)
+        assertNull(handlers.seenUserId, "no verified identity: anonymous")
+        assertEquals(emptySet(), handlers.seenRoles)
+        assertEquals(token, handlers.seenToken, "the token is forwarded on by nested sends")
     }
 
-    @Test fun `unsigned token without decoder is UnauthenticatedException`() {
-        val e = assertFailsWith<UnauthenticatedException> {
-            withoutDecoder.resolve("Bearer ${TestJwt.unsignedToken("u-9", listOf("snodra-admin"))}")
-        }
+    @Test fun `with decoder the dispatcher installs the verified caller`() = runBlocking {
+        val codec = JsonCodec()
+        val registry = HandlerRegistry(MessageTypeResolver("test"))
+        val handlers = CallerRecordingHandlers()
+        registry.register(handlers)
+        val dispatcher = InboundRequestDispatcher(HandlerInvoker(registry, codec), withDecoder, codec)
+        val token = TestJwt.token("u-1", listOf("snodra-user"))
 
-        assertEquals("unsigned token", e.message)
+        val reply = dispatcher.dispatch(ping("Bearer $token"))
+
+        assertTrue(reply.hasPayload(), "expected a payload, got ${reply.error.message}")
+        assertEquals("u-1", handlers.seenUserId)
+        assertEquals(setOf("snodra-user"), handlers.seenRoles)
+        assertEquals(token, handlers.seenToken)
     }
 }

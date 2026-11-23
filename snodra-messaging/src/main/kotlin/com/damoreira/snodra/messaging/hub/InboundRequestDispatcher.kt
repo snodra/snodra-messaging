@@ -15,6 +15,7 @@ import com.damoreira.snodra.messaging.handler.SubscriptionAdmission
 import com.damoreira.snodra.messaging.security.ForwardedIdentityResolver
 import com.damoreira.snodra.messaging.security.Identity
 import com.damoreira.snodra.messaging.security.SecurityContextElement
+import com.damoreira.snodra.messaging.security.SnodraForwardedToken
 import com.damoreira.snodra.messaging.eventstore.EventHeaders
 import com.damoreira.snodra.messaging.tracing.CorrelationContext
 import kotlinx.coroutines.withContext
@@ -27,8 +28,9 @@ import org.springframework.security.core.context.SecurityContextHolder
  * calls the local command or query handler. Every outcome, including a rejected token, becomes a [Reply].
  *
  * While the handler runs, the Spring [org.springframework.security.core.context.SecurityContext] holds a
- * [SnodraForwardedAuthentication] (or no authentication for an anonymous caller), carried across suspensions and
- * thread switches by a coroutine context element, so nested sends from the handler re-forward the same token.
+ * [SnodraForwardedAuthentication] for a verified caller, a [SnodraForwardedToken] (not authenticated) for a token this
+ * service has no `JwtDecoder` to verify, or no authentication when no token came, carried across suspensions and thread
+ * switches by a coroutine context element, so nested sends from the handler re-forward the same token.
  * Threads the handler starts itself do not inherit it; such code should read [MessageContext] instead. The request's
  * correlation id travels the same way ([CorrelationContext]), so messages sent while handling carry it.
  *
@@ -126,9 +128,11 @@ class InboundRequestDispatcher(
             authorization = authorization,
             headers = headers,
         )
-        // The resolved identity (verified or trusted) is visible to the handler and re-forwarded by nested sends.
+        // The verified identity is visible to the handler and re-forwarded by nested sends. A token this service cannot verify is
+        // no identity (the caller is anonymous) but is still re-forwarded.
         val securityContext = SecurityContextHolder.createEmptyContext().apply {
-            if (identity != null) authentication = identity.authentication
+            authentication = identity?.authentication
+                ?: authorization?.let(ForwardedIdentityResolver::bearerToken)?.let(::SnodraForwardedToken)
         }
         return Caller.Resolved(ctx, identity, securityContext)
     }
