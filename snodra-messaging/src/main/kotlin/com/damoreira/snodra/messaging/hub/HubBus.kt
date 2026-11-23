@@ -601,8 +601,10 @@ class HubBus(
             authorization = token?.let { "Bearer $it" },
             headers = extra + ("correlationId" to correlationId),
         )
-        // Same thread and coroutine as the caller (so a thread-bound transaction of the caller is joined).
-        val result = withContext(CorrelationContext(correlationId)) {
+        // Same thread and coroutine as the caller (so a thread-bound transaction of the caller is joined), and the caller's trace floor:
+        // what the handler sends carries the caller's traceparent, as it would through the hub.
+        val trace = CorrelationContext(correlationId, CorrelationContext.currentTraceparent(currentCoroutineContext()))
+        val result = withContext(trace) {
             if (kind == RequestKind.COMMAND) invoker.invokeCommand(type, payload, ctx, identity) else invoker.invokeQuery(type, payload, ctx, identity)
         }
         return when (result) {

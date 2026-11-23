@@ -35,6 +35,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withContext
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Test
 import org.slf4j.MDC
@@ -61,6 +62,15 @@ import java.util.concurrent.CopyOnWriteArrayList
 
 class LocalPingHandlers {
     @CommandHandler fun handle(command: Ping): Pong = Pong("local:${command.text}", Instant.EPOCH)
+}
+
+/** Records the trace floor (`traceparent`) a handler runs under. */
+class TraceCapturingHandlers {
+    @Volatile var seen: String? = "unset"
+    @CommandHandler suspend fun handle(command: Ping): Pong {
+        seen = com.damoreira.snodra.messaging.tracing.CorrelationContext.currentTraceparent(kotlinx.coroutines.currentCoroutineContext())
+        return Pong("traced", Instant.EPOCH)
+    }
 }
 
 class CountHandlers {
@@ -358,6 +368,17 @@ class HubBusTest {
         assertEquals(com.damoreira.snodra.messaging.saga.RawOutcome.Success, raw)
         assertEquals(2, hub.requestsFrom("self"))
         assertEquals("order-2", hub.lastRequest()!!.routingKey)
+    }
+
+    @Test fun `a handler answered in-process keeps the caller's trace floor`() = runBlocking {
+        val handlers = TraceCapturingHandlers()
+        registry.register(handlers)
+        val bus = bus(connection("lonely", hubName = "no-such-hub-" + UUID.randomUUID()))
+        val traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+
+        withContext(com.damoreira.snodra.messaging.tracing.CorrelationContext("corr-1", traceparent)) { bus.send(Ping("x")) }
+
+        assertEquals(traceparent, handlers.seen)
     }
 
     @Test fun `remote command carries bearer token and correlation id`() = runBlocking {
