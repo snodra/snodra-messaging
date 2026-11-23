@@ -16,7 +16,7 @@ nmcpSettings {
     centralPortal {
         username = System.getenv("MAVEN_CENTRAL_USERNAME") ?: ""
         password = System.getenv("MAVEN_CENTRAL_PASSWORD") ?: ""
-        // A tag is the human gate; the portal validates and releases the bundle.
+        // CI tags a release only after every check passed; the portal validates and releases the bundle.
         publishingType = "AUTOMATIC"
     }
 }
