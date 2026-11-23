@@ -73,10 +73,12 @@ class InProcessHubTest {
             queries: List<String> = emptyList(),
             shared: List<String> = emptyList(),
             permits: Int = 1_000,
+            subscriptions: List<String> = emptyList(),
         ) = send(
             ClientMessage.newBuilder().setRegister(
                 Register.newBuilder().setServiceName(service).setInstanceId(instance).addAllCommandTypes(commands.toList())
-                    .addAllQueryTypes(queries).addAllSharedQueryTypes(shared).setInitialPermits(permits),
+                    .addAllQueryTypes(queries).addAllSharedQueryTypes(shared).addAllSubscriptionQueryTypes(subscriptions)
+                    .setInitialPermits(permits),
             ).build(),
         )
 
@@ -88,8 +90,9 @@ class InProcessHubTest {
             queries: List<String> = emptyList(),
             shared: List<String> = emptyList(),
             permits: Int = 1_000,
+            subscriptions: List<String> = emptyList(),
         ): RawClient {
-            register(service, instance, *commands, queries = queries, shared = shared, permits = permits)
+            register(service, instance, *commands, queries = queries, shared = shared, permits = permits, subscriptions = subscriptions)
             assertTrue(next().hasRegisterAck())
             return this
         }
@@ -282,6 +285,68 @@ class InProcessHubTest {
         assertIs<StatusException>(failure)
         assertEquals(Status.Code.ALREADY_EXISTS, failure.status.code)
         assertEquals("type test.Ping is owned by service svc-a", failure.status.description)
+    }
+
+    // --- subscription types (Register.subscription_query_types) ---
+
+    private fun query(id: String, type: String, mode: RequestMode) = ClientMessage.newBuilder().setRequest(
+        Request.newBuilder().setId(id).setKind(RequestKind.QUERY).setType(type).setMode(mode).setTimeoutMs(2_000)
+            .setPayload(ByteString.copyFromUtf8("{}")),
+    ).build()
+
+    @Test
+    fun `a subscription type that is no query type of the Register is INVALID_ARGUMENT, like the real hub`() = runBlocking {
+        val client = RawClient().also { it.register("svc-a", "a-1", queries = listOf("test.Get"), subscriptions = listOf("test.Watch")) }
+        val failure = assertIs<StatusException>(client.awaitEnd())
+        assertEquals(Status.Code.INVALID_ARGUMENT, failure.status.code)
+        assertEquals("type test.Watch listed as a subscription type but not as a query type", failure.status.description)
+    }
+
+    @Test
+    fun `registrants of a query type agree on whether it is a subscription type`() = runBlocking {
+        RawClient().registered("svc-x", "x-1", shared = listOf("test.Watch"), subscriptions = listOf("test.Watch"))
+        awaitRegistered("test.Watch")
+        val plain = RawClient().also { it.register("svc-y", "y-1", shared = listOf("test.Watch")) }
+        val failure = assertIs<StatusException>(plain.awaitEnd())
+        assertEquals(Status.Code.ALREADY_EXISTS, failure.status.code)
+        assertEquals("type test.Watch is registered by service svc-x as a subscription type", failure.status.description)
+
+        RawClient().registered("svc-p", "p-1", shared = listOf("test.Plain"))
+        awaitRegistered("test.Plain")
+        val declaring = RawClient().also { it.register("svc-q", "q-1", shared = listOf("test.Plain"), subscriptions = listOf("test.Plain")) }
+        val refused = assertIs<StatusException>(declaring.awaitEnd())
+        assertEquals("type test.Plain is registered by service svc-p as a query type, not a subscription type", refused.status.description)
+
+        // Agreeing registrants are fine.
+        RawClient().registered("svc-z", "z-1", shared = listOf("test.Watch"), subscriptions = listOf("test.Watch"))
+        Unit
+    }
+
+    @Test
+    fun `a declared subscription type is served in mode SUBSCRIPTION only, and that mode for such types only`() = runBlocking {
+        val owner = RawClient().registered("svc-a", "a-1", queries = listOf("test.Watch", "test.Get"), subscriptions = listOf("test.Watch"))
+        awaitRegistered("test.Watch")
+        val sender = RawClient().registered("svc-s", "s-1")
+        for ((id, mode) in listOf("u" to RequestMode.UNARY, "st" to RequestMode.STREAMING, "g" to RequestMode.SCATTER_GATHER)) {
+            sender.send(query(id, "test.Watch", mode))
+            val error = sender.next().error
+            assertEquals(ErrorCode.INVALID_REQUEST, error.code, "$mode")
+            val label = mapOf(RequestMode.UNARY to "unary", RequestMode.STREAMING to "streaming", RequestMode.SCATTER_GATHER to "scatter_gather")[mode]
+            assertEquals("invalid request: test.Watch is a subscription type; $label is not for it", error.message)
+        }
+        sender.send(query("sub", "test.Get", RequestMode.SUBSCRIPTION))
+        val error = sender.next().error
+        assertEquals(ErrorCode.INVALID_REQUEST, error.code)
+        assertEquals(
+            "invalid request: test.Get is not a subscription type (Register.subscription_query_types); subscription is for subscription types only",
+            error.message,
+        )
+        owner.nothingWithin(200) // no instance got anything
+        // The declared type subscribes; the other one answers point queries.
+        sender.send(query("ok", "test.Watch", RequestMode.SUBSCRIPTION))
+        val forwarded = owner.next()
+        assertTrue(forwarded.hasRequest(), forwarded.toString())
+        assertEquals(RequestMode.SUBSCRIPTION, forwarded.request.mode)
     }
 
     // --- shared query types and scatter-gather ---
@@ -657,8 +722,8 @@ class InProcessHubTest {
 
     /** Two handlers of the shared `acct.Watch` (svc-a / a-1 and svc-b / b-1) and a sender. */
     private suspend fun subscriptionTrio(): Triple<RawClient, RawClient, RawClient> {
-        val a = RawClient().also { it.register("svc-a", "a-1", shared = listOf("acct.Watch")) }.apply { next() }
-        val b = RawClient().also { it.register("svc-b", "b-1", shared = listOf("acct.Watch")) }.apply { next() }
+        val a = RawClient().also { it.register("svc-a", "a-1", shared = listOf("acct.Watch"), subscriptions = listOf("acct.Watch")) }.apply { next() }
+        val b = RawClient().also { it.register("svc-b", "b-1", shared = listOf("acct.Watch"), subscriptions = listOf("acct.Watch")) }.apply { next() }
         withTimeout(TIMEOUT_MS) { while (hub.connectedInstances().size < 2) kotlinx.coroutines.delay(10) }
         val sender = RawClient().also { it.register("svc-web", "s-1") }
         assertTrue(sender.next().hasRegisterAck())
@@ -837,8 +902,8 @@ class InProcessHubTest {
         assertEquals(ErrorCode.HANDLER_DISCONNECTED to 2, lost.error.code to lost.parts)
         assertEquals(0, hub.openSubscriptions())
 
-        val a2 = RawClient().also { it.register("svc-a", "a-2", shared = listOf("acct.Watch")) }.apply { next() }
-        val b2 = RawClient().also { it.register("svc-b", "b-2", shared = listOf("acct.Watch")) }.apply { next() }
+        val a2 = RawClient().also { it.register("svc-a", "a-2", shared = listOf("acct.Watch"), subscriptions = listOf("acct.Watch")) }.apply { next() }
+        val b2 = RawClient().also { it.register("svc-b", "b-2", shared = listOf("acct.Watch"), subscriptions = listOf("acct.Watch")) }.apply { next() }
         withTimeout(TIMEOUT_MS) { while (hub.connectedInstances().size < 3) kotlinx.coroutines.delay(10) }
         val second = open(sender, a2, b2, "sub2")
         hub.dropInstance("s-1")
@@ -858,7 +923,7 @@ class InProcessHubTest {
         sender.send(subscribe("r4", "test.Cmd"))
         assertEquals(ErrorCode.INVALID_REQUEST, sender.next().error.code)
 
-        val handler = RawClient().registered("svc-h", "h-1", queries = listOf("acct.Watch"))
+        val handler = RawClient().registered("svc-h", "h-1", queries = listOf("acct.Watch"), subscriptions = listOf("acct.Watch"))
         val other = RawClient().registered("svc-o", "o-1")
         withTimeout(TIMEOUT_MS) { while (hub.connectedInstances().size < 4) kotlinx.coroutines.delay(10) }
         sender.send(subscribe("r6", "acct.Watch"))
@@ -868,9 +933,10 @@ class InProcessHubTest {
         assertEquals(ErrorCode.INVALID_REQUEST, sender.next().error.code) // duplicate id
         sender.send(request("r6#0", "acct.Watch"))
         assertEquals(ErrorCode.INVALID_REQUEST, sender.next().error.code) // the initial request's id is pending
-        // An update target's id is no pending id: a unary request with it is routed normally (INVALID_REQUEST for a command kind on a query type is not checked by this double: NO_HANDLER is what the handler answers).
+        // An update target's id is no pending id, but a unary request on a subscription type is refused by the hub itself.
         sender.send(request("r6#1", "acct.Watch"))
-        assertEquals("r6#1", handler.next().request.id)
+        assertEquals("invalid request: acct.Watch is a subscription type; unary is not for it", sender.next().error.message)
+        handler.nothingWithin(50)
 
         // The per-instance limit: refused before anything is sent.
         hub.maxSubscriptionsPerInstance = 1

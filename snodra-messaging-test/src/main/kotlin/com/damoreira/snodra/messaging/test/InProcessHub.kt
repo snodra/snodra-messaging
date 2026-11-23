@@ -80,6 +80,12 @@ import java.util.concurrent.TimeUnit
  * (`HANDLER_DISCONNECTED`). No target: `NO_HANDLER`; a command: `INVALID_REQUEST`; a mode this hub does not know:
  * `INVALID_REQUEST`. [inject] writes any message to an instance's stream.
  *
+ * Subscription types, as the real hub: `Register.subscription_query_types` must name query types of the same `Register`
+ * (`INVALID_ARGUMENT` otherwise), and the registrants of a query type must agree on whether it is one (`ALREADY_EXISTS`). A
+ * declared subscription type is served in mode `SUBSCRIPTION` only: a sender's unary, streaming or scatter-gather request for it
+ * is one `Error{INVALID_REQUEST}` ("<type> is a subscription type; <mode> is not for it"), and a `SUBSCRIPTION` request for a
+ * query type nobody declared is one `Error{INVALID_REQUEST}` ("… is not a subscription type …"); no instance gets anything.
+ *
  * Streaming queries: a `STREAMING` request goes to one live instance that lists the type (round-robin per type), as
  * `Request{id = <id>#1, mode = STREAMING, initial_credit}` (a uint32; 0 reads
  * as 64; `max_results` is kept by the hub) through the target's permits and queue. The handler's `ReplyPart{<id>#1}` and
@@ -255,6 +261,8 @@ class InProcessHub(val name: String = "snodra-server-" + UUID.randomUUID()) : Au
         @Volatile var types: Set<String> = emptySet()
         @Volatile var commandTypes: Set<String> = emptySet()
         @Volatile var sharedTypes: Set<String> = emptySet()
+        /** The query types the session declared in `Register.subscription_query_types`. */
+        @Volatile var subscriptionTypes: Set<String> = emptySet()
         @Volatile var registered = false
         /** The stream's first `Register` was judged for credentials (only the first counts). */
         var credentialsJudged = false
@@ -598,6 +606,12 @@ class InProcessHub(val name: String = "snodra-server-" + UUID.randomUUID()) : Au
             throw Status.INVALID_ARGUMENT.withDescription("type $type is listed as shared and as exclusive").asException()
         }
         val types = exclusive + shared
+        // Like the real hub: a subscription type must be one of the Register's query types.
+        val declared = reg.subscriptionQueryTypesList.toSet()
+        val queries = reg.queryTypesList.toSet() + shared
+        declared.firstOrNull { it !in queries }?.let { type ->
+            throw Status.INVALID_ARGUMENT.withDescription("type $type listed as a subscription type but not as a query type").asException()
+        }
         val replaced = synchronized(lock) {
             // The real hub refuses (in `enforce` and `permissive`, not in `off`) a stream that names the instance id of a
             // live session of another service: the owner is untouched, nothing is replaced.
@@ -624,6 +638,15 @@ class InProcessHub(val name: String = "snodra-server-" + UUID.randomUUID()) : Au
                     throw Status.ALREADY_EXISTS.withDescription("type $type is owned exclusively by service ${owner.serviceName}").asException()
                 }
             }
+            // Like the real hub: the registrants of a query type agree on whether it is a subscription type.
+            for (type in queries) {
+                val other = sessions.firstOrNull { it !== session && it.registered && type in it.types && type !in it.commandTypes } ?: continue
+                val theirs = type in other.subscriptionTypes
+                if (theirs != (type in declared)) {
+                    val what = if (theirs) "a subscription type" else "a query type, not a subscription type"
+                    throw Status.ALREADY_EXISTS.withDescription("type $type is registered by service ${other.serviceName} as $what").asException()
+                }
+            }
             val first = !session.registered
             // Like the real hub: one session per instance id, the newer stream wins and the older one stops being routed to.
             val older = if (first && replaceSessions) {
@@ -641,6 +664,7 @@ class InProcessHub(val name: String = "snodra-server-" + UUID.randomUUID()) : Au
             session.types = types
             session.commandTypes = reg.commandTypesList.toSet()
             session.sharedTypes = shared
+            session.subscriptionTypes = declared
             if (first) streamsOpened.merge(reg.instanceId, 1, Int::plus)
             older
         }
@@ -820,6 +844,7 @@ class InProcessHub(val name: String = "snodra-server-" + UUID.randomUUID()) : Au
                 sender.fail(req.id, ErrorCode.NO_HANDLER, "no handler registered for ${req.type}")
                 return
             }
+            if (refusedAsSubscriptionType(sender, req, candidates, "unary")) return
             val index = rotation.merge(req.type, 1, Int::plus)!! - 1
             val handler = candidates[index % candidates.size]
             val timeout = effectiveTimeout(req)
@@ -855,6 +880,16 @@ class InProcessHub(val name: String = "snodra-server-" + UUID.randomUUID()) : Au
         return if (req.timeoutMs > 0) minOf(Duration.ofMillis(req.timeoutMs.toLong()), override ?: maxTimeout) else override ?: replyTimeout
     }
 
+    /**
+     * Like the real hub: a declared subscription type is served in mode `SUBSCRIPTION` only; a sender's request for it in [mode]
+     * is refused with one `Error{INVALID_REQUEST}` and no instance gets anything. Caller holds [lock].
+     */
+    private fun refusedAsSubscriptionType(sender: Session, req: Request, owners: List<Session>, mode: String): Boolean {
+        if (owners.none { req.type in it.subscriptionTypes }) return false
+        sender.fail(req.id, ErrorCode.INVALID_REQUEST, "invalid request: ${req.type} is a subscription type; $mode is not for it")
+        return true
+    }
+
     private fun scatter(sender: Session, req: Request) {
         synchronized(lock) {
             if (req.id in pending || req.id in gathers || req.id in streams || req.id in subscriptions) {
@@ -870,6 +905,7 @@ class InProcessHub(val name: String = "snodra-server-" + UUID.randomUUID()) : Au
                 sender.fail(req.id, ErrorCode.NO_HANDLER, "no handler registered for ${req.type}")
                 return
             }
+            if (refusedAsSubscriptionType(sender, req, owners, "scatter_gather")) return
             lastHeaders = req.headersMap.toMap()
             val gather = Gather(req.id, sender, req.maxResults)
             gathers[req.id] = gather
@@ -961,6 +997,7 @@ class InProcessHub(val name: String = "snodra-server-" + UUID.randomUUID()) : Au
                 sender.fail(req.id, ErrorCode.INVALID_REQUEST, "invalid request: ${req.type} is a command; streaming is for queries")
                 return
             }
+            if (refusedAsSubscriptionType(sender, req, owners, "streaming")) return
             val targetId = "${req.id}#1"
             if (req.id in pending || req.id in gathers || req.id in streams || req.id in subscriptions || targetId in pending || targetId in streams) {
                 sender.fail(req.id, ErrorCode.INVALID_REQUEST, "request ${req.id} is already in flight")
@@ -1208,6 +1245,13 @@ class InProcessHub(val name: String = "snodra-server-" + UUID.randomUUID()) : Au
             }
             if (owners.any { req.type in it.commandTypes }) {
                 sender.fail(req.id, ErrorCode.INVALID_REQUEST, forQueries)
+                return
+            }
+            if (owners.none { req.type in it.subscriptionTypes }) {
+                sender.fail(
+                    req.id, ErrorCode.INVALID_REQUEST,
+                    "invalid request: ${req.type} is not a subscription type (Register.subscription_query_types); subscription is for subscription types only",
+                )
                 return
             }
             val initialId = "${req.id}#0"

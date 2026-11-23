@@ -373,7 +373,7 @@ class HubCertificateRotationTest {
             serviceName = "svc-c", instanceId = "i-c", settings = settings(null),
             inbound = { reply(it.id) }, scope = scope, statusInterval = Duration.ofMillis(200),
             subscriptions = SubscriptionRegistry(), inboundSubscription = { _, register -> register(Any()) },
-        ).also { clients += it; it.register(emptySet(), setOf("test.Watch")); it.start() }
+        ).also { clients += it; it.register(emptySet(), setOf("test.Watch"), subscriptionQueryTypes = setOf("test.Watch")); it.start() }
         val handler = handler(listOf(a), certificate(), drainTimeout = Duration.ofSeconds(10))
         assertTrue(owner.awaitRegistered(wait) && handler.awaitRegistered(wait))
         val watch = Request.newBuilder().setId(java.util.UUID.randomUUID().toString()).setKind(RequestKind.QUERY).setType("test.Watch")

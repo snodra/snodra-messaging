@@ -353,8 +353,9 @@ class SubscriptionQueryTest {
         second.nothingWithin(100)
     }
 
-    @Test fun `a unary request for a subscription type is INVALID_REQUEST, a SUBSCRIPTION request for a plain query type ends INVALID_REQUEST`() = runBlocking {
-        owner("svc-x", "x-1", AccountWatcher())
+    @Test fun `a unary request for a subscription type and a SUBSCRIPTION request for a plain query type are the hub's INVALID_REQUEST`() = runBlocking {
+        // The hub answers both itself, before any handler (the handler-side checks behind it: HandlerInvokerTest).
+        val x = owner("svc-x", "x-1", AccountWatcher())
         val sender = RawSender("s-1").also { it.next() }
         sender.send(
             ClientMessage.newBuilder().setRequest(
@@ -362,14 +363,15 @@ class SubscriptionQueryTest {
                     .setPayload(ByteString.copyFromUtf8("{\"account\":7}")),
             ).build(),
         )
-        val unary = sender.next().reply.error
-        assertEquals(ErrorCode.INVALID_REQUEST to "test.WatchAccount is a subscription query: send it with QueryBus.subscribe", unary.code to unary.message)
+        val unary = sender.next().error
+        assertEquals(ErrorCode.INVALID_REQUEST to "invalid request: test.WatchAccount is a subscription type; unary is not for it", unary.code to unary.message)
 
         owner("svc-y", "y-1", PlainCountOwner())
         sender.send(subscribeRequest("w2", account = 1, type = "test.GetCount", payload = "{\"key\":\"x\"}"))
-        val end = sender.nextEnd()
-        assertEquals(ErrorCode.INVALID_REQUEST, end.error.code)
-        assertTrue(end.error.message.contains("no subscription handler") || end.error.message.contains("not a subscription query handler"), end.error.message)
+        val refused = sender.next().error
+        assertEquals(ErrorCode.INVALID_REQUEST, refused.code)
+        assertTrue("is not a subscription type" in refused.message, refused.message)
+        assertEquals(0, x.subscriptions.size)
     }
 
     @Test fun `a subscription with a payload that does not decode ends INVALID_REQUEST`() = runBlocking {
@@ -853,7 +855,7 @@ class SubscriptionQueryTest {
             subscriptions = SubscriptionRegistry(),
             inboundSubscription = { _, register -> register(Any()) },
         ).also { connections += it }
-        raw.register(emptySet(), setOf("test.WatchAccount"))
+        raw.register(emptySet(), setOf("test.WatchAccount"), subscriptionQueryTypes = setOf("test.WatchAccount"))
         raw.start()
         assertTrue(raw.awaitRegistered(wait))
         val bus = caller()
