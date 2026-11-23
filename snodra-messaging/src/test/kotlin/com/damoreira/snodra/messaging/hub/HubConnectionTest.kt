@@ -17,6 +17,15 @@ import com.damoreira.snodra.messaging.HubRegistrationRejectedException
 import com.damoreira.snodra.messaging.HubUnavailableException
 import com.damoreira.snodra.messaging.MessageTimeoutException
 import com.damoreira.snodra.messaging.test.InProcessHub
+import com.damoreira.snodra.server.v1.ClientMessage
+import io.grpc.CallOptions
+import io.grpc.Channel
+import io.grpc.ClientCall
+import io.grpc.ClientInterceptor
+import io.grpc.ForwardingClientCall
+import io.grpc.ForwardingClientCallListener
+import io.grpc.Metadata
+import io.grpc.MethodDescriptor
 import io.grpc.Status
 import io.grpc.inprocess.InProcessChannelBuilder
 import kotlinx.coroutines.CompletableDeferred
@@ -361,6 +370,127 @@ class HubConnectionTest {
         assertTrue(conn.awaitRegistered(wait))
         assertTrue(hub.registrationsFrom("a") >= 2, "registrations=${hub.registrationsFrom("a")}")
         assertEquals(setOf("test.Ping"), hub.registeredTypes())
+    }
+
+    /** What the client side of one `Connect` call saw: heartbeats written, echoes read and when the call ended (System.nanoTime). */
+    private class TappedCall {
+        val sent = CopyOnWriteArrayList<Long>()
+        val echoed = CopyOnWriteArrayList<Long>()
+        @Volatile var endedAt = 0L
+        fun ended() = synchronized(this) { if (endedAt == 0L) endedAt = System.nanoTime() }
+    }
+
+    /**
+     * Taps every `Connect` call of a connection's channels. [onEcho] runs on the transport's thread before an echo is handed to the
+     * connection (a slow echo can be made by sleeping there).
+     */
+    private class HeartbeatTap : ClientInterceptor {
+        val calls = CopyOnWriteArrayList<TappedCall>()
+        @Volatile var onEcho: (() -> Unit)? = null
+
+        override fun <ReqT, RespT> interceptCall(method: MethodDescriptor<ReqT, RespT>, options: CallOptions, next: Channel): ClientCall<ReqT, RespT> {
+            val call = TappedCall().also { calls += it }
+            return object : ForwardingClientCall.SimpleForwardingClientCall<ReqT, RespT>(next.newCall(method, options)) {
+                override fun sendMessage(message: ReqT) {
+                    if ((message as? ClientMessage)?.hasHeartbeat() == true) call.sent += System.nanoTime()
+                    super.sendMessage(message)
+                }
+
+                override fun cancel(message: String?, cause: Throwable?) {
+                    call.ended()
+                    super.cancel(message, cause)
+                }
+
+                override fun start(listener: Listener<RespT>, headers: Metadata) {
+                    super.start(object : ForwardingClientCallListener.SimpleForwardingClientCallListener<RespT>(listener) {
+                        override fun onMessage(message: RespT) {
+                            if ((message as? ServerMessage)?.hasHeartbeat() == true) {
+                                onEcho?.invoke()
+                                call.echoed += System.nanoTime()
+                            }
+                            super.onMessage(message)
+                        }
+
+                        override fun onClose(status: Status, trailers: Metadata) {
+                            call.ended()
+                            super.onClose(status, trailers)
+                        }
+                    }, headers)
+                }
+            }
+        }
+    }
+
+    private fun tappedConnection(instanceId: String, tap: HeartbeatTap) = HubConnection(
+        { InProcessChannelBuilder.forName(hub.name).intercept(tap).build() }, "svc-$instanceId", instanceId, fast,
+        { req -> errorReply(req.id, ErrorCode.HANDLER_ERROR, "unexpected") }, scope,
+    ).also { connections += it }
+
+    @Test fun `the silent-hub decision needs more than three intervals and three unanswered heartbeats`() {
+        val i = 1_000L
+        val ms = 1_000_000L // nanoseconds
+        data class Case(val sinceMs: Long, val unanswered: Int, val silent: Boolean)
+        for (c in listOf(
+            Case(4 * i - 1, 3, true), // the fourth tick after the last echoed heartbeat
+            Case(3 * i + 1, 3, true), // more than three intervals, three heartbeats unanswered
+            Case(3 * i, 3, false), // exactly three intervals: not more
+            Case(3 * i + 1, 2, false), // a late third tick: only two heartbeats unanswered yet
+            Case(10 * i, 2, false), // (the next tick decides)
+            Case(2 * i + 500, 3, false), // three unanswered, but not three intervals
+            Case(3 * i + 500, 0, false), // an echo just came
+        )) {
+            assertEquals(c.silent, hubSilent(c.sinceMs * ms, c.unanswered, i), "since ${c.sinceMs} ms, ${c.unanswered} unanswered")
+        }
+    }
+
+    @Test fun `a silent hub is dropped on the tick after three unanswered heartbeats, never before three intervals`() = runBlocking {
+        val interval = 200L
+        val slack = 80L // scheduling and transport
+        hub.heartbeatInterval = Duration.ofMillis(interval)
+        val tap = HeartbeatTap()
+        val conn = tappedConnection("a", tap)
+        conn.start()
+        assertTrue(conn.awaitRegistered(wait))
+        delay(5 * interval) // echoed: the stream stays up past three intervals
+        assertTrue(conn.connected.value)
+
+        hub.echoHeartbeats = false
+        withTimeout(10 * interval) { conn.connected.first { !it } }
+        val call = tap.calls.first()
+        await atMost Duration.ofSeconds(2) until { call.endedAt != 0L }
+        val lastEcho = call.echoed.last()
+        val silenceMs = (call.endedAt - lastEcho) / 1_000_000
+        assertTrue(silenceMs > 3 * interval, "dropped $silenceMs ms after the last echo, want more than ${3 * interval}")
+        assertTrue(silenceMs <= 4 * interval + slack, "dropped $silenceMs ms after the last echo, want the next tick after three intervals")
+        // The check runs on the tick, before that tick's heartbeat: the drop comes one interval after the last heartbeat written.
+        val sinceLastBeatMs = (call.endedAt - call.sent.last()) / 1_000_000
+        assertTrue(sinceLastBeatMs in (interval - slack)..(interval + slack), "dropped $sinceLastBeatMs ms after the last heartbeat")
+        assertEquals(3, call.sent.count { it > lastEcho }, "heartbeats written after the last echo")
+    }
+
+    @Test fun `a late echo starts the silence over - the drop never comes before three intervals after it`() = runBlocking {
+        val interval = 200L
+        hub.heartbeatInterval = Duration.ofMillis(interval)
+        val tap = HeartbeatTap()
+        val conn = tappedConnection("a", tap)
+        conn.start()
+        assertTrue(conn.awaitRegistered(wait))
+        delay(3 * interval)
+
+        // The next echo is the hub's last, and it arrives 1.5 intervals late: the heartbeat written meanwhile is never answered.
+        val held = java.util.concurrent.atomic.AtomicBoolean()
+        tap.onEcho = {
+            if (held.compareAndSet(false, true)) {
+                hub.echoHeartbeats = false
+                Thread.sleep(interval * 3 / 2)
+            }
+        }
+        withTimeout(10 * interval) { conn.connected.first { !it } }
+        val call = tap.calls.first()
+        await atMost Duration.ofSeconds(2) until { call.endedAt != 0L }
+        val silenceMs = (call.endedAt - call.echoed.last()) / 1_000_000
+        assertTrue(silenceMs > 3 * interval, "dropped $silenceMs ms after the last echo, want more than ${3 * interval}")
+        assertEquals(3, call.sent.count { it > call.echoed.last() }, "heartbeats written after the last echo")
     }
 
     @Test fun `heartbeats are sent at the interval the hub announces`() = runBlocking {

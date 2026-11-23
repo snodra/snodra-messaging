@@ -117,6 +117,19 @@ internal fun isRegistrationRejection(status: Status): Boolean = when (status.cod
     else -> false
 }
 
+/** Heartbeat intervals without an echo, and heartbeats left unanswered, after which a silent hub is dropped. */
+internal const val SILENT_HEARTBEATS = 3
+
+/**
+ * The silent-hub decision, taken on a heartbeat tick before that tick's heartbeat is written: more than [SILENT_HEARTBEATS]
+ * heartbeat intervals ([intervalMs]) have passed since the last echo ([sinceEchoNanos]; the `RegisterAck` counts as the first
+ * one) **and** the [unanswered] heartbeats written since that echo are at least [SILENT_HEARTBEATS]. The second condition keeps
+ * a tick that fires a little late from dropping the stream exactly three intervals after the last echo: the drop always comes
+ * on the tick after the third unanswered heartbeat, between three and four intervals after the last echo, never before three.
+ */
+internal fun hubSilent(sinceEchoNanos: Long, unanswered: Int, intervalMs: Long): Boolean =
+    unanswered >= SILENT_HEARTBEATS && sinceEchoNanos > SILENT_HEARTBEATS * intervalMs * 1_000_000
+
 /**
  * Reconnect delays: exponential from `backoffMin` to `backoffMax`, each wait jittered by ±20 % and capped at the max.
  * At the max the wait is jittered downward only (80-100 % of it): clamping a ±20 % wait would put about half of a
@@ -155,8 +168,11 @@ internal object ReconnectBackoff {
  * Each stream gets its own outbound channel, so nothing queued for a broken stream (stale replies, requests whose
  * senders were already failed) leaks into the next one ahead of its `Register`.
  *
- * Liveness: every heartbeat expects an echo. When the oldest unanswered heartbeat is older than three heartbeat
- * intervals the stream is treated as dead (a half-open TCP connection never fails on its own) and the loop reconnects.
+ * Liveness: every heartbeat expects an echo. From the `RegisterAck` on, each heartbeat tick checks, before writing its
+ * heartbeat, whether more than three heartbeat intervals have passed since the last echo (the ack counts as the first) and
+ * the three heartbeats written since that echo are all unanswered ([hubSilent]); then the stream is treated as dead (a
+ * half-open TCP connection never fails on its own) and the loop reconnects. The drop comes between three and four intervals
+ * after the last echo, never before three. Before the ack there is no such check: the handshake timeout covers that.
  *
  * Incoming requests run on [handlerDispatcher], never on [scope]'s dispatcher, so a handler that blocks (for example
  * on a nested `sendBlocking`) cannot starve the stream collector that would deliver its own reply. At most
@@ -333,6 +349,36 @@ class HubConnection(
         @Volatile var draining = false
         /** The `ControlRequest`s read on this stream and not yet handed to the control, in arrival order. */
         val controls = Channel<ControlRequest>(Channel.UNLIMITED)
+
+        // The silent-hub watch, armed by the ack (guarded by itself): the last sign of life (the ack, then each echo; System.nanoTime)
+        // and the heartbeats written since it.
+        private val silence = Any()
+        private var watching = false
+        private var lastEchoNanos = 0L
+        private var unanswered = 0
+
+        /** The handshake: the ack is the first sign of life the silence is measured from. */
+        fun watchSilence() = synchronized(silence) {
+            watching = true
+            lastEchoNanos = System.nanoTime()
+            unanswered = 0
+        }
+
+        /** An echo (any heartbeat the hub writes) proves the hub alive; before the ack it confirms nothing. */
+        fun echoed() = synchronized(silence) {
+            if (watching) {
+                lastEchoNanos = System.nanoTime()
+                unanswered = 0
+            }
+        }
+
+        fun heartbeatWritten() = synchronized(silence) { if (watching) unanswered++ }
+
+        /** The time since the last echo, in ms, when the hub is silent by [hubSilent] on this tick; null otherwise (and before the ack). */
+        fun silentFor(intervalMs: Long): Long? = synchronized(silence) {
+            val since = System.nanoTime() - lastEchoNanos
+            if (watching && hubSilent(since, unanswered, intervalMs)) since / 1_000_000 else null
+        }
     }
 
     private val lock = Any() // guards registration, generation and current
@@ -1026,11 +1072,10 @@ class HubConnection(
             while (true) {
                 val interval = stream.heartbeatIntervalMs
                 delay(interval)
-                // Throwing fails this coroutineScope, which cancels the collector and ends the stream like any failure.
-                val oldest = stream.probes.firstEntry()?.key
-                if (oldest != null && System.currentTimeMillis() - oldest > 3 * interval) {
-                    stream.probes.clear()
-                    throw HeartbeatTimeoutException("no heartbeat echo from the hub for ${System.currentTimeMillis() - oldest} ms")
+                // The silent-hub check, on the tick and before its heartbeat (see hubSilent). Throwing fails this coroutineScope, which
+                // cancels the collector and ends the stream like any failure.
+                stream.silentFor(interval)?.let { ms ->
+                    throw HeartbeatTimeoutException("no heartbeat echo from the hub for $ms ms ($SILENT_HEARTBEATS heartbeats unanswered)")
                 }
                 heartbeat(stream)
                 if (settings.tokenProvider == null) refreshCredentials(stream) // a rotated token file reaches the hub without a reconnect
@@ -1134,7 +1179,9 @@ class HubConnection(
             maxOf(System.currentTimeMillis(), lastHeartbeatAt + 1).also { lastHeartbeatAt = it }
         }
         stream.probes[sentAt] = stream.registeredGeneration
-        stream.out.trySend(ClientMessage.newBuilder().setHeartbeat(Heartbeat.newBuilder().setSentAtMs(sentAt)).build())
+        if (stream.out.trySend(ClientMessage.newBuilder().setHeartbeat(Heartbeat.newBuilder().setSentAtMs(sentAt)).build()).isSuccess) {
+            stream.heartbeatWritten()
+        }
         return sentAt
     }
 
@@ -1166,6 +1213,7 @@ class HubConnection(
             message.hasControl() -> stream.controls.trySend(message.control)
             message.hasRegisterAck() -> onAck(stream, message.registerAck)
             message.hasHeartbeat() -> {
+                stream.echoed()
                 val sentAt = message.heartbeat.sentAtMs
                 val generation = stream.probes[sentAt] ?: return // an unsolicited keep-alive
                 stream.probes.headMap(sentAt, true).clear()
@@ -1189,6 +1237,7 @@ class HubConnection(
             }
         }
         if (!first) return
+        stream.watchSilence()
         stream.handshakeReached.complete(Unit)
         refreshCredentials(stream) // a credential renewed between this stream's Register and its ack
     }
