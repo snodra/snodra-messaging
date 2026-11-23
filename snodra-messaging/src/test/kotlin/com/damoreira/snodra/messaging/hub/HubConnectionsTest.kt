@@ -566,6 +566,27 @@ class HubConnectionsTest {
         assertEquals(listOf("10.0.0.2:7000"), conns.connections().map { it.target })
     }
 
+    @Test fun `a dns target that vanishes is reported to the remaining hubs at once, not at the next status interval`() = runBlocking {
+        val a = hub()
+        val b = hub()
+        routes["10.0.0.1:7000"] = a.name
+        routes["10.0.0.2:7000"] = b.name
+        val answer = AtomicReference(listOf("10.0.0.1", "10.0.0.2"))
+        val conns = client(
+            emptyList(), "x",
+            statusInterval = Duration.ofMinutes(10), // only the reports a change of the live hubs sends
+            dnsTarget = HubTargets.Dns("snodra-server", 7000),
+            resolver = { answer.get().map(InetAddress::getByName) },
+        )
+        conns.start()
+        eventually(5_000) { conns.liveHubIds().toSet() == setOf(a.hubId, b.hubId) }
+        eventually(5_000) { a.lastStatusFrom("x")?.connectedHubIdsList?.toSet() == setOf(a.hubId, b.hubId) }
+
+        answer.set(listOf("10.0.0.1"))
+        eventually(5_000) { conns.liveHubIds() == listOf(a.hubId) }
+        eventually(2_000) { a.lastStatusFrom("x")?.connectedHubIdsList == listOf(a.hubId) }
+    }
+
     @Test fun `a dns target that comes back while draining is revived, never dialed a second time`() = runBlocking {
         // The hub keeps one session per instance id: a second stream to a hub whose draining stream still serves a
         // request would end that stream and fail the request.

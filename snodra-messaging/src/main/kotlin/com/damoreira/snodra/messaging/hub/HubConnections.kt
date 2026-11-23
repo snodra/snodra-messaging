@@ -87,7 +87,8 @@ import java.util.concurrent.atomic.AtomicInteger
  *   `NO_HANDLER`). Open subscriptions of the rolled stream end (the hub tells their subscribers `HANDLER_DISCONNECTED`). A roll that does not
  *   complete stops the rollover for that pair (one ERROR); the remaining hubs keep the old pair until the files change again. An unexpected
  *   exception in a check is logged once and the next tick checks again.
- * - **Status**: every [statusInterval], and whenever the live set changes, each live hub gets an `InstanceStatus` with the
+ * - **Status**: every [statusInterval], and whenever the live set changes (a handshake, a stream lost, a roll, a DNS target no
+ *   longer resolved), each live hub gets an `InstanceStatus` with the
  *   ids of the live hubs, the handlers in flight and the event processors ([processors]).
  */
 class HubConnections(
@@ -612,6 +613,7 @@ class HubConnections(
     }
 
     private fun reconcile(resolved: List<String>) {
+        var liveChanged = false
         val gone = synchronized(lock) {
             if (stopped) return
             resolvedTargets = resolved
@@ -619,9 +621,13 @@ class HubConnections(
             parked.keys.retainAll(resolved.toSet())
             val vanished = active.keys.filter { it !in resolved }.map { active.remove(it)!! }
             draining += vanished
+            val before = live.value
             refreshLive()
+            liveChanged = live.value != before
             vanished
         }
+        // The remaining hubs learn the new set of live hubs now, as for any other change of it (not at the next status interval).
+        if (liveChanged) reportStatus()
         for (member in gone) {
             log.info("Hub target {} is no longer resolved; closing it once idle", member.connection.target)
             scope.launch { drain(member) }
