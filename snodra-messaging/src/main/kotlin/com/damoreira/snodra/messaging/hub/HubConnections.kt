@@ -355,9 +355,9 @@ class HubConnections(
         declined: (T) -> Boolean = { false },
         call: suspend (HubConnection, Request) -> T,
     ): T {
-        // How long the call waits for a hub to take it: the caller's timeout (timeout_ms), else request-timeout, else 5 s.
-        val wait = if (request.timeoutMs > 0) Duration.ofMillis(request.timeoutMs.toLong())
-        else settings.chosenRequestTimeout ?: HubProtocol.DEFAULT_REQUEST_TIMEOUT
+        // How long the call waits for a hub to take it, and the latest a hop starts: the caller's timeout (timeout_ms), else
+        // request-timeout, else 5 s. The same rule bounds the whole call (callBound), which the saga relay waits for.
+        val wait = HubProtocol.hubWait(request.timeoutMs, settings.requestTimeout)
         val deadline = System.nanoTime() + wait.toNanos()
         val tried = HashSet<HubConnection>()
         var moves = 0
@@ -398,6 +398,15 @@ class HubConnections(
             }
         }
     }
+
+    /**
+     * The longest one call of [type] sent with [timeoutMs] can take: [route] starts no new hop once [HubProtocol.hubWait] has passed
+     * since the call began, and a hop it starts just before carries `timeout_ms` whole, guarded by the hub's deadline bound for it plus
+     * [HubProtocol.LOCAL_GUARD_MARGIN]. So: `hubWait(timeoutMs) + hubDeadlineBound(type, timeoutMs) + 1 s` — with a chosen timeout T
+     * (no per-type override below it) about `2 × T + 1 s`.
+     */
+    override fun callBound(type: String, timeoutMs: Int): Duration =
+        HubProtocol.hubWait(timeoutMs, settings.requestTimeout).plus(hubDeadlineBound(type, timeoutMs)).plus(HubProtocol.LOCAL_GUARD_MARGIN)
 
     /** The deadline rules of the first live hub (the hubs of a deployment are configured alike). */
     override fun hubTimeoutFor(type: String): Duration =

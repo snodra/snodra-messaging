@@ -133,19 +133,49 @@ class HubBusRawSendTest {
         hub.maxTimeout = Duration.ofSeconds(20)
         hub.typeTimeouts = mapOf("test.Slow" to Duration.ofSeconds(90))
         val local = HandlerRegistry(resolver).also { it.register(ContextCapturingHandlers()) }
-        val caller = connection("caller") { error("unexpected") }
+        val caller = connection("caller") { error("unexpected") } // waits up to its request-timeout, 2 s, for a stream
         caller.start()
         assertTrue(caller.awaitRegistered(wait))
         val unset = HubBus(caller, local, HandlerInvoker(local, codec), codec, resolver, true, TraceHeaders(null, null), null)
         val chosen = HubBus(caller, local, HandlerInvoker(local, codec), codec, resolver, true, TraceHeaders(null, null), Duration.ofSeconds(2))
         val sendTimeout = Duration.ofMillis(300)
-        val guard = RawCommandSender.HUB_CALL_GUARD
+        // The wait for a stream (2 s) and the client's own guard (1 s past the hub's deadline), then the relay's margin.
+        val extra = Duration.ofSeconds(2).plus(HubProtocol.LOCAL_GUARD_MARGIN).plus(RawCommandSender.HUB_CALL_GUARD)
 
         assertEquals(sendTimeout, unset.sendTimeoutFor("test.Ping", sendTimeout), "a local handler: the send timeout alone")
-        assertEquals(Duration.ofSeconds(20).plus(guard), unset.sendTimeoutFor("test.Remote", sendTimeout), "the hub's clamp for timeout_ms 0, plus the guard")
-        assertEquals(Duration.ofSeconds(90).plus(guard), unset.sendTimeoutFor("test.Slow", sendTimeout), "the type's override")
-        assertEquals(Duration.ofSeconds(2).plus(guard), chosen.sendTimeoutFor("test.Slow", sendTimeout), "the request timeout sent as timeout_ms")
+        assertEquals(Duration.ofSeconds(20).plus(extra), unset.sendTimeoutFor("test.Remote", sendTimeout), "the hub's clamp for timeout_ms 0")
+        assertEquals(Duration.ofSeconds(90).plus(extra), unset.sendTimeoutFor("test.Slow", sendTimeout), "the type's override")
+        assertEquals(Duration.ofSeconds(2).plus(extra), chosen.sendTimeoutFor("test.Slow", sendTimeout), "the request timeout sent as timeout_ms")
         assertEquals(Duration.ofMinutes(5), unset.sendTimeoutFor("test.Slow", Duration.ofMinutes(5)), "never shorter than the send timeout")
+    }
+
+    @Test fun `over several hubs the relay waits for a call moved to another hub just before its timeout, with the full timeout again`() = runBlocking {
+        // request-timeout 60 s: the call may wait for a hub (and move) for up to 60 s, and the hop it starts then carries the full
+        // 60 s again; the relay must not abandon it before that hop's guard (60 s + 1 s) has passed too.
+        val sixty = Duration.ofSeconds(60)
+        val connections = HubConnections(
+            targets = HubTargets.Static(listOf(hub.name)),
+            channelFactory = HubChannelFactory { InProcessChannelBuilder.forName(it).build() },
+            serviceName = "svc-caller",
+            instanceId = "caller-n",
+            settings = settings.copy(requestTimeout = sixty),
+            inbound = { error("unexpected") },
+            scope = scope,
+        )
+        connections.start()
+        try {
+            assertTrue(connections.awaitRegistered(wait))
+            val local = HandlerRegistry(resolver)
+            val relayBus = HubBus(connections, local, HandlerInvoker(local, codec), codec, resolver, true, TraceHeaders(null, null), sixty)
+
+            val bound = relayBus.sendTimeoutFor("test.Remote", Duration.ofMillis(300))
+
+            val longestCall = sixty.plus(sixty).plus(HubProtocol.LOCAL_GUARD_MARGIN) // the last hop starts at 60 s and is guarded to 61 s
+            assertTrue(bound >= longestCall.plus(RawCommandSender.HUB_CALL_GUARD), "the relay abandons the call after $bound")
+            assertEquals(longestCall, connections.callBound("test.Remote", 60_000))
+        } finally {
+            connections.stop()
+        }
     }
 
     @Test fun `a type no service handles is transient through the hub (a rolling redeploy of the target)`() = runBlocking {

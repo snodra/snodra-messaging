@@ -38,6 +38,12 @@ interface HubTransport {
     /** See [HubConnection.hubDeadlineBound]. */
     fun hubDeadlineBound(type: String, timeoutMs: Int): java.time.Duration
 
+    /**
+     * The longest one unary call of [type] sent with [timeoutMs] can take through this transport, from the call to its answer or
+     * failure: the wait for a hub (moves to other hubs included) plus the last hop's local guard. See [HubConnections.callBound].
+     */
+    fun callBound(type: String, timeoutMs: Int): java.time.Duration
+
     /** See [HubConnection.gather]. */
     suspend fun gather(
         request: com.damoreira.snodra.server.v1.Request,

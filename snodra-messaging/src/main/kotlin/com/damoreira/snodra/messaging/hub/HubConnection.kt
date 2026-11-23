@@ -884,6 +884,13 @@ class HubConnection(
         Duration.ofMillis(HubProtocol.hubDeadlineBoundMs(timeoutMs, type, ackState.value ?: RegisterAck.getDefaultInstance()))
 
     /**
+     * [send] waits up to `request-timeout` (else 5 s) for a stream, then the request's local guard: the hub's deadline bound for
+     * [timeoutMs] plus [HubProtocol.LOCAL_GUARD_MARGIN].
+     */
+    override fun callBound(type: String, timeoutMs: Int): Duration =
+        HubProtocol.hubWait(0, settings.requestTimeout).plus(hubDeadlineBound(type, timeoutMs)).plus(HubProtocol.LOCAL_GUARD_MARGIN)
+
+    /**
      * Closes the stream, stops reconnecting and fails every request in flight. What is queued for the hub (a subscription's
      * last updates and `ReplyEnd`) is written first: the outbound queue is closed, which half-closes the request side after
      * its last message, and the hub's answer (it finishing its side) is awaited, for [STOP_CLOSE_TIMEOUT] at most.

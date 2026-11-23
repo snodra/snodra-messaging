@@ -64,6 +64,16 @@ object HubProtocol {
     /** The heartbeat period of a stream whose `RegisterAck` announces none (snodra-server always does: 3 s by default). */
     val DEFAULT_HEARTBEAT_INTERVAL: Duration = Duration.ofSeconds(3)
 
+    /**
+     * How long a call sent with [timeoutMs] may wait for a hub to take it, over several hubs also the latest moment a new hop (a move to
+     * another hub) starts: `timeout_ms` when positive, else [requestTimeout] (`request-timeout`) when positive, else
+     * [DEFAULT_REQUEST_TIMEOUT]. Each hop carries `timeout_ms` whole and is guarded by [localGuardMs], so one call ends within this
+     * wait plus one hop's guard ([HubConnections.callBound]).
+     */
+    fun hubWait(timeoutMs: Int, requestTimeout: Duration?): Duration =
+        if (timeoutMs > 0) Duration.ofMillis(timeoutMs.toLong())
+        else requestTimeout?.takeIf { !it.isZero && !it.isNegative } ?: DEFAULT_REQUEST_TIMEOUT
+
     /** Added to the hub's own deadline: the local guard only fires when the hub never answers at all. */
     val LOCAL_GUARD_MARGIN: Duration = Duration.ofSeconds(1)
 

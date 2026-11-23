@@ -36,15 +36,16 @@ interface RawCommandSender {
     /**
      * How long the relay waits for [sendRaw] of [type] before it abandons the call and sends it again later with the same
      * idempotency key, given its `sagas.relay.send-timeout` [sendTimeout]. A local handler has no other
-     * bound: [sendTimeout]. Through the hub never less than the hub's deadline for the call plus [HUB_CALL_GUARD], so the relay
+     * bound: [sendTimeout]. Through the hub never less than the longest the call can take (the wait for a hub, moves to other hubs
+     * included, plus the last hop's guard past the hub's deadline: `HubTransport.callBound`) plus [HUB_CALL_GUARD], so the relay
      * never sends a command again while the hub may still be running the first call.
      */
     fun sendTimeoutFor(type: String, sendTimeout: Duration): Duration = sendTimeout
 
     companion object {
         /**
-         * Added to the hub's deadline of a call: covers the client's own guard (1 s past that deadline) and the wait for a live
-         * hub stream (`snodra.messaging.hub.request-timeout`, 5 s by default), with room.
+         * Added to the longest a call through the hub can take (`HubTransport.callBound`, which already counts the wait for a hub
+         * and the client's own guard): room for scheduling, so the relay's limit always falls after the call's own end.
          */
         val HUB_CALL_GUARD: Duration = Duration.ofSeconds(10)
     }
