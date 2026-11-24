@@ -13,7 +13,7 @@ package com.damoreira.snodra.messaging.hub
  *   k *= 0xc4ceb9fe1a85ec53; k ^= k >>> 33`). Plain FNV-1a spreads keys that differ only in their last characters
  *   (`order-1`, `order-2`, ...) unevenly (about 30/70 over two hubs); the finalizer evens that out.
  *
- * The function is fixed by the protocol specification (https://snodra.damoreira.com/library-authors/protocol/); `RendezvousTest` holds reference vectors.
+ * The function is fixed by the protocol specification (https://snodra.damoreira.com/docs/library-authors/protocol/); `RendezvousTest` holds reference vectors.
  */
 object Rendezvous {
     private const val OFFSET_BASIS = -0x340d631b7bdddcdbL // 0xcbf29ce484222325

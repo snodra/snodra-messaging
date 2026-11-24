@@ -15,7 +15,7 @@ private val payloadMapper: JsonMapper = JsonMapper.builder().build()
 private const val MAX_DEPTH = 100
 
 /**
- * The payload contract (https://snodra.damoreira.com/library-authors/message-store-add-ons/): an event's payload in the outbox
+ * The payload contract (https://snodra.damoreira.com/docs/library-authors/message-store-add-ons/): an event's payload in the outbox
  * ([OutboxEntry.payload]) and in the saga dispatch (an entry of kind `EVENT`) is a JSON object (UTF-8) whose integers all fit in
  * a signed 64-bit integer, which every message store holds and a strict JSON reader can decode, so it also refuses:
  *

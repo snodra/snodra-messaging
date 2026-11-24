@@ -1,5 +1,5 @@
 -- snodra-messaging message store, schema version 1 (PostgreSQL 13 or later).
--- The shared schema of the Snodra message store (https://snodra.damoreira.com/library-authors/): every Snodra library reads and writes these
+-- The shared schema of the Snodra message store (https://snodra.damoreira.com/docs/library-authors/): every Snodra library reads and writes these
 -- tables the same way. Idempotent: it can run again over itself. Frozen once released: later changes are V2, V3, ...
 -- Times are UTC instants at millisecond precision, stamped by the application (never now()).
 -- Identifiers and positions use the "C" collation: compared and ordered by their bytes.

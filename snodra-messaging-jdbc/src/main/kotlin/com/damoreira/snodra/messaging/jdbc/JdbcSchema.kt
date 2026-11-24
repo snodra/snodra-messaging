@@ -22,7 +22,7 @@ internal object JdbcSchema {
     const val VERSION = 1
 
     /** The session-level advisory lock (PostgreSQL, one bigint key) and the named lock (MySQL) that serialise [apply]. */
-    private const val PG_LOCK = 0x534E4452_5343484DL // session advisory lock serialising schema setup; the key the specification fixes (https://snodra.damoreira.com/library-authors/message-store-add-ons/), 0x534E44525343484D = 6002810473706375245
+    private const val PG_LOCK = 0x534E4452_5343484DL // session advisory lock serialising schema setup; the key the specification fixes (https://snodra.damoreira.com/docs/library-authors/message-store-add-ons/), 0x534E44525343484D = 6002810473706375245
     private const val MYSQL_LOCK = "snodra_schema"
 
     /** How long [apply] waits for another instance applying the schema. */

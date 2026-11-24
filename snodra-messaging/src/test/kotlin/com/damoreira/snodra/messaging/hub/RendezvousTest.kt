@@ -5,7 +5,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-/** The hub choice for keyed requests; the score function is fixed by the protocol specification, https://snodra.damoreira.com/library-authors/protocol/ (the vectors below pin it). */
+/** The hub choice for keyed requests; the score function is fixed by the protocol specification, https://snodra.damoreira.com/docs/library-authors/protocol/ (the vectors below pin it). */
 class RendezvousTest {
 
     @Test fun `reference vectors`() {

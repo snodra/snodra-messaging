@@ -35,7 +35,7 @@ import kotlin.test.assertTrue
 /**
  * The storage contract of `dead_letters`: the documents this library writes are exactly the hand-written
  * fixtures in `src/test/resources/dead_letters_contract` (the MongoDB layout of the specification,
- * https://snodra.damoreira.com/library-authors/mongodb-layout/),
+ * https://snodra.damoreira.com/docs/library-authors/mongodb-layout/),
  * types included (Int32 `partition`, Int64 `offset`, BinData, dates), with no
  * `_class`, no null, a blank `id` or `type` header absent as `eventId` or `eventType`, and `replay` (parked while the
  * processor replayed the record) written only when true: the core's [DeadLetterFactory] builds the letter, this add-on
