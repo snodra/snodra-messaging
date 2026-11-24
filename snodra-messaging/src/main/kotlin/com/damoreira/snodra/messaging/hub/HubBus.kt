@@ -434,7 +434,7 @@ class HubBus(
             val result = decodeReply(type, messageClass, part.payload.toByteArray()) as R
             ScatterPart(part.responderService, part.responderInstance, result, null)
         } catch (e: InvalidMessageException) {
-            // One owner answering in another shape fails its own part, not the gather (same rule as the Rust library).
+            // One owner answering in another shape fails its own part, not the gather.
             val message = listOfNotNull(e.message, e.cause?.message).joinToString(": ")
             val exception = RemoteHandlerException(type, message, ByteArray(0), com.damoreira.snodra.server.v1.ErrorCode.ERROR_CODE_UNSPECIFIED.name)
             ScatterPart(part.responderService, part.responderInstance, null, exception)
@@ -444,7 +444,7 @@ class HubBus(
     private suspend fun dispatch(message: Any, kind: RequestKind, options: SendOptions): Any {
         val type = typeResolver.typeNameOf(message::class)
         // A shared query type is never answered locally: the hub round-robins a point query over every owner's
-        // instances, this one included, so an owner is not favoured over the others (as in the Rust library).
+        // instances, this one included, so an owner is not favoured over the others.
         // With alwaysThroughHub nothing is: the hub routes it (by its routing key, too) like a request of another service.
         val local = when {
             alwaysThroughHub -> null
@@ -459,7 +459,7 @@ class HubBus(
         }
         val messageKind = if (kind == RequestKind.COMMAND) MessageKind.COMMAND else MessageKind.QUERY
         return timed(messageKind, type) {
-            // Built inside the timing: a request that cannot be encoded is a call that failed (`error`), as in Rust.
+            // Built inside the timing: a request that cannot be encoded is a call that failed (`error`).
             val template = template(message, kind, options.routingKey, options.priority, extra = options.headers)
             withRetry(type, messageKind, options.timeout, options.retry, retryIf = { true }) { timeout ->
                 attempt(template, message::class, timeout)

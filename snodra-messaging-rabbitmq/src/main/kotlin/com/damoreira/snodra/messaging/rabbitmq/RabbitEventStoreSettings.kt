@@ -5,8 +5,8 @@ import java.nio.file.Path
 import java.time.Duration
 
 /**
- * How [RabbitEventStore] reaches RabbitMQ (`snodra.messaging.rabbitmq.*` in a Spring application, [RabbitProperties]): the same
- * settings as the Rust add-on's `SNODRA_RABBITMQ_*`. The source and its dead-letter stream are the core's
+ * How [RabbitEventStore] reaches RabbitMQ (`snodra.messaging.rabbitmq.*` in a Spring application, [RabbitProperties]).
+ * The source and its dead-letter stream are the core's
  * (`snodra.messaging.events.*`), as the Kafka add-on's topics.
  *
  * Refuses (an [IllegalArgumentException]) no host, a host that is not `host[:port]`, TLS without a CA file (the store never

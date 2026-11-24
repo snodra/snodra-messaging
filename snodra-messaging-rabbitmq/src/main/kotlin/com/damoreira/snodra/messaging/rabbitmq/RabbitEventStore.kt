@@ -18,7 +18,7 @@ import kotlin.coroutines.cancellation.CancellationException
  * The event store on RabbitMQ Streams, the add-on `snodra-messaging-rabbitmq`: RabbitMQ 3.13 or later with the stream
  * plugin, through the stream protocol (the RabbitMQ Stream Java client's `Client`).
  *
- * **The layout on the wire** is shared with the Rust add-on (`snodra-messaging-rabbitmq`, `rabbitmq-stream-client`): both read
+ * **The layout on the wire** is the one every Snodra service on RabbitMQ Streams follows: they read
  * and write the same streams the same way. These are rules:
  *
  * - **A source is a super stream** (`snodra.events`, partition streams `snodra.events-0` to `-N`), created by the infrastructure,
@@ -32,7 +32,7 @@ import kotlin.coroutines.cancellation.CancellationException
  * - **A message** is one AMQP 1.0 message per event: the JSON payload as exactly one `data` section; `properties.message-id` the
  *   event id (a string); `properties.content-type` the symbol `application/json`; the key as the message annotation `x-routing-key`
  *   (a symbol key, a string value; absent without a key); every header an application property with a string value. Published one
- *   message per entry: **never a sub-entry batch, never compressed** (the Rust client cannot read them).
+ *   message per entry: **never a sub-entry batch, never compressed**.
  * - **A segment** is the partition stream's suffix after `<source>-` (`3`), **a position** the offset in decimal, an event's time
  *   its chunk's timestamp.
  * - **A processor's subscription** `<service>.<processor>` is a consumer of that name on every partition stream, with

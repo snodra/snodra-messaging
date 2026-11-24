@@ -788,7 +788,7 @@ class HubConnection(
 
         init {
             // The initial part went to the caller with subscribe(): it counts as consumed now, not at the first next(), so a
-            // caller that starts collecting late does not hold the hub's credit back (as the Rust library does).
+            // caller that starts collecting late does not hold the hub's credit back.
             consumedOne()
         }
 

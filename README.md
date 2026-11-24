@@ -65,7 +65,7 @@ The starter finds it, registers the type on the server and runs it. Settings are
 ## Documentation
 
 Quick start, the settings map, every add-on and the testing kits: **<https://snodra.damoreira.com/docs/messaging/kotlin/>**.
-The Rust counterpart is [`snodra-messaging-rs`](https://github.com/snodra/snodra-messaging-rs); both speak the
+Other languages: <https://snodra.damoreira.com/>. Services written with any Snodra library speak the
 same protocol (`snodra.hub.v1`) and share the event records and store layouts.
 
 ## Contributing

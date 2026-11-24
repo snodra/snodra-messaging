@@ -54,7 +54,7 @@ sealed interface HubTargets {
         }
 
         /**
-         * The hub addresses of one DNS answer (same rule as the Rust library): the IPv4 addresses when there is any, else
+         * The hub addresses of one DNS answer: the IPv4 addresses when there is any, else
          * the IPv6 ones; repeats (an IPv6 address differing only in its scope id included) dropped, answer order kept.
          * A dual-stack name lists every hub under both families: dialing both would open two streams to each hub with
          * one instance id, and the hub keeps only the newer one.

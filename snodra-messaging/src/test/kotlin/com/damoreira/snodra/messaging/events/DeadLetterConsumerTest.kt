@@ -213,7 +213,7 @@ class DeadLetterConsumerTest {
         assertEquals(listOf(HAPPENED to DUPLICATE, HAPPENED to HANDLED), metrics.outcomes("default"))
     }
 
-    @Test fun `an invalid record whose letter exists already is counted duplicate, as the Rust library`() {
+    @Test fun `an invalid record whose letter exists already is counted duplicate`() {
         // Its INVALID letter exists (parked, then the instance died before the commit); INVALID letters block no key, so
         // the redelivery parks again and the store reports the letter there.
         val r0 = Delivery("0", "0", null, emptyMap(), ByteArray(0), 0L)

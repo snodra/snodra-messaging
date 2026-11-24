@@ -3,7 +3,7 @@
 The RabbitMQ Streams event store of `snodra-messaging`: publish, competing subscriptions, replay, lag and a
 dead-letter stream on **RabbitMQ 3.13 or later with the stream plugin** (`rabbitmq_stream`), through the stream protocol
 (port 5552, 5551 with TLS) and the RabbitMQ Stream Java client (`com.rabbitmq:stream-client`). It reads and writes the same
-streams as the Rust crate `snodra-messaging-rabbitmq`: the layout on the wire below is shared, rule for rule.
+streams as any other Snodra service on RabbitMQ Streams: the layout on the wire below is the shared one, rule for rule.
 
 ```kotlin
 dependencies {
@@ -61,8 +61,6 @@ a backoff), naming the command above.
 
 ## Settings (`snodra.messaging.rabbitmq.*`)
 
-The Rust add-on reads the same settings as `SNODRA_RABBITMQ_*`.
-
 | Setting | Default | Meaning |
 |---|---|---|
 | `hosts` | `rabbitmq` | nodes to connect to first, `host` or `host:port`, comma-separated, tried in order (then each stream's leader as the broker advertises it) |
@@ -81,7 +79,6 @@ The Rust add-on reads the same settings as `SNODRA_RABBITMQ_*`.
 | `management.ca-file` | none | PEM CA certificates of an `https` management API |
 
 The source and its dead-letter stream are the core's: `snodra.messaging.events.source` (`snodra.events`) and `<source>.dlt`.
-The Rust add-on's `SNODRA_RABBITMQ_KNOWN_SUBSCRIPTIONS` belongs to its event browser and has no Kotlin counterpart.
 
 ## What it covers
 
@@ -102,15 +99,15 @@ The Rust add-on's `SNODRA_RABBITMQ_KNOWN_SUBSCRIPTIONS` belongs to its event bro
   that API can tell. The store asks it once at startup: it must answer (else the startup fails), and with its metrics off no
   `replay` is declared. Without it, a reset is answered `UNSUPPORTED`.
 
-## The layout on the wire (shared with the Rust add-on)
+## The layout on the wire (shared by every Snodra library)
 
-These are rules both libraries follow; a program writing snodra's streams must follow them too.
+These are rules every Snodra library follows; a program writing snodra's streams must follow them too.
 
 | What | Rule |
 |---|---|
 | Source | a super stream (`snodra.events`, partitions `snodra.events-0` .. `-N`, binding keys `0` .. `N-1`), created by the infrastructure; a plain stream source (the dead letter) is one partition, segment `0` |
 | Routing | murmur3 x86_32 of the routing key's UTF-8 bytes, seed 104729, as an **unsigned** number modulo the partition count, over the partitions in the broker's order (the Java client's default hash routing). Routing key = the event's key, else its id. With 6 partitions: `order-1` 0, `order-2` 2, `customer-123` 5, `order-7` 3, `""` 4 |
-| Message | one AMQP 1.0 message per event, **no sub-entry batching, no compression** (the Rust client cannot read them): exactly one `data` section = the JSON payload; `message-id` = the event id (string); `content-type` = the symbol `application/json`; message annotation `x-routing-key` (symbol) = the key (string), absent without one; every header (`type`, `id`, `correlationId`, `timestamp`, `source`, `userId`, `traceparent`, and any other, a dead letter's `snodra-dlt-*`) an application property with a string value |
+| Message | one AMQP 1.0 message per event, **no sub-entry batching, no compression**: exactly one `data` section = the JSON payload; `message-id` = the event id (string); `content-type` = the symbol `application/json`; message annotation `x-routing-key` (symbol) = the key (string), absent without one; every header (`type`, `id`, `correlationId`, `timestamp`, `source`, `userId`, `traceparent`, and any other, a dead letter's `snodra-dlt-*`) an application property with a string value |
 | Segment / position | the partition's suffix after `<source>-` (`3`); the offset in decimal; an event's time is its chunk's timestamp |
 | Consumer | name `<service>.<processor>` on every partition stream; properties `single-active-consumer=true`, `name`, `super-stream=<source>` (absent on a plain stream), `snodra-member=<random id per subscription instance>` |
 | Offset tracking | reference = the consumer name, per partition stream; **the stored value is the next offset to read** (the acknowledged offset + 1); nothing stored = `first`. Not the Java client's "last processed" convention: a tool assuming it shows a value one higher |

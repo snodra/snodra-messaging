@@ -7,8 +7,7 @@ import com.damoreira.snodra.messaging.api.Query
 import java.time.Instant
 
 /*
- * The "texts" domain owned by service-c (Rust). Field names and wire types are mirrored in
- * snodra-messaging-rs/examples/service-c/src/messages.rs; keep both in step.
+ * The "texts" domain owned by service-c. Field names and wire types are mirrored by service-c; keep both in step.
  */
 
 /** Command owned by service-c: upper-case the text. */

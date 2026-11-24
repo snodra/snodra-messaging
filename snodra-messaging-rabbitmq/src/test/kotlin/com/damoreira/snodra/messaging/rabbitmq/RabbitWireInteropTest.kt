@@ -34,13 +34,12 @@ import java.util.concurrent.TimeUnit
 
 /**
  * Interoperability at the wire level, on a real broker ([RabbitBroker]), with plain clients of the Java stream library standing in
- * for any other program on the streams (the Rust add-on is checked against the same rules by its own tests; a cross-language run
- * comes later):
+ * for any other program on the streams:
  *
  * - what the Kotlin add-on writes, read back raw by a plain client, follows every wire rule (partition, AMQP types, one message
  *   per entry), and lands where the client's own hash routing puts the same keys;
- * - the exact bytes the Rust add-on encodes, written by a plain producer where the Rust add-on routes them, read by the Kotlin add-on;
- * - offsets: what a plain client stores the Rust way (the next offset to read) is where the Kotlin subscription resumes, and what
+ * - the exact bytes another Snodra service encodes, written by a plain producer where that service routes them, read by the Kotlin add-on;
+ * - offsets: what a plain client stores (the next offset to read) is where the Kotlin subscription resumes, and what
  *   the Kotlin subscription stores reads back, to a plain client, as the next offset to read.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
@@ -174,8 +173,8 @@ class RabbitWireInteropTest {
     }
 
     @Test
-    fun `the bytes the Rust add-on writes, where it routes them, read by the Kotlin add-on`() = runBlocking {
-        val source = fresh("rust")
+    fun `the bytes another Snodra service writes, where it routes them, read by the Kotlin add-on`() = runBlocking {
+        val source = fresh("foreign")
         RabbitBroker.superStream(source, 6)
         val passThrough = object : Codec {
             override fun encode(message: Message): Codec.EncodedMessage {
@@ -187,10 +186,10 @@ class RabbitWireInteropTest {
         }
         val confirmed = CountDownLatch(2)
         val client = RabbitBroker.client(Client.ClientParameters().codec(passThrough).publishConfirmListener { _, _ -> confirmed.countDown() })
-        // The Rust add-on routes "order-42" by its key, the unkeyed event by its id "e-42".
+        // Another Snodra service routes "order-42" by its key, the unkeyed event by its id "e-42".
         val keyedPartition = RabbitWire.partitionIndex("order-42", 6)
         val unkeyedPartition = RabbitWire.partitionIndex("e-42", 6)
-        for ((i, pair) in listOf(keyedPartition to RUST_KEYED, unkeyedPartition to RUST_UNKEYED).withIndex()) {
+        for ((i, pair) in listOf(keyedPartition to INTEROP_KEYED, unkeyedPartition to INTEROP_UNKEYED).withIndex()) {
             val (partition, hex) = pair
             assertTrue(client.declarePublisher(i.toByte(), null, "$source-$partition").isOk)
             val stand = RabbitWire.codec.messageBuilder().addData(HexFormat.of().parseHex(hex)).build()
@@ -199,7 +198,7 @@ class RabbitWireInteropTest {
         assertTrue(confirmed.await(10, TimeUnit.SECONDS))
         client.close()
 
-        val sub = store.subscribe(SubscriptionSpec("svc.rust-bytes", source))
+        val sub = store.subscribe(SubscriptionSpec("svc.foreign-bytes", source))
         val got = deliveries(sub, 2)
         sub.close()
         val keyed = got.single { it.key == "order-42" }
@@ -207,7 +206,7 @@ class RabbitWireInteropTest {
         val unkeyed = got.single { it.key == null }
         assertEquals(unkeyedPartition.toString(), unkeyed.segment)
         for (d in got) {
-            assertEquals(RUST_HEADERS, d.headers)
+            assertEquals(INTEROP_HEADERS, d.headers)
             assertEquals("""{"total":42}""", String(d.payload))
             assertTrue(d.timestampMs > 0)
         }
@@ -219,7 +218,7 @@ class RabbitWireInteropTest {
         RabbitBroker.stream(source)
         for (i in 0 until 6) store.publish(event(source, "k"))
 
-        // A plain client stores the Rust way: 3 is the next offset to read.
+        // A plain client stores the next offset to read: 3 is the next offset to read.
         RabbitBroker.client().use { it.storeOffset("svc.resume", source, 3) }
         awaitStored("svc.resume", source, 3)
         val resumed = store.subscribe(SubscriptionSpec("svc.resume", source))
@@ -268,16 +267,16 @@ class RabbitWireInteropTest {
     }
 
     private companion object {
-        val RUST_HEADERS = mapOf(
+        val INTEROP_HEADERS = mapOf(
             "type" to "orders.Placed", "id" to "e-42", "correlationId" to "c-1", "timestamp" to "2026-11-14T10:00:00.000Z",
             "source" to "orders", "userId" to "", "traceparent" to "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
             "x-extra" to "kept",
         )
 
-        // The Rust add-on's encoding of that event, keyed "order-42" and unkeyed (as in RabbitWireTest).
-        const val RUST_KEYED =
+        // The encoding written by another Snodra service for that event, keyed "order-42" and unkeyed (as in RabbitWireTest).
+        const val INTEROP_KEYED =
             "005372c11a02a30d782d726f7574696e672d6b6579a1086f726465722d3432005373c0240da104652d34324040404040a3106170706c69636174696f6e2f6a736f6e404040404040005374c1c810a106757365724964a100a10b7472616365706172656e74a13730302d30616637363531393136636434336464383434386562323131633830333139632d623761643662373136393230333333312d3031a107782d6578747261a1046b657074a10d636f7272656c6174696f6e4964a103632d31a1026964a104652d3432a10474797065a10d6f72646572732e506c61636564a106736f75726365a1066f7264657273a10974696d657374616d70a118323032362d31312d31345431303a30303a30302e3030305a005375a00c7b22746f74616c223a34327d"
-        const val RUST_UNKEYED =
+        const val INTEROP_UNKEYED =
             "005373c0240da104652d34324040404040a3106170706c69636174696f6e2f6a736f6e404040404040005374c1c810a10974696d657374616d70a118323032362d31312d31345431303a30303a30302e3030305aa1026964a104652d3432a106736f75726365a1066f7264657273a10b7472616365706172656e74a13730302d30616637363531393136636434336464383434386562323131633830333139632d623761643662373136393230333333312d3031a107782d6578747261a1046b657074a10474797065a10d6f72646572732e506c61636564a106757365724964a100a10d636f7272656c6174696f6e4964a103632d31005375a00c7b22746f74616c223a34327d"
     }
 }

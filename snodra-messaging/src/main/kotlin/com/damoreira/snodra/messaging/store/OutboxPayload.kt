@@ -15,13 +15,13 @@ private val payloadMapper: JsonMapper = JsonMapper.builder().build()
 private const val MAX_DEPTH = 100
 
 /**
- * The payload contract (both libraries', `store::check_outbox_payload` in snodra-messaging-rs): an event's payload in the outbox
+ * The payload contract (https://snodra.damoreira.com/library-authors/message-store-add-ons/): an event's payload in the outbox
  * ([OutboxEntry.payload]) and in the saga dispatch (an entry of kind `EVENT`) is a JSON object (UTF-8) whose integers all fit in
- * a signed 64-bit integer, which every message store holds and a Rust consumer (serde_json) can decode, so it also refuses:
+ * a signed 64-bit integer, which every message store holds and a strict JSON reader can decode, so it also refuses:
  *
  * - a depth over 100, counted as MySQL's `JSON_DEPTH` (a scalar or an empty array or object is 1, a non-empty one is 1 + its
  *   deepest member: `{}` is 1, `{"a":1}` is 2, `{"a":[1]}` is 3): the payload contract is store-independent, and MySQL refuses
- *   deeper documents (serde_json's own limit, 128 nested arrays and objects, is looser);
+ *   deeper documents;
  * - a number no double holds (`1e400`; one that merely rounds, `1e-400`, is fine);
  * - a lone surrogate escape (`"\ud800"`), in a value or a name (a pair, `"\ud83d\ude00"`, is fine);
  * - a leading byte order mark (and any bytes that are not UTF-8).

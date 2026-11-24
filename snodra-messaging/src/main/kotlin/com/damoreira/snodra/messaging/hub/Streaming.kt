@@ -33,7 +33,7 @@ internal val NO_STREAMING_HANDLERS: StreamingInbound = { request, _ ->
  * The credit the hub granted for one outbound stream: `initial_credit` plus every `Flow`. [take] spends one and
  * suspends while none is left, which is how a handler's flow is held back by the sender's back-pressure.
  *
- * `initial_credit` and `Flow.credits` are `uint32` on the wire: a Rust caller may send `u32::MAX`, which protobuf's
+ * `initial_credit` and `Flow.credits` are `uint32` on the wire: a caller may send the largest uint32, 4294967295, which protobuf's
  * Java binding hands over as -1. Both are read unsigned ([of]) and the window is clamped to [Int.MAX_VALUE].
  */
 internal class StreamCredit(initial: Int) {

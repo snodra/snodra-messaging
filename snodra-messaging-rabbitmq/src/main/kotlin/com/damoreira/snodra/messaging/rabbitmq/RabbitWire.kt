@@ -9,8 +9,8 @@ import com.damoreira.snodra.messaging.eventstore.OutgoingEvent
 import io.netty.buffer.Unpooled
 
 /**
- * The layout on the wire, shared with the Rust add-on (`rabbitmq-stream-client`): how an event becomes an AMQP 1.0 message,
- * which partition stream it goes to, and how a delivered message is read back. These are rules both libraries follow; see
+ * The layout on the wire, shared by every Snodra service on RabbitMQ Streams: how an event becomes an AMQP 1.0 message,
+ * which partition stream it goes to, and how a delivered message is read back. These are rules every Snodra library follows; see
  * [RabbitEventStore] for the whole layout.
  */
 internal object RabbitWire {

@@ -102,7 +102,7 @@ class SagaAutoConfigurationTest {
             assertTrue(context.getBean(SagaStage::class.java) === runtime)
             // no hub: the relay sends commands to this service's own handlers
             assertIs<LocalRawCommandSender>(field(context.getBean(SagaDispatchRelay::class.java), "commands"))
-            // the type of the library's failure event is the wire name the Rust side shares
+            // the type of the library's failure event is the name on the wire
             assertEquals("snodra.SagaCommandFailed", context.getBean(MessageTypeResolver::class.java).typeNameOf(SagaCommandFailed::class))
             // the default Clock, and the no-op metrics without a registry
             assertEquals(ZoneOffset.UTC, context.getBean(Clock::class.java).zone)

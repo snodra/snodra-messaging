@@ -74,19 +74,6 @@ import java.util.UUID
  * - **`next` is cancelled** by the kit every time a slice of reading is up, as the core cancels it on its shutdown and timers
  *   (see [com.damoreira.snodra.messaging.eventstore.Subscription.next]). One that loses an event it was about to return when it
  *   is cancelled shows here as a delivery that never comes: the check names the events it waited for.
- *
- * **The checks' names in snodra-messaging-rs** (`snodra_messaging::event_store::conformance`): every check here has the same
- * name there in snake_case ([aJoiningInstanceAnnouncesItsFirstAssignment] is `a_joining_instance_announces_its_first_assignment`,
- * [anInstanceLeftWithoutSegmentsClosesItsChange] is `an_instance_left_without_segments_closes_its_change`, ...); no name differs.
- * The Rust kit has five more, of the event browser (a Rust crate: the Kotlin event stores have none), with no Kotlin check:
- *
- * | Kotlin check | Rust check |
- * |---|---|
- * | **none** | `search_finds_by_type_key_and_correlation` (with `browse`) |
- * | **none** | `search_stops_at_bounds` (with `browse`) |
- * | **none** | `tail_streams_new_events` (with `browse`) |
- * | **none** | `browser_never_commits_a_position` (with `browse`) |
- * | **none** | `no_browser_without_capability` (without `browse`) |
  */
 abstract class EventStoreConformanceTest {
     /** The prepared source (see the class docs). */

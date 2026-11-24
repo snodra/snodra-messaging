@@ -29,7 +29,7 @@ class HubToken(private val source: () -> String?) {
          * empty (or unreadable) file keeps the last token and logs one WARN.
          *
          * @throws IllegalStateException if [file] cannot be read now, or holds nothing but whitespace (a configured secret that
-         *   is not there is a deployment error, better at startup than as a stream of rejections; as snodra-messaging-rs)
+         *   is not there is a deployment error, better at startup than as a stream of rejections)
          */
         fun of(inline: String?, file: Path?): HubToken =
             if (file != null) FileSource(file).also { it.readOrThrow() }.let { HubToken(it::read) }

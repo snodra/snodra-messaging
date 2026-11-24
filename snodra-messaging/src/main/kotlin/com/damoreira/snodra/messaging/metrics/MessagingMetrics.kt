@@ -108,7 +108,7 @@ enum class HubOutcome {
             is NoHandlerException -> NO_HANDLER
             is MessageTimeoutException -> TIMEOUT
             is HandlerDisconnectedException -> HANDLER_DISCONNECTED
-            is RemoteHandlerException -> HANDLER_ERROR // also a code this library does not map, as the Rust library
+            is RemoteHandlerException -> HANDLER_ERROR // also a code this library does not map
             is InvalidMessageException -> INVALID_REQUEST
             is HandlerBusyException -> RESOURCE_EXHAUSTED
             is StreamCancelledException -> CANCELLED

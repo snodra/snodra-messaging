@@ -45,7 +45,7 @@ import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.TimeUnit
 
 /**
- * An in-process stand-in for the Rust snodra hub, for starter and service unit tests that must not start a container.
+ * An in-process stand-in for the snodra hub, for starter and service unit tests that must not start a container.
  *
  * It mirrors the observable protocol behaviour: the first message must be a `Register` (`FAILED_PRECONDITION`), a type
  * owned by another service is refused (`ALREADY_EXISTS`), a later `Register` replaces an instance's types, requests are

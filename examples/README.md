@@ -7,8 +7,8 @@ A disposable sandbox that shows cross-service messaging on the real `snodra-serv
    (through its outbox, then Kafka);
 3. **service-a** reacts to the event and remembers it;
 4. **service-a** sends the query `examples.CountGreetings` over the hub; **service-b** answers from its counts;
-5. **service-a** sends the command `examples.Shout` and the query `examples.Reverse` to **service-c**, a Rust
-   service built on `snodra-messaging-rs`; C publishes `examples.TextShouted` / `examples.TextReversed` while
+5. **service-a** sends the command `examples.Shout` and the query `examples.Reverse` to **service-c**, a
+   separate service; C publishes `examples.TextShouted` / `examples.TextReversed` while
    handling them, and A and B log those events; C also logs B's `GreetingDelivered`;
 6. **service-b** and **service-c** both own the shared query `examples.Inventory`: **service-a** sends it as
    a point query (one of them answers) and as a scatter-gather (both answer);
@@ -21,7 +21,7 @@ A disposable sandbox that shows cross-service messaging on the real `snodra-serv
    to service-c (whose only HTTP is the banner saga's); both push through a `QueryUpdateEmitter`.
 9. **service-b** runs a saga ([The postcard saga](#the-postcard-saga)): every `GreetingDelivered` gets a postcard printed
    by an external printer, **fake-printer**, which answers over a webhook, its own Kafka topic or a poll, never, or by dying.
-10. **service-c** runs the same story in Rust ([The banner saga](#the-banner-saga)): every `TextShouted` gets a banner
+10. **service-c** runs the same story ([The banner saga](#the-banner-saga)): every `TextShouted` gets a banner
    printed by the same fake printer, which answers service-c where each job asks it to.
 11. **service-b** and **service-c** each run a named event processor, `audit` ([Event processors and dead
    letters](#event-processors-and-dead-letters)): its own consumer group, a failure switch, and example admin endpoints over
@@ -39,12 +39,12 @@ dependency, so they always exercise the current library. Wire classes live in `e
 | `examples/fake-printer` | a partner, not a Snodra service: the fake printer of [the postcard saga](#the-postcard-saga) and [the banner saga](#the-banner-saga) (`POST /jobs`, `GET /jobs/{id}`) | 8093 |
 | `examples/orders-sql` | not in the sandbox: a small service on PostgreSQL with the SQL message store (`snodra-messaging-jdbc`). The command `examples.orders.PlaceOrder` stores the order row and the outbox entry of `examples.orders.OrderPlaced` in one transaction; its event handler confirms the order. Events go to the in-memory event store. `OrdersEndToEndTest` runs it against PostgreSQL and the hub image | – |
 | `examples/conformance-service` | not in the sandbox: the conformance service of snodra `protocol/conformance.md` (contract version 1) on this library, which the conformance runner `snodra-conformance` (snodra-server, `conformance/`) starts with its `CONFORMANCE_*` environment to prove level 1 of the Libraries guide. `ConformanceLevel1Test` runs the whole level against it on `SNODRA_SERVER_IMAGE` (one hub, then two) when `SNODRA_CONFORMANCE_BIN` names the runner binary, and is skipped otherwise; it asserts the library's known failures exactly | – |
-| `snodra-messaging-rs/examples/service-c` | Rust: owner of `Shout`, `Reverse`, `IncrementCounter` and the banner saga's `PrintBanner` / `PollBannerJob`, co-owner of the shared `Inventory`, `Rows`, `WatchCounter` and `OpenSubscriptions`, publishes the text events, logs `GreetingDelivered`; the banner saga's webhook and `GET /banners/{jobId}`; `GET /greetings/{name}/count`, service-b's `CountGreetings` sent through the hub (the sandbox's call from Rust to Kotlin); the `audit` processor and its `/audit/...` endpoints | 8094 |
+| service-c (its sources are in the sibling checkout named under Prerequisites) | owner of `Shout`, `Reverse`, `IncrementCounter` and the banner saga's `PrintBanner` / `PollBannerJob`, co-owner of the shared `Inventory`, `Rows`, `WatchCounter` and `OpenSubscriptions`, publishes the text events, logs `GreetingDelivered`; the banner saga's webhook and `GET /banners/{jobId}`; `GET /greetings/{name}/count`, service-b's `CountGreetings` sent through the hub (the sandbox's call from service-c to service-b); the `audit` processor and its `/audit/...` endpoints | 8094 |
 
 ## Prerequisites
 
 - Docker (Rancher Desktop or Docker Desktop) with Compose v2.
-- The sibling checkouts `../snodra-server` and `../snodra-messaging-rs` next to this repo, plus the sandbox compose
+- The sibling checkouts `../snodra-server` and the one holding service-c next to this repo, plus the sandbox compose
   (`compose.yaml` and `compose.local.yaml`). `INFRA_DIR` names the directory holding the compose files; the smoke needs it.
 
 ## Start
@@ -56,7 +56,7 @@ docker compose -f compose.yaml -f compose.local.yaml --profile examples up --bui
 ```
 
 This builds `snodra-examples-service-a:dev`, `snodra-examples-service-b:dev` and `snodra-examples-service-c:dev` from
-source (the first build takes several minutes, Rust compiles librdkafka; later ones are cached) and starts only what the
+source (the first build takes several minutes; later ones are cached) and starts only what the
 three apps need: both hubs from the released image (`hub`, `hub-2`, `SNODRA_SERVER_VERSION`), the event browser
 (`snodra-event-browser`), Kafka, the topic init job, MongoDB and otel-lgtm (Grafana on <http://localhost:3000/>, see
 [Metrics](#metrics)). The identity provider and RustFS stay down. The hub's gRPC port is published on host
@@ -82,7 +82,7 @@ curl -s localhost:8091/greetings/delivered
 curl -s localhost:8091/greetings/Ada/count
 # {"name":"Ada","count":1}
 
-# 5: command and query to the Rust service, events back to A (and B)
+# 5: command and query to service-c, events back to A (and B)
 curl -s -X POST localhost:8091/shouts -H 'content-type: application/json' -d '{"text":"abc"}'
 # {"text":"ABC"}
 curl -s localhost:8091/reverse/abc
@@ -170,11 +170,11 @@ sandbox hub gives `examples.CountGreetings` a 20 s per-type timeout
 `TIMEOUT`. It then waits for service-b to answer again. Finally it checks flow control. The sandbox runs every
 service with the libraries' default concurrency; the one-permit demo is the opt-in override
 `compose.flow-demo.yaml` (service-b: `SNODRA_MESSAGING_HUB_MAX_CONCURRENT_HANDLERS=1` and a slowed
-`CountGreetings`, `examples.count-delay` / env `EXAMPLES_COUNT_DELAY=200ms`; service-c (Rust):
+`CountGreetings`, `examples.count-delay` / env `EXAMPLES_COUNT_DELAY=200ms`; service-c:
 `SNODRA_MAX_CONCURRENT_HANDLERS=1`). The smoke recreates service-b and service-c with it (step 11b), then step 12
 sends 20 parallel counts: all must answer 200, one at a time (at least 4 s; about 4.5 s, since a one-permit instance
 gets each permit back at once), with the topology showing requests queued for service-b while they wait. Step 13
-sends 10 parallel shouts from Kotlin service-a to Rust service-c: all must answer 200. After each burst the topology
+sends 10 parallel shouts from service-a to service-c: all must answer 200. After each burst the topology
 must show the instance with its permit back and nothing queued. Step 14 recreates both with the
 default concurrency again (also when a step failed). `SERVICE_B_MAX_CONCURRENT_HANDLERS`,
 `SERVICE_C_MAX_CONCURRENT_HANDLERS` and `EXAMPLES_COUNT_DELAY` tune the demo (the smoke expects its defaults);
@@ -282,7 +282,7 @@ Both hubs run `enforce` (`SNODRA_SERVER_AUTH_MODE=permissive` in the environment
 The ACL gives each example exactly what it registers and sends: service-a handles nothing and sends `SendGreeting`,
 `CountGreetings`, `Shout`, `Reverse`, `Inventory`, `Rows`, `WatchCounter`, `IncrementCounter` and `OpenSubscriptions`;
 service-b handles `SendGreeting`, `CountGreetings`, `Inventory`, `Rows`, `WatchCounter`, `OpenSubscriptions` and the
-postcard adapter's `PrintPostcard` and `PollPrintJob` and sends nothing; service-c (Rust) handles `Shout`, `Reverse`,
+postcard adapter's `PrintPostcard` and `PollPrintJob` and sends nothing; service-c handles `Shout`, `Reverse`,
 `IncrementCounter`, the same shared types and the banner adapter's `PrintBanner` and `PollBannerJob` and sends `CountGreetings`
 (its `GET /greetings/{name}/count`, see [Metrics](#metrics)); a
 `smoke-intruder` token may register as `smoke-intruder` and do nothing. The services read their token from a file
@@ -318,7 +318,7 @@ only them (both need `SECURE=1`).
 
 ## JWT sandbox
 
-The secure sandbox with service-b (Kotlin) and service-c (Rust) authenticating by JWT: the overlay
+The secure sandbox with service-b (Kotlin) and service-c authenticating by JWT: the overlay
 `compose.jwt.yaml` on top of the secure one, with a throwaway identity provider (`hub-idp`, container `snodra-server-idp`, its own
 realm `snodra-server-dev`, tokens that live 30 s). service-a keeps its static token, so both credential kinds run side by side. The
 identity provider, the realm and the client secrets are dev only; the secrets come from `dev-hub-pki.sh` into the git-ignored
@@ -359,7 +359,7 @@ service-c with the JWT overlay as well) and adds, last:
 
 ## mTLS sandbox
 
-The secure sandbox with service-a (Kotlin) and service-c (Rust) authenticating with a client certificate: the
+The secure sandbox with service-a (Kotlin) and service-c authenticating with a client certificate: the
 overlay `compose.mtls.yaml` on top of the secure one. service-b keeps its static token (the hubs run
 `SNODRA_SERVER_TLS_CLIENT_AUTH=optional`), so both kinds run side by side. It is not combined with the JWT overlay. The client CA, the
 certificates (EC P-256, 30 days, exactly one URI SAN `snodra://service/<name>`) and their keys come from `dev-hub-pki.sh` into the
@@ -405,7 +405,7 @@ Everything in the sandbox exports its metrics over OTLP to otel-lgtm every 5 s (
 both hubs (`SNODRA_SERVER_OTLP_ENDPOINT=http://otel-lgtm:4317`, `OTEL_METRIC_EXPORT_INTERVAL=5000`), service-a and service-b (the
 library's metrics, listed in the [README](../README.md#metrics), and Boot's own, over OTLP/HTTP:
 `SNODRA_OTLP_METRICS_ENABLED=true`, `SNODRA_OTLP_METRICS_ENDPOINT=http://otel-lgtm:4318/v1/metrics`,
-`SNODRA_OTLP_METRICS_STEP=5s`) and service-c (the Rust library's, over OTLP/gRPC: `SNODRA_OTLP_ENDPOINT=http://otel-lgtm:4317`,
+`SNODRA_OTLP_METRICS_STEP=5s`) and service-c (over OTLP/gRPC: `SNODRA_OTLP_ENDPOINT=http://otel-lgtm:4317`,
 `OTEL_METRIC_EXPORT_INTERVAL=5000`). Outside the sandbox the examples export nothing unless switched on (`SNODRA_OTLP_METRICS_ENABLED`
 defaults to `false`, `SNODRA_OTLP_METRICS_STEP` to `60s`; service-c installs no meter provider without `SNODRA_OTLP_ENDPOINT`).
 Each series carries `job` = the service name (`snodra-server` for the hubs) and `instance` = the instance id the hub shows on its
@@ -419,7 +419,7 @@ those the sandbox mode does not drive. Prometheus is reached through Grafana's p
 ```bash
 P=localhost:3000/api/datasources/proxy/uid/prometheus/api/v1
 curl -sG $P/query --data-urlencode 'query=max by (service) (snodra_server_connected_instances)'      # instances per service
-curl -sG $P/query --data-urlencode 'query=sum by (job, processor, outcome) (snodra_events_consumed_total)'   # Kotlin and Rust alike
+curl -sG $P/query --data-urlencode 'query=sum by (job, processor, outcome) (snodra_events_consumed_total)'   # service-a, -b and -c alike
 curl -sG $P/query --data-urlencode 'query=max by (subscription) (snodra_event_browser_subscription_lag)'   # every subscription, idle ones too
 ```
 
@@ -428,8 +428,8 @@ Smoke steps 29 to 29e check it, last, in every sandbox mode: 29 expects Grafana'
 (`snodra_server_requests_total`, `snodra_server_request_duration_seconds_bucket`, `snodra_server_connected_instances`, the processor gauges
 `snodra_server_processor_lag`, `_state`, `_dead_letters` and `_processed`) under `job="snodra-server"`, and the subscription lag from `snodra-event-browser`
 from both hubs (`instance` = the `hubId` of each hub's topology) and `snodra_server_connected_instances` for service-a, -b and -c;
-29c sends `examples.CountGreetings` three times through service-c (`GET $C/greetings/Ada/count`, the sandbox's one call from Rust
-through the hub) and expects service-b (Kotlin) and service-c (Rust) to export the library series under the same names with the
+29c sends `examples.CountGreetings` three times through service-c (`GET $C/greetings/Ada/count`, the sandbox's one call from service-c
+through the hub) and expects service-b (Kotlin) and service-c to export the library series under the same names with the
 same label names (the hub-client histogram: service-a, the Kotlin sender, and service-c; the series:
 `snodra_events_consumed_total{outcome,processor,type}`, `snodra_event_handler_duration_seconds_bucket{le,processor,type}`, the
 outbox gauges and counter, `snodra_processor_lag{processor,segment}`, `snodra_processor_state{processor,state}`,
@@ -455,7 +455,7 @@ carried traffic, such as after a full run: the request and consumer series exist
 
 ## Experiments
 
-- **Nobody owns the command (Rust side).** `docker compose ... stop service-c`, then `POST /shouts`: the same 503
+- **Nobody owns the command (service-c side).** `docker compose ... stop service-c`, then `POST /shouts`: the same 503
   `NoHandlerException`; `start service-c` and it recovers within seconds.
 - **Nobody owns the command.** `docker compose ... stop service-b`, then post a greeting:
   `503 {"error":"NoHandlerException","message":"No handler registered for 'examples.SendGreeting'"}`.
@@ -524,8 +524,8 @@ the printer post its signed notifications to an address of its choosing.
 
 ## The banner saga
 
-`examples.Banner` in service-c (Rust, sagas: `snodra-messaging-rs/examples/service-c/src/banner.rs`) is the postcard saga
-in Rust with service-c's own types (a command type has one owner): it starts on `TextShouted` (the job id is
+`examples.Banner` in service-c is the postcard saga
+with service-c's own types (a command type has one owner): it starts on `TextShouted` (the job id is
 `banner-<text in lower case>`), sends `PrintBanner` to service-c's own idempotent adapter (`idempotent_command`; the saga relay
 delivers it locally) and gives the printer 30 s. The printer prints the text in lower case and answers by its prefix as for
 postcards, but where the job tells it: service-c's `POST service-c:8080/printer/webhook` (`external::webhook::verify` and
@@ -546,9 +546,9 @@ is service-c's HTTP address); step 25 also replays the webhook (200) and sends a
 
 ## Event processors and dead letters
 
-service-b (Kotlin) and service-c (Rust) each run a **named event processor**, `audit` (the library's
+service-b (Kotlin) and service-c each run a **named event processor**, `audit` (the library's
 "Event processors and dead letters"), next to their `default` one: service-b with `@ProcessingGroup("audit")` on `AuditHandler`
-(`service-b/.../Audit.kt`), service-c with `builder.event_in::<ShoutAudit, _, _>("audit", ...)` (`service-c/src/audit.rs`). The
+(`service-b/.../Audit.kt`), service-c with a processor named `audit` for `ShoutAudit`. The
 processor is its own Kafka consumer on `snodra.events`, consumer group `service-b.audit` / `service-c.audit` (the `default`
 processors use `service-b.default` / `service-c.default`), idempotency markers `processor:audit:<eventId>` and its own dead letters. It handles
 an audit note (service-b's `examples.AuditNote`, service-c's `examples.ShoutAudit`: `{key, text, at}`; two types, so each service

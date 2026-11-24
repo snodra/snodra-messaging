@@ -73,8 +73,7 @@ import java.util.concurrent.atomic.AtomicInteger
  *   `Permits{count = max(0, ceil(max / N) - offered), grant = ceil(max / N)}`, offered = what the stream announced plus
  *   its earlier top-ups; the grant raises the hub's permit cap on the session (otherwise `initial_permits`). So the
  *   survivors of an outage (or of a hub that failed its first attempt) serve at full capacity, flaps never add up, a
- *   hub that joins or returns gets `ceil(max / N)` on its new stream, and nothing is ever revoked (rule shared with
- *   the Rust library). One [HandlerGate] keeps the local bound at [maxConcurrentHandlers] over all hubs.
+ *   hub that joins or returns gets `ceil(max / N)` on its new stream, and nothing is ever revoked. One [HandlerGate] keeps the local bound at [maxConcurrentHandlers] over all hubs.
  * - **Client certificate rotation**: with [HubSettings.clientCertificate], every [certificateCheckInterval] the files are
  *   read ([HubClientCertificate.refresh]); when a renewed, valid pair was adopted, the instance first waits a random delay (uniform in
  *   [0, min([rolloverMaxDelay], 10 % of what is left of the pair its streams present)], once per pair, so replicas that see the same renewed
@@ -501,7 +500,7 @@ class HubConnections(
     }
 
     /**
-     * N for the permit split of a stream [connection] opens (same rule as the Rust library): the other kept hubs that
+     * N for the permit split of a stream [connection] opens: the other kept hubs that
      * are live or still on their first connect attempt, plus [connection] itself. A hub that is down after having
      * failed is not counted, so the hubs that are up are not starved by it.
      */

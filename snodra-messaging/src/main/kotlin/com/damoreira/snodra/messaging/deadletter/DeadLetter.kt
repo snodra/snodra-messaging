@@ -24,7 +24,7 @@ class DeadLetterError(type: String, message: String) {
     override fun toString() = "DeadLetterError(type=$type, message=$message)"
 
     companion object {
-        /** The longest `error.message` in code points (shared with the Rust library, as `snodra-dlt-error`). */
+        /** The longest `error.message` in code points (as the `snodra-dlt-error` header). */
         const val MAX_MESSAGE = 2000
 
         /** The error of an INVALID letter. */

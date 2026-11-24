@@ -21,7 +21,7 @@ import kotlin.random.Random
  * - [token] returns the cached token while it is fresh, else fetches; callers that arrive while a fetch runs wait for that one
  *   (single flight, and its failure is theirs too). Fresh means before [AccessToken.refreshAt] by the wall clock **and** by the
  *   monotonic clock ([nanoTime], counted from the fetch): a machine that slept stops the monotonic clock, a wall clock set back
- *   stops the other, and either alone would keep a token past its refresh point, as the Rust library does.
+ *   stops the other, and either alone would keep a token past its refresh point.
  * - After the first fetch the provider renews the token **in the background** when it stops being fresh and publishes it in
  *   [current], which every live stream follows (see [HubConnection]). A token a hub refused ([invalidate]) is renewed at the
  *   renewer's next look (within 5 s) and is not [usable] meanwhile. A renewal that fails keeps the current
@@ -114,8 +114,8 @@ class HubTokenProvider(
             val token = endpoint.fetch()
             counts.incrementAndGet(TokenFetchResult.OK.ordinal)
             fetchedNanos = nanoTime()
-            // A fetched token is usable until a hub refuses it, even when the endpoint answered the refused value again (as Rust,
-            // which drops a refused token and remembers no value): otherwise the renewer would fetch again without a pause.
+            // A fetched token is usable until a hub refuses it, even when the endpoint answered the refused value again:
+            // no refused value is remembered, or the renewer would fetch again without a pause.
             refused = null
             currentState.value = token
             errorState.value = null

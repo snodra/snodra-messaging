@@ -5,7 +5,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-/** The hub choice for keyed requests; the Rust library must produce the same values (shared vectors below). */
+/** The hub choice for keyed requests; the score function is fixed by the protocol specification, https://snodra.damoreira.com/library-authors/protocol/ (the vectors below pin it). */
 class RendezvousTest {
 
     @Test fun `reference vectors`() {
@@ -16,7 +16,7 @@ class RendezvousTest {
         assertEquals(0xd8d5618ff3a93f55uL.toLong(), Rendezvous.score("hub-a", "order-1"))
         assertEquals(0xeb119984ce491337uL.toLong(), Rendezvous.score("hub-b", "order-1"))
         assertEquals(0x9d21a20b3a1b75f6uL.toLong(), Rendezvous.score("hub-c", "order-1"))
-        assertEquals(0x5c855509f5ad7c8duL.toLong(), Rendezvous.score("hub-1", "order-42")) // the Rust library's vector
+        assertEquals(0x5c855509f5ad7c8duL.toLong(), Rendezvous.score("hub-1", "order-42"))
     }
 
     @Test fun `the highest unsigned score wins`() {

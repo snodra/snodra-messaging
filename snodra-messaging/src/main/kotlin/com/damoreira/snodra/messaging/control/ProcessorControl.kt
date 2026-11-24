@@ -54,7 +54,7 @@ import com.damoreira.snodra.server.v1.ResetTarget as WireTarget
  *
  * Requests run off the hub stream, one at a time per processor (a single thread each), except the renewal of the operation
  * this instance holds, which is answered at once, and the dead-letter requests while a reset of the processor executes here:
- * the list is read beside it, a retry, retry-all or discard is refused LOCKED at once (as the Rust library does). A prepare or
+ * the list is read beside it, a retry, retry-all or discard is refused LOCKED at once. A prepare or
  * renewal with a lease under [MIN_RESET_LEASE_MS] is INVALID. A reset needs the event store's capability `replay`: without it a
  * prepare or an execute is refused UNSUPPORTED before anything changes (the processor keeps its subscription). A reset executes
  * here only for an operation this instance holds, through the event store's [com.damoreira.snodra.messaging.eventstore.SubscriptionAdmin]:
@@ -679,7 +679,7 @@ class ProcessorControl(
         /** The shortest lease a `ResetPrepare` may ask for (the hub asks for 30 s): a shorter one would lapse before anything happened. */
         const val MIN_RESET_LEASE_MS = 1000L
 
-        /** The refusal of a prepare without an operation id or with a lease under [MIN_RESET_LEASE_MS] (the Rust library's text). */
+        /** The refusal of a prepare without an operation id or with a lease under [MIN_RESET_LEASE_MS]. */
         private const val BAD_PREPARE = "a prepare needs an operation id and a lease of at least 1000 ms"
 
         /** The dead-letter requests that change letters: refused while a reset of the processor executes here. */

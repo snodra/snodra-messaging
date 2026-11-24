@@ -213,7 +213,7 @@ abstract class JdbcBoundsTest(private val database: TestDatabase) {
 
     /**
      * A dead letter whose payload is valid UTF-8 holding U+0000 is parked anyway, its bytes in `payload_binary` (the record must
-     * not be lost because its text cannot be stored), as the Rust store does; it reads back with the same bytes.
+     * not be lost because its text cannot be stored); it reads back with the same bytes.
      */
     @Test
     fun aDeadLetterPayloadHoldingNulIsKeptAsBytes() = runBlocking {

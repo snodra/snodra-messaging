@@ -12,7 +12,7 @@ import org.slf4j.LoggerFactory
 import java.util.UUID
 
 /**
- * Publish and consume rates on a real broker, with the Rust add-on's floors (publish 500/s one confirmed event at a time, as the
+ * Publish and consume rates on a real broker, with floors (publish 500/s one confirmed event at a time, as the
  * outbox relay publishes; consume 3 000/s acknowledging each). Tagged `throughput`: not part of `test` (a shared Docker VM makes
  * rates meaningless), run alone with `./gradlew throughputTest`.
  */

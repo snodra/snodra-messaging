@@ -7,8 +7,7 @@ import java.nio.file.Path
 import java.time.Duration
 
 /**
- * `snodra.messaging.rabbitmq.*`: how the RabbitMQ Streams event store ([RabbitEventStore]) reaches RabbitMQ, the Rust add-on's
- * `SNODRA_RABBITMQ_*` settings. The source, the subscriptions' names and the dead-letter mode are the core's
+ * `snodra.messaging.rabbitmq.*`: how the RabbitMQ Streams event store ([RabbitEventStore]) reaches RabbitMQ. The source, the subscriptions' names and the dead-letter mode are the core's
  * `snodra.messaging.events.*`. Passwords never appear in logs.
  */
 @ConfigurationProperties("snodra.messaging.rabbitmq")

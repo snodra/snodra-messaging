@@ -116,8 +116,8 @@ internal fun outboxPayload(payload: ByteArray, what: String): Document {
 }
 
 /**
- * [json] without the whitespace the driver's writer puts between tokens (after `:` and `,`): compact JSON, as the Rust store
- * relays it. Strings are copied as they are (escapes included) and every number keeps the driver's text.
+ * [json] without the whitespace the driver's writer puts between tokens (after `:` and `,`): compact JSON.
+ * Strings are copied as they are (escapes included) and every number keeps the driver's text.
  */
 internal fun compactJson(json: String): String {
     val out = StringBuilder(json.length)

@@ -17,7 +17,7 @@ import org.springframework.web.server.ResponseStatusException
 
 data class ShoutRequest(val text: String)
 
-/** The caller side of the texts domain: both requests go over the hub to service-c (Rust). */
+/** The caller side of the texts domain: both requests go over the hub to service-c. */
 @RestController
 class TextsController(
     private val commands: CommandBus,

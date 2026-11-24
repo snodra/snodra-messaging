@@ -13,7 +13,7 @@ import java.time.Duration
 
 class RabbitSettingsTest {
     @Test
-    fun `the defaults are the Rust add-on's`() {
+    fun `the defaults of the settings`() {
         val s = RabbitProperties().toSettings()
         assertEquals(listOf("rabbitmq" to 5552), s.nodes())
         assertEquals("/", s.virtualHost)
@@ -75,7 +75,7 @@ class RabbitSettingsTest {
     }
 
     @Test
-    fun `a password file is trimmed at both ends, as in the Rust add-on`(@TempDir dir: Path) {
+    fun `a password file is trimmed at both ends`(@TempDir dir: Path) {
         val file = Files.writeString(dir.resolve("password"), " \tfrom-file\r\n\n\r\n")
         assertEquals("from-file", RabbitProperties(passwordFile = file).toSettings().password)
         val management = RabbitProperties(

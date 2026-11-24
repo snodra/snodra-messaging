@@ -11,7 +11,7 @@
 #        service-b's HTTP address;
 #        SKIP_POSTCARD=1 skips the saga steps 24-24e (the postcard printer), ONLY_POSTCARD=1 runs only them, PRINTER=http://localhost:8093
 #        is the fake printer's address;
-#        SKIP_BANNER=1 skips the Rust saga steps 25-25e (service-c's banner printer), ONLY_BANNER=1 runs only them,
+#        SKIP_BANNER=1 skips the saga steps 25-25e (service-c's banner printer), ONLY_BANNER=1 runs only them,
 #        C=http://localhost:8094 is service-c's HTTP address;
 #        SKIP_AUDIT=1 skips the named-processor and dead-letter steps 26-26h (the `audit` processor of service-b and
 #        service-c), ONLY_AUDIT=1 runs only them;
@@ -205,7 +205,7 @@ flow_steps() {
   [ "$max_queued" -ge 1 ] || fail "the hub never showed a request queued for service-b"
   expect_permit_back service-b
 
-  echo "13. cross-language under flow control: 10 parallel Shouts from Kotlin service-a to Rust service-c (1 permit) ..."
+  echo "13. flow control across services: 10 parallel Shouts from service-a to service-c (1 permit) ..."
   started=$(now_ms)
   codes=$(parallel_calls 10 POST "$A/shouts" '{"text":"flow"}')
   elapsed=$(( $(now_ms) - started ))
@@ -543,7 +543,7 @@ await_both_hubs() { # <seconds>: prints the seconds it took; fails after <second
 }
 
 # One call through service-a per line of <out>: "<http code> <ms> <started at, ms since <t0>>", alternating a Kotlin
-# (CountGreetings, service-b) and a Rust (Reverse, service-c) target, until <stop file> exists.
+# (CountGreetings, service-b) and a service-c (Reverse) target, until <stop file> exists.
 ha_loop() { # <out> <stop file> <t0>
   local n=0 started code url
   while [ ! -e "$2" ]; do
@@ -634,7 +634,7 @@ ha_steps() {
   echo "   every example instance is back on $h2 (and reports it) $(( $(now_ms) - t0 )) ms after docker start"
 }
 
-# examples.Inventory is a shared query type owned by service-b (Kotlin) and service-c (Rust). A
+# examples.Inventory is a shared query type owned by service-b (Kotlin) and service-c. A
 # scatter-gather from service-a asks both; a point query goes to one instance of either. Needs jq or python3;
 # SKIP_SCATTER=1 skips these steps, ONLY_SCATTER=1 runs only them.
 scatter_steps() {
@@ -675,7 +675,7 @@ scatter_steps() {
   done
 }
 
-# examples.Rows is a shared streaming query type owned by service-b (Kotlin) and service-c (Rust); a
+# examples.Rows is a shared streaming query type owned by service-b (Kotlin) and service-c; a
 # stream from service-a goes to one instance of either, paced by credits. Step 19 streams 1000 rows with a window of
 # 8 credits (so the handler is held back and refilled many times) until both owners streamed once; 19b cancels a stream
 # from the collector's side (take=50) and expects both hubs' in-flight counts back at 0; 19c makes the handler fail on
@@ -727,8 +727,8 @@ stream_steps() {
   echo "   $code $body"
 }
 
-# examples.WatchCounter is a shared subscription query type served by service-b (Kotlin) and service-c
-# (Rust), each with an in-memory counter per name. Step 20 opens `GET /subscribe/counter?updates=4` in the background
+# examples.WatchCounter is a shared subscription query type served by service-b (Kotlin) and service-c,
+# each with an in-memory counter per name. Step 20 opens `GET /subscribe/counter?updates=4` in the background
 # (service-a subscribes, collects the initial result and four updates, cancels), waits until both owners hold the
 # subscription, then increments the counter twice through service-b (`POST $B/counters/<name>/increment`) and twice
 # through service-c (the command examples.IncrementCounter, sent by `POST $A/counters/<name>/increment`), and expects
@@ -920,7 +920,7 @@ postcard_steps() {
   done
 }
 
-# S2 (Rust sagas): service-c's banner saga (examples.Banner) gets every shouted text printed as a banner by the
+# S2 (sagas): service-c's banner saga (examples.Banner) gets every shouted text printed as a banner by the
 # same fake printer, which answers service-c where each job asks it to (its own webhook and printer.banner.events, never
 # service-b). Each step shouts a text of its kind through service-a (`POST $A/shouts`, the command examples.Shout to
 # service-c, whose TextShouted starts the saga) and reads `GET $C/banners/banner-<text>` (service-c's projection of
@@ -955,7 +955,7 @@ banner_steps() {
   local run id body code
   run=$(date +%s)
 
-  echo "25. webhook-$run: the printer posts a signed webhook to service-c (Rust); a replay is a no-op, a wrong secret is refused ..."
+  echo "25. webhook-$run: the printer posts a signed webhook to service-c; a replay is a no-op, a wrong secret is refused ..."
   shout "webhook-$run"; id="banner-webhook-$run"
   await_banner "$id" PRINTED - 90
   body="{\"deliveryId\":\"printed-$id\",\"jobId\":\"$id\",\"name\":\"webhook-$run\"}"
@@ -993,7 +993,7 @@ banner_steps() {
   done
 }
 
-# service-b (Kotlin) and service-c (Rust) each run a named event processor, `audit` (consumer group
+# service-b (Kotlin) and service-c each run a named event processor, `audit` (consumer group
 # `<service>.audit`, markers `processor:audit:<eventId>`), next to their `default` one. It handles an audit note published
 # under a key (`POST <service>/audit/notes {"key","text"}`, service-b's AuditNote and service-c's ShoutAudit) and fails
 # on demand: while `POST <service>/audit/failing?on=true` is on, a note whose text starts with `poison` fails. The example
@@ -1145,7 +1145,7 @@ audit_steps() {
 
   echo "26b. service-b (Kotlin): failure on; two poison notes under one key, a fine note under another: HANDLER_FAILED, SEQUENCED, handled ..."
   audit_park service-b "$B" "$run"
-  echo "26c. service-c (Rust): the same ..."
+  echo "26c. service-c: the same ..."
   audit_park service-c "$C" "$run"
 
   echo "26d. the hub shows both audit processors FAILING with two dead letters each, and default still there ..."
@@ -1220,7 +1220,7 @@ audit_steps() {
 # the hub as control plane for event processors, through its HTTP API
 # ($HUB/api/v1/services/<service>/processors/audit/...) with the dashboard write token: scripts/dev-hub-pki.sh
 # writes it to <secrets>/hub-control/dashboard-write.token and every sandbox mode mounts it into both hubs
-# (SNODRA_SERVER_DASHBOARD_WRITE_TOKEN_FILE). For the `audit` processor of service-b (Kotlin) and of service-c (Rust):
+# (SNODRA_SERVER_DASHBOARD_WRITE_TOKEN_FILE). For the `audit` processor of service-b (Kotlin) and of service-c:
 # 27: a write without a credential (or with a wrong one) is 401 on both hubs, with the dashboard token 403 (SECURE=1 only: the
 # plain hubs have no dashboard token); leftover letters are cleared and the processor resumed. 27b: pause: the hub shows PAUSED and notes published
 # meanwhile are not handled (the hub lists the processor's lag as at least 2); resume: they are, RUNNING again, lag 0.
@@ -1678,7 +1678,7 @@ browser_steps() {
 # proxy of the bundled data source (PROM; otel-lgtm does not publish Prometheus' port). These steps run last, once the
 # others made traffic. 29: Grafana lists the three dashboards, Overview, Hub and Messaging, in the folder Snodra. 29b: the
 # hub series come from both hubs (job snodra-server, instance = the hub id each hub's topology gives). 29c: service-b
-# (Kotlin) and service-c (Rust) export the library series under the same names with the same label names (the
+# (Kotlin) and service-c export the library series under the same names with the same label names (the
 # hub-client histogram from the sandbox's senders, service-a and service-c, whose GET /greetings/{name}/count sends
 # examples.CountGreetings through the hub for it), and their instance label is the instance id the hubs list. 29d: no series has a label hub_id, and only the hub's streams and
 # subscriptions open have instance_id (the handler instance). 29e: every panel query of the three
@@ -1792,8 +1792,8 @@ obs_steps() {
   echo "   requests, duration buckets, connected_instances, processor lag/state/dead letters/processed: each from$ids" \
        "the subscription lag from the event browser"
 
-  echo "29c. service-b (Kotlin) and service-c (Rust) export the library series under the same names and label names ..."
-  # Only service-a (Kotlin) and service-c (Rust) send through the hub: service-c's GET /greetings/{name}/count sends
+  echo "29c. service-b (Kotlin) and service-c export the library series under the same names and label names ..."
+  # Only service-a (Kotlin) and service-c send through the hub: service-c's GET /greetings/{name}/count sends
   # examples.CountGreetings to service-b, so the hub-client histogram is compared between service-a and service-c.
   for i in 1 2 3; do
     reply=$(curl -fsS "$C/greetings/Ada/count") || fail "GET $C/greetings/Ada/count (CountGreetings from service-c through the hub) failed"
@@ -1996,7 +1996,7 @@ secure_steps() {
 }
 
 # Only with SECURE=1 JWT=1 against the JWT sandbox (compose.jwt.yaml): service-b (Kotlin) and
-# service-c (Rust) register with an OAuth2 access token (a dev identity provider, tokens that live 30 s), service-a with its
+# service-c register with an OAuth2 access token (a dev identity provider, tokens that live 30 s), service-a with its
 # static token. Step 22: both hubs list service-b and service-c with authKind jwt and an expiresAt, and service-a with
 # authKind token. Step 22b: within ~40 s the expiresAt of both services advances on both hubs while the instance, and the
 # stream it registered on (connectedSinceMs), stay the same: the token was renewed and handed to the live stream as
@@ -2051,7 +2051,7 @@ jwt_steps() {
   # The hubs' logs keep the history of earlier runs: "credentials expired" is only looked for from here on.
   jwt_started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-  echo "22. both hubs show service-b (Kotlin) and service-c (Rust) with authKind jwt and an expiresAt, service-a with token ..."
+  echo "22. both hubs show service-b (Kotlin) and service-c with authKind jwt and an expiresAt, service-a with token ..."
   for h in "$HUB" "$HUB2"; do
     for svc in service-b service-c; do
       sess=$(await_auth_kind "$h" "$svc" jwt)
@@ -2102,7 +2102,7 @@ jwt_steps() {
 }
 
 # Only with SECURE=1 MTLS=1 against the mTLS sandbox (compose.mtls.yaml): service-a (Kotlin) and
-# service-c (Rust) register with a client certificate (a dev client CA, exactly one URI SAN snodra://service/<name>), service-b
+# service-c register with a client certificate (a dev client CA, exactly one URI SAN snodra://service/<name>), service-b
 # with its static token (the hubs run with SNODRA_SERVER_TLS_CLIENT_AUTH=optional). Step 23: both hubs list service-a and
 # service-c with authKind certificate, the fingerprint of the certificate in the service's mounted directory and an
 # expiresAt, and service-b with token. Step 23b: the certificate of service-c (then of service-a) is replaced on disk by a new
@@ -2150,7 +2150,7 @@ mtls_steps() {
   docker inspect "$h2" >/dev/null 2>&1 || fail "container $h2 not found (set HUB2_CONTAINER, or SKIP_MTLS=1)"
   mtls_started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-  echo "23. both hubs show service-a (Kotlin) and service-c (Rust) with authKind certificate, the fingerprint of their certificate and an expiresAt, service-b with token ..."
+  echo "23. both hubs show service-a (Kotlin) and service-c with authKind certificate, the fingerprint of their certificate and an expiresAt, service-b with token ..."
   for h in "$HUB" "$HUB2"; do
     for svc in service-a service-c; do
       fp=$(cert_fp_of "$SECRETS/mtls/$svc/client.pem")

@@ -4,8 +4,8 @@ import com.damoreira.snodra.messaging.api.MessageType
 import com.damoreira.snodra.messaging.api.Query
 
 /*
- * A shared query type: service-b (Kotlin) and service-c (Rust) both own it, so a point query goes to one
- * of them and a scatter-gather asks both. Mirrored in snodra-messaging-rs/examples/service-c/src/messages.rs; keep both
+ * A shared query type: service-b (Kotlin) and service-c both own it, so a point query goes to one
+ * of them and a scatter-gather asks both. Service-c keeps a mirror of these types; keep both
  * in step.
  */
 

@@ -548,7 +548,7 @@ class EventConsumer(
 
     /**
      * The outcome of a letter [DeadLetterStore.park] took ([new]) or found there already: the record's own letter exists
-     * (parked, then the instance died before the acknowledgement), so this delivery is a duplicate, as the Rust library counts it.
+     * (parked, then the instance died before the acknowledgement), so this delivery is a duplicate.
      */
     private fun parked(new: Boolean): Consumed {
         if (!new) return Consumed.DUPLICATE

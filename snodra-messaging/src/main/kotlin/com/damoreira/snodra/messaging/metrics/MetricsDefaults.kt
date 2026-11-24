@@ -14,9 +14,9 @@ import java.util.UUID
  * any setting of the application wins. They apply to the whole application, its own meters and traces included:
  *
  * - `management.otlp.metrics.export.base-time-unit=seconds` (Boot's default is milliseconds): the library's timers
- *   ([MicrometerMessagingMetrics]) reach Prometheus as `..._seconds` series, as the Rust library's;
+ *   ([MicrometerMessagingMetrics]) reach Prometheus as `..._seconds` series,;
  * - `management.otlp.metrics.export.publish-max-gauge-for-histograms=false`: no `..._max_seconds` gauge next to each
- *   histogram, a series the Rust library does not export;
+ *   histogram, a series this library does not export;
  * - the resource identity every series carries (Prometheus `job` and `instance`), set only where nothing else names it,
  *   because Boot lets `management.opentelemetry.resource-attributes.*` win over `OTEL_RESOURCE_ATTRIBUTES` and
  *   `OTEL_SERVICE_NAME`:

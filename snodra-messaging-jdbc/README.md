@@ -14,8 +14,7 @@ dependencies {
 ```
 
 With a `DataSource` in the application (Boot's `spring.datasource.*`) that is all: the store is created, its schema applied at
-startup and its retention run every minute. The Rust twin (`snodra-messaging-sqlx`) reads and writes the same tables, so a
-Kotlin service and a Rust service can share one database layout.
+startup and its retention run every minute. Every Snodra library reads and writes the same tables, so services written with any of them can share one database layout.
 
 ## Requirements
 

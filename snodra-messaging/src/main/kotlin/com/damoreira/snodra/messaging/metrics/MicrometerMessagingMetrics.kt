@@ -15,7 +15,7 @@ import java.util.concurrent.atomic.AtomicReference
 
 /**
  * The messaging meters on a Micrometer [registry]. Prometheus shows them with `_` for `.`, the unit
- * appended and `_total` on counters (the series the dashboards query, identical to the Rust library's):
+ * appended and `_total` on counters (the series the dashboards query):
  *
  * - `snodra.outbox.published{outcome}` (counter, `ok | failed`, one per send attempt), and the gauges `snodra.outbox.pending`
  *   and `snodra.outbox.oldest.age` (seconds, computed when observed from the oldest document the relay's latest poll saw, 0
@@ -25,7 +25,7 @@ import java.util.concurrent.atomic.AtomicReference
  *   exported as histograms with the explicit [DURATION_BUCKETS] (the hub's request duration boundaries). Their unit is the
  *   registry's base time unit: seconds for Prometheus and the simple registry, and for OTLP because the library makes
  *   `management.otlp.metrics.export.base-time-unit` default to `seconds` ([MetricsDefaults]), so the series is
- *   `..._seconds_bucket` as the Rust library's. (A distribution summary in seconds cannot do it: Micrometer's fixed-boundary
+ *   `..._seconds_bucket`. (A distribution summary in seconds cannot do it: Micrometer's fixed-boundary
  *   histograms round a recorded value up to a whole number.)
  *
  * Every hook only counts in memory: the export thread reads atomics, never the database.
@@ -83,7 +83,7 @@ class MicrometerMessagingMetrics(private val registry: MeterRegistry, private va
     companion object {
         private const val SECONDS = "seconds"
 
-        /** The histogram bucket boundaries in seconds, the hub's `snodra_server_request_duration_seconds` ones (and the Rust library's). */
+        /** The histogram bucket boundaries in seconds, the hub's `snodra_server_request_duration_seconds` ones. */
         val DURATION_BUCKETS = doubleArrayOf(0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0)
 
         private val BUCKETS = DURATION_BUCKETS.map { Duration.ofNanos((it * 1e9).toLong()) }.toTypedArray()

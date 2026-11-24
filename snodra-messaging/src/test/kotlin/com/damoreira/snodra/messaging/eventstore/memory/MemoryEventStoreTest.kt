@@ -29,7 +29,7 @@ class MemoryEventStoreTest {
 
     @Test
     fun aKeyGoesToTheSegmentOfItsFnv1aHash() {
-        // The FNV-1a 64 hash of the key's UTF-8 bytes, unsigned, modulo the segments (the Rust library's in-memory store says the same).
+        // The FNV-1a 64 hash of the key's UTF-8 bytes, unsigned, modulo the segments.
         assertEquals(listOf(2, 1, 0, 1, 1), listOf("k", "order-1", "order-2", "é", "").map { MemoryEventStore.segmentOf(it, 4) })
         assertEquals(listOf(2, 3, 0, 1, 5), listOf("k", "order-1", "order-2", "é", "").map { MemoryEventStore.segmentOf(it, 6) })
     }

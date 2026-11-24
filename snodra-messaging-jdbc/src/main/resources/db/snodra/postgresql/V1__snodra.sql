@@ -1,5 +1,5 @@
 -- snodra-messaging message store, schema version 1 (PostgreSQL 13 or later).
--- Shared by the Kotlin add-on (snodra-messaging-jdbc) and the Rust one (snodra-messaging-sqlx): both read and write these
+-- The shared schema of the Snodra message store (https://snodra.damoreira.com/library-authors/): every Snodra library reads and writes these
 -- tables the same way. Idempotent: it can run again over itself. Frozen once released: later changes are V2, V3, ...
 -- Times are UTC instants at millisecond precision, stamped by the application (never now()).
 -- Identifiers and positions use the "C" collation: compared and ordered by their bytes.

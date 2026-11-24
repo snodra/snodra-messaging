@@ -12,7 +12,7 @@ import org.junit.jupiter.api.Test
 import java.util.HexFormat
 import java.util.UUID
 
-/** The layout on the wire shared with the Rust add-on: routing, the message's AMQP types, how a message reads back. */
+/** The layout on the wire: routing, the message's AMQP types, how a message reads back. */
 class RabbitWireTest {
     private val headers = mapOf(
         "type" to "orders.Placed",
@@ -28,7 +28,7 @@ class RabbitWireTest {
     private fun event(key: String?) = OutgoingEvent("snodra.events", "e-42", "orders.Placed", key, headers, """{"total":42}""".toByteArray())
 
     /**
-     * The partition table the Rust add-on pins too (murmur3 x86_32, seed 104729, the hash as an unsigned number modulo 6
+     * The partition table (murmur3 x86_32, seed 104729, the hash as an unsigned number modulo 6
      * partitions); the hash is the Java stream client's own (its HashRoutingStrategy's), and a signed modulo is wrong for
      * `order-7`, whose hash has its top bit set.
      */
@@ -94,15 +94,14 @@ class RabbitWireTest {
     }
 
     /**
-     * The bytes the Rust add-on writes for the same event (its `wire::message`, encoded by `rabbitmq-stream-protocol` 0.11.0;
-     * the application properties come in its map's order), read by the Kotlin add-on; and both encodings have the same sections
-     * of the same types.
+     * The bytes another Snodra service writes for the same event, read by the Kotlin add-on; and both encodings have the same sections
+     * of the same types (the application properties come in its map's order).
      */
     @Test
-    fun `what the Rust add-on writes reads back as the event, with the types the Kotlin add-on writes`() {
-        for ((key, hex) in listOf("order-42" to RUST_KEYED, null to RUST_UNKEYED)) {
-            val rust = HexFormat.of().parseHex(hex)
-            val read = RabbitWire.delivery("3", 12, 1_700_000_000_000, RabbitWire.codec.decode(Unpooled.wrappedBuffer(rust), rust.size))
+    fun `what another Snodra service writes reads back as the event, with the types the Kotlin add-on writes`() {
+        for ((key, hex) in listOf("order-42" to INTEROP_KEYED, null to INTEROP_UNKEYED)) {
+            val foreign = HexFormat.of().parseHex(hex)
+            val read = RabbitWire.delivery("3", 12, 1_700_000_000_000, RabbitWire.codec.decode(Unpooled.wrappedBuffer(foreign), foreign.size))
             assertEquals(key, read.key)
             assertEquals(headers, read.headers)
             assertEquals("""{"total":42}""", String(read.payload))
@@ -110,7 +109,7 @@ class RabbitWireTest {
             assertEquals(1_700_000_000_000, read.timestampMs)
 
             val kotlin = RabbitWire.encode(RabbitWire.message(event(key)))
-            assertEquals(shape(rust), shape(kotlin), "the sections and their types")
+            assertEquals(shape(foreign), shape(kotlin), "the sections and their types")
         }
     }
 
@@ -151,10 +150,10 @@ class RabbitWireTest {
     private fun type(v: V) = v::class.simpleName
 
     private companion object {
-        // Encoded by the Rust add-on's `wire::message` (commit 99c3698 of snodra-messaging-rs) for the event above, publishing id 1.
-        const val RUST_KEYED =
+        // Written by another Snodra service for the event above, publishing id 1.
+        const val INTEROP_KEYED =
             "005372c11a02a30d782d726f7574696e672d6b6579a1086f726465722d3432005373c0240da104652d34324040404040a3106170706c69636174696f6e2f6a736f6e404040404040005374c1c810a106757365724964a100a10b7472616365706172656e74a13730302d30616637363531393136636434336464383434386562323131633830333139632d623761643662373136393230333333312d3031a107782d6578747261a1046b657074a10d636f7272656c6174696f6e4964a103632d31a1026964a104652d3432a10474797065a10d6f72646572732e506c61636564a106736f75726365a1066f7264657273a10974696d657374616d70a118323032362d31312d31345431303a30303a30302e3030305a005375a00c7b22746f74616c223a34327d"
-        const val RUST_UNKEYED =
+        const val INTEROP_UNKEYED =
             "005373c0240da104652d34324040404040a3106170706c69636174696f6e2f6a736f6e404040404040005374c1c810a10974696d657374616d70a118323032362d31312d31345431303a30303a30302e3030305aa1026964a104652d3432a106736f75726365a1066f7264657273a10b7472616365706172656e74a13730302d30616637363531393136636434336464383434386562323131633830333139632d623761643662373136393230333333312d3031a107782d6578747261a1046b657074a10474797065a10d6f72646572732e506c61636564a106757365724964a100a10d636f7272656c6174696f6e4964a103632d31005375a00c7b22746f74616c223a34327d"
     }
 }

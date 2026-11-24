@@ -275,7 +275,7 @@ class StreamingQueryTest {
         owner("svc-x", "x-1", RowsStreamer(state))
         val sender = RawSender("s-1")
         sender.next() // ack
-        sender.send(streamRequest("s1", initialCredit = 0xFFFFFFFFL.toInt())) // u32::MAX, as a Rust caller may send
+        sender.send(streamRequest("s1", initialCredit = 0xFFFFFFFFL.toInt())) // the largest uint32, as a caller may send
         val parts = (1..5).map { sender.next().part }
         assertEquals((1L..5L).toList(), parts.map { it.seq })
         val end = sender.next().end

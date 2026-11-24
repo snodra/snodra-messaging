@@ -30,7 +30,7 @@ object EventHeaders {
     private val TIMESTAMPS: java.time.format.DateTimeFormatter =
         java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'").withZone(java.time.ZoneOffset.UTC)
 
-    /** [at] as the [TIMESTAMP] header writes it: always with milliseconds (`2026-11-15T10:20:35.000Z`), finer digits cut, as Rust does. */
+    /** [at] as the [TIMESTAMP] header writes it: always with milliseconds (`2026-11-15T10:20:35.000Z`), finer digits cut. */
     fun timestamp(at: java.time.Instant): String = TIMESTAMPS.format(at)
 }
 

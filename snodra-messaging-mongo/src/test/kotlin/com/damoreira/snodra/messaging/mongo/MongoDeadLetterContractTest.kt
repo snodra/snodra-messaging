@@ -34,11 +34,12 @@ import kotlin.test.assertTrue
 
 /**
  * The storage contract of `dead_letters`: the documents this library writes are exactly the hand-written
- * fixtures in `src/test/resources/dead_letters_contract` (byte for byte the Rust library's
- * `tests/fixtures/dead_letters_contract`), types included (Int32 `partition`, Int64 `offset`, BinData, dates), with no
+ * fixtures in `src/test/resources/dead_letters_contract` (the MongoDB layout of the specification,
+ * https://snodra.damoreira.com/library-authors/mongodb-layout/),
+ * types included (Int32 `partition`, Int64 `offset`, BinData, dates), with no
  * `_class`, no null, a blank `id` or `type` header absent as `eventId` or `eventType`, and `replay` (parked while the
  * processor replayed the record) written only when true: the core's [DeadLetterFactory] builds the letter, this add-on
- * stores it. Every fixture document, as the other library writes it, reads back through the store and the core's admin
+ * stores it. Every fixture document, as any Snodra library writes it, reads back through the store and the core's admin
  * API; the indexes have the documented names.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)

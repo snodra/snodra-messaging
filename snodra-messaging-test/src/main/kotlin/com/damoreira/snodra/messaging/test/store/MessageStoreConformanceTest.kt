@@ -71,22 +71,6 @@ import java.util.concurrent.TimeUnit
  * [DuplicateKeyException] or a [TransientDataAccessException] (a write conflict: `ConcurrencyFailureException`, a database's
  * transient transaction error) in its cause chain. Any other exception fails the check: the runtime would park the event as a
  * handler failure instead of retrying it.
- *
- * **The checks' names in snodra-messaging-rs** (`snodra_messaging::store::conformance`): the same checks under the same names in
- * snake_case (`appendedEntryIsClaimedInCreatedSeqOrder` is `appended_entry_is_claimed_in_created_seq_order`), except:
- *
- * | Kotlin check | Rust check |
- * |---|---|
- * | [outboxPayloadMustBeAJsonObject] | `outbox_rejects_a_payload_that_is_not_a_json_object` |
- * | [oldestPendingIsTheOldestEntryNeitherSentNorFailed] | `pending_counts_entries_neither_sent_nor_failed` |
- * | [concurrentStartsOfOneSagaKeyLetOneWin] | `two_transactions_starting_one_saga_key_leave_one_live_saga` |
- * | [concurrentUpdatesOfOneSagaLetOneWin] | `two_transactions_updating_one_saga_version_commit_once` |
- * | [sagaEventTheOutboxWouldRefuseIsNotRecorded] | `saga_dispatch_store_refuses_an_event_the_outbox_would_refuse` |
- * | [dueDeadlinesAreClaimedOnceUntilTheirLeaseExpires] | `due_deadline_is_claimed_once_until_its_lease_passes` |
- * | [concurrentDeadlineClaimsReturnEachDeadlineOnce] | `two_schedulers_claim_each_due_deadline_once` |
- * | [sagaDispatchEntriesAreRelayedInOrderPerSaga] and [sagaDispatchLeaseIsExclusiveUntilItExpires] | `dispatch_hands_out_each_saga_in_seq_order` (one check) |
- * | [concurrentLeaseClaimsGrantOneOwner] | `two_relays_never_hold_one_saga_lease` |
- * | **none** (Rust only) | `dead_letter_deleted_in_a_transaction_goes_with_it` |
  */
 abstract class MessageStoreConformanceTest {
     /** A store over empty state, called before each test. */
@@ -202,7 +186,7 @@ abstract class MessageStoreConformanceTest {
     }
 
     /**
-     * Payloads the contract refuses on top of "a JSON object with 64-bit integers": what a Rust consumer (serde_json) cannot
+     * Payloads the contract refuses on top of "a JSON object with 64-bit integers": what a strict JSON reader cannot
      * decode (a number no double holds, a lone surrogate escape in a value or a name, a leading byte order mark) and a depth over
      * 100 (MySQL's JSON limit: the object, 99 arrays, the number is 101).
      */

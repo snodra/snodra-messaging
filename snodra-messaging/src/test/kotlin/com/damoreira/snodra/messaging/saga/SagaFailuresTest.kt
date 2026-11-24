@@ -213,7 +213,7 @@ class SagaFailuresTest {
         assertFalse(failures.retry("rt.Flaky:nope"))
         assertFalse(failures.retry("rt.Gone:e-1"))
         assertEquals(0, failures.retryAll("rt.Flaky"))
-        assertEquals(0, failures.retryAll("rt.Gone"), "nothing parked: nothing to refuse, as in Rust")
+        assertEquals(0, failures.retryAll("rt.Gone"), "nothing parked: nothing to refuse")
         assertNull(failures.list().firstOrNull())
     }
 }

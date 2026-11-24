@@ -6,9 +6,9 @@ import com.damoreira.snodra.messaging.api.Query
 import com.damoreira.snodra.messaging.api.SubscriptionQuery
 
 /*
- * A shared subscription query type: service-b (Kotlin) and service-c (Rust) both serve it with an
+ * A shared subscription query type: service-b (Kotlin) and service-c both serve it with an
  * in-memory counter per name; a subscription gets the current value of one of them as its initial result and then the
- * changes of both, as they happen. Mirrored in snodra-messaging-rs/examples/service-c/src/messages.rs; keep both in step.
+ * changes of both, as they happen. Service-c keeps a mirror of these types; keep both in step.
  */
 
 /** Subscription query owned by service-b and service-c: watch the counter [name] (initial [Counter], updates [CounterChanged]). */
@@ -22,7 +22,7 @@ data class Counter(val service: String, val instance: String, val name: String, 
 data class CounterChanged(val service: String, val instance: String, val name: String, val value: Long)
 
 /**
- * Command owned by service-c (Rust): increments its counter [name] and emits the change to every subscription. [service]
+ * Command owned by service-c: increments its counter [name] and emits the change to every subscription. [service]
  * says whose counter this is meant for (only service-c owns the command; service-b increments through its own
  * `POST /counters/{name}/increment`); a handler that is not that service refuses it.
  */

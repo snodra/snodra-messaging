@@ -3,7 +3,7 @@ package com.damoreira.snodra.messaging.rabbitmq
 /**
  * A reader of encoded AMQP 1.0 messages, section by section, with the type codes of what snodra's layout fixes: written for
  * the tests from the AMQP 1.0 specification (part 1, types; part 3, the message format), independent of the stream client's
- * codec, as the Rust add-on's golden test reads them.
+ * codec.
  */
 internal object Amqp {
     /** One AMQP value: its type and its body (a string's bytes, a list's or a map's elements). */

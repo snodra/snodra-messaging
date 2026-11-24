@@ -18,7 +18,7 @@ class OutboxPayloadTest {
         }
     }
 
-    @Test fun `what a Rust consumer cannot decode is refused too, each saying why`() {
+    @Test fun `what a JSON reader cannot decode is refused too, each saying why`() {
         val cases = mapOf(
             """{"a":1e400}""".toByteArray() to "double",
             """{"a":"\ud800"}""".toByteArray() to "surrogate",

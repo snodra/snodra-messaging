@@ -97,7 +97,7 @@ class HubBusMetricsTest {
         @Suppress("unused") val text: String get() = error("cannot encode")
     }
 
-    @Test fun `a call whose request cannot be encoded is observed as error, as the Rust library`() = runBlocking {
+    @Test fun `a call whose request cannot be encoded is observed as error`() = runBlocking {
         val bus = caller(ContextCapturingHandlers())
 
         assertFailsWith<Exception> { bus.send(Unencodable()) }

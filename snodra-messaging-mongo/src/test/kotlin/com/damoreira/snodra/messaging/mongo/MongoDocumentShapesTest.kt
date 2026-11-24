@@ -70,7 +70,7 @@ class MongoDocumentShapesTest {
     }
 
     @Test
-    fun `documents the Rust store writes without its optional fields are read as absent`() {
+    fun `documents written without their optional fields are read as absent`() {
         val now = java.util.Date.from(Instant.now().truncatedTo(ChronoUnit.MILLIS))
         val past = java.util.Date.from(Instant.now().minusSeconds(60).truncatedTo(ChronoUnit.MILLIS))
         val tag = UUID.randomUUID().toString().take(8)

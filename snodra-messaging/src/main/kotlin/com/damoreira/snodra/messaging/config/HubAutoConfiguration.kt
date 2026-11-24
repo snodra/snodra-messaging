@@ -247,7 +247,7 @@ class HubAutoConfiguration {
         val secret = o.clientSecret?.takeIf { it.isNotBlank() } ?: env(OAUTH2_CLIENT_SECRET_ENV)
         val secretFile = o.clientSecretFile ?: env(OAUTH2_CLIENT_SECRET_FILE_ENV)?.let { Path.of(it.trim()) }
         if (tokenUri == null) {
-            // As the Rust library: a stray setting is a misconfigured service that would run unauthenticated, so it fails the startup.
+            // A stray setting is a misconfigured service that would run unauthenticated, so it fails the startup.
             val stray = listOfNotNull(
                 "snodra.messaging.hub.oauth2.client-id".takeIf { !o.clientId.isNullOrBlank() },
                 "snodra.messaging.hub.oauth2.client-secret".takeIf { !o.clientSecret.isNullOrBlank() },

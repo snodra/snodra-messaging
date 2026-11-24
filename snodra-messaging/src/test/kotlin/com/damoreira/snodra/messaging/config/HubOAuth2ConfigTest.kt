@@ -204,7 +204,7 @@ class HubOAuth2ConfigTest {
         assertTrue("snodra.messaging.hub.oauth2.client-secret-file" in empty && blank.toString() in empty && "empty" in empty, empty)
     }
 
-    @Test fun `any oauth2 setting without a token uri fails the startup naming it, like the Rust library does`(@TempDir dir: Path) {
+    @Test fun `any oauth2 setting without a token uri fails the startup naming it`(@TempDir dir: Path) {
         val file = dir.resolve("s").also { Files.writeString(it, "x") }
         val strays = mapOf(
             "snodra.messaging.hub.oauth2.client-id=orders" to "snodra.messaging.hub.oauth2.client-id",
