@@ -3,6 +3,9 @@ name: release
 # CI calls this after it pushes a release tag (ci.yml, job `release`): a tag pushed with
 # GITHUB_TOKEN starts no workflow by itself. Run it by hand only to publish an existing tag again;
 # nobody pushes tags.
+#
+# The jobs that hold a write token (prepare, attach) run no build: Gradle and its plugins run only in
+# check and publish, which can read the repository and nothing more.
 on:
   workflow_call:
     inputs:
@@ -30,9 +33,11 @@ permissions:
   contents: read
 
 # The input reaches shells only through this variable, and is printed only once it is checked.
+# No build cache here: the jobs that sign and publish build from scratch, with nothing restored from
+# other runs (setup-gradle's cache is off below too).
 env:
   TAG: ${{ inputs.tag }}
-  GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.caching=true"
+  GRADLE_OPTS: "-Dorg.gradle.daemon=false"
 
 concurrency:
   group: release-${{ inputs.tag }}
@@ -51,6 +56,7 @@ jobs:
     outputs:
       version: ${{ steps.tag.outputs.version }}
       latest: ${{ steps.tag.outputs.latest }}
+      commit: ${{ steps.tag.outputs.commit }}
     steps:
       - name: the tag is vN.N.N
         run: |
@@ -71,12 +77,14 @@ jobs:
             exit 1
           fi
           highest=$(git tag --list 'v*' | scripts/last-tag.sh)
+          # Later jobs check out this commit, not the tag name: what is published is what was checked.
+          echo "commit=$(git rev-parse "refs/tags/$TAG^{commit}")" >> "$GITHUB_OUTPUT"
           echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
           echo "latest=$([ "$TAG" = "$highest" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
           echo "$TAG; highest release tag: $highest"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          ref: refs/tags/${{ env.TAG }}
+          ref: ${{ steps.tag.outputs.commit }}
           path: tag
           persist-credentials: false
       - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.9.1
@@ -84,6 +92,8 @@ jobs:
           distribution: temurin
           java-version: "25"
       - uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4.4.3
+        with:
+          cache-disabled: true
       # The same build as the publish job, without the signing secrets.
       - name: the bundle built from the tag carries its version
         working-directory: tag
@@ -93,18 +103,18 @@ jobs:
           ./gradlew nmcpZipAggregation -Pversion="$VERSION" --no-daemon
           ../scripts/check-bundle.sh build/nmcp/zip/aggregation.zip "$VERSION" .
 
-  # The JAR uploads attach to an existing release, so it is created first.
+  # The release is created as a draft: it becomes public in `attach`, once Maven Central took the
+  # version, so a failed publish never leaves a public release naming coordinates that do not exist.
   prepare:
     needs: check
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: create the release
+      - name: create the draft release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.check.outputs.version }}
-          LATEST: ${{ needs.check.outputs.latest }}
         run: |
           NOTES="Maven Central: \`com.damoreira.snodra:snodra-messaging*:$VERSION\`
           JARs: every published module below."
@@ -113,27 +123,28 @@ jobs:
               --title "${GITHUB_REPOSITORY#*/} $TAG" --notes "$NOTES"
           else
             # --verify-tag: never create a tag here.
-            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --latest="$LATEST" \
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
               --title "${GITHUB_REPOSITORY#*/} $TAG" --generate-notes --notes "$NOTES"
           fi
 
+  # Builds, signs and publishes with read access only; the JARs go to `attach` as an artifact.
   publish:
     needs: [check, prepare]
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     env:
       VERSION: ${{ needs.check.outputs.version }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          ref: refs/tags/${{ env.TAG }}
+          ref: ${{ needs.check.outputs.commit }}
           persist-credentials: false
       - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.9.1
         with:
           distribution: temurin
           java-version: "25"
       - uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4.4.3
+        with:
+          cache-disabled: true
 
       # Maven Central never takes a version twice, so a repeated run skips the upload of a version
       # it already has and only finishes the GitHub release. The bundle is one deployment: either
@@ -177,11 +188,38 @@ jobs:
           echo "::notice::$VERSION is on Maven Central already; only the GitHub release is completed"
           ./gradlew nmcpZipAggregation -Pversion="$VERSION" --no-daemon
 
-      - name: the published JARs attach to the release
+      - name: the JARs for the GitHub release
+        run: |
+          # The main JAR of every published module, at this version (not sources or javadoc).
+          mkdir "$RUNNER_TEMP/jars"
+          for f in */build.gradle.kts; do
+            grep -q 'maven-publish' "$f" || continue
+            m=${f%%/*}
+            cp "$m/build/libs/$m-$VERSION.jar" "$RUNNER_TEMP/jars/"
+          done
+          ls "$RUNNER_TEMP/jars"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: jars
+          path: ${{ runner.temp }}/jars/*.jar
+          if-no-files-found: error
+          retention-days: 7
+
+  # Holds the write token and runs only gh: attaches the JARs and makes the draft public.
+  attach:
+    needs: [check, prepare, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: jars
+          path: jars
+      - name: the JARs attach to the release, which becomes public
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LATEST: ${{ needs.check.outputs.latest }}
         run: |
-          find . -path '*/build/libs/*.jar' \
-            ! -name '*-sources.jar' ! -name '*-javadoc.jar' -print0 \
-            | xargs -0 -r gh release upload "$TAG" \
-                --repo "$GITHUB_REPOSITORY" --clobber
+          gh release upload "$TAG" jars/*.jar --repo "$GITHUB_REPOSITORY" --clobber
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest="$LATEST"

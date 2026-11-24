@@ -9,9 +9,10 @@ permissions:
   contents: read
 
 # A branch keeps only its newest run. On main the runs queue instead: a run that is releasing must
-# finish, and the next one then starts from the tag it pushed.
+# finish, and the next one then starts from the tag it pushed. The event is part of the group, so a
+# run started by hand never replaces a pending push run on main (only push runs release).
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 # bash -eo pipefail: a failing command inside a pipe fails the step.
@@ -118,12 +119,11 @@ jobs:
   # the tested commit: no file holds the version and no release commit is made.
   version:
     needs: [build, proto-sync, test, throughput, scripts]
-    # Pushes to main of this repository only: never a fork or a pull request, and never a
-    # `release:` commit (a GITHUB_TOKEN push starts no workflow anyway).
+    # Pushes to main of this repository only: never a fork, a pull request or a run started by hand.
+    # There is no release commit to skip, and the tag CI pushes with GITHUB_TOKEN starts no workflow.
     if: >-
       github.event_name == 'push' && github.ref == 'refs/heads/main'
       && github.repository_owner == 'snodra'
-      && !startsWith(github.event.head_commit.message, 'release:')
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.next.outputs.version }}
@@ -197,6 +197,12 @@ jobs:
           VERSION: ${{ needs.version.outputs.version }}
         run: |
           tag="v$VERSION"
+          # A re-run after the push landed: the tag is this run's, on the tested commit.
+          if [ "$(git rev-parse -q --verify "refs/tags/$tag^{commit}" || true)" = "$GITHUB_SHA" ]; then
+            echo "::notice::$tag is already on $GITHUB_SHA; releasing it"
+            echo "tag=$tag" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           main=$(git ls-remote --exit-code origin refs/heads/main | cut -f1)
           if [ "$main" != "$GITHUB_SHA" ]; then
             echo "::notice::main moved to $main during the release; the run for the newer commit releases"
