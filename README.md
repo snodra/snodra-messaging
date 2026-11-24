@@ -93,10 +93,15 @@ the build takes it from the tag, so there is no release commit.
 - `scripts/next-version.sh` holds the rule. `for t in scripts/*.test.sh; do sh "$t"; done` runs the tests
   of the release scripts.
 
+A release needs every check green, the throughput floors included. If a check fails spuriously, use
+**Re-run failed jobs**: the release follows when it passes.
+
 If a release fails half way (the tag exists, Maven Central or the GitHub release does not have it), use
-**Re-run failed jobs** on that run, or run the `release` workflow by hand with the existing tag. Both are
-safe to repeat: a version Maven Central already has is not uploaded again. **Re-run all jobs** on a run
-that tagged does nothing, because its commit then carries the tag.
+**Re-run failed jobs** on that run, or run the `release` workflow by hand with the existing tag. A version
+Maven Central already shows is not uploaded again. After the upload itself succeeded, wait until the
+version shows on Maven Central (it can take half an hour) before you re-run: until then a re-run uploads
+it again, and Maven Central refuses it. The GitHub release stays a draft until the upload to Maven Central
+succeeded. **Re-run all jobs** on a run that tagged does nothing, because its commit then carries the tag.
 
 ## License
 
