@@ -131,6 +131,10 @@ module "$b" snodra-messaging-kafka 1.2.3 1.2.3-SNAPSHOT
 check "an add-on on a snapshot core fails" 1 "$b" 1.2.3
 
 good "$b"
+echo '{ "formatVersion": "1.1" }' >"$b/$g/snodra-messaging-kafka/1.2.3/snodra-messaging-kafka-1.2.3.module"
+check "metadata naming no version of the group fails" 1 "$b" 1.2.3
+
+good "$b"
 core_jar "$b" 1.2.3 0.1.0
 check "a core reporting another version fails" 1 "$b" 1.2.3
 
