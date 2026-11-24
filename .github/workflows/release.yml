@@ -203,6 +203,7 @@ jobs:
           name: jars
           path: ${{ runner.temp }}/jars/*.jar
           if-no-files-found: error
+          overwrite: true
           retention-days: 7
 
   # Holds the write token and runs only gh: attaches the JARs and makes the draft public.
