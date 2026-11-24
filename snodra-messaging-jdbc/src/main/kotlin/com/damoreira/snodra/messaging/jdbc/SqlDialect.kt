@@ -88,8 +88,8 @@ data object PostgresDialect : SqlDialect {
     /** The channel appends notify and relays listen on; the payload is empty. */
     const val CHANNEL = "snodra_outbox"
 
-    /** The first key of the transaction-scoped advisory lock that serialises the start of sagas per start key (0x4B524B4E, 1263684430). */
-    const val SAGA_START_LOCK = 0x4B524B4E
+    /** The first key of the transaction-scoped advisory lock that serialises the start of sagas per start key (0x534E4452, 1397638226). */
+    const val SAGA_START_LOCK = 0x534E4452
 
     override fun timestamp(instant: Instant): Any = OffsetDateTime.ofInstant(SqlDialect.millis(instant), ZoneOffset.UTC)
 

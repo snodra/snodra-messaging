@@ -29,7 +29,7 @@ import java.time.Instant
  * Two transactions writing one saga never wait long for each other: the loser fails with a `TransientDataAccessException`
  * the saga runtime retries (a database would otherwise make it wait for the winner's commit). An update locks the saga's row
  * with `FOR UPDATE NOWAIT`. A start (an insert with a live start key) takes, on PostgreSQL, the transaction-scoped advisory
- * lock `pg_try_advisory_xact_lock(1263684430, hashtext(start_key_hash))` (another transaction's insert is invisible until it
+ * lock `pg_try_advisory_xact_lock(1397638226, hashtext(start_key_hash))` (another transaction's insert is invisible until it
  * commits); on MySQL the insert itself meets the other transaction's uncommitted row in the unique index on
  * `live_start_key_hash` and waits for it at most [MYSQL_START_WAIT_SECONDS] (`innodb_lock_wait_timeout`, for that statement):
  * no locking read on a missing row, so no gap lock, so no deadlock between starts of different keys. Messages name a saga's

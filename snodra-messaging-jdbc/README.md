@@ -82,7 +82,7 @@ without any transaction manager gets one from this add-on, a `DataSourceTransact
 available, a deadlock or a serialization failure as a `TransientDataAccessException` (`CannotAcquireLockException`,
 `PessimisticLockingFailureException`). Two transactions writing one saga never wait long for each other: an update locks the
 saga's row with `FOR UPDATE NOWAIT`; the start of a saga with a live start key takes, on PostgreSQL, the transaction-scoped
-advisory lock `pg_try_advisory_xact_lock(1263684430, hashtext(start_key_hash))` (another transaction's uncommitted insert is
+advisory lock `pg_try_advisory_xact_lock(1397638226, hashtext(start_key_hash))` (another transaction's uncommitted insert is
 invisible there), and on MySQL inserts at once and waits at most 1 s (`innodb_lock_wait_timeout` for that statement) for another
 transaction's uncommitted start of the same key. The loser fails with `CannotAcquireLockException` and the runtime retries it. On
 MySQL that timeout rolls back the statement only (`innodb_rollback_on_timeout` OFF, the default); with it ON MySQL rolls the whole
