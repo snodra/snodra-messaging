@@ -13,7 +13,7 @@
   <a href="https://central.sonatype.com/artifact/com.damoreira.snodra/snodra-messaging"><img alt="maven central" src="https://img.shields.io/maven-central/v/com.damoreira.snodra/snodra-messaging"></a>
   <img alt="Kotlin" src="https://img.shields.io/badge/Kotlin-2.4.21-7F52FF?logo=kotlin&logoColor=white">
   <img alt="Spring Boot" src="https://img.shields.io/badge/Spring_Boot-4.1.2-6DB33F?logo=springboot&logoColor=white">
-  <a href="https://snodra.damoreira.com/"><img alt="docs" src="https://img.shields.io/badge/docs-snodra.damoreira.com-0B5FFF"></a>
+  <a href="https://snodra.damoreira.com/docs/"><img alt="docs" src="https://img.shields.io/badge/docs-snodra.damoreira.com-0B5FFF"></a>
   <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-Apache--2.0-blue"></a>
 </p>
 
@@ -64,7 +64,7 @@ The starter finds it, registers the type on the server and runs it. Settings are
 
 ## Documentation
 
-Quick start, the settings map, every add-on and the testing kits: **<https://snodra.damoreira.com/messaging/kotlin/>**.
+Quick start, the settings map, every add-on and the testing kits: **<https://snodra.damoreira.com/docs/messaging/kotlin/>**.
 The Rust counterpart is [`snodra-messaging-rs`](https://github.com/snodra/snodra-messaging-rs); both speak the
 same protocol (`snodra.hub.v1`) and share the event records and store layouts.
 
