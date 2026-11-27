@@ -6,10 +6,12 @@ dead-letter stream on **RabbitMQ 3.13 or later with the stream plugin** (`rabbit
 streams as any other Snodra service on RabbitMQ Streams: the layout on the wire below is the shared one, rule for rule.
 
 ```kotlin
+val snodraVersion = "X.Y.Z" // the latest release
+
 dependencies {
-    implementation("com.damoreira.snodra:snodra-messaging:0.1.0-SNAPSHOT")
-    implementation("com.damoreira.snodra:snodra-messaging-rabbitmq:0.1.0-SNAPSHOT")
-    implementation("com.damoreira.snodra:snodra-messaging-mongo:0.1.0-SNAPSHOT") // or another message store
+    implementation("com.damoreira.snodra:snodra-messaging:$snodraVersion")
+    implementation("com.damoreira.snodra:snodra-messaging-rabbitmq:$snodraVersion")
+    implementation("com.damoreira.snodra:snodra-messaging-mongo:$snodraVersion") // or another message store
 }
 ```
 
