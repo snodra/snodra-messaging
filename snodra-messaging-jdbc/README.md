@@ -6,7 +6,7 @@ live in tables `snodra_*` of the service's own database, written through plain J
 the service's own transaction. One module, one dialect per database (`PostgresDialect`, `MySqlDialect`).
 
 ```kotlin
-val snodraVersion = "X.Y.Z" // the latest release
+val snodraVersion = "0.6.1" // the latest release
 
 dependencies {
     implementation("com.damoreira.snodra:snodra-messaging:$snodraVersion")
