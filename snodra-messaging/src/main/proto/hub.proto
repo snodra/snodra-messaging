@@ -28,6 +28,22 @@ service Hub {
   rpc Topology(TopologyRequest) returns (TopologyResponse);
 }
 
+// Read-only view of the live schema catalogue: the contract every connected instance declared for
+// the types it handles, with the JSON Schema of each payload and response. Served beside Hub on the
+// same port, for tooling; the dashboard reads the same snapshot over HTTP. Never contains payloads
+// or headers.
+//
+// Callers authenticate like a hub client: when the hub enforces authentication, a call without a
+// valid credential fails with UNAUTHENTICATED. The schemas it returns are canonical: object keys
+// sorted, no insignificant whitespace. A hub whose catalogue is switched off answers List with an
+// empty list and Get with NOT_FOUND.
+service Catalog {
+  // Every live contract, commands and queries.
+  rpc List(ListCatalogRequest) returns (ListCatalogResponse);
+  // One live contract, matched by type and versions; NOT_FOUND when no instance serves it.
+  rpc Get(GetCatalogRequest) returns (CatalogEntry);
+}
+
 // Everything a service instance can send to the hub.
 message ClientMessage {
   oneof message {
@@ -141,6 +157,83 @@ message Register {
   // anything (see RequestMode). The initial request "<id>#0" is the hub's own and reaches the
   // handler as usual.
   repeated string subscription_query_types = 14;
+  // The contract of each handled command and query type: its payload and response versions and
+  // their JSON Schemas (see MessageContract). Every type listed in command_types, query_types or
+  // shared_query_types has exactly one contract here; its kind, shared and subscription flags
+  // must agree with those lists. A contract is (type, payload_version, response_version); a
+  // version of 0 (unset) reads as 1. The hub never parses a payload; it reads only the schemas and
+  // the reserved request headers (snodra-schema-version and snodra-response-schema-version, see
+  // Request.headers).
+  //
+  // A Register with a missing, extra, duplicate or disagreeing contract, or a schema that breaks
+  // the limits (see MessageContract), fails with INVALID_ARGUMENT. A contract whose
+  // (type, payload_version, response_version) is live with a different schema, served by any
+  // instance (this one included), fails with FAILED_PRECONDITION: a changed schema needs a new
+  // version.
+  //
+  // A hub whose catalogue is switched off ignores contracts and event_contracts, and serves every
+  // type as payload version 1, response version 1.
+  repeated MessageContract contracts = 15;
+  // The contract of each event type this instance consumes: its payload version and JSON Schema
+  // (see EventContract). Events are catalogued only; the hub never routes them. One contract per
+  // event type; the same refusals as for contracts apply.
+  repeated EventContract event_contracts = 16;
+}
+
+// The kind of a handled type in a contract. A contract's kind is COMMAND or QUERY; events carry
+// their own EventContract and never use this enum.
+enum ContractKind {
+  // Not a valid kind: a contract carrying this value, or a value this file does not define, is
+  // refused with INVALID_ARGUMENT.
+  CONTRACT_KIND_UNSPECIFIED = 0;
+  // Exactly one handler, side effects.
+  CONTRACT_KIND_COMMAND = 1;
+  // Read only.
+  CONTRACT_KIND_QUERY = 2;
+}
+
+// The contract one instance declares for one command or query type it handles: the payload and
+// response versions and the JSON Schema of each document. A contract is
+// (type, payload_version, response_version); a version of 0 (unset) reads as 1. The hub never
+// parses a payload: it stores the schemas for the catalogue and matches requests by the two
+// reserved headers, never by content. Each schema is a UTF-8 JSON Schema document (2020-12): a
+// JSON object at the top level, at most 64 KiB, nested at most 100 levels deep. The hub stores
+// the canonical form (object keys sorted, no insignificant whitespace).
+message MessageContract {
+  // Fully qualified type name, for example "orders.PlaceOrder".
+  string type = 1;
+  // Command or query; must agree with the list the type appears in.
+  ContractKind kind = 2;
+  // Registered through Register.shared_query_types: many services may own it.
+  bool shared = 3;
+  // Registered through Register.subscription_query_types: served in mode SUBSCRIPTION only.
+  bool subscription = 4;
+  // The payload (request message) version; 0 (unset) reads as 1.
+  uint32 payload_version = 5;
+  // The response (reply message) version; 0 (unset) reads as 1.
+  uint32 response_version = 6;
+  // JSON Schema of the payload, UTF-8.
+  bytes payload_schema = 7;
+  // JSON Schema of the response, UTF-8.
+  bytes response_schema = 8;
+  // True when the schema is a checked-in override rather than generated from the message type.
+  // Informational: the hub stores it for the dashboard and never acts on it; it takes no part in
+  // routing or in the comparison of contracts.
+  bool schema_override = 9;
+}
+
+// The contract one instance declares for one event type it consumes. Events have no response and
+// are never routed through the hub; they are catalogued so the dashboard can show their schema.
+message EventContract {
+  // Fully qualified event type name, for example "orders.OrderPlaced".
+  string type = 1;
+  // The event payload version; 0 (unset) reads as 1.
+  uint32 payload_version = 2;
+  // JSON Schema of the event payload, UTF-8.
+  bytes payload_schema = 3;
+  // True when the schema is a checked-in override rather than generated from the message type.
+  // Informational, as MessageContract.schema_override.
+  bool schema_override = 4;
 }
 
 // Flow control: the sender may receive `count` more forwarded requests. Clients return one permit
@@ -496,7 +589,8 @@ message Credentials {
   oneof kind {
     // Static pre-shared token.
     string token = 1;
-    // Client-credentials access token (JWT) issued by the OAuth2 provider; its azp claim names the service.
+    // Client-credentials access token (JWT) issued by the OAuth2 provider; its azp claim names the
+    // service.
     string jwt = 2;
   }
 }
@@ -532,19 +626,22 @@ message RegisterAck {
 enum RequestMode {
   // One handler, one Reply or Error. A subscription type fails with INVALID_REQUEST.
   UNARY = 0;
-  // Every live instance of every owner gets an ordinary unary Request; the sender gets one
-  // ReplyPart per answer, in arrival order, then a ReplyEnd. A subscription type
-  // (Register.subscription_query_types) fails with INVALID_REQUEST, and no instance gets anything.
+  // Every live instance serving the request's contract (see Request.headers) gets an ordinary
+  // unary Request; the sender gets one ReplyPart per answer, in arrival order, then a ReplyEnd. A
+  // subscription type (Register.subscription_query_types) fails with INVALID_REQUEST, and no
+  // instance gets anything.
   SCATTER_GATHER = 1;
-  // One live instance gets the Request (mode STREAMING, id "<id>#1", the sender's
-  // initial_credit) and answers with ReplyParts and a ReplyEnd, relayed to the sender under the
-  // sender's credits (initial_credit, then Flow). A subscription type fails with INVALID_REQUEST.
+  // One live instance serving the request's contract gets the Request (mode STREAMING, id
+  // "<id>#1", the sender's initial_credit) and answers with ReplyParts and a ReplyEnd, relayed to
+  // the sender under the sender's credits (initial_credit, then Flow). A subscription type fails
+  // with INVALID_REQUEST.
   STREAMING = 2;
-  // The initial result comes from one live instance (an ordinary unary Request "<id>#0"); every
-  // live instance of every owner gets the Request with mode SUBSCRIPTION ("<id>#n", n >= 1) and
-  // pushes its updates as ReplyParts. The sender gets the initial result, then the updates, as
-  // ReplyParts under its credits, until a ReplyEnd or its Cancel. Only for a subscription type
-  // (Register.subscription_query_types): any other type fails with INVALID_REQUEST.
+  // The initial result comes from one live instance serving the request's contract (an ordinary
+  // unary Request "<id>#0"); every live instance serving that contract gets the Request with mode
+  // SUBSCRIPTION ("<id>#n", n >= 1) and pushes its updates as ReplyParts. The sender gets the
+  // initial result, then the updates, as ReplyParts under its credits, until a ReplyEnd or its
+  // Cancel. Only for a subscription type (Register.subscription_query_types): any other type
+  // fails with INVALID_REQUEST.
   SUBSCRIPTION = 3;
 }
 
@@ -568,7 +665,18 @@ message Request {
   // JSON document, UTF-8. The sender's library serialises the message class to this document.
   bytes payload = 5;
   // Transport metadata. Known keys: "authorization" (Bearer JWT of the acting user),
-  // "correlationId", "traceparent" (W3C trace context), "tracestate".
+  // "correlationId", "traceparent" (W3C trace context), "tracestate", and the two contract
+  // versions:
+  //   "snodra-schema-version"           the payload version the sender speaks,
+  //   "snodra-response-schema-version"  the response version the sender expects.
+  // An absent version header reads as 1. A present one must be ASCII digits "[1-9][0-9]*" that fit
+  // a uint32 (no sign, no leading zero, no whitespace); anything else fails with INVALID_REQUEST.
+  // The hub routes the request to an instance serving that exact contract
+  // (type, payload version, response version) and passes the headers to the handler unchanged.
+  // The reply is the requested response version, so it needs no version header of its own: the
+  // hub routes only to an instance serving the exact payload and response contract. When no live
+  // contract serves the request, it fails with NO_HANDLER, naming the versions that are live. A
+  // hub whose catalogue is switched off ignores both headers.
   map<string, string> headers = 6;
   // Per-request timeout hint in milliseconds. The hub uses it to emit TIMEOUT if no Reply
   // arrives in time. The effective timeout is, with override = the hub's per-type override for
@@ -612,7 +720,8 @@ message Reply {
 // HANDLER_ERROR, UNAUTHENTICATED, PERMISSION_DENIED and INVALID_REQUEST inside a Reply.
 enum ErrorCode {
   ERROR_CODE_UNSPECIFIED = 0;
-  // No connected instance has registered Request.type.
+  // No connected instance has registered Request.type, or no instance serves the requested
+  // payload and response versions.
   NO_HANDLER = 1;
   // No Reply arrived within Request.timeout_ms (or the hub default).
   TIMEOUT = 2;
@@ -797,4 +906,45 @@ message TopologyTotals {
   uint32 in_flight = 5;
   // Requests waiting in per-instance queues, all instances.
   uint32 queued = 6;
+}
+
+// One live command or query contract, as the catalogue shows it: the type, its versions, both
+// JSON Schemas and the services and instances serving it. Never contains payloads or headers.
+message CatalogEntry {
+  // Fully qualified type name.
+  string type = 1;
+  // Command or query.
+  ContractKind kind = 2;
+  // The payload (request message) version.
+  uint32 payload_version = 3;
+  // The response (reply message) version.
+  uint32 response_version = 4;
+  // JSON Schema of the payload, UTF-8.
+  bytes payload_schema = 5;
+  // JSON Schema of the response, UTF-8.
+  bytes response_schema = 6;
+  // Every service serving this contract, sorted.
+  repeated string services = 7;
+  // Every instance serving this contract, sorted.
+  repeated string instances = 8;
+}
+
+// Request for the whole live catalogue. Carries no parameters.
+message ListCatalogRequest {}
+
+// Every live command and query contract; empty when the catalogue is switched off. Events are not
+// part of the Catalog service; the dashboard shows them.
+message ListCatalogResponse {
+  // Every live contract, sorted by type name, then payload version, then response version.
+  repeated CatalogEntry entries = 1;
+}
+
+// Request for one live contract, matched by type and versions.
+message GetCatalogRequest {
+  // Fully qualified type name.
+  string type = 1;
+  // The payload version to match; 0 (unset) reads as 1.
+  uint32 payload_version = 2;
+  // The response version to match; 0 (unset) reads as 1.
+  uint32 response_version = 3;
 }
